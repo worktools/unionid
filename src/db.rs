@@ -1,18 +1,30 @@
-use std::collections::BTreeMap;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{DbObject, Row, Table, Value};
-use crate::query::{
-    CmpOp, CreateIndexStmt, CreateTableStmt, InsertStmt, Pipeline, Predicate, Stage, Statement,
-};
+use crate::error::{Error, Result};
+use crate::model::{Catalog, Column, DbObject, Row, ScalarType, Table, Value};
+use crate::query::{CmpOp, Pipeline, Predicate, Stage, Statement};
 
-#[derive(Debug, Serialize, Deserialize)]
+type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<usize>>>>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseColumn {
+    pub name: String,
+    pub ty: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub ok: bool,
     pub message: String,
     pub rows: Vec<BTreeMap<String, Value>>,
+    #[serde(default)]
+    pub columns: Vec<ResponseColumn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<Error>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl QueryResponse {
@@ -21,246 +33,409 @@ impl QueryResponse {
             ok: true,
             message: message.into(),
             rows: Vec::new(),
+            columns: Vec::new(),
+            error: None,
+            warnings: Vec::new(),
         }
     }
 
-    pub fn ok_rows(rows: Vec<BTreeMap<String, Value>>) -> Self {
+    pub fn failure(error: Error) -> Self {
         Self {
-            ok: true,
-            message: format!("{} row(s)", rows.len()),
-            rows,
+            ok: false,
+            message: error.to_string(),
+            rows: Vec::new(),
+            columns: Vec::new(),
+            error: Some(error),
+            warnings: Vec::new(),
         }
     }
 
     pub fn err(message: impl Into<String>) -> Self {
-        Self {
-            ok: false,
-            message: message.into(),
-            rows: Vec::new(),
-        }
+        Self::failure(Error::new("E_QUERY", message))
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Database {
     objects: BTreeMap<String, DbObject>,
     #[serde(default)]
-    indexes: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<usize>>>>,
+    indexes: Indexes,
+    #[serde(default)]
+    pub catalog: Catalog,
+    #[serde(default)]
+    pub sequence: u64,
 }
 
 impl Database {
-    pub fn execute(&mut self, stmt: Statement) -> QueryResponse {
+    pub fn execute(&mut self, stmt: Statement) -> Result<QueryResponse> {
         match stmt {
-            Statement::CreateTable(s) => self.create_table(s),
-            Statement::CreateIndex(s) => self.create_index(s),
-            Statement::Insert(s) => self.insert(s),
-            Statement::Pipeline(p) => self.query(p),
+            Statement::DefineType { name, ty } => {
+                self.catalog.define(name.clone(), ty)?;
+                Ok(QueryResponse::ok_message(format!("type '{name}' defined")))
+            }
+            Statement::CreateTable { table, columns } => {
+                let ScalarType::Record(columns) =
+                    self.catalog.resolve(ScalarType::Record(columns), 0)?
+                else {
+                    unreachable!()
+                };
+                self.create_table(table, columns, None, None)
+            }
+            Statement::TypedTable {
+                table,
+                row_type,
+                key,
+            } => {
+                let def = self.catalog.types.get(&row_type).ok_or_else(|| {
+                    Error::new("E_SCHEMA", format!("unknown row type '{row_type}'"))
+                })?;
+                let ScalarType::Record(columns) = self.catalog.underlying(&def.ty)? else {
+                    return Err(Error::new("E_TYPE", "a table's row type must be a record"));
+                };
+                self.create_table(table, columns.clone(), Some(def.id), key)
+            }
+            Statement::CreateIndex { table, column } => self.create_index(&table, &column),
+            Statement::Insert { table, values } => self.insert(&table, values),
+            Statement::Pipeline(pipeline) => self.query(pipeline),
         }
     }
 
-    fn create_table(&mut self, stmt: CreateTableStmt) -> QueryResponse {
-        if self.objects.contains_key(&stmt.table) {
-            return QueryResponse::err(format!("table '{}' already exists", stmt.table));
-        }
-
-        let table = Table {
-            name: stmt.table.clone(),
-            schema: stmt.columns,
-            rows: Vec::new(),
+    fn table(&self, name: &str) -> Result<&Table> {
+        let Some(DbObject::Table(table)) = self.objects.get(name) else {
+            return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
         };
-
-        self.objects
-            .insert(stmt.table.clone(), DbObject::Table(table));
-        QueryResponse::ok_message(format!("table '{}' created", stmt.table))
+        Ok(table)
     }
 
-    fn create_index(&mut self, stmt: CreateIndexStmt) -> QueryResponse {
-        let Some(DbObject::Table(table)) = self.objects.get(&stmt.table) else {
-            return QueryResponse::err(format!("table '{}' not found", stmt.table));
-        };
-
-        if !table.schema.iter().any(|c| c.name == stmt.column) {
-            return QueryResponse::err(format!(
-                "column '{}' not found in table '{}'",
-                stmt.column, stmt.table
+    fn create_table(
+        &mut self,
+        name: String,
+        columns: Vec<Column>,
+        row_type: Option<u64>,
+        key: Option<String>,
+    ) -> Result<QueryResponse> {
+        if self.objects.contains_key(&name) {
+            return Err(Error::new(
+                "E_SCHEMA",
+                format!("table '{name}' already exists"),
             ));
         }
+        if let Some(key) = &key {
+            let ty = self.catalog.field_type(&columns, key)?;
+            if !matches!(
+                self.catalog.underlying(ty)?,
+                ScalarType::Int | ScalarType::Text
+            ) {
+                return Err(Error::new(
+                    "E_TYPE",
+                    "primary keys currently require int or text",
+                ));
+            }
+        }
+        self.objects.insert(
+            name.clone(),
+            DbObject::Table(Table {
+                name: name.clone(),
+                schema: columns,
+                rows: Vec::new(),
+                row_type,
+                primary_key: key.clone(),
+            }),
+        );
+        if let Some(key) = key {
+            self.create_index(&name, &key)?;
+        }
+        Ok(QueryResponse::ok_message(format!("table '{name}' created")))
+    }
 
+    fn create_index(&mut self, name: &str, column: &str) -> Result<QueryResponse> {
+        let table = self.table(name)?;
+        self.catalog.field_type(&table.schema, column)?;
         if self
             .indexes
-            .get(&stmt.table)
-            .and_then(|cols| cols.get(&stmt.column))
-            .is_some()
+            .get(name)
+            .is_some_and(|cols| cols.contains_key(column))
         {
-            return QueryResponse::err(format!(
-                "index on '{}.{}' already exists",
-                stmt.table, stmt.column
+            return Err(Error::new(
+                "E_INDEX",
+                format!("index on '{name}.{column}' already exists"),
             ));
         }
-
-        let mut posting = BTreeMap::<String, Vec<usize>>::new();
-        for (row_id, row) in table.rows.iter().enumerate() {
-            let value = row.fields.get(&stmt.column).unwrap_or(&Value::Null);
-            let key = index_key(value);
-            posting.entry(key).or_default().push(row_id);
+        let mut posting: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (id, row) in table.rows.iter().enumerate() {
+            if let Some(value) = row_field(&row.fields, column) {
+                posting.entry(value.index_key()).or_default().push(id);
+            }
         }
-
         self.indexes
-            .entry(stmt.table.clone())
+            .entry(name.into())
             .or_default()
-            .insert(stmt.column.clone(), posting);
-
-        QueryResponse::ok_message(format!("index created on '{}.{}'", stmt.table, stmt.column))
+            .insert(column.into(), posting);
+        Ok(QueryResponse::ok_message(format!(
+            "index created on '{name}.{column}'"
+        )))
     }
 
-    fn insert(&mut self, stmt: InsertStmt) -> QueryResponse {
-        let table_name = stmt.table.clone();
-        let Some(DbObject::Table(table)) = self.objects.get_mut(&stmt.table) else {
-            return QueryResponse::err(format!("table '{}' not found", stmt.table));
+    fn insert(&mut self, name: &str, values: Value) -> Result<QueryResponse> {
+        let table = self.table(name)?;
+        let ty = table
+            .row_type
+            .map(ScalarType::Ref)
+            .unwrap_or_else(|| ScalarType::Record(table.schema.clone()));
+        let value = self.catalog.coerce(&values, &ty, name)?;
+        let Value::Record(fields) = value.unwrapped() else {
+            return Err(Error::new("E_TYPE", "insert requires a complete record"));
         };
-
-        let mut incoming = BTreeMap::new();
-        for (k, v) in stmt.values {
-            incoming.insert(k, v);
+        let fields = fields.clone();
+        if let Some(key) = &table.primary_key {
+            let value = row_field(&fields, key)
+                .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
+            if self
+                .indexes
+                .get(name)
+                .and_then(|cols| cols.get(key))
+                .is_some_and(|posting| posting.contains_key(&value.index_key()))
+            {
+                return Err(Error::new(
+                    "E_CONSTRAINT",
+                    format!("duplicate primary key '{name}.{key}'"),
+                ));
+            }
         }
-
-        let mut row_fields = BTreeMap::new();
-        for col in &table.schema {
-            let raw = incoming.remove(&col.name).unwrap_or(Value::Null);
-            match raw.coerce_to(&col.ty) {
-                Ok(v) => {
-                    row_fields.insert(col.name.clone(), v);
-                }
-                Err(e) => {
-                    return QueryResponse::err(format!(
-                        "insert failed for column '{}': {}",
-                        col.name, e
-                    ));
+        let id = table.rows.len();
+        if let Some(cols) = self.indexes.get_mut(name) {
+            for (column, posting) in cols {
+                if let Some(value) = row_field(&fields, column) {
+                    posting.entry(value.index_key()).or_default().push(id);
                 }
             }
         }
-
-        if !incoming.is_empty() {
-            let extra = incoming.keys().cloned().collect::<Vec<_>>().join(", ");
-            return QueryResponse::err(format!("unknown column(s): {extra}"));
-        }
-
-        let inserted_fields = row_fields.clone();
-        table.rows.push(Row { fields: row_fields });
-        let row_id = table.rows.len() - 1;
-
-        if let Some(table_indexes) = self.indexes.get_mut(&table_name) {
-            for (column, posting) in table_indexes.iter_mut() {
-                let value = inserted_fields.get(column).unwrap_or(&Value::Null);
-                let key = index_key(value);
-                posting.entry(key).or_default().push(row_id);
-            }
-        }
-
-        QueryResponse::ok_message(format!("inserted into '{}'", stmt.table))
+        let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
+            unreachable!()
+        };
+        table.rows.push(Row { fields });
+        Ok(QueryResponse::ok_message(format!("inserted into '{name}'")))
     }
 
-    fn query(&self, pipeline: Pipeline) -> QueryResponse {
-        let Some(DbObject::Table(table)) = self.objects.get(&pipeline.from) else {
-            return QueryResponse::err(format!("table '{}' not found", pipeline.from));
-        };
-
-        let mut rows = table
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(row_id, row)| (row_id, row.fields.clone()))
-            .collect::<Vec<_>>();
-
-        let table_indexes = self.indexes.get(&pipeline.from);
-
-        for stage in pipeline.stages {
+    fn query(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
+        let table = self.table(&pipeline.from)?;
+        let mut schema = table.schema.clone();
+        // Validate and bind every stage before touching any rows, including empty tables.
+        for stage in &mut pipeline.stages {
             match stage {
                 Stage::Filter(pred) => {
-                    if let Some(allowed_ids) = indexed_row_ids(table_indexes, &pred) {
-                        rows.retain(|(row_id, _)| allowed_ids.contains(row_id));
+                    let ty = self.catalog.field_type(&schema, &pred.column)?;
+                    pred.value = self.catalog.coerce(&pred.value, ty, &pred.column)?;
+                    if !matches!(pred.op, CmpOp::Eq | CmpOp::Ne) && !self.orderable(ty)? {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!("field '{}' has no ordering", pred.column),
+                        ));
                     }
-                    rows.retain(|row| evaluate_predicate(row, &pred));
                 }
+                Stage::Select(columns) => {
+                    schema = columns
+                        .iter()
+                        .map(|name| {
+                            Ok(Column {
+                                name: name.clone(),
+                                ty: self.catalog.field_type(&schema, name)?.clone(),
+                                id: 0,
+                            })
+                        })
+                        .collect::<Result<_>>()?;
+                }
+                Stage::Sort { column, .. } => {
+                    let ty = self.catalog.field_type(&schema, column)?;
+                    if !self.orderable(ty)? {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!("field '{column}' has no ordering"),
+                        ));
+                    }
+                }
+                Stage::Limit(_) => {}
+            }
+        }
+        let candidates = if let Some(Stage::Filter(pred)) = pipeline.stages.first() {
+            if matches!(pred.op, CmpOp::Eq) {
+                self.indexes
+                    .get(&pipeline.from)
+                    .and_then(|cols| cols.get(&pred.column))
+                    .map(|posting| {
+                        posting
+                            .get(&pred.value.index_key())
+                            .cloned()
+                            .unwrap_or_default()
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut rows = match candidates {
+            Some(ids) => ids
+                .into_iter()
+                .filter_map(|id| table.rows.get(id).map(|r| r.fields.clone()))
+                .collect::<Vec<_>>(),
+            None => table.rows.iter().map(|r| r.fields.clone()).collect(),
+        };
+        for stage in pipeline.stages {
+            match stage {
+                Stage::Filter(pred) => rows.retain(|row| evaluate(row, &pred)),
                 Stage::Select(columns) => {
                     rows = rows
                         .into_iter()
-                        .map(|(row_id, row)| {
-                            let mut out = BTreeMap::new();
-                            for col in &columns {
-                                out.insert(
-                                    col.clone(),
-                                    row.get(col).cloned().unwrap_or(Value::Null),
-                                );
-                            }
-                            (row_id, out)
+                        .map(|row| {
+                            columns
+                                .iter()
+                                .filter_map(|name| {
+                                    row_field(&row, name).map(|v| (name.clone(), v.clone()))
+                                })
+                                .collect()
                         })
                         .collect();
                 }
-                Stage::Limit(n) => {
-                    rows.truncate(n);
-                }
+                Stage::Sort { column, descending } => rows.sort_by(|a, b| {
+                    let order = row_field(a, &column)
+                        .zip(row_field(b, &column))
+                        .and_then(|(a, b)| a.cmp_ord(b))
+                        .unwrap_or(std::cmp::Ordering::Equal);
+                    if descending { order.reverse() } else { order }
+                }),
+                Stage::Limit(n) => rows.truncate(n),
             }
         }
+        Ok(QueryResponse {
+            ok: true,
+            message: format!("{} row(s)", rows.len()),
+            rows,
+            columns: schema
+                .iter()
+                .map(|c| ResponseColumn {
+                    name: c.name.clone(),
+                    ty: self.catalog.describe(&c.ty),
+                })
+                .collect(),
+            error: None,
+            warnings: Vec::new(),
+        })
+    }
 
-        QueryResponse::ok_rows(rows.into_iter().map(|(_, row)| row).collect())
+    fn orderable(&self, ty: &ScalarType) -> Result<bool> {
+        Ok(matches!(
+            self.catalog.underlying(ty)?,
+            ScalarType::Int | ScalarType::Float | ScalarType::Text
+        ))
+    }
+
+    /// Indexes are derived data. Rebuild on load so older key encodings cannot
+    /// change query semantics after a numeric comparison fix.
+    pub fn rebuild_indexes(&mut self) -> Result<()> {
+        let mut keys = self
+            .indexes
+            .iter()
+            .flat_map(|(table, cols)| cols.keys().map(move |col| (table.clone(), col.clone())))
+            .collect::<BTreeSet<_>>();
+        for (name, DbObject::Table(table)) in &self.objects {
+            if let Some(key) = &table.primary_key {
+                keys.insert((name.clone(), key.clone()));
+            }
+        }
+        self.indexes.clear();
+        for (table, column) in keys {
+            self.create_index(&table, &column)?;
+        }
+        Ok(())
+    }
+
+    pub fn table_names(&self) -> Vec<String> {
+        self.objects.keys().cloned().collect()
+    }
+
+    pub fn schema_text(&self) -> String {
+        let mut lines = Vec::new();
+        // Definitions were registered in dependency order; names need not sort that way.
+        let mut definitions = self.catalog.types.values().collect::<Vec<_>>();
+        definitions.sort_by_key(|d| d.id);
+        for d in definitions {
+            match &d.ty {
+                ScalarType::Record(fields) => {
+                    lines.push(format!("type {} =", d.name));
+                    for field in fields {
+                        lines.push(format!(
+                            "  {} {}",
+                            field.name,
+                            self.catalog.describe(&field.ty)
+                        ));
+                    }
+                }
+                ScalarType::Enum(def) => {
+                    lines.push(format!("type {} =", d.name));
+                    for (i, variant) in def.variants.iter().enumerate() {
+                        lines.push(format!(
+                            "  {}{}",
+                            if i == 0 { "" } else { "| " },
+                            self.catalog.describe_variant(variant)
+                        ));
+                    }
+                }
+                _ => lines.push(format!(
+                    "type {} = {}",
+                    d.name,
+                    self.catalog.describe(&d.ty)
+                )),
+            }
+        }
+        for (name, DbObject::Table(t)) in &self.objects {
+            let row = t
+                .row_type
+                .and_then(|id| self.catalog.definition(id).ok())
+                .map(|d| d.name.clone());
+            if let Some(row) = row {
+                lines.push(format!("table {name} {row}"));
+            } else {
+                let columns = t
+                    .schema
+                    .iter()
+                    .map(|c| format!("{} {}", c.name, self.catalog.describe(&c.ty)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("create table {name} ({columns})"));
+            }
+            if let Some(key) = &t.primary_key {
+                lines.push(format!("  key {key}"));
+            }
+        }
+        lines.join("\n")
     }
 }
 
-fn indexed_row_ids(
-    table_indexes: Option<&BTreeMap<String, BTreeMap<String, Vec<usize>>>>,
-    pred: &Predicate,
-) -> Option<HashSet<usize>> {
-    if !matches!(pred.op, CmpOp::Eq) {
-        return None;
+fn row_field<'a>(row: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a Value> {
+    if let Some(value) = row.get(path) {
+        return Some(value);
     }
-
-    let posting = table_indexes?
-        .get(&pred.column)?
-        .get(&index_key(&pred.value))?
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-
-    Some(posting)
+    let (head, tail) = path.split_once('.')?;
+    row.get(head)?.field(tail)
 }
 
-fn index_key(value: &Value) -> String {
-    match value {
-        Value::Int(v) => format!("int:{v}"),
-        Value::Float(v) => format!("float:{}", v.to_bits()),
-        Value::Bool(v) => format!("bool:{v}"),
-        Value::Text(v) => format!("text:{v}"),
-        Value::Enum(v) => format!(
-            "enum:{}",
-            serde_json::to_string(v).unwrap_or_else(|_| "<invalid>".to_string())
-        ),
-        Value::Null => "null".to_string(),
-    }
-}
-
-fn evaluate_predicate(row: &(usize, BTreeMap<String, Value>), pred: &Predicate) -> bool {
-    let lhs = row.1.get(&pred.column).unwrap_or(&Value::Null);
-    let rhs = &pred.value;
-
+fn evaluate(row: &BTreeMap<String, Value>, pred: &Predicate) -> bool {
+    let Some(lhs) = row_field(row, &pred.column) else {
+        return false;
+    };
     match pred.op {
-        CmpOp::Eq => lhs.cmp_eq(rhs),
-        CmpOp::Ne => !lhs.cmp_eq(rhs),
-        CmpOp::Gt => lhs
-            .cmp_ord(rhs)
-            .map(|o| o == std::cmp::Ordering::Greater)
-            .unwrap_or(false),
-        CmpOp::Gte => lhs
-            .cmp_ord(rhs)
-            .map(|o| o == std::cmp::Ordering::Greater || o == std::cmp::Ordering::Equal)
-            .unwrap_or(false),
-        CmpOp::Lt => lhs
-            .cmp_ord(rhs)
-            .map(|o| o == std::cmp::Ordering::Less)
-            .unwrap_or(false),
-        CmpOp::Lte => lhs
-            .cmp_ord(rhs)
-            .map(|o| o == std::cmp::Ordering::Less || o == std::cmp::Ordering::Equal)
-            .unwrap_or(false),
+        CmpOp::Eq => lhs.cmp_eq(&pred.value),
+        CmpOp::Ne => !lhs.cmp_eq(&pred.value),
+        CmpOp::Gt => lhs.cmp_ord(&pred.value) == Some(std::cmp::Ordering::Greater),
+        CmpOp::Lt => lhs.cmp_ord(&pred.value) == Some(std::cmp::Ordering::Less),
+        CmpOp::Gte => matches!(
+            lhs.cmp_ord(&pred.value),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        ),
+        CmpOp::Lte => matches!(
+            lhs.cmp_ord(&pred.value),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ),
     }
 }

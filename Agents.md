@@ -23,8 +23,8 @@
 ## 非目标（当前阶段）
 
 - 复杂优化器
-- 并发事务
-- 索引
+- 多写者并发事务
+- 分布式与复杂关联查询
 
 ## 当前进展（2026-03-05）
 
@@ -36,7 +36,16 @@
 - 已支持单列索引：`create index <table> (<col>)`，用于等值过滤加速。
 - 已支持 Rust 风格参数化 enum 列类型：`enum(A, B(int), C(text,float))`。
 
-## 代码约定
+## 当前开发进展（2026-09-06）
+
+- 已开始新的无分号语言预览；当前可执行子集见 `docs/LANGUAGE.md`，完整目标见 `docs/DESIGN.md`。
+- 类型声明和查询采用 PRQL 风格，优先空格、换行与缩进，不引入分号或 TypeScript 风格的密集注解。
+- `Engine` 是本地 Rust API、CLI 和 TCP 的共享入口；每次请求是一个原子脚本。
+- 已实现命名 sum/record、tuple、option/list、严格插入、主键及 filter/select/sort/take；match、更新操作及 migration 尚未实现。
+- 现有 WAL/snapshot 增加同步提交、快照水位、原子发布与占用锁；仍是过渡实现，存储 ADR 和长期格式未冻结。
+- 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
+
+## 代码约定（当前）
 
 - 优先小而清晰的模块边界：`model`, `db`, `query`, `server`, `cli`。
 - 错误处理统一为可读字符串，保证 TCP/CLI 易观察。
@@ -45,6 +54,8 @@
 ## 测试与验证
 
 - 至少保证 `cargo check` 通过。
+- 当前同时运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 和 `cargo test`。
+- 集成测试使用隔离临时目录与动态 TCP 端口；不要访问开发者已有数据库。
 - 手工验证：
   1. 启动 `server`
   2. 使用 `cli` 建表、插入、查询

@@ -1,0 +1,42 @@
+# A complete, semicolon-free script. The final query is the returned result.
+type Contact =
+  email text
+  nickname option text
+
+type State =
+  Pending
+  | Running {worker text, attempt int}
+  | Done {result text}
+  | Failed {message text, retryable bool}
+
+type Task =
+  id int
+  title text
+  owner Contact
+  tags list text
+  state State
+
+table tasks Task
+  key id
+
+insert tasks
+  id = 1
+  title = "同步目录"
+  owner =
+    email = "alice@example.com"
+    nickname = None
+  tags = ["local", "sync"]
+  state = Running {worker = "local", attempt = 2}
+
+insert tasks
+  id = 2
+  title = "检查配置"
+  owner = {email = "bob@example.com", nickname = Some "Bob"}
+  tags = ["local"]
+  state = Pending
+
+from tasks
+filter state == Running {worker = "local", attempt = 2}
+select {id, title, owner.email, state}
+sort id
+take 20
