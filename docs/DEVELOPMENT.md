@@ -63,7 +63,7 @@ cargo run --example embedded
 ## 后续工作
 
 - #2：以当前查询参考完善完整语言 RFC；类型推断、通用函数与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
-- #8/#10/#11/#34–#36：在已实现的默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、typed arithmetic/value construction、多键 sort、范围 take、布尔组合、基础集合函数、typed 参数和 schema-aware prepared query 上继续完善 option/元素谓词与 group/aggregate。#9/#12/#34/#35 已完成。
+- #8/#10/#11/#34–#36：已实现默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、typed arithmetic/value construction、多键 sort、范围 take、布尔组合、`contains/length/any/all`、Option helper、typed 参数和 schema-aware prepared query。#9/#12/#34–#36 已完成；#11 的剩余核心拆为 #59 普通 derive、#60 group/aggregate 与 #61 局部纯函数。
 - #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出恢复矩阵和 `check --db` 已接入；继续补真实空间不足／同步故障、恢复时间边界、索引计划及 explain。
 - #17–#20：显式 schema/data migration、版本化 runner/ledger、声明式 schema diff、逻辑备份还原和显式旧原型导入已实现。
 - #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；继续打磨 REPL 日常操作，并用 #24 的真实负载和故障矩阵形成发布证据。

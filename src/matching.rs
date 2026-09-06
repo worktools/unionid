@@ -1404,15 +1404,19 @@ pub(crate) fn evaluate(
     catalog: &Catalog,
     row: &BTreeMap<String, Value>,
     pred: &MatchPredicate,
+    budget: &mut crate::expression::EvaluationBudget,
 ) -> Result<bool> {
     let Some(value) = row_field(row, &pred.column) else {
         return Ok(false);
     };
     for arm in &pred.arms {
         if let Some(bindings) = match_bindings(value, &arm.pattern) {
-            return crate::expression::evaluate(catalog, &arm.condition, |path| {
-                binding_value(&bindings, path)
-            });
+            return crate::expression::evaluate(
+                catalog,
+                &arm.condition,
+                |path| binding_value(&bindings, path),
+                budget,
+            );
         }
     }
     Ok(false)

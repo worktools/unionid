@@ -48,6 +48,9 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 | [#34](https://github.com/worktools/unionid/issues/34) | [查询] 实现复合排序与范围分页 | P0 | [#11](https://github.com/worktools/unionid/issues/11) 的可独立子任务 |
 | [#35](https://github.com/worktools/unionid/issues/35) | [查询] 实现 ADT 解构表达式与类型化派生 | P0 | [#10](https://github.com/worktools/unionid/issues/10)、[#11](https://github.com/worktools/unionid/issues/11) |
 | [#36](https://github.com/worktools/unionid/issues/36) | [查询] 实现布尔表达式与集合函数 | P0 | [#10](https://github.com/worktools/unionid/issues/10)、[#11](https://github.com/worktools/unionid/issues/11) |
+| [#59](https://github.com/worktools/unionid/issues/59) | [查询] 普通类型化派生列 | P0 | [#36](https://github.com/worktools/unionid/issues/36) |
+| [#60](https://github.com/worktools/unionid/issues/60) | [查询] 分组与基础汇总 | P0 | [#36](https://github.com/worktools/unionid/issues/36)、[#59](https://github.com/worktools/unionid/issues/59) |
+| [#61](https://github.com/worktools/unionid/issues/61) | [语言] 查询局部 let 与非递归纯函数 | P0 | [#59](https://github.com/worktools/unionid/issues/59)、[#60](https://github.com/worktools/unionid/issues/60) |
 
 ### M2 · 可靠读写与持久化
 
@@ -86,8 +89,8 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 
 1. [#6](https://github.com/worktools/unionid/issues/6)、[#7](https://github.com/worktools/unionid/issues/7) 与 [#28](https://github.com/worktools/unionid/issues/28) 已完成；继续用当前可执行规范、示例和实际反馈收敛 [#2](https://github.com/worktools/unionid/issues/2)。
 2. [#13](https://github.com/worktools/unionid/issues/13) 与 [#14](https://github.com/worktools/unionid/issues/14) 已交付 redb 原子提交、进程退出恢复、打开锁和格式校验子集，持久数据使用稳定 RowId；两项继续跟踪设备故障与恢复边界。
-3. [#9](https://github.com/worktools/unionid/issues/9)、[#12](https://github.com/worktools/unionid/issues/12)、[#34](https://github.com/worktools/unionid/issues/34) 与 [#35](https://github.com/worktools/unionid/issues/35) 已完成；[#36](https://github.com/worktools/unionid/issues/36) 继续跟踪 option helper、元素谓词与通用函数。
-4. [#15](https://github.com/worktools/unionid/issues/15)、[#17](https://github.com/worktools/unionid/issues/17)–[#20](https://github.com/worktools/unionid/issues/20) 已完成，M3 核心链路闭合。[#22](https://github.com/worktools/unionid/issues/22) 与 [#23](https://github.com/worktools/unionid/issues/23) 已实现 versioned typed 接口、有界服务和优雅关闭；M4 下一步处理 #21 的日常 CLI，并进入 #24 真实负载与发布验收。
+3. [#9](https://github.com/worktools/unionid/issues/9)、[#12](https://github.com/worktools/unionid/issues/12) 与 [#34](https://github.com/worktools/unionid/issues/34)–[#36](https://github.com/worktools/unionid/issues/36) 已完成；查询核心按 [#59](https://github.com/worktools/unionid/issues/59) 普通 derive、[#60](https://github.com/worktools/unionid/issues/60) group/aggregate、[#61](https://github.com/worktools/unionid/issues/61) 局部纯函数的顺序推进，并由 [#11](https://github.com/worktools/unionid/issues/11) 汇总验收。
+4. [#15](https://github.com/worktools/unionid/issues/15)、[#17](https://github.com/worktools/unionid/issues/17)–[#20](https://github.com/worktools/unionid/issues/20) 已完成，M3 核心链路闭合。[#22](https://github.com/worktools/unionid/issues/22) 与 [#23](https://github.com/worktools/unionid/issues/23) 已实现 versioned typed 接口、有界服务和优雅关闭；核心查询闭环后处理 #16 的类型化索引计划，再进入 #21/#24 的日常体验与发布验收。
 
 类型演进规则刻意放在 M0，避免 migration 被当作事后附加；完整 migration 执行要等原子存储与 DML 成熟。
 

@@ -300,6 +300,18 @@ pub enum BoolExpression {
         collection: ScalarExpression,
         item: ScalarExpression,
     },
+    Any {
+        collection: ScalarExpression,
+        binding: String,
+        predicate: Box<BoolExpression>,
+    },
+    All {
+        collection: ScalarExpression,
+        binding: String,
+        predicate: Box<BoolExpression>,
+    },
+    IsSome(ScalarExpression),
+    IsNone(ScalarExpression),
     Not(Box<BoolExpression>),
     And(Box<BoolExpression>, Box<BoolExpression>),
     Or(Box<BoolExpression>, Box<BoolExpression>),

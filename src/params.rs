@@ -237,6 +237,22 @@ fn visit_bool(expression: &BoolExpression, visitor: &mut impl FnMut(&ScalarExpre
             visit_scalar(left, visitor);
             visit_scalar(right, visitor);
         }
+        BoolExpression::Any {
+            collection,
+            predicate,
+            ..
+        }
+        | BoolExpression::All {
+            collection,
+            predicate,
+            ..
+        } => {
+            visit_scalar(collection, visitor);
+            visit_bool(predicate, visitor);
+        }
+        BoolExpression::IsSome(value) | BoolExpression::IsNone(value) => {
+            visit_scalar(value, visitor)
+        }
         BoolExpression::Not(value) => visit_bool(value, visitor),
         BoolExpression::And(left, right) | BoolExpression::Or(left, right) => {
             visit_bool(left, visitor);
@@ -258,6 +274,22 @@ fn visit_bool_mut(
         } => {
             visit_scalar_mut(left, visitor);
             visit_scalar_mut(right, visitor);
+        }
+        BoolExpression::Any {
+            collection,
+            predicate,
+            ..
+        }
+        | BoolExpression::All {
+            collection,
+            predicate,
+            ..
+        } => {
+            visit_scalar_mut(collection, visitor);
+            visit_bool_mut(predicate, visitor);
+        }
+        BoolExpression::IsSome(value) | BoolExpression::IsNone(value) => {
+            visit_scalar_mut(value, visitor)
         }
         BoolExpression::Not(value) => visit_bool_mut(value, visitor),
         BoolExpression::And(left, right) | BoolExpression::Or(left, right) => {

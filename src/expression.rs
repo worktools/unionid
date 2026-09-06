@@ -2,6 +2,33 @@ use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, ScalarType, Value};
 use crate::query::{ArithmeticOp, BoolExpression, CmpOp, ScalarExpression};
 
+pub const MAX_COLLECTION_PREDICATE_EVALUATIONS: usize = 100_000;
+
+pub(crate) struct EvaluationBudget {
+    remaining_collection_predicates: usize,
+}
+
+impl EvaluationBudget {
+    pub(crate) fn new() -> Self {
+        Self {
+            remaining_collection_predicates: MAX_COLLECTION_PREDICATE_EVALUATIONS,
+        }
+    }
+
+    fn consume_collection_predicate(&mut self) -> Result<()> {
+        if self.remaining_collection_predicates == 0 {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "list element predicate evaluation limit of {MAX_COLLECTION_PREDICATE_EVALUATIONS} exceeded"
+                ),
+            ));
+        }
+        self.remaining_collection_predicates -= 1;
+        Ok(())
+    }
+}
+
 pub(crate) fn bind(
     catalog: &Catalog,
     scope: &[Column],
@@ -102,6 +129,55 @@ fn bind_in_scope(
                 reference_kind,
             )?;
             bind_scalar(catalog, scope, item, Some(&item_ty), reference_kind)?;
+            Ok(())
+        }
+        BoolExpression::Any {
+            collection,
+            binding,
+            predicate,
+        }
+        | BoolExpression::All {
+            collection,
+            binding,
+            predicate,
+        } => {
+            let collection_ty = bind_scalar(catalog, scope, collection, None, reference_kind)?;
+            let ScalarType::List(item_ty) = catalog.underlying(&collection_ty)? else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!(
+                        "list element predicate expects a list, got {}",
+                        catalog.describe(&collection_ty)
+                    ),
+                ));
+            };
+            let mut nested_scope = Vec::with_capacity(scope.len() + 1);
+            nested_scope.push(Column {
+                name: binding.clone(),
+                ty: item_ty.as_ref().clone(),
+                default: None,
+                id: 0,
+            });
+            nested_scope.extend_from_slice(scope);
+            bind_in_scope(
+                catalog,
+                &nested_scope,
+                predicate,
+                "list predicate binding",
+                "list predicate condition",
+            )
+        }
+        BoolExpression::IsSome(value) | BoolExpression::IsNone(value) => {
+            let ty = bind_scalar(catalog, scope, value, None, reference_kind)?;
+            if !matches!(catalog.underlying(&ty)?, ScalarType::Option(_)) {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!(
+                        "option predicate expects an option, got {}",
+                        catalog.describe(&ty)
+                    ),
+                ));
+            }
             Ok(())
         }
         BoolExpression::Not(value) => {
@@ -428,10 +504,63 @@ pub(crate) fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
     }
 }
 
-pub(crate) fn evaluate<'a>(
+pub(crate) fn evaluate<'values>(
     catalog: &Catalog,
-    expression: &'a BoolExpression,
-    values: impl Fn(&str) -> Option<&'a Value> + Copy,
+    expression: &BoolExpression,
+    values: impl Fn(&str) -> Option<&'values Value> + Copy,
+    budget: &mut EvaluationBudget,
+) -> Result<bool> {
+    let resolver = FunctionResolver {
+        values,
+        marker: std::marker::PhantomData,
+    };
+    evaluate_resolved(catalog, expression, &resolver, budget)
+}
+
+trait ValueResolver {
+    fn resolve(&self, path: &str) -> Option<&Value>;
+}
+
+struct FunctionResolver<'values, F> {
+    values: F,
+    marker: std::marker::PhantomData<&'values Value>,
+}
+
+impl<'values, F> ValueResolver for FunctionResolver<'values, F>
+where
+    F: Fn(&str) -> Option<&'values Value>,
+{
+    fn resolve(&self, path: &str) -> Option<&Value> {
+        (self.values)(path)
+    }
+}
+
+struct ScopedResolver<'item, 'outer> {
+    binding: &'item str,
+    item: &'item Value,
+    outer: &'outer dyn ValueResolver,
+}
+
+impl ValueResolver for ScopedResolver<'_, '_> {
+    fn resolve(&self, path: &str) -> Option<&Value> {
+        if path == self.binding {
+            return Some(self.item);
+        }
+        if let Some(path) = path
+            .strip_prefix(self.binding)
+            .and_then(|suffix| suffix.strip_prefix('.'))
+        {
+            return self.item.field(path);
+        }
+        self.outer.resolve(path)
+    }
+}
+
+fn evaluate_resolved(
+    catalog: &Catalog,
+    expression: &BoolExpression,
+    values: &dyn ValueResolver,
+    budget: &mut EvaluationBudget,
 ) -> Result<bool> {
     match expression {
         BoolExpression::Value(value) => {
@@ -460,34 +589,85 @@ pub(crate) fn evaluate<'a>(
                 matches!(collection.as_value().unwrapped(), Value::List(values) if values.iter().any(|value| value.cmp_eq(item.as_value()))),
             )
         }
-        BoolExpression::Not(value) => Ok(!evaluate(catalog, value, values)?),
+        BoolExpression::Any {
+            collection,
+            binding,
+            predicate,
+        }
+        | BoolExpression::All {
+            collection,
+            binding,
+            predicate,
+        } => {
+            let Some(collection) = evaluate_scalar(catalog, collection, values)? else {
+                return Ok(false);
+            };
+            let Value::List(items) = collection.as_value().unwrapped() else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    "bound list element predicate received a non-list value",
+                ));
+            };
+            let all = matches!(expression, BoolExpression::All { .. });
+            for item in items {
+                budget.consume_collection_predicate()?;
+                let nested = ScopedResolver {
+                    binding,
+                    item,
+                    outer: values,
+                };
+                let matched = evaluate_resolved(catalog, predicate, &nested, budget)?;
+                if matched != all {
+                    return Ok(!all);
+                }
+            }
+            Ok(all)
+        }
+        BoolExpression::IsSome(value) | BoolExpression::IsNone(value) => {
+            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+                return Ok(false);
+            };
+            let Value::Option(value) = value.as_value().unwrapped() else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    "bound option predicate received a non-option value",
+                ));
+            };
+            let is_some = value.is_some();
+            Ok(if matches!(expression, BoolExpression::IsNone(_)) {
+                !is_some
+            } else {
+                is_some
+            })
+        }
+        BoolExpression::Not(value) => Ok(!evaluate_resolved(catalog, value, values, budget)?),
         BoolExpression::And(left, right) => {
-            if !evaluate(catalog, left, values)? {
+            if !evaluate_resolved(catalog, left, values, budget)? {
                 return Ok(false);
             }
-            evaluate(catalog, right, values)
+            evaluate_resolved(catalog, right, values, budget)
         }
         BoolExpression::Or(left, right) => {
-            if evaluate(catalog, left, values)? {
+            if evaluate_resolved(catalog, left, values, budget)? {
                 return Ok(true);
             }
-            evaluate(catalog, right, values)
+            evaluate_resolved(catalog, right, values, budget)
         }
     }
 }
 
-fn evaluate_scalar<'a>(
+fn evaluate_scalar<'expression, 'values>(
     catalog: &Catalog,
-    expression: &'a ScalarExpression,
-    values: impl Fn(&str) -> Option<&'a Value> + Copy,
-) -> Result<Option<Evaluated<'a>>> {
+    expression: &'expression ScalarExpression,
+    values: &'values dyn ValueResolver,
+) -> Result<Option<Evaluated<'expression, 'values>>> {
     match expression {
-        ScalarExpression::Reference(path) => Ok(values(path).map(Evaluated::Borrowed)),
+        ScalarExpression::Reference(path) => Ok(values.resolve(path).map(Evaluated::Runtime)),
         ScalarExpression::Parameter { name, .. } => Err(Error::new(
             "E_PARAM_MISSING",
             format!("parameter '${name}' was not bound"),
         )),
-        ScalarExpression::Literal(value) => Ok(Some(Evaluated::Borrowed(value))),
+        ScalarExpression::Literal(value) => Ok(Some(Evaluated::Expression(value))),
         ScalarExpression::Length(value) => {
             let Some(value) = evaluate_scalar(catalog, value, values)? else {
                 return Ok(None);
@@ -538,12 +718,16 @@ fn evaluate_scalar<'a>(
     }
 }
 
-pub(crate) fn evaluate_value<'a>(
+pub(crate) fn evaluate_value<'values>(
     catalog: &Catalog,
-    expression: &'a ScalarExpression,
-    values: impl Fn(&str) -> Option<&'a Value> + Copy,
+    expression: &ScalarExpression,
+    values: impl Fn(&str) -> Option<&'values Value> + Copy,
 ) -> Result<Value> {
-    evaluate_scalar(catalog, expression, values)?
+    let resolver = FunctionResolver {
+        values,
+        marker: std::marker::PhantomData,
+    };
+    evaluate_scalar(catalog, expression, &resolver)?
         .map(|value| value.as_value().clone())
         .ok_or_else(|| Error::new("E_QUERY", "bound scalar expression has no runtime value"))
 }
@@ -603,15 +787,17 @@ fn finite_float(value: f64, context: &str) -> Result<Value> {
     Ok(Value::Float(if value == 0.0 { 0.0 } else { value }))
 }
 
-enum Evaluated<'a> {
-    Borrowed(&'a Value),
+enum Evaluated<'expression, 'values> {
+    Expression(&'expression Value),
+    Runtime(&'values Value),
     Owned(Value),
 }
 
-impl Evaluated<'_> {
+impl Evaluated<'_, '_> {
     fn as_value(&self) -> &Value {
         match self {
-            Self::Borrowed(value) => value,
+            Self::Expression(value) => value,
+            Self::Runtime(value) => value,
             Self::Owned(value) => value,
         }
     }
@@ -649,5 +835,52 @@ pub(crate) fn simple_index_equality(expression: &BoolExpression) -> Option<(&str
             Some((path, value))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn any_over(values: Vec<Value>) -> BoolExpression {
+        BoolExpression::Any {
+            collection: ScalarExpression::Literal(Value::List(values)),
+            binding: "item".into(),
+            predicate: Box::new(BoolExpression::Compare {
+                left: ScalarExpression::Reference("item".into()),
+                op: CmpOp::Gt,
+                right: ScalarExpression::Literal(Value::Int(10)),
+            }),
+        }
+    }
+
+    #[test]
+    fn list_predicates_share_a_bounded_evaluation_budget() {
+        let expression = any_over(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let mut budget = EvaluationBudget {
+            remaining_collection_predicates: 2,
+        };
+        let error = evaluate(
+            &Catalog::default(),
+            &expression,
+            |_| None::<&Value>,
+            &mut budget,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "E_LIMIT");
+
+        let expression = any_over(vec![Value::Int(11), Value::Int(1), Value::Int(2)]);
+        let mut budget = EvaluationBudget {
+            remaining_collection_predicates: 1,
+        };
+        assert!(
+            evaluate(
+                &Catalog::default(),
+                &expression,
+                |_| None::<&Value>,
+                &mut budget
+            )
+            .unwrap()
+        );
     }
 }

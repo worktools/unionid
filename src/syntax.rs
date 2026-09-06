@@ -1707,6 +1707,47 @@ impl Parser {
                 item: self.scalar_expression(depth + 1, false)?,
             });
         }
+        if self.word("any") || self.word("all") {
+            let all = self.word("all");
+            self.bump();
+            let collection = self.scalar_expression(depth + 1, false)?;
+            self.expect(Kind::Open('('))?;
+            self.newlines();
+            let binding = self.identifier()?;
+            if binding == "_" || !binding.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+                return Err(
+                    self.error("list predicate bindings must start with a lowercase letter")
+                );
+            }
+            self.expect(Kind::Op("->".into()))?;
+            self.newlines();
+            let predicate = Box::new(self.bool_expression(depth + 1, true)?);
+            self.newlines();
+            self.expect(Kind::Close(')'))?;
+            return Ok(if all {
+                BoolExpression::All {
+                    collection,
+                    binding,
+                    predicate,
+                }
+            } else {
+                BoolExpression::Any {
+                    collection,
+                    binding,
+                    predicate,
+                }
+            });
+        }
+        if self.word("is_some") || self.word("is_none") {
+            let is_none = self.word("is_none");
+            self.bump();
+            let value = self.scalar_expression(depth + 1, false)?;
+            return Ok(if is_none {
+                BoolExpression::IsNone(value)
+            } else {
+                BoolExpression::IsSome(value)
+            });
+        }
         if *self.kind() == Kind::Open('(') {
             let checkpoint = self.pos;
             if let Ok(left) = self.scalar_expression(depth, false) {
