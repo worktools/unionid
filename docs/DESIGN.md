@@ -122,7 +122,7 @@ upsert tasks $task
 
 无分号需要明确解析边界，不能简单把所有换行删掉或按空行切割。提案使用换行、缩进与语法上下文共同决定边界：声明体和嵌套 record/match 通过缩进进入与退出；`from/update/delete` 后续同层 transform 继续当前 pipeline，遇到新的顶层声明／数据操作起始词或文件末尾结束。`type`、`table`、`let`、`insert`、`upsert` 等顶层形式分别有确定的结束规则，空行和注释本身不提交语句。
 
-括号内及操作数尚未完整时的跨行、相邻多条查询、嵌套 match 后恢复外层 pipeline、不同缩进宽度和混用 tab/空格，都要写入 parser 的正反例。文件以 EOF 结束；REPL 在 AST 完整且无开放布局时由显式提交手势（例如完整输入后空行或提交键）执行，尚未完整则续行。REPL 的提交手势属于交互行为，不成为文件语言中的分号替代物。具体规则与格式化稳定性由 [parser issue #8](https://github.com/worktools/unionid/issues/8) 验收。
+括号内及操作数尚未完整时的跨行、相邻多条查询、嵌套 match 后恢复外层 pipeline、不同缩进宽度和混用 tab/空格，都要写入 parser 的正反例。文件以 EOF 结束；REPL 已通过 [#66](https://github.com/worktools/unionid/issues/66) 暴露 complete/incomplete/invalid 判断，在 AST 完整且无开放布局时由空行提交，尚未完整则保留缓冲区续写，明确非法则立即报告。提交手势属于交互行为，不成为文件语言中的分号替代物；规范格式化与补全由 [#67](https://github.com/worktools/unionid/issues/67) 跟踪。
 
 ## 4. 类型语义必须先明确
 

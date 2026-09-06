@@ -36,7 +36,7 @@
 - 已支持单列索引：`create index <table> (<col>)`，用于等值过滤加速。
 - 已支持 Rust 风格参数化 enum 列类型：`enum(A, B(int), C(text,float))`。
 
-## 当前开发进展（2026-09-06）
+## 当前开发进展（2026-09-07）
 
 - 已开始新的无分号语言预览；当前可执行子集见 `docs/LANGUAGE.md`，查询细则见 `docs/QUERY.md`，完整目标见 `docs/DESIGN.md`。
 - 类型声明和查询采用 PRQL 风格，优先空格、换行与缩进，不引入分号或 TypeScript 风格的密集注解。
@@ -44,6 +44,7 @@
 - `Engine` 是本地 Rust API、CLI 和 TCP 的共享入口；每次请求是一个原子脚本。
 - 已实现命名 sum/record、tuple、option/list、严格插入、主键、filter/select、单键/多键 sort、前 N 行/范围 take、普通 scalar/bool derive，以及支持递归 pattern 与 option/sum/product/list 新值构造的 `filter match` 和 ADT derive。同一顶层 constructor 可由多个互补嵌套分支覆盖；有预算的 pattern matrix 在扫描前检查穷尽性、不可达分支和积类型相关性。普通 filter、match condition、derive result、typed set 和 migration conversion 复用 scalar expression，支持 int/float 的 `+ - * /` 和一元负号；整数溢出、除零或非有限 float 返回 `E_ARITH`。filter、condition 与普通 derive 还支持括号、`not/and/or`、字段／binding 间比较、`contains/length`、Option helper，以及有类型、可嵌套、有预算的 `any/all` list 元素谓词。未分组 `aggregate` 与 `group ... aggregate` 支持 count/sum/min/max、typed 空输入、命名数值、scalar 输入和完整 ADT key，并限制 group、accumulator cell 和估算状态内存。查询局部 `let` 支持表达式常量与单/多参数非递归纯函数，通过有限推断、字段式注解和有界展开复用现有 expression IR。update/delete 已支持 filter/match target、嵌套 record 路径、同时求值的 set、affected rows、主键/索引维护和请求级回滚；upsert 按主键插入或完整替换 typed row，并保留命中行的 RowId。
 - 查询与 mutation 共用绑定后的类型化索引访问计划；`explain` 可显示 full scan、主键／二级索引 lookup、当前候选数、源码 stage 顺序和结果 schema，且不执行数据行。planner 只跳过前置 `let`，不越过其他 stage。
+- 已提供 parser 驱动的 `input_status` Rust API，区分 complete/incomplete/invalid 并保留错误 span；本地与 TCP REPL 共用 continuation/ready 状态机，空行和 EOF 不会提交未完成脚本。
 - `docs/SCENARIOS.md` 用任务队列、配置、事件、同步和 key/value 工作流维护查询覆盖；#35/#36、#59–#61 已补齐 ADT 派生、布尔/集合表达式、普通派生、基础汇总和查询局部纯函数。
 - 字段可用 `field type = value` 声明默认值；默认值在 schema 阶段类型检查，insert 会对嵌套 record 和 sum record 负载逐层补齐。
 - 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，并已接入 redb `rows` 表。

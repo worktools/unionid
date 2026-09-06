@@ -1,4 +1,7 @@
-use unionid::{Engine, QueryAccessKind, QueryResponse, QueryStageKind, UpsertAction, Value};
+use unionid::{
+    Engine, InputStatus, QueryAccessKind, QueryResponse, QueryStageKind, UpsertAction, Value,
+    input_status,
+};
 
 fn ok(engine: &mut Engine, source: &str) -> QueryResponse {
     let r = engine.execute(source);
@@ -87,6 +90,55 @@ fn executable_examples() {
     assert_eq!(r.rows.len(), 1);
     assert!(r.rows[0]["id"].cmp_eq(&Value::Int(1)));
     assert!(r.rows[0]["attempts"].cmp_eq(&Value::Int(2)));
+}
+
+#[test]
+fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
+    for source in [
+        "",
+        "# comment only",
+        "from tasks",
+        "type Task =\n  id int",
+        "from tasks\ngroup id\n  aggregate\n    rows = count",
+        "from tasks\nfilter match state\n  Pending => true",
+    ] {
+        assert_eq!(input_status(source), InputStatus::Complete, "{source:?}");
+    }
+
+    for source in [
+        "type Task =",
+        "type Task =\n",
+        "type Task =\n  id option (",
+        "from tasks |",
+        "from tasks\nfilter match state",
+        "from tasks\nfilter match state\n  Pending =>",
+        "from tasks\ngroup state",
+        "explain\n",
+        "migration initial\n",
+    ] {
+        let InputStatus::Incomplete(error) = input_status(source) else {
+            panic!("expected incomplete source: {source:?}");
+        };
+        assert_eq!(error.code, "E_INCOMPLETE", "{source:?}");
+        assert!(error.span.is_some(), "{source:?}");
+    }
+
+    for source in [
+        "from",
+        "from (",
+        "from tasks | unknown",
+        "from tasks trailing",
+        "from tasks\n\tfilter id == 1",
+        "type Task =\n  id int\n name text",
+        "from tasks | filter id == 1)",
+        "type Task =\n  id",
+    ] {
+        let InputStatus::Invalid(error) = input_status(source) else {
+            panic!("expected invalid source: {source:?}");
+        };
+        assert_eq!(error.code, "E_SYNTAX", "{source:?}");
+        assert!(error.span.is_some(), "{source:?}");
+    }
 }
 
 #[test]

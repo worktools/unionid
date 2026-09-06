@@ -35,3 +35,4 @@ pub use protocol::{Request as ProtocolRequest, Response as ProtocolResponse, Wir
 pub use schema::{
     SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation, SchemaDiffTableImpact,
 };
+pub use syntax::{InputStatus, input_status};
