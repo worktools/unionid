@@ -9,7 +9,7 @@
 - 严格类型检查、字段默认值、主键、upsert/update/delete、等值索引及原子脚本
 - 稳定 catalog 身份、原子 schema revision 与可校验 hash
 - 独立于 serde/Rust enum 布局的版本化 ADT value codec
-- redb 原子持久模式，可由本地命令、REPL 与 TCP 服务共同使用
+- redb 增量原子持久模式，可由本地命令、REPL 与 TCP 服务共同使用
 
 ## 先运行一个完整例子
 

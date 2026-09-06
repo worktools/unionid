@@ -32,13 +32,21 @@ pub struct StorageIntegrity {
 }
 
 trait DurableBackend: Send {
-    fn commit(&mut self, database: &Database) -> std::result::Result<(), CommitFailure>;
+    fn commit(
+        &mut self,
+        previous: &Database,
+        database: &Database,
+    ) -> std::result::Result<(), CommitFailure>;
     fn check_integrity(&mut self) -> Result<(bool, Database)>;
 }
 
 impl DurableBackend for RedbStore {
-    fn commit(&mut self, database: &Database) -> std::result::Result<(), CommitFailure> {
-        RedbStore::commit(self, database)
+    fn commit(
+        &mut self,
+        previous: &Database,
+        database: &Database,
+    ) -> std::result::Result<(), CommitFailure> {
+        RedbStore::commit(self, previous, database)
     }
 
     fn check_integrity(&mut self) -> Result<(bool, Database)> {
@@ -180,7 +188,7 @@ impl Engine {
                 .checked_add(1)
                 .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
             if let Some(durable) = &mut self.durable {
-                match durable.commit(&candidate) {
+                match durable.commit(&self.db, &candidate) {
                     Ok(()) => {}
                     Err(CommitFailure::Definite(error)) => {
                         return Err(Error::new(
@@ -314,7 +322,7 @@ mod tests {
     }
 
     impl DurableBackend for FailOnce {
-        fn commit(&mut self, _: &Database) -> std::result::Result<(), CommitFailure> {
+        fn commit(&mut self, _: &Database, _: &Database) -> std::result::Result<(), CommitFailure> {
             match self.uncertain.take() {
                 Some(false) => Err(CommitFailure::Definite(Error::new(
                     "E_STORAGE",

@@ -4,7 +4,7 @@
 - 状态：已接受
 - 关联：[GitHub issue #6](https://github.com/worktools/unionid/issues/6)
 
-实现状态：主 Engine 已提供 `Engine::open_redb`，CLI 的 `run/cli/server --db` 已使用下述固定内部表、版本化 codec、`Durability::Immediate` 与 two-phase commit。`check --db`、提交前／后进程退出矩阵、未知版本与独占打开诊断已经接入；真实设备故障、恢复时间、格式升级和备份仍由 #13/#14/#20 跟踪。
+实现状态：主 Engine 已提供 `Engine::open_redb`，CLI 的 `run/cli/server --db` 已使用下述固定内部表、版本化 codec、`Durability::Immediate` 与 two-phase commit。提交按稳定 catalog ID、RowId 和 index key 计算差异，只修改变化的键，并在删除或覆盖前核对旧值。`check --db`、提交前／后进程退出矩阵、未知版本与独占打开诊断已经接入；真实设备故障、恢复时间、格式升级和备份仍由 #13/#14/#20 跟踪。
 
 ## 背景
 
@@ -42,7 +42,7 @@ redb 只承载 unionid 的稳定键和版本化字节值。初始内部表固定
 
 逻辑值编码必须带 codec 版本；稳定 ID 不能从名称或物理位置临时推导。索引键编码必须使字节全序与 unionid 对该类型声明的相等和排序一致，不能继承 Rust 派生顺序或 JSON 文本顺序。未知存储格式、codec 或键编码版本拒绝打开；后端文件格式升级与应用 schema migration 分开处理。
 
-内部表在同一写事务中打开和修改。二级索引是派生数据，但正常写入仍与行及 catalog 原子提交；恢复工具可以扫描行重建并核对索引。
+内部表在同一写事务中打开和修改。二级索引是派生数据，但正常写入仍与行及 catalog 原子提交；恢复工具可以扫描行重建并核对索引。当前持久提交比较 Engine 的前后状态，以稳定键生成 delete/write 集合；它不清空内部表，也不改写内容未变化的 row/index 或普通写入尚未使用的 migration ledger。
 
 redb 自身阻止同一个数据库文件被第二个实例打开，这与 unionid 的单所有者模型一致。产品层把 `DatabaseAlreadyOpen` 转成稳定的忙错误；服务占用数据库时，本地 CLI 应连接服务或明确失败。[Database API](https://docs.rs/redb/4.1.0/redb/struct.Database.html)
 
