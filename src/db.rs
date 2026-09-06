@@ -293,6 +293,13 @@ impl Database {
                     }
                 }
                 Stage::FilterMatch(pred) => crate::matching::bind(&self.catalog, &schema, pred)?,
+                Stage::DeriveMatch(derive) => {
+                    schema.push(crate::matching::bind_derive(
+                        &self.catalog,
+                        &schema,
+                        derive,
+                    )?);
+                }
                 Stage::Select(columns) => {
                     schema = columns
                         .iter()
@@ -349,6 +356,12 @@ impl Database {
                 Stage::Filter(pred) => rows.retain(|row| evaluate(row, &pred)),
                 Stage::FilterMatch(pred) => {
                     rows.retain(|row| crate::matching::evaluate(row, &pred))
+                }
+                Stage::DeriveMatch(derive) => {
+                    for row in &mut rows {
+                        let value = crate::matching::evaluate_derive(row, &derive)?;
+                        row.insert(derive.name.clone(), value);
+                    }
                 }
                 Stage::Select(columns) => {
                     rows = rows

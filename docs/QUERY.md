@@ -9,7 +9,13 @@ from tasks
 filter match state
   Running {attempt, ..} => attempt >= 2
   _ => false
-select {id, title, owner.email}
+derive state_label =
+  match state
+    Pending => "pending"
+    Running {..} => "running"
+    Done {..} => "done"
+    Failed {..} => "failed"
+select {id, title, owner.email, state_label}
 sort id
 take 20
 ```
@@ -20,13 +26,13 @@ take 20
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
 | 值过滤 | `filter field >= literal` | 已实现 | #10 扩展为通用表达式 |
-| sum 模式过滤 | `filter match field` | 已实现 unit、单个 record 负载和穷尽检查 | #10 增加位置、tuple、嵌套模式与通用 match |
+| sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、Option 和穷尽检查 | #35 增加 tuple/嵌套 pattern |
 | 投影 | `select {field, nested.field}` | 已实现 | #11 与派生列组合 |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | #16 增加索引计划 |
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` | 未实现 | #10、#22 |
-| ADT 派生列 | `derive x = match ...` | 未实现 | #35 |
+| ADT 派生列 | `derive x = match ...` | 已实现穷尽 match 返回 binding 或 typed literal | #35 增加嵌套 pattern 和通用表达式 |
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 未实现 | #36 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
@@ -59,19 +65,26 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 ```text
 query             = "from" table pipeline-stage*
 pipeline-stage    = newline stage | "|" stage
-stage             = value-filter | match-filter | select | sort | take
+stage             = value-filter | match-filter | derive-match | select | sort | take
 
 value-filter      = "filter" field-path comparison literal
 match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
 match-arm         = pattern "=>" condition newline?
+derive-match      = "derive" identifier "=" nested-match-expression
+nested-match-expression = match-expression | newline indent match-expression dedent
+match-expression  = "match" field-path newline indent match-value-arm+ dedent
+match-value-arm   = pattern "=>" match-value newline?
+match-value       = binding-path | literal
 select            = "select" "{" field-path ("," field-path)* ","? "}"
 sort              = "sort" sort-key | "sort" "{" sort-key ("," sort-key)* ","? "}"
 sort-key          = "-"? field-path
 take              = "take" nonnegative-integer | "take" positive-integer ".." positive-integer
 
-pattern           = "_" | qualified-variant record-pattern?
+pattern           = "_" | qualified-variant (record-pattern | positional-bindings)?
 qualified-variant = Variant | Type "." Variant
-record-pattern    = "{" (binding ("," binding)* ("," "..")? | "..")? "}"
+record-pattern    = "{" (field-binding ("," field-binding)* ("," "..")? | "..")? "}"
+field-binding     = identifier ("=" identifier)?
+positional-bindings = identifier+
 condition         = bool | binding | binding comparison literal
 comparison        = "==" | "!=" | ">" | ">=" | "<" | "<="
 field-path        = identifier ("." identifier)*
@@ -93,13 +106,14 @@ from tasks | take 1 | filter id > 1
 from tasks | filter id > 1 | take 1
 ```
 
-引擎在读取任何行之前，按 stage 顺序检查整条 pipeline。空表上的未知字段、类型错误、非穷尽 match 仍然报错。`select` 会改变后续 schema，因此投影掉的字段不能再用于 filter、match 或 sort。
+引擎在读取任何行之前，按 stage 顺序检查整条 pipeline。空表上的未知字段、类型错误、非穷尽 match 和分支结果类型冲突仍然报错。`derive` 将新字段加入后续 schema；`select` 会改变后续 schema，因此投影掉的字段不能再用于 filter、match、derive 或 sort。
 
 | Stage | 输出 schema | 行与顺序语义 | 空输入 |
 | --- | --- | --- | --- |
 | `from` | 表的完整行类型 | 读取表；未排序行序不构成承诺 | 返回带完整 schema 的空结果 |
 | `filter` | 不变 | 只保留条件为真的行 | 仍执行字段与类型检查 |
-| `filter match` | 不变 | 每行按其 sum 变体执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
+| `filter match` | 不变 | 每行按其 sum/option constructor 执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
+| `derive match` | 追加一个有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
 | `sort` | 不变 | 单列或多列词典序；全部键相同的次序不承诺 | 返回空结果但仍检查全部键 |
 | `take` | 不变 | 保留前 N 行，或一基闭区间内的行；无 sort 时位置不稳定 | 返回空结果但仍检查范围 |
@@ -126,7 +140,7 @@ select {name, endpoint.host}
 
 ## 模式过滤
 
-`filter match` 检查一个 sum 字段，并在当前变体的 record 负载中建立局部绑定：
+`filter match` 检查一个 sum 或 option 字段，并在当前 constructor 的负载中建立局部绑定：
 
 ```text
 from tasks
@@ -151,15 +165,36 @@ take 1
 
 当前规则如下：
 
-- unit 变体直接写 `Pending`。带单个 record 负载的变体写 `Running {worker, attempt}`。
-- record 字段名同时是该分支的局部绑定。绑定可以继续访问嵌套 record，例如 `meta.attempts >= 3`。
+- unit 变体直接写 `Pending`。带单个 record 负载的变体写 `Running {worker, attempt}`；位置负载用空格绑定，例如 `Pair left right`。
+- option 使用 `None` 与 `Some value`；写成 `Some _` 可以只判断存在而忽略内容。
+- record 字段名默认也是局部绑定；`{retry_at = at, ..}` 把字段重命名为 `at`。绑定可以继续访问嵌套 record，例如 `meta.attempts >= 3`。
 - `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
 - `_` 覆盖尚未出现的变体，必须位于最后。没有 `_` 时必须覆盖全部变体。
 - 构造器由被匹配字段的命名类型确定，也可写成 `State.Running`。其他命名 sum 的同名构造器不会混用。
 - condition 当前只能是 `true`、`false`、一个 bool 绑定，或者 `binding <op> literal`。绑定只在所属分支内有效。
-- 位置负载、tuple 负载、字段重命名、嵌套模式、通用 match 表达式和 match 结果投影尚未实现。
+- 当前可绑定整个 tuple 值，但 tuple 内部分解、record 内 `Some`/sum 等嵌套 pattern 仍未实现。
 
-未知构造器、重复变体、通配分支后的不可达分支、遗漏变体、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum 来源或非 bool 条件返回类型错误。
+未知构造器、重复分支、通配分支后的不可达分支、遗漏 constructor、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum/option 来源或非 bool 条件返回类型错误。
+
+## ADT 派生列
+
+`derive name = match ...` 解构一个 sum/option，并把所有分支归一成一个有静态类型的新字段：
+
+```text
+from jobs
+derive retry_at =
+  match state
+    Failed {retry_at = at, ..} => at
+    _ => None
+filter retry_at == Some 30
+select {id, retry_at}
+```
+
+`match` 可以与 `=` 写在同一行，也可像上例多缩进一层。派生字段追加到当前 schema，后续 filter、derive、select 和 sort 都可以引用它；名称与已有字段冲突时拒绝。
+
+当前分支结果可以是一个局部 binding（含嵌套 record 路径）或完整 literal。引擎先从 binding、primitive literal 或限定 constructor 推导一个结果类型，再按该类型检查全部分支；`None`、空 list/record 等不能单独确定类型，但可在其他分支已经给出类型时使用。不同命名类型不会因结构相同而统一。
+
+分支必须穷尽且结果类型一致，这些检查在扫描前完成。当前不能在结果中进行算术/函数调用，也不能用 binding 构造新的 record/sum，例如 `Some at` 会等 #36 的统一表达式 IR；嵌套 pattern 和嵌套 match 仍由 #35 后续完成。
 
 ## 投影、排序与截取
 
@@ -192,8 +227,8 @@ take 20
 
 ## 布局与语句边界
 
-- 顶层 `from` 开始一条查询。同层 `filter`、`select`、`sort`、`take` 或兼容的 `limit` 延续当前 pipeline。
-- `filter match` 的分支通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
+- 顶层 `from` 开始一条查询。同层 `filter`、`derive`、`select`、`sort`、`take` 或兼容的 `limit` 延续当前 pipeline。
+- `filter match` 与 `derive ... match` 的分支通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
 - 括号和集合内允许换行。字符串里的 `|`、逗号和 `#` 都是文本，不参与分隔。
 - 同层出现新的 `from`、`type`、`table`、`insert` 或 `create` 时，前一条查询结束并开始新语句。
@@ -240,10 +275,11 @@ filter match state
 | 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、`filter match`、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
 | 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
 | 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较和字符串中的 `|` | `tests/language.rs::executable_examples` |
-| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、字段默认值、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
+| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、字段默认值、ADT derive、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 穷尽性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*` |
+| ADT 派生 | 测试内脚本 | sum/option、位置/record 绑定、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。
