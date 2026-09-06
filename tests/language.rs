@@ -910,6 +910,57 @@ fn derive_match_preserves_nominal_result_types() {
 }
 
 #[test]
+fn nested_patterns_destructure_sum_option_and_tuple_values() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Detail = Network {code int} | Validation text\ntype State = Failed {detail Detail, retry option (int, text)} | Done\ntype Job =\n  id int\n  state State\ntable jobs Job\ninsert jobs {id = 1, state = Failed {detail = Network {code = 503}, retry = Some ((30, \"network\"))}}\ninsert jobs {id = 2, state = Failed {detail = Validation \"email\", retry = None}}\ninsert jobs {id = 3, state = Done}",
+    );
+    let result = ok(
+        &mut e,
+        "from jobs\nderive retry_reason =\n  match state\n    Failed {detail = Detail.Network {code}, retry = Some (at, reason)} => reason\n    _ => \"none\"\nfilter match state\n  Failed {retry = Some (at, _), ..} => at >= 20\n  _ => false\nselect {id, retry_reason}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(result.rows[0]["retry_reason"].cmp_eq(&Value::Text("network".into())));
+}
+
+#[test]
+fn nested_patterns_are_typed_and_refutable_on_empty_tables() {
+    let setup = "type Detail = Network {code int} | Validation text\ntype State = Failed {detail Detail, retry option (int, text)} | Done\ntype Job =\n  state State\ntable jobs Job";
+    for (pattern, expected) in [
+        (
+            "Failed {detail = Network {code}, ..} => code\n    Done => 0",
+            "non-exhaustive match; missing Failed",
+        ),
+        (
+            "Failed {retry = Some (at, _, extra), ..} => at\n    _ => 0",
+            "tuple pattern",
+        ),
+        (
+            "Failed {detail = Network {code = value}, retry = Some (value, _)} => value\n    _ => 0",
+            "binding 'value' is declared more than once",
+        ),
+        (
+            "Failed {retry = Some value} => 1\n    _ => 0",
+            "omits detail",
+        ),
+    ] {
+        let mut engine = Engine::memory();
+        ok(&mut engine, setup);
+        let result = engine.execute(&format!(
+            "from jobs\nderive value =\n  match state\n    {pattern}"
+        ));
+        assert!(!result.ok, "accepted {pattern}");
+        assert!(
+            result.message.contains(expected),
+            "{}: {pattern}",
+            result.message
+        );
+    }
+}
+
+#[test]
 fn match_obeys_pipeline_scope_and_layout_boundaries() {
     let mut e = Engine::memory();
     ok(

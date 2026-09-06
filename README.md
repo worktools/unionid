@@ -39,7 +39,7 @@ cargo run -- cli --memory
 
 输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record 和位置负载，`derive x = match ...` 可把分支 binding 或 typed literal 归一为新列。嵌套 pattern、通用表达式、`let/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和嵌套 pattern，`derive x = match ...` 可把分支 binding 或 typed literal 归一为新列。通用表达式、`let/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
 
 ## 后续方向与计划
 

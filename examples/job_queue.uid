@@ -53,6 +53,19 @@ insert jobs
   payload = Sync {source = "remote", target = "local"}
   state = Running {worker = "worker-1", started_at = 150}
 
+insert jobs
+  id = "job-e"
+  priority = 5
+  created_at = 130
+  payload = Webhook {url = "https://example.test/retry", body = "{}"}
+  state = Failed {error = Network {message = "timeout"}, retry_at = Some 240}
+
+from jobs
+filter match state
+  Failed {error = Network {message}, retry_at = Some at} => at >= 200
+  _ => false
+select {id, state}
+
 from jobs
 filter match state
   Queued {scheduled_at, ..} => scheduled_at <= 200
