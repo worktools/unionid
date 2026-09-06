@@ -197,6 +197,50 @@ fn malformed_unknown_or_noncontiguous_logs_fail_closed() {
 }
 
 #[test]
+fn oversized_wal_records_fail_closed_without_changing_the_file() {
+    for (first, terminated) in [(b' ', false), (b' ', true), (b'{', true)] {
+        let dir = TempDir::new();
+        let wal = dir.0.join("db.wal");
+        let mut contents = vec![b' '; unionid::wal::MAX_RECORD_BYTES + 1];
+        contents[0] = first;
+        if terminated {
+            contents.push(b'\n');
+        }
+        std::fs::write(&wal, &contents).unwrap();
+        let error = Engine::open(Some(wal.clone()), None, 0)
+            .err()
+            .expect("oversized WAL must fail");
+        assert_eq!(error.code, "E_STORAGE");
+        assert!(
+            error.message.contains("WAL line 1: record exceeds"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&wal).unwrap(), contents);
+    }
+}
+
+#[test]
+fn maximally_escaped_source_round_trips_within_the_wal_record_limit() {
+    let dir = TempDir::new();
+    let wal = dir.0.join("db.wal");
+    let mut source = "create table t (id int)\n#".to_string();
+    source.extend(std::iter::repeat_n(
+        '\u{0001}',
+        unionid::syntax::MAX_SOURCE_BYTES - source.len(),
+    ));
+    {
+        let mut e = Engine::open(Some(wal.clone()), None, 0).unwrap();
+        let response = e.execute(&source);
+        assert!(response.ok, "{}", response.message);
+        let length = std::fs::metadata(&wal).unwrap().len() as usize;
+        assert!(length > unionid::wal::MAX_RECORD_BYTES - 512);
+        assert!(length <= unionid::wal::MAX_RECORD_BYTES);
+    }
+    let mut e = Engine::open(Some(wal), None, 0).unwrap();
+    assert!(e.execute("from t").ok);
+}
+
+#[test]
 fn supported_original_prototype_wal_can_be_read() {
     let dir = TempDir::new();
     let wal = dir.0.join("db.wal");

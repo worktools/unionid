@@ -98,4 +98,4 @@ cargo run -- cli --addr 127.0.0.1:7878 --file examples/tasks.uid
 
 TCP 当前预览协议：每行一个 JSON 对象 `{"query":"完整源码（换行转义）"}`，每行一个 QueryResponse JSON 响应，也接受旧版纯文本单行请求。未知请求字段报错，结构化参数、request ID、完整协议版本协商仍待实现；JSON 中的换行不会被压平。
 
-响应包含 `ok/message/columns/rows/error/warnings`。`columns` 保留投影顺序和类型描述；`rows` 采用有 tag 的值编码及名义类型 ID。该编码是预览接口，尚未提供跨客户端的 i64 兼容封装，JavaScript 等客户端需自行无损读取大整数。服务默认本机监听，当前限制 64 个活动连接、请求大小和 30 秒 socket 读写超时；查询预算、取消、优雅关闭等仍待完善。
+响应包含 `ok/message/columns/rows/error/warnings`。`columns` 保留投影顺序和类型描述；`rows` 采用有 tag 的值编码及名义类型 ID。该编码是预览接口，尚未提供跨客户端的 i64 兼容封装，JavaScript 等客户端需自行无损读取大整数。服务默认本机监听，当前限制 64 个活动连接、请求大小和 30 秒 socket 读写超时。连接数达到上限时，新连接收到一行 `E_BUSY` 响应后关闭，可以在已有连接释放后重试；拒绝过程使用独立的短超时，不执行请求。查询预算、取消、优雅关闭等仍待完善。

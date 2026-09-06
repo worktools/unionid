@@ -3,6 +3,7 @@ use common::{Server, TempDir, wait};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use unionid::{Engine, QueryResponse, cli};
 
 #[test]
@@ -176,4 +177,82 @@ fn concurrent_requests_are_serialized_and_invalid_json_is_reported() {
             .code,
         "E_PROTOCOL"
     );
+}
+
+#[test]
+fn connection_limit_returns_busy_and_recovers_after_a_client_leaves() {
+    let server = Server::start(&[]);
+    let mut clients = Vec::new();
+    for _ in 0..unionid::server::MAX_CONNECTIONS {
+        let stream = TcpStream::connect(&server.addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        reader.get_mut().write_all(b"from absent\n").unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<QueryResponse>(&line)
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "E_TABLE"
+        );
+        // The response confirms admission while the connection stays open.
+        clients.push(reader);
+    }
+    let busy = cli::send_one(&server.addr, "create table rejected (id int)").unwrap();
+    assert!(!busy.ok);
+    assert_eq!(busy.error.unwrap().code, "E_BUSY");
+
+    // A rejected client need not send anything or close its write half for the
+    // server to deliver E_BUSY and finish the bounded rejection path.
+    let idle = TcpStream::connect(&server.addr).unwrap();
+    idle.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut idle = BufReader::new(idle);
+    let mut line = String::new();
+    idle.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<QueryResponse>(&line)
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "E_BUSY"
+    );
+    line.clear();
+    assert_eq!(idle.read_line(&mut line).unwrap(), 0);
+
+    let mut leaving = clients.pop().unwrap();
+    leaving.get_mut().write_all(b"quit\n").unwrap();
+    let mut line = String::new();
+    leaving.read_line(&mut line).unwrap();
+    assert!(serde_json::from_str::<QueryResponse>(&line).unwrap().ok);
+    drop(leaving);
+
+    // The worker releases its slot just after sending the quit response.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = cli::send_one(&server.addr, "from rejected").unwrap();
+        match response.error.unwrap().code.as_str() {
+            "E_TABLE" => break, // Rejected requests never execute.
+            "E_BUSY" if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            code => panic!("connection slot did not recover: {code}"),
+        }
+    }
+    let existing = &mut clients[0];
+    existing
+        .get_mut()
+        .write_all(b"create table recovered (id int)\n")
+        .unwrap();
+    let mut line = String::new();
+    existing.read_line(&mut line).unwrap();
+    assert!(serde_json::from_str::<QueryResponse>(&line).unwrap().ok);
 }

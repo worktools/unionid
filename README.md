@@ -9,7 +9,7 @@
 
 ## 先运行一个完整例子
 
-在 Rust 1.94.0 下验证：
+需要 Rust 1.94 或更高版本（Cargo 已声明 `rust-version`，CI 使用 1.94.0）：
 
 ```bash
 cargo run -- run --file examples/tasks.uid

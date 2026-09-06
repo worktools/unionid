@@ -1,11 +1,15 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
 use crate::syntax;
+
+// A source byte needs at most six JSON bytes (e.g. a control character's
+// Unicode escape), plus the record envelope, sequence and newline.
+pub const MAX_RECORD_BYTES: usize = syntax::MAX_SOURCE_BYTES * 6 + 256;
 
 #[derive(Debug)]
 pub struct Wal {
@@ -42,6 +46,12 @@ impl Wal {
     }
 
     pub fn append(&self, sequence: u64, source: &str) -> Result<(), String> {
+        if source.len() > syntax::MAX_SOURCE_BYTES {
+            return Err(format!(
+                "WAL source exceeds {} byte limit",
+                syntax::MAX_SOURCE_BYTES
+            ));
+        }
         let mut encoded = serde_json::to_vec(&Record {
             format_version: 1,
             sequence,
@@ -79,17 +89,25 @@ pub fn replay_from_path(path: &Path, db: &mut Database) -> Result<usize, String>
     let mut reader = BufReader::new(file);
     let mut applied = 0;
     let snapshot_sequence = db.sequence;
-    let mut line = String::new();
+    let mut encoded = Vec::new();
     let mut line_number = 0;
     loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
+        encoded.clear();
+        let n = (&mut reader)
+            .take((MAX_RECORD_BYTES + 1) as u64)
+            .read_until(b'\n', &mut encoded)
             .map_err(|e| format!("read WAL: {e}"))?;
         if n == 0 {
             break;
         }
         line_number += 1;
+        if n > MAX_RECORD_BYTES {
+            return Err(format!(
+                "WAL line {line_number}: record exceeds {MAX_RECORD_BYTES} byte limit; preserve this file and restore/repair explicitly"
+            ));
+        }
+        let line = std::str::from_utf8(&encoded)
+            .map_err(|e| format!("WAL line {line_number}: invalid UTF-8: {e}"))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -100,7 +118,7 @@ pub fn replay_from_path(path: &Path, db: &mut Database) -> Result<usize, String>
         }
         let (sequence, source) = if line.trim_start().starts_with('{') {
             let record: Record =
-                serde_json::from_str(&line).map_err(|e| format!("WAL line {line_number}: {e}"))?;
+                serde_json::from_str(line).map_err(|e| format!("WAL line {line_number}: {e}"))?;
             if record.format_version != 1 {
                 return Err(format!(
                     "WAL line {line_number}: unsupported format version {}",

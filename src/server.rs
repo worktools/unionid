@@ -1,15 +1,16 @@
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
 use crate::{Engine, Error, QueryResponse};
 
 pub const MAX_FRAME_BYTES: usize = crate::syntax::MAX_SOURCE_BYTES * 6 + 256;
+pub const MAX_CONNECTIONS: usize = 64;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,9 +40,11 @@ pub fn serve(listener: TcpListener, engine: Engine) -> Result<(), String> {
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let stream = stream.map_err(|e| format!("accept: {e}"))?;
-        if active.fetch_add(1, Ordering::Relaxed) >= 64 {
+        if active.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
             active.fetch_sub(1, Ordering::Relaxed);
-            drop(stream);
+            if let Err(error) = reject_busy(stream) {
+                eprintln!("reject client: {error}");
+            }
             continue;
         }
         let engine = Arc::clone(&engine);
@@ -60,6 +63,53 @@ pub fn serve(listener: TcpListener, engine: Engine) -> Result<(), String> {
         });
     }
     Ok(())
+}
+
+fn reject_busy(mut stream: TcpStream) -> Result<(), String> {
+    // Rejection must not create another worker or leave the accept loop waiting
+    // indefinitely on a client that does not read its response.
+    stream
+        .set_write_timeout(Some(Duration::from_millis(100)))
+        .map_err(|e| format!("set rejection timeout: {e}"))?;
+    write_response(
+        &mut stream,
+        &QueryResponse::failure(Error::new(
+            "E_BUSY",
+            "active connection limit reached; retry after a connection closes",
+        )),
+    )?;
+    // Closing with unread request bytes can reset the connection and discard
+    // E_BUSY. Half-close first, then give the client a bounded chance to finish.
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut remaining = MAX_FRAME_BYTES + 1;
+    let mut buffer = [0; 4096];
+    while remaining > 0 {
+        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| e.to_string())?;
+        let size = remaining.min(buffer.len());
+        match stream.read(&mut buffer[..size]) {
+            Ok(0) => break,
+            Ok(n) => remaining -= n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break, // Timeout or disconnected peer; rejection is done.
+        }
+    }
+    Ok(())
+}
+
+fn write_response(stream: &mut TcpStream, response: &QueryResponse) -> Result<(), String> {
+    serde_json::to_writer(&mut *stream, response).map_err(|e| format!("encode response: {e}"))?;
+    stream
+        .write_all(b"\n")
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("write response: {e}"))
 }
 
 fn handle(mut writer: TcpStream, engine: Arc<Mutex<Engine>>) -> Result<(), String> {
@@ -110,12 +160,7 @@ fn handle(mut writer: TcpStream, engine: Arc<Mutex<Engine>>) -> Result<(), Strin
                 Err(error) => QueryResponse::failure(error),
             }
         };
-        serde_json::to_writer(&mut writer, &response)
-            .map_err(|e| format!("encode response: {e}"))?;
-        writer
-            .write_all(b"\n")
-            .and_then(|_| writer.flush())
-            .map_err(|e| format!("write response: {e}"))?;
+        write_response(&mut writer, &response)?;
         if quit || oversized {
             return Ok(());
         }
