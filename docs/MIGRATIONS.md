@@ -69,6 +69,7 @@ drop key table
 - `rename` 保留 type/field/variant 的稳定 ID。值按 ID 对齐后改用新名称，不按字段位置解释。
 - `add field` 必须声明 typed literal 默认值。默认值会立即回填所有直接或嵌套引用该 record 的既有值；`option T` 也必须显式写 `None`。
 - `change field` 和 `change variant` 保留目标成员 ID；field 原有默认值也通过同一个 `using` expression 转换。新旧 inline record 中同名字段保留 ID；需要改名时先写显式 `rename`，再写 `change`。
+- `using` 为了支持 `old.field` 会暴露 binding 最外层 record，但内部命名类型仍保留身份。例如给 `Retry` 增加默认字段后，外层 payload 转换可以写 `retry = old.retry`；结构相同的匿名 record 仍不能代替 `Retry`。
 - `drop field` 明确丢弃该字段的数据。若主键或 secondary index 仍引用它，操作会失败；先显式 `drop key` 和 `drop index`。
 - `set key` 在扫描全部行并确认 int/text 类型、字段存在且唯一后设置主键；缺少等值索引时自动创建。替换旧主键时保留旧索引，之后可显式删除。
 - `drop key` 只移除唯一约束，保留可继续服务查询的索引。`drop index` 不允许直接删除仍承担主键约束的索引。

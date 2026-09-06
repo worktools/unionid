@@ -320,7 +320,7 @@ impl Database {
             .unwrap();
         column.ty = new_ty.clone();
         validate_catalog_cycles(&self.catalog)?;
-        let input = expand_type(&old_catalog, &old_column.ty, 0)?;
+        let input = expose_binding_root(&old_catalog, &old_column.ty)?;
         crate::matching::bind_migration_result(
             &self.catalog,
             &new_ty,
@@ -977,59 +977,20 @@ fn collect_type_references(ty: &ScalarType, references: &mut Vec<u64>) {
     }
 }
 
-fn expand_type(catalog: &Catalog, ty: &ScalarType, depth: usize) -> Result<ScalarType> {
-    if depth >= MAX_DEPTH {
-        return Err(Error::new(
-            "E_LIMIT",
-            "migration type expansion exceeds the nesting limit",
-        ));
+// A transform must see the outer record so `old.field` can bind, while nested
+// Ref nodes stay nominal so values such as `old.meta` retain their type identity.
+fn expose_binding_root(catalog: &Catalog, ty: &ScalarType) -> Result<ScalarType> {
+    let mut current = ty;
+    for _ in 0..MAX_DEPTH {
+        match current {
+            ScalarType::Ref(id) => current = &catalog.definition(*id)?.ty,
+            other => return Ok(other.clone()),
+        }
     }
-    Ok(match ty {
-        ScalarType::Ref(id) => expand_type(catalog, &catalog.definition(*id)?.ty, depth + 1)?,
-        ScalarType::Record(fields) => ScalarType::Record(
-            fields
-                .iter()
-                .map(|field| {
-                    Ok(Column {
-                        name: field.name.clone(),
-                        ty: expand_type(catalog, &field.ty, depth + 1)?,
-                        default: field.default.clone(),
-                        id: field.id,
-                    })
-                })
-                .collect::<Result<_>>()?,
-        ),
-        ScalarType::Enum(enum_type) => ScalarType::Enum(crate::model::EnumType {
-            variants: enum_type
-                .variants
-                .iter()
-                .map(|variant| {
-                    Ok(crate::model::EnumVariantDef {
-                        name: variant.name.clone(),
-                        args: variant
-                            .args
-                            .iter()
-                            .map(|ty| expand_type(catalog, ty, depth + 1))
-                            .collect::<Result<_>>()?,
-                        id: variant.id,
-                    })
-                })
-                .collect::<Result<_>>()?,
-        }),
-        ScalarType::Tuple(items) => ScalarType::Tuple(
-            items
-                .iter()
-                .map(|ty| expand_type(catalog, ty, depth + 1))
-                .collect::<Result<_>>()?,
-        ),
-        ScalarType::Option(item) => {
-            ScalarType::Option(Box::new(expand_type(catalog, item, depth + 1)?))
-        }
-        ScalarType::List(item) => {
-            ScalarType::List(Box::new(expand_type(catalog, item, depth + 1)?))
-        }
-        other => other.clone(),
-    })
+    Err(Error::new(
+        "E_LIMIT",
+        "migration binding type expansion exceeds the nesting limit",
+    ))
 }
 
 fn preserve_structural_ids(old: &ScalarType, new: &mut ScalarType) {
@@ -1080,7 +1041,7 @@ fn payload_type(args: &[ScalarType]) -> ScalarType {
 }
 
 fn expanded_payload_type(catalog: &Catalog, args: &[ScalarType]) -> Result<ScalarType> {
-    expand_type(catalog, &payload_type(args), 0)
+    expose_binding_root(catalog, &payload_type(args))
 }
 
 fn payload_value(args: &[Value]) -> Value {

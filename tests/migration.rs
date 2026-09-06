@@ -374,6 +374,45 @@ fn field_type_changes_use_typed_expressions_and_rebuild_indexes() {
 }
 
 #[test]
+fn migration_transforms_preserve_nested_named_record_identity() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type Meta =
+  attempts int
+type OldPayload =
+  meta Meta
+type NewPayload =
+  meta Meta
+  label text
+type Item =
+  id int
+  payload OldPayload
+table items Item
+  key id
+insert items {id = 1, payload = {meta = {attempts = 3}}}"#,
+    );
+
+    ok(
+        &mut engine,
+        r#"migration payload_v2
+  change field Item.payload to NewPayload
+    using old -> {meta = old.meta, label = "preserved"}"#,
+    );
+
+    let response = ok(
+        &mut engine,
+        "from items | filter payload.meta.attempts == 3",
+    );
+    assert_eq!(response.rows.len(), 1);
+    assert!(
+        response.rows[0]["payload"]
+            .source_text()
+            .contains("label = \"preserved\"")
+    );
+}
+
+#[test]
 fn type_add_and_drop_obey_reference_integrity() {
     let mut engine = Engine::memory();
     ok(

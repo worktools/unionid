@@ -76,6 +76,8 @@ REPL 用 `unionid>` 表示新输入、`..>` 表示语法仍需续写、`ready>` 
 
 [恢复成本记录](docs/benchmarks/recovery-2026-09-07.md)给出可重复的 1 万／10 万行 ADT 数据库 open/check 时间、数据库大小和峰值内存；10 万行是 v0.1 已测试上限，完整检查在当前实现上约需 0.75 GiB 峰值内存。
 
+[端到端发布验收](docs/RELEASE-VALIDATION.md)记录任务队列、嵌套配置和 session/cache 三条持久链路；它们通过真实 CLI 子进程走完查询与写入、重启、深层 ADT migration、完整检查和 backup/restore。
+
 复杂条件推荐在 `filter` 或 match 分支的 `=>` 后换行并缩进；混用 `and` 与 `or` 时用括号写清分组。语言会减少无助于理解的标点，同时保留括号和集合边界等必要符号。
 
 ## 后续方向与计划
