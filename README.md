@@ -7,6 +7,7 @@
 - 共享 Rust 引擎、本地 CLI 与 TCP 服务
 - 严格类型检查、字段默认值、主键、等值索引及原子脚本
 - 稳定 catalog 身份、原子 schema revision 与可校验 hash
+- 独立于 serde/Rust enum 布局的版本化 ADT value codec
 
 ## 先运行一个完整例子
 
@@ -48,12 +49,13 @@ cargo run -- cli --memory
 - [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
 - [查询语言参考](docs/QUERY.md)：当前可执行的 pipeline grammar、stage 语义、模式和错误。
 - [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
+- [ADT value codec](docs/CODEC.md)：稳定 ID 驱动的持久值格式、限制与 schema evolution 边界。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。
 - [存储 ADR](docs/adr/0001-redb-storage.md)：redb 选型、ADT 存储边界、实验和限制。
 - [原型基线与已知问题](docs/PROTOTYPE-AUDIT.md)：早期原型的验证结果和故障证据。
 - [第一轮开发记录](docs/DEVELOPMENT.md)：已实现能力、验证方法与尚未完成的范围。
 
-设计草案描述完整目标，部分语法已实现；整体能力边界以 LANGUAGE.md 为准，查询行为以 QUERY.md 为准。长期持久化后端已选定 redb，但尚未接入主 Engine；当前 WAL／snapshot 仍是过渡实现，不能作为正式长期格式。
+设计草案描述完整目标，部分语法已实现；整体能力边界以 LANGUAGE.md 为准，查询行为以 QUERY.md 为准。长期持久化后端已选定 redb，ADT value codec 已实现但尚未接入主 Engine；当前 WAL／snapshot 仍是过渡实现，不能作为正式长期格式。
 
 ## 运行
 

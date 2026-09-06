@@ -2,6 +2,7 @@
 //!
 //! The Engine is shared by embedded applications, the local CLI, and TCP.
 pub mod cli;
+pub mod codec;
 pub mod db;
 pub mod engine;
 pub mod error;
