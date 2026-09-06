@@ -11,7 +11,7 @@ fn rows(engine: &mut Engine, source: &str) -> serde_json::Value {
 }
 
 #[test]
-fn executable_task_example() {
+fn executable_examples() {
     let mut engine = Engine::memory();
     let r = ok(&mut engine, include_str!("../examples/tasks.uid"));
     assert_eq!(r.rows.len(), 1);
@@ -26,6 +26,30 @@ fn executable_task_example() {
     assert!(engine.schema().contains("type State"));
     assert!(!engine.schema().contains(';'));
     assert_eq!(engine.tables(), ["tasks"]);
+
+    let mut config = Engine::memory();
+    let r = ok(&mut config, include_str!("../examples/config.uid"));
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(
+        r.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["name", "endpoint.host", "mode"]
+    );
+    assert!(r.rows[0]["name"].cmp_eq(&Value::Text("worker".into())));
+
+    let mut events = Engine::memory();
+    let r = ok(&mut events, include_str!("../examples/events.uid"));
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(
+        r.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "event"]
+    );
+    assert!(r.rows[0]["id"].cmp_eq(&Value::Int(2)));
 }
 
 #[test]

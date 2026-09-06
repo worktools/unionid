@@ -1,6 +1,6 @@
 # 第一轮开发记录
 
-日期：2026-09-06。目标是交付无分号 ADT 语言的可运行预览；完整 v0.1 路线图仍在实施。当前语法见 [LANGUAGE.md](LANGUAGE.md)，运行入口见 [README](../README.md)。
+日期：2026-09-06。目标是交付无分号 ADT 语言的可运行预览；完整 v0.1 路线图仍在实施。当前语法见 [LANGUAGE.md](LANGUAGE.md)，查询的详细语义见 [QUERY.md](QUERY.md)，运行入口见 [README](../README.md)。
 
 ## 已实现
 
@@ -8,6 +8,7 @@
 - Lexer、源码位置、缩进与换行 AST；命名 sum/record、tuple、option/list、完整值构造和严格校验。
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。
 - 换行及单行 pipeline、字段路径、filter/select/sort/take、sum 类型的模式过滤、主键唯一性和等值索引。
+- 查询参考明确记录当前 grammar、stage schema、执行顺序、match 规则、错误类别和已实现/计划边界；任务、配置、事件三个示例都由语言测试执行。
 - 原子脚本、可读 CLI 输出、JSON 输出、文件/stdin、多行 REPL、正确退出码及 EOF 处理。
 - 修复大整数、浮点零值与 enum 负载的索引/扫描一致性；深层索引键按结构编码，避免重复转义造成指数增长；未知字段在空表上也报错。
 - 用隔离的临时目录、动态 TCP 端口和子进程建立测试；增加 macOS/Linux 的 CI 配置。
@@ -42,7 +43,7 @@ cargo run --example embedded
 
 ## 后续工作
 
-- #2/#7：以当前可执行子集完善语言 RFC 与类型演进契约；默认值、类型兼容矩阵和完整版本策略尚未冻结。
+- #28/#2/#7：以当前查询参考完善完整语言 RFC 与类型演进契约；默认值、类型兼容矩阵和完整版本策略尚未冻结。
 - #8/#9/#10/#11/#12：在已实现的 `filter match` 子集上继续完善 typed IR、通用 match 表达式、tuple/嵌套模式、参数、let/derive/group/aggregate，完成完整 M1 验收。
 - #6/#13/#14/#15/#16：选定持久化方案，补齐故障模型、CRUD/upsert、索引计划及 explain。
 - #17–#20：实现 schema/data migration、ledger、diff、备份还原与显式旧数据转换。

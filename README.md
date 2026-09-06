@@ -36,7 +36,7 @@ cargo run -- cli --memory
 
 输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)。sum 类型的 `filter match` 已支持 record 负载绑定和穷尽检查；通用 match 表达式、`let/derive/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)。sum 类型的 `filter match` 已支持 record 负载绑定和穷尽检查；通用 match 表达式、`let/derive/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
 
 ## 后续方向与计划
 
@@ -45,11 +45,12 @@ cargo run -- cli --memory
 新语言的类型声明与查询都朝 PRQL 风格收敛：无分号、少标点，优先用空格、换行和清晰的布局表达结构。
 
 - [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
+- [查询语言参考](docs/QUERY.md)：当前可执行的 pipeline grammar、stage 语义、模式和错误。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。
 - [原型基线与已知问题](docs/PROTOTYPE-AUDIT.md)：早期原型的验证结果和故障证据。
 - [第一轮开发记录](docs/DEVELOPMENT.md)：已实现能力、验证方法与尚未完成的范围。
 
-设计草案描述完整目标，部分语法已实现，能力边界以 LANGUAGE.md 为准。WAL／snapshot 是过渡实现，存储选型与长期格式尚未冻结。
+设计草案描述完整目标，部分语法已实现；整体能力边界以 LANGUAGE.md 为准，查询行为以 QUERY.md 为准。WAL／snapshot 是过渡实现，存储选型与长期格式尚未冻结。
 
 ## 运行
 

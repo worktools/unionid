@@ -38,7 +38,7 @@
 
 ## 当前开发进展（2026-09-06）
 
-- 已开始新的无分号语言预览；当前可执行子集见 `docs/LANGUAGE.md`，完整目标见 `docs/DESIGN.md`。
+- 已开始新的无分号语言预览；当前可执行子集见 `docs/LANGUAGE.md`，查询细则见 `docs/QUERY.md`，完整目标见 `docs/DESIGN.md`。
 - 类型声明和查询采用 PRQL 风格，优先空格、换行与缩进，不引入分号或 TypeScript 风格的密集注解。
 - `Engine` 是本地 Rust API、CLI 和 TCP 的共享入口；每次请求是一个原子脚本。
 - 已实现命名 sum/record、tuple、option/list、严格插入、主键、filter/select/sort/take，以及带 record 负载绑定与穷尽检查的 `filter match`；通用 match 表达式、更新操作及 migration 尚未实现。
