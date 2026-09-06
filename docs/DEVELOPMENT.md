@@ -15,7 +15,8 @@
 - `upsert table value` 要求声明主键，输入按完整 row 与默认值规则检查；未命中时分配 RowId，命中时整行替换并保留 RowId。响应以 `upsert_action` 区分 inserted/updated，索引和 redb 状态服从同一请求级提交边界。
 - redb 提交错误按边界区分：transaction commit 前的确定失败回滚候选状态并保留句柄，commit 调用返回错误时标记结果不确定、关闭句柄并阻止后续写入。可注入 backend 单元测试验证两条 Engine 状态路径；真实子进程测试分别在未提交多表 transaction 与成功 Engine commit 后直接退出并重开。
 - `check --db` 调用 redb `check_integrity`，再重新加载并验证 unionid 逻辑状态；无效数据库文件、未知 codec 版本、索引不一致和跨进程占用都有结构化诊断。
-- 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter、match condition 与 derive result 共用有类型的 scalar expression，支持带 checked 错误的 int/float 算术；filter/match condition 还支持括号、`not/and/or`、字段或 binding 间比较、list `contains` 及 list/text `length`。复杂条件可使用 `filter`／`=>` 后的缩进块或跨行括号。
+- 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、普通 scalar/bool derive、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter、match condition 与 derive result 共用有类型的 scalar expression，支持带 checked 错误的 int/float 算术；filter/match condition 和普通 derive 还支持括号、`not/and/or`、字段或 binding 间比较、list `contains`、list/text `length`、Option helper 与有预算的嵌套 `any/all`。复杂条件可使用 `filter`／`=>` 后的缩进块或跨行括号。
+- 未分组 `aggregate` 与 `group ... aggregate` 支持 count/sum/min/max；绑定阶段确定输入与输出类型，sum 保留命名数值类型，min/max 返回 option。group key 使用完整 typed equality，可包含 ADT；后续 filter/select/sort/take 使用汇总后的 schema。group 数量、accumulator cell 与估算状态内存都有显式上限。
 - match 支持 sum 的 unit/record/位置负载、option 的 None/Some，以及 record/tuple/sum/option 的递归 pattern；有预算的 pattern matrix 允许同一顶层 constructor 使用互补嵌套分支，并检查完整穷尽性、不可达分支和积类型相关性。record 字段可重命名绑定，分支可从 binding 递归构造 option/sum/record/tuple/list，并静态统一结果类型。命名 record 构造会补齐字段默认值；派生列可继续 filter/sort/select，空表也执行全部检查。
 - 以任务队列、嵌套配置、事件收件箱、离线同步和 session/cache 推演 ADT 与日常操作，形成 [实际场景与查询覆盖矩阵](SCENARIOS.md)；ADT 派生和集合查询分别拆为 #35/#36。
 - 查询参考明确记录当前 grammar、stage schema、执行顺序、match 规则、错误类别和已实现/计划边界；任务、配置、事件三个示例都由语言测试执行。
@@ -63,7 +64,7 @@ cargo run --example embedded
 ## 后续工作
 
 - #2：以当前查询参考完善完整语言 RFC；类型推断、通用函数与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
-- #8/#10/#11/#34–#36：已实现默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、普通 scalar/bool derive、typed arithmetic/value construction、多键 sort、范围 take、布尔组合、`contains/length/any/all`、Option helper、typed 参数和 schema-aware prepared query。#9/#12/#34–#36 与 #59 已完成；#11 的剩余核心为 #60 group/aggregate 与 #61 局部纯函数。
+- #8/#10/#11/#34–#36：已实现默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、普通 scalar/bool derive、typed arithmetic/value construction、多键 sort、范围 take、布尔组合、`contains/length/any/all`、Option helper、typed 参数、schema-aware prepared query 与有界的 group/aggregate。#9/#12/#34–#36、#59 和 #60 已完成；#11 的剩余核心为 #61 局部纯函数。
 - #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出恢复矩阵和 `check --db` 已接入；继续补真实空间不足／同步故障、恢复时间边界、索引计划及 explain。
 - #17–#20：显式 schema/data migration、版本化 runner/ledger、声明式 schema diff、逻辑备份还原和显式旧原型导入已实现。
 - #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；继续打磨 REPL 日常操作，并用 #24 的真实负载和故障矩阵形成发布证据。

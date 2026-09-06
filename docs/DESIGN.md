@@ -35,7 +35,7 @@ SQLite 的本地应用定位与 Redis 的可选持久化分别提供使用方式
 
 ## 3. 目标语言体验
 
-以下是完整目标的提案示例，其中包含当前尚未实现的通用函数和部分 pipeline stage，不能直接作为完整脚本执行。普通 filter、match condition 和 derive match 已支持有类型 int/float 算术；filter 与 condition 还支持布尔组合、比较、Option helper 及 `contains/length/any/all`，`derive x = match ...` 可递归解构 ADT 并从 binding 或算术结果构造 option/sum/product/list 值，`$name` 参数已可通过 Rust API 与版本化协议绑定。准确限制以 [QUERY.md](QUERY.md) 为准。类型定义和查询采用一致的 PRQL 风格：以换行组织操作，空格表达参数应用，尽量让文字承担含义。**无分号、少标点是已确定的设计约束**；下面的缩进式字段声明与 ADT 分支是本轮推荐草案，具体布局规则由 [语言 issue #2](https://github.com/worktools/unionid/issues/2) 验证后冻结。
+以下是完整目标的提案示例，其中包含当前尚未实现的通用函数和部分 pipeline stage，不能直接作为完整脚本执行。普通 filter、match condition 和 derive match 已支持有类型 int/float 算术；filter 与 condition 还支持布尔组合、比较、Option helper 及 `contains/length/any/all`，`derive x = match ...` 可递归解构 ADT 并从 binding 或算术结果构造 option/sum/product/list 值，`aggregate` 和 `group ... aggregate` 已支持 count/sum/min/max，`$name` 参数已可通过 Rust API 与版本化协议绑定。准确限制以 [QUERY.md](QUERY.md) 为准。类型定义和查询采用一致的 PRQL 风格：以换行组织操作，空格表达参数应用，尽量让文字承担含义。**无分号、少标点是已确定的设计约束**；下面的缩进式字段声明与 ADT 分支是本轮推荐草案，具体布局规则由 [语言 issue #2](https://github.com/worktools/unionid/issues/2) 验证后冻结。
 
 PRQL 本身使用空格调用函数，并允许换行连接 pipeline；我们借鉴这些习惯。[PRQL 函数调用与 pipeline](https://prql-lang.org/book/reference/syntax/function-calls.html) PRQL 的类型设计页也讨论 sum/product 组合，但下面的 `field type`、缩进声明和带 tag 的构造器是 unionid 的提案，不能当作现有 PRQL 语法或编译器能力。[PRQL 类型设计](https://prql-lang.org/book/reference/spec/type-system.html)
 

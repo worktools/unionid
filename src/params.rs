@@ -203,7 +203,7 @@ fn visit_pipeline(pipeline: &Pipeline, visitor: &mut impl FnMut(&ScalarExpressio
                     visit_match_value(&arm.result, visitor);
                 }
             }
-            Stage::Select(_) | Stage::Sort(_) | Stage::Take { .. } => {}
+            Stage::Aggregate(_) | Stage::Select(_) | Stage::Sort(_) | Stage::Take { .. } => {}
         }
     }
 }
@@ -223,7 +223,7 @@ fn visit_pipeline_mut(pipeline: &mut Pipeline, visitor: &mut impl FnMut(&mut Sca
                     visit_match_value_mut(&mut arm.result, visitor);
                 }
             }
-            Stage::Select(_) | Stage::Sort(_) | Stage::Take { .. } => {}
+            Stage::Aggregate(_) | Stage::Select(_) | Stage::Sort(_) | Stage::Take { .. } => {}
         }
     }
 }

@@ -37,7 +37,7 @@ take 20
 | ADT 派生列 | `derive x = match ...` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造 | #61 继续加入查询局部纯函数 |
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于普通 filter 与 match condition | — |
 | 其他派生列 | `derive score = priority + bonus` | 已实现 scalar 与 bool expression、typed 参数及后续 stage 作用域 | — |
-| 分组与汇总 | `group`、`aggregate` | 未实现 | #60 |
+| 分组与汇总 | `aggregate` / `group {key} ...` | 已实现 count/sum/min/max、typed 空输入语义与资源上限 | — |
 | 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows、原子约束与增量持久维护 | #15 |
 | Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId、结构化 action 与增量持久维护 | #15 |
 | schema migration | `migration name` | 已实现显式 ADT schema 操作、typed conversion、全引用路径重写、版本化 runner/ledger 与原子索引维护 | #19 继续补声明式 diff 与更细 plan 报告 |
@@ -68,7 +68,7 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 ```text
 query             = "from" table pipeline-stage*
 pipeline-stage    = newline stage | "|" stage
-stage             = value-filter | match-filter | derive-expression | derive-match | select | sort | take
+stage             = value-filter | match-filter | derive-expression | derive-match | aggregate | group-aggregate | select | sort | take
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
@@ -84,6 +84,10 @@ match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
 match-arm         = arm-pattern "=>" nested-bool-expression newline?
 derive-match      = "derive" identifier "=" nested-match-expression
 derive-expression = "derive" identifier "=" nested-bool-expression
+aggregate         = "aggregate" newline indent aggregate-field+ dedent
+group-aggregate   = "group" group-fields newline indent aggregate dedent
+group-fields      = field-path | "{" field-path ("," field-path)* ","? "}"
+aggregate-field   = identifier "=" ("count" | (("sum" | "min" | "max") field-path)) newline?
 nested-match-expression = match-expression | newline indent match-expression dedent
 match-expression  = "match" field-path newline indent match-value-arm+ dedent
 match-value-arm   = arm-pattern "=>" match-value newline?
@@ -227,6 +231,8 @@ from tasks | filter id > 1 | take 1
 | `filter match` | 不变 | 每行按其 sum/option constructor 执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
 | `derive` | 追加一个有静态类型的字段 | 每行求值一次 scalar 或 bool expression，行数与顺序不变 | 仍推导结果类型并检查完整表达式 |
 | `derive match` | 追加一个有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
+| `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/sum 为类型化零；min/max 为 None |
+| `group ... aggregate` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
 | `sort` | 不变 | 单列或多列词典序；全部键相同的次序不承诺 | 返回空结果但仍检查全部键 |
 | `take` | 不变 | 保留前 N 行，或一基闭区间内的行；无 sort 时位置不稳定 | 返回空结果但仍检查范围 |
@@ -345,6 +351,49 @@ select {id, retry_at}
 
 分支必须穷尽且结果类型一致，constructor 归属、参数数量、嵌套覆盖关系和每个值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option，同一个顶层 constructor 可以由多个互补嵌套分支覆盖。派生结果已经支持 scalar arithmetic，但尚未复用 filter 的完整布尔节点或通用函数。prepared query 记录 schema revision/hash，schema 改变后以 `E_SCHEMA_CHANGED` 拒绝旧 plan。
 
+## 分组与基础汇总
+
+未分组汇总使用一个缩进块命名输出列：
+
+```text
+from events
+filter received_at >= $since
+aggregate
+  events = count
+  amount = sum amount_cents
+  earliest = min received_at
+  latest = max received_at
+```
+
+分组时把 aggregate 放进 group 的缩进块。单个 key 可直接写字段路径；多个 key 使用花括号明确边界：
+
+```text
+from events
+derive day = received_at / 86400
+group {source, day}
+  aggregate
+    events = count
+    amount = sum amount_cents
+filter events >= 10
+sort {source, day}
+take 20
+```
+
+当前签名和空输入语义：
+
+| 函数 | 输入 | 输出 | 未分组空输入 |
+| --- | --- | --- | --- |
+| `count` | 不接参数，统计输入行 | `int` | `0` |
+| `sum field` | `int` / `float`，包括命名数值类型 | 与输入相同 | 同类型的零 |
+| `min field` | `int` / `float` / `text`，包括相应命名类型 | `option T` | `None` |
+| `max field` | `int` / `float` / `text`，包括相应命名类型 | `option T` | `None` |
+
+`sum` 的 int 使用 checked addition，溢出返回 `E_ARITH`；float 每一步都必须保持有限，正负零最终归一为正零。min/max 用 Option 明确表达空输入，不引入 null 或三值逻辑。分组空输入没有 group，因此返回零行。
+
+aggregate 输入目前是字段路径，也可以指向前一 stage 的普通或 ADT 派生列。group key 使用完整 typed equality，可包含 record、tuple、sum、option 或 list；输出中保留原静态类型。未显式 sort 时不承诺 group 行顺序。group block 必须包含一个 aggregate，aggregate 后的 filter/select/sort/take 针对汇总后的 schema 执行。
+
+每条 aggregate 最多声明 256 个输出、产生 100,000 个 group 和 1,000,000 个 accumulator cell，估算 group state 上限为 64 MiB；同时仍受 250,000 输入工作行、100,000 结果行与服务 deadline 限制。任一边界超限返回 `E_LIMIT`。distinct aggregate、用户定义 aggregate、window 和 join 不进入 v0.1。
+
 ## 投影、排序与截取
 
 `select` 接受一个或多个字段路径，拒绝重复或未知字段。输出列顺序就是选择顺序：
@@ -427,13 +476,14 @@ filter match state
 | 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、`filter match`、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
 | 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
 | 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较、typed derive 和字符串中的 `|` | `tests/language.rs::executable_examples` |
-| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、布尔/集合 filter、普通与 ADT derive、typed arithmetic、嵌套 pattern、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
+| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、布尔/集合 filter、普通与 ADT derive、group/aggregate、typed arithmetic、嵌套 pattern、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
 | 离线同步冲突 | [sync_conflicts.uid](../examples/sync_conflicts.uid) | 同一 `Conflict` constructor 的互补嵌套分支、typed derive 与 Option | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 嵌套穷尽性、不可达分支、积类型相关性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*`、`complementary_nested_*`、`nested_pattern_coverage_*` |
 | ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
 | 普通派生 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | scalar/bool 结果、命名类型、完整 ADT 复制、typed 参数、短路、空表检查和后续 stage 作用域 | `regular_derives_*` |
+| 分组汇总 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | count/sum/min/max、命名数值、ADT key、空输入、溢出、后续 stage 与资源上限 | `basic_aggregates_*`、`grouped_aggregates_*`、`aggregates_reject_*`、`aggregate_group_limits_*` |
 | 布尔与集合表达式 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 数值表达式 | 测试内脚本 | int/float 类型、优先级、跨行括号、命名数值类型、整数除法、短路及运行时错误 | `typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |

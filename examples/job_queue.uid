@@ -94,6 +94,20 @@ derive retry_at =
 select {id, state, retry_at}
 
 from jobs
+derive state_label =
+  match state
+    Queued {..} => "queued"
+    Running {..} => "running"
+    Succeeded {..} => "succeeded"
+    Failed {..} => "failed"
+group state_label
+  aggregate
+    jobs = count
+    total_priority = sum priority
+    earliest = min created_at
+sort state_label
+
+from jobs
 filter
   priority >= 10
   and contains tags "sync"

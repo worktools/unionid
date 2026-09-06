@@ -791,6 +791,172 @@ fn regular_derives_are_checked_before_scanning_and_follow_stage_scope() {
 }
 
 #[test]
+fn basic_aggregates_define_typed_results_and_empty_input() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Amount = int\ntype Event =\n  source text\n  amount Amount\n  latency float\n  label text\ntable events Event\ninsert events {source = \"a\", amount = 10, latency = 1.5, label = \"later\"}\ninsert events {source = \"a\", amount = 20, latency = 2.0, label = \"first\"}\ninsert events {source = \"b\", amount = -5, latency = 2.5, label = \"last\"}",
+    );
+    let result = ok(
+        &mut e,
+        "from events\nderive adjusted = amount + 1\naggregate\n  rows = count\n  total = sum adjusted\n  lowest = min amount\n  highest = max amount\n  latency_total = sum latency\n  first_label = min label\nselect {rows, total, lowest, highest, latency_total, first_label}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert!(row["rows"].cmp_eq(&Value::Int(3)));
+    assert!(row["total"].unwrapped().cmp_eq(&Value::Int(28)));
+    assert!(row["latency_total"].cmp_eq(&Value::Float(6.0)));
+    for (name, expected) in [("lowest", -5), ("highest", 20)] {
+        let Value::Option(Some(value)) = row[name].unwrapped() else {
+            panic!("{name} was not Some");
+        };
+        assert!(value.unwrapped().cmp_eq(&Value::Int(expected)));
+    }
+    let Value::Option(Some(label)) = row["first_label"].unwrapped() else {
+        panic!("first_label was not Some");
+    };
+    assert!(label.cmp_eq(&Value::Text("first".into())));
+    assert_eq!(result.columns[0].ty, "int");
+    assert_eq!(result.columns[1].ty, "Amount");
+    assert_eq!(result.columns[2].ty, "option Amount");
+    assert_eq!(result.columns[5].ty, "option text");
+
+    let mut empty = Engine::memory();
+    ok(
+        &mut empty,
+        "type Amount = int\ntype Event = {amount Amount, label text}\ntable events Event",
+    );
+    let result = ok(
+        &mut empty,
+        "from events\naggregate\n  rows = count\n  total = sum amount\n  lowest = min amount\n  label = max label",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["rows"].cmp_eq(&Value::Int(0)));
+    assert!(result.rows[0]["total"].unwrapped().cmp_eq(&Value::Int(0)));
+    assert!(matches!(
+        result.rows[0]["lowest"].unwrapped(),
+        Value::Option(None)
+    ));
+    assert!(matches!(
+        result.rows[0]["label"].unwrapped(),
+        Value::Option(None)
+    ));
+}
+
+#[test]
+fn grouped_aggregates_support_adt_keys_and_later_stages() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Kind = Created | Updated\ntype Event =\n  source text\n  kind Kind\n  amount int\ntable events Event\ninsert events {source = \"b\", kind = Created, amount = 4}\ninsert events {source = \"a\", kind = Created, amount = 5}\ninsert events {source = \"a\", kind = Created, amount = 8}\ninsert events {source = \"a\", kind = Updated, amount = 20}",
+    );
+    let result = ok(
+        &mut e,
+        "from events\ngroup {source, kind}\n  aggregate\n    events = count\n    total = sum amount\n    lowest = min amount\nfilter total >= 10\nselect {source, kind, events, total}\nsort source",
+    );
+    assert_eq!(result.rows.len(), 2);
+    assert!(
+        result
+            .rows
+            .iter()
+            .all(|row| row["source"].cmp_eq(&Value::Text("a".into())))
+    );
+    assert!(result.rows.iter().any(|row| {
+        matches!(row["kind"].unwrapped(), Value::Enum(value) if value.variant == "Created")
+            && row["total"].cmp_eq(&Value::Int(13))
+    }));
+    assert_eq!(result.columns[1].ty, "Kind");
+
+    let grouped = ok(
+        &mut e,
+        "from events\ngroup source\n  aggregate\n    events = count\n    total = sum amount\nsort source\ntake 1",
+    );
+    assert_eq!(grouped.rows.len(), 1);
+    assert!(grouped.rows[0]["source"].cmp_eq(&Value::Text("a".into())));
+    assert!(grouped.rows[0]["events"].cmp_eq(&Value::Int(3)));
+    assert!(grouped.rows[0]["total"].cmp_eq(&Value::Int(33)));
+
+    let mut empty = Engine::memory();
+    ok(
+        &mut empty,
+        "type Event = {source text, amount int}\ntable events Event",
+    );
+    let result = ok(
+        &mut empty,
+        "from events\ngroup source\n  aggregate\n    events = count\n    total = sum amount",
+    );
+    assert!(result.rows.is_empty());
+    assert_eq!(result.columns.len(), 3);
+}
+
+#[test]
+fn aggregates_reject_invalid_types_layout_and_runtime_overflow() {
+    let setup = "type Row =\n  id int\n  label text\n  active bool\ntable rows Row";
+    for (pipeline, code, message) in [
+        ("aggregate\n  total = sum label", "E_TYPE", "sum expects"),
+        ("aggregate\n  first = min active", "E_TYPE", "orderable"),
+        (
+            "aggregate\n  total = sum missing",
+            "E_FIELD",
+            "unknown field",
+        ),
+        (
+            "group id\n  aggregate\n    id = count",
+            "E_FIELD",
+            "conflicts",
+        ),
+        (
+            "select {label}\naggregate\n  total = sum id",
+            "E_FIELD",
+            "unknown field",
+        ),
+    ] {
+        let mut e = Engine::memory();
+        ok(&mut e, setup);
+        let result = e.execute(&format!("from rows\n{pipeline}"));
+        assert!(!result.ok, "accepted {pipeline}");
+        let error = result.error.unwrap();
+        assert_eq!(error.code, code, "{pipeline}: {error}");
+        assert!(error.message.contains(message), "{pipeline}: {error}");
+    }
+
+    for pipeline in [
+        "aggregate\n  rows = count id",
+        "aggregate\n  total = sum",
+        "aggregate\n  rows = median id",
+        "group id\n  filter id > 0",
+        "aggregate\n  rows = count\n  rows = count",
+    ] {
+        let mut e = Engine::memory();
+        ok(&mut e, setup);
+        let result = e.execute(&format!("from rows\n{pipeline}"));
+        assert_eq!(result.error.unwrap().code, "E_SYNTAX", "{pipeline}");
+    }
+
+    let mut integers = Engine::memory();
+    ok(
+        &mut integers,
+        "type Row = {value int}\ntable rows Row\ninsert rows {value = 9223372036854775807}\ninsert rows {value = 1}",
+    );
+    let error = integers
+        .execute("from rows\naggregate\n  total = sum value")
+        .error
+        .unwrap();
+    assert_eq!(error.code, "E_ARITH");
+
+    let mut floats = Engine::memory();
+    ok(
+        &mut floats,
+        "type Row = {value float}\ntable rows Row\ninsert rows {value = 1e308}\ninsert rows {value = 1e308}",
+    );
+    let error = floats
+        .execute("from rows\naggregate\n  total = sum value")
+        .error
+        .unwrap();
+    assert_eq!(error.code, "E_ARITH");
+}
+
+#[test]
 fn arithmetic_precedence_grouping_and_integer_division_are_explicit() {
     let mut engine = Engine::memory();
     ok(
