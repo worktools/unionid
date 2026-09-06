@@ -8,7 +8,9 @@ use crate::migration::MigrationEntry;
 use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
 };
-use crate::query::{Pipeline, SetAssignment, Stage, Statement};
+use crate::query::{
+    Aggregate, AggregateAssignment, AggregateFunction, Pipeline, SetAssignment, Stage, Statement,
+};
 
 mod migration;
 
@@ -16,6 +18,200 @@ type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<RowId>>>>;
 
 pub const MAX_QUERY_WORKING_ROWS: usize = 250_000;
 pub const MAX_RESULT_ROWS: usize = 100_000;
+pub const MAX_GROUPS: usize = 100_000;
+pub const MAX_AGGREGATE_OUTPUTS: usize = 256;
+pub const MAX_AGGREGATE_CELLS: usize = 1_000_000;
+pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
+
+struct GroupAccumulator {
+    fields: Vec<(String, Value)>,
+    states: Vec<AggregateState>,
+}
+
+enum AggregateState {
+    Count(i64),
+    Sum(Option<Value>),
+    Min(Option<Value>),
+    Max(Option<Value>),
+}
+
+impl GroupAccumulator {
+    fn new(fields: Vec<(String, Value)>, assignments: &[AggregateAssignment]) -> Self {
+        let states = assignments
+            .iter()
+            .map(|assignment| match assignment.function {
+                AggregateFunction::Count => AggregateState::Count(0),
+                AggregateFunction::Sum => AggregateState::Sum(None),
+                AggregateFunction::Min => AggregateState::Min(None),
+                AggregateFunction::Max => AggregateState::Max(None),
+            })
+            .collect();
+        Self { fields, states }
+    }
+
+    fn update(
+        &mut self,
+        row: &BTreeMap<String, Value>,
+        assignments: &[AggregateAssignment],
+    ) -> Result<()> {
+        for (state, assignment) in self.states.iter_mut().zip(assignments) {
+            match state {
+                AggregateState::Count(count) => {
+                    *count = count
+                        .checked_add(1)
+                        .ok_or_else(|| Error::new("E_ARITH", "count overflowed int"))?;
+                }
+                AggregateState::Sum(total) => {
+                    let value = aggregate_input(row, assignment)?;
+                    *total = Some(match (total.take(), value.unwrapped()) {
+                        (None, Value::Int(value)) => Value::Int(*value),
+                        (None, Value::Float(value)) => Value::Float(*value),
+                        (Some(Value::Int(total)), Value::Int(value)) => Value::Int(
+                            total
+                                .checked_add(*value)
+                                .ok_or_else(|| Error::new("E_ARITH", "integer sum overflow"))?,
+                        ),
+                        (Some(Value::Float(total)), Value::Float(value)) => {
+                            let result = total + value;
+                            if !result.is_finite() {
+                                return Err(Error::new(
+                                    "E_ARITH",
+                                    "float sum produced a non-finite value",
+                                ));
+                            }
+                            Value::Float(result)
+                        }
+                        _ => {
+                            return Err(Error::new(
+                                "E_TYPE",
+                                "bound sum received values with inconsistent numeric types",
+                            ));
+                        }
+                    });
+                }
+                AggregateState::Min(current) => {
+                    update_extreme(current, aggregate_input(row, assignment)?, true)?;
+                }
+                AggregateState::Max(current) => {
+                    update_extreme(current, aggregate_input(row, assignment)?, false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        catalog: &Catalog,
+        assignments: &[AggregateAssignment],
+    ) -> Result<BTreeMap<String, Value>> {
+        let mut row = self.fields.into_iter().collect::<BTreeMap<_, _>>();
+        for (state, assignment) in self.states.into_iter().zip(assignments) {
+            let output_type = assignment
+                .output_type
+                .as_ref()
+                .ok_or_else(|| Error::new("E_TYPE", "aggregate output has no bound result type"))?;
+            let raw = match state {
+                AggregateState::Count(count) => Value::Int(count),
+                AggregateState::Sum(Some(Value::Float(value))) => {
+                    Value::Float(if value == 0.0 { 0.0 } else { value })
+                }
+                AggregateState::Sum(Some(value)) => value,
+                AggregateState::Sum(None) => match catalog.underlying(output_type)? {
+                    ScalarType::Int => Value::Int(0),
+                    ScalarType::Float => Value::Float(0.0),
+                    _ => {
+                        return Err(Error::new("E_TYPE", "bound sum output is not numeric"));
+                    }
+                },
+                AggregateState::Min(value) | AggregateState::Max(value) => {
+                    Value::Option(value.map(Box::new))
+                }
+            };
+            let value = catalog.coerce(
+                &raw,
+                output_type,
+                &format!("aggregate '{}' result", assignment.name),
+            )?;
+            row.insert(assignment.name.clone(), value);
+        }
+        Ok(row)
+    }
+}
+
+fn aggregate_input<'a>(
+    row: &'a BTreeMap<String, Value>,
+    assignment: &AggregateAssignment,
+) -> Result<&'a Value> {
+    let input = assignment
+        .input
+        .as_deref()
+        .ok_or_else(|| Error::new("E_QUERY", "aggregate input field is missing"))?;
+    row_field(row, input).ok_or_else(|| {
+        Error::new(
+            "E_FIELD",
+            format!("missing aggregate input '{input}' during execution"),
+        )
+    })
+}
+
+fn update_extreme(current: &mut Option<Value>, value: &Value, minimum: bool) -> Result<()> {
+    let replace = if let Some(existing) = current.as_ref() {
+        let order = value.cmp_ord(existing).ok_or_else(|| {
+            Error::new(
+                "E_TYPE",
+                "bound min/max received values without a shared ordering",
+            )
+        })?;
+        if minimum {
+            order == std::cmp::Ordering::Less
+        } else {
+            order == std::cmp::Ordering::Greater
+        }
+    } else {
+        true
+    };
+    if replace {
+        *current = Some(value.clone());
+    }
+    Ok(())
+}
+
+fn aggregate_function_name(function: AggregateFunction) -> &'static str {
+    match function {
+        AggregateFunction::Count => "count",
+        AggregateFunction::Sum => "sum",
+        AggregateFunction::Min => "min",
+        AggregateFunction::Max => "max",
+    }
+}
+
+fn check_group_limits(
+    group_count: usize,
+    aggregate_count: usize,
+    working_bytes: usize,
+) -> Result<()> {
+    if group_count > MAX_GROUPS
+        || group_count.saturating_mul(aggregate_count.max(1)) > MAX_AGGREGATE_CELLS
+    {
+        return Err(Error::new(
+            "E_LIMIT",
+            format!(
+                "aggregate needs more than {MAX_GROUPS} groups or {MAX_AGGREGATE_CELLS} accumulator cells"
+            ),
+        ));
+    }
+    if working_bytes > MAX_GROUP_WORKING_BYTES {
+        return Err(Error::new(
+            "E_LIMIT",
+            format!(
+                "aggregate group state exceeds {} bytes",
+                MAX_GROUP_WORKING_BYTES
+            ),
+        ));
+    }
+    Ok(())
+}
 
 fn check_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
@@ -706,6 +902,9 @@ impl Database {
                         derive,
                     )?);
                 }
+                Stage::Aggregate(aggregate) => {
+                    schema = self.bind_aggregate(&schema, aggregate)?;
+                }
                 Stage::Select(columns) => {
                     schema = columns
                         .iter()
@@ -734,6 +933,157 @@ impl Database {
             }
         }
         Ok(schema)
+    }
+
+    fn bind_aggregate(&self, schema: &[Column], aggregate: &mut Aggregate) -> Result<Vec<Column>> {
+        if aggregate.assignments.len() > MAX_AGGREGATE_OUTPUTS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "aggregate has {} output fields; limit is {MAX_AGGREGATE_OUTPUTS}",
+                    aggregate.assignments.len()
+                ),
+            ));
+        }
+        let mut output = Vec::with_capacity(aggregate.group_by.len() + aggregate.assignments.len());
+        let mut names = BTreeSet::new();
+        for path in &aggregate.group_by {
+            if !names.insert(path.clone()) {
+                return Err(Error::new(
+                    "E_QUERY",
+                    format!("duplicate group field '{path}'"),
+                ));
+            }
+            output.push(Column {
+                name: path.clone(),
+                ty: self.catalog.field_type(schema, path)?.clone(),
+                default: None,
+                id: 0,
+            });
+        }
+        for assignment in &mut aggregate.assignments {
+            if !names.insert(assignment.name.clone()) {
+                return Err(Error::new(
+                    "E_FIELD",
+                    format!(
+                        "aggregate field '{}' conflicts with a group or aggregate field",
+                        assignment.name
+                    ),
+                ));
+            }
+            let ty = match assignment.function {
+                AggregateFunction::Count => ScalarType::Int,
+                AggregateFunction::Sum => {
+                    let ty = self.aggregate_input_type(schema, assignment)?;
+                    if !matches!(
+                        self.catalog.underlying(ty)?,
+                        ScalarType::Int | ScalarType::Float
+                    ) {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!(
+                                "sum expects int or float, got {}",
+                                self.catalog.describe(ty)
+                            ),
+                        ));
+                    }
+                    ty.clone()
+                }
+                AggregateFunction::Min | AggregateFunction::Max => {
+                    let ty = self.aggregate_input_type(schema, assignment)?;
+                    if !self.orderable(ty)? {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!(
+                                "{} expects an orderable int, float, or text value, got {}",
+                                aggregate_function_name(assignment.function),
+                                self.catalog.describe(ty)
+                            ),
+                        ));
+                    }
+                    ScalarType::Option(Box::new(ty.clone()))
+                }
+            };
+            assignment.output_type = Some(ty.clone());
+            output.push(Column {
+                name: assignment.name.clone(),
+                ty,
+                default: None,
+                id: 0,
+            });
+        }
+        Ok(output)
+    }
+
+    fn aggregate_input_type<'a>(
+        &'a self,
+        schema: &'a [Column],
+        assignment: &AggregateAssignment,
+    ) -> Result<&'a ScalarType> {
+        let input = assignment.input.as_deref().ok_or_else(|| {
+            Error::new(
+                "E_QUERY",
+                format!(
+                    "{} requires an input field",
+                    aggregate_function_name(assignment.function)
+                ),
+            )
+        })?;
+        self.catalog.field_type(schema, input)
+    }
+
+    fn aggregate_rows(
+        &self,
+        rows: Vec<BTreeMap<String, Value>>,
+        aggregate: &Aggregate,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<BTreeMap<String, Value>>> {
+        let mut groups: BTreeMap<Vec<String>, GroupAccumulator> = BTreeMap::new();
+        let mut working_bytes = 0usize;
+        if aggregate.group_by.is_empty() {
+            groups.insert(
+                Vec::new(),
+                GroupAccumulator::new(Vec::new(), &aggregate.assignments),
+            );
+        }
+        for (position, row) in rows.iter().enumerate() {
+            check_deadline_periodically(deadline, position)?;
+            let mut key = Vec::with_capacity(aggregate.group_by.len());
+            let mut values = Vec::with_capacity(aggregate.group_by.len());
+            for path in &aggregate.group_by {
+                let value = row_field(row, path).ok_or_else(|| {
+                    Error::new(
+                        "E_FIELD",
+                        format!("missing group field '{path}' during execution"),
+                    )
+                })?;
+                key.push(value.index_key());
+                values.push((path.clone(), value.clone()));
+            }
+            let next_group_count = groups.len().saturating_add(1);
+            if !groups.contains_key(&key) {
+                let group_bytes = key
+                    .iter()
+                    .map(String::len)
+                    .sum::<usize>()
+                    .saturating_mul(2)
+                    .saturating_add(aggregate.assignments.len().saturating_mul(32));
+                working_bytes = working_bytes.saturating_add(group_bytes);
+                check_group_limits(next_group_count, aggregate.assignments.len(), working_bytes)?;
+                groups.insert(
+                    key.clone(),
+                    GroupAccumulator::new(values, &aggregate.assignments),
+                );
+            }
+            let group = groups.get_mut(&key).expect("group was initialized");
+            group.update(row, &aggregate.assignments)?;
+        }
+        let mut output = Vec::with_capacity(groups.len());
+        for (position, (_, group)) in groups.into_iter().enumerate() {
+            check_deadline_periodically(deadline, position)?;
+            output.push(group.finish(&self.catalog, &aggregate.assignments)?);
+        }
+        Ok(output)
     }
 
     fn query(
@@ -844,6 +1194,9 @@ impl Database {
                         )?;
                         row.insert(derive.name.clone(), value);
                     }
+                }
+                Stage::Aggregate(aggregate) => {
+                    rows = self.aggregate_rows(rows, &aggregate, deadline)?;
                 }
                 Stage::Select(columns) => {
                     rows = rows
@@ -1705,5 +2058,26 @@ mod tests {
             vec![0, 1, 2]
         );
         assert_eq!(table(&restored, "entries").next_row_id, 3);
+    }
+
+    #[test]
+    fn aggregate_group_limits_reject_each_bounded_resource() {
+        assert_eq!(
+            check_group_limits(MAX_GROUPS + 1, 1, 0).unwrap_err().code,
+            "E_LIMIT"
+        );
+        assert_eq!(
+            check_group_limits(4_000, MAX_AGGREGATE_OUTPUTS, 0)
+                .unwrap_err()
+                .code,
+            "E_LIMIT"
+        );
+        assert_eq!(
+            check_group_limits(1, 1, MAX_GROUP_WORKING_BYTES + 1)
+                .unwrap_err()
+                .code,
+            "E_LIMIT"
+        );
+        check_group_limits(1, MAX_AGGREGATE_OUTPUTS, MAX_GROUP_WORKING_BYTES).unwrap();
     }
 }

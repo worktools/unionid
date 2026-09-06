@@ -45,7 +45,7 @@ type Job =
 - 原子 claim：按 id 和旧状态筛选，把 `Queued` 改成 `Running` 并返回新值，属于 #15；状态解构与新值表达式复用 #35。
 - 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter match state` 组合即可限定状态。
 - 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
-- 按状态计数：`derive match` 已可把 sum 分支归一为状态名，后续 group/aggregate 由 #60 跟踪。
+- 按状态计数：`derive match` 把 sum 分支归一为状态名，再用 `group state_label` 与 `aggregate` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.uid](../examples/job_queue.uid)。
 
 列表查询必须提供唯一的最终排序键，例如 `sort {-priority, created_at, id}`。只按 priority 分页会让相同优先级的跨请求边界不稳定。
 
@@ -118,7 +118,7 @@ type Event =
   delivery DeliveryState = Pending
 ```
 
-常见工作流包括筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。当前 `filter match` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，统计继续由 #60 承接。
+常见工作流包括筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。当前 `filter match` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，来源统计可用 `group source` 后接 count/sum/min/max。
 
 ## 4. 离线同步与冲突状态
 
@@ -181,7 +181,7 @@ type Session =
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec 与 schema-aware prepared query | option helper/元素谓词可继续扩展 | #10/#22/#36 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match target 与 typed simultaneous set；upsert 已实现按主键 insert/replace；三者维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 扩大工作集时直接生成 mutation set | #15，P0 |
-| count/sum/min/max 与分组 | 未实现 | aggregate/group | #60，P0 |
+| count/sum/min/max 与分组 | 已实现 typed 空输入、命名数值、完整 ADT key、后续 stage 与有界资源 | distinct aggregate、window 和用户定义 aggregate 延后 | #60，P0 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |
 | 持久提交、恢复和备份 | redb Engine、原子提交、完整性检查和进程退出恢复已实现 | 设备故障矩阵与备份还原 | #13/#14/#20，P0 |
 
@@ -194,4 +194,4 @@ type Session =
 5. 时间、随机数、网络和文件不是查询表达式的隐含副作用。当前时间由参数传入；外部 I/O 留在应用层。
 6. v0.1 不以 join、window、递归、高阶泛型换取表面覆盖率。若一个场景主要依赖大规模关联、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
 
-实现顺序按用户可完成的工作流安排：先完成 #34 列表读取，再完成 #35/#36 的 ADT 表达式，随后以 #13–#15 交付持久的状态修改；#11 的基础汇总可以与读取能力并行收敛，最终由 #24 用本页场景验收。
+实现顺序按用户可完成的工作流安排：#34–#36、#59 和 #60 已补齐列表读取、ADT 表达式、普通派生与基础汇总；下一项 #61 收敛查询局部纯函数，再由 #11 汇总查询核心，并由 #24 用本页场景验收。

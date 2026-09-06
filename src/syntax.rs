@@ -4,10 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
-    ArithmeticOp, BoolExpression, CmpOp, DeriveExpression, DeriveMatch, LocatedStatement, MatchArm,
-    MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
-    MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
-    SchemaMigration, SetAssignment, SortKey, Stage, Statement,
+    Aggregate, AggregateAssignment, AggregateFunction, ArithmeticOp, BoolExpression, CmpOp,
+    DeriveExpression, DeriveMatch, LocatedStatement, MatchArm, MatchField, MatchPattern,
+    MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField, MatchValuePayload,
+    MigrationTransform, Pipeline, ScalarExpression, SchemaMigration, SetAssignment, SortKey, Stage,
+    Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -1194,6 +1195,19 @@ impl Parser {
                     self.expect(Kind::Dedent)?;
                 }
                 stage
+            } else if self.word("aggregate") {
+                Stage::Aggregate(self.aggregate(Vec::new())?)
+            } else if self.word("group") {
+                self.bump();
+                let group_by = self.path_list("group", "group field")?;
+                self.block()?;
+                if !self.word("aggregate") {
+                    return Err(self.error("group block must contain aggregate"));
+                }
+                let aggregate = self.aggregate(group_by)?;
+                self.newlines();
+                self.expect(Kind::Dedent)?;
+                Stage::Aggregate(aggregate)
             } else if self.word("select") {
                 self.bump();
                 let braced = self.eat(Kind::Open('{'));
@@ -1289,9 +1303,9 @@ impl Parser {
                 }
             } else {
                 if piped {
-                    return Err(
-                        self.error("expected filter / derive / select / sort / take after '|'")
-                    );
+                    return Err(self.error(
+                        "expected filter / derive / aggregate / group / select / sort / take after '|'",
+                    ));
                 }
                 break;
             };
@@ -1301,9 +1315,96 @@ impl Parser {
     }
 
     fn is_pipeline_stage(&self) -> bool {
-        ["filter", "derive", "select", "sort", "take", "limit"]
-            .iter()
-            .any(|word| self.word(word))
+        [
+            "filter",
+            "derive",
+            "aggregate",
+            "group",
+            "select",
+            "sort",
+            "take",
+            "limit",
+        ]
+        .iter()
+        .any(|word| self.word(word))
+    }
+
+    fn path_list(&mut self, context: &str, item: &str) -> Result<Vec<String>> {
+        let braced = self.eat(Kind::Open('{'));
+        self.newlines();
+        let mut paths = Vec::new();
+        let mut seen = BTreeSet::new();
+        loop {
+            let path = self.path()?;
+            if !seen.insert(path.clone()) {
+                return Err(self.error(format!("duplicate {item} '{path}'")));
+            }
+            paths.push(path);
+            if !braced {
+                break;
+            }
+            self.newlines();
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+            self.newlines();
+            if *self.kind() == Kind::Close('}') {
+                break;
+            }
+        }
+        if braced {
+            self.expect(Kind::Close('}'))?;
+        }
+        if paths.is_empty() {
+            return Err(self.error(format!("{context} requires at least one field")));
+        }
+        Ok(paths)
+    }
+
+    fn aggregate(&mut self, group_by: Vec<String>) -> Result<Aggregate> {
+        self.expect_word("aggregate")?;
+        self.block()?;
+        self.newlines();
+        let mut assignments = Vec::new();
+        let mut seen = BTreeSet::new();
+        while *self.kind() != Kind::Dedent {
+            let name = self.identifier()?;
+            if !seen.insert(name.clone()) {
+                return Err(self.error(format!("duplicate aggregate field '{name}'")));
+            }
+            self.expect(Kind::Op("=".into()))?;
+            let function_name = self.identifier()?;
+            let (function, input) = match function_name.as_str() {
+                "count" => (AggregateFunction::Count, None),
+                "sum" => (AggregateFunction::Sum, Some(self.path()?)),
+                "min" => (AggregateFunction::Min, Some(self.path()?)),
+                "max" => (AggregateFunction::Max, Some(self.path()?)),
+                _ => {
+                    return Err(self.error(format!(
+                        "unknown aggregate function '{function_name}'; expected count, sum, min, or max"
+                    )));
+                }
+            };
+            assignments.push(AggregateAssignment {
+                name,
+                function,
+                input,
+                output_type: None,
+            });
+            if *self.kind() == Kind::Dedent {
+                break;
+            }
+            self.expect(Kind::Newline)?;
+            self.newlines();
+        }
+        self.expect(Kind::Dedent)?;
+        if assignments.is_empty() {
+            return Err(self.error("aggregate requires at least one output field"));
+        }
+        Ok(Aggregate {
+            group_by,
+            assignments,
+        })
     }
 
     fn comparison_operator(&mut self) -> Result<CmpOp> {

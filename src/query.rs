@@ -189,9 +189,32 @@ pub enum Stage {
     FilterMatch(MatchPredicate),
     Derive(DeriveExpression),
     DeriveMatch(DeriveMatch),
+    Aggregate(Aggregate),
     Select(Vec<String>),
     Sort(Vec<SortKey>),
     Take { offset: usize, limit: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct Aggregate {
+    pub group_by: Vec<String>,
+    pub assignments: Vec<AggregateAssignment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregateAssignment {
+    pub name: String,
+    pub function: AggregateFunction,
+    pub input: Option<String>,
+    pub output_type: Option<ScalarType>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AggregateFunction {
+    Count,
+    Sum,
+    Min,
+    Max,
 }
 
 #[derive(Debug, Clone)]
