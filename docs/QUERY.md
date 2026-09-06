@@ -22,11 +22,13 @@ take 20
 | 值过滤 | `filter field >= literal` | 已实现 | #10 扩展为通用表达式 |
 | sum 模式过滤 | `filter match field` | 已实现 unit、单个 record 负载和穷尽检查 | #10 增加位置、tuple、嵌套模式与通用 match |
 | 投影 | `select {field, nested.field}` | 已实现 | #11 与派生列组合 |
-| 排序 | `sort field` / `sort -field` | 已实现单列 | #11 扩展查询组合 |
-| 截取 | `take 20` | 已实现 | — |
+| 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | #16 增加索引计划 |
+| 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` | 未实现 | #10、#22 |
-| 派生列 | `derive` | 未实现 | #11 |
+| ADT 派生列 | `derive x = match ...` | 未实现 | #35 |
+| 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 未实现 | #36 |
+| 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
 | 更新与删除 | `update`、`delete`、`upsert` | 未实现 | #15 |
 | migration 查询与转换 | `migration` | 未实现 | #17、#18 |
@@ -63,8 +65,9 @@ value-filter      = "filter" field-path comparison literal
 match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
 match-arm         = pattern "=>" condition newline?
 select            = "select" "{" field-path ("," field-path)* ","? "}"
-sort              = "sort" "-"? field-path
-take              = "take" nonnegative-integer
+sort              = "sort" sort-key | "sort" "{" sort-key ("," sort-key)* ","? "}"
+sort-key          = "-"? field-path
+take              = "take" nonnegative-integer | "take" positive-integer ".." positive-integer
 
 pattern           = "_" | qualified-variant record-pattern?
 qualified-variant = Variant | Type "." Variant
@@ -98,8 +101,8 @@ from tasks | filter id > 1 | take 1
 | `filter` | 不变 | 只保留条件为真的行 | 仍执行字段与类型检查 |
 | `filter match` | 不变 | 每行按其 sum 变体执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
-| `sort` | 不变 | 单列升序或降序；相同键的次序不承诺 | 返回空结果 |
-| `take` | 不变 | 保留当前结果的前 N 行；无 sort 时“前”不稳定 | 返回空结果 |
+| `sort` | 不变 | 单列或多列词典序；全部键相同的次序不承诺 | 返回空结果但仍检查全部键 |
+| `take` | 不变 | 保留前 N 行，或一基闭区间内的行；无 sort 时位置不稳定 | 返回空结果但仍检查范围 |
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
@@ -167,7 +170,17 @@ from tasks
 select {title, id, owner.email}
 ```
 
-`sort field` 升序排列，`sort -field` 降序排列。当前只接受 int、float 和 text；相同键之间没有稳定性承诺。`take N` 接受非负整数，`take 0` 返回空行但仍保留当前结果 schema。
+`sort field` 升序排列，`sort -field` 降序排列。多个排序键写成 `sort {key, -descending_key, final_key}`，按书写顺序做词典序比较。键可以是嵌套 record 路径，当前只接受 int、float 和 text；重复键在解析时拒绝，未知或不可排序键即使在空表上也会报错。
+
+全部排序键相同时，引擎不承诺原行顺序。分页或队列查询需要可复现顺序时，应把 int/text 主键作为最后一个键：
+
+```text
+from jobs
+sort {-priority, created_at, id}
+take 11..20
+```
+
+`take N` 接受非负整数并保留前 N 行，`take 0` 返回空行但仍保留当前结果 schema。`take start..end` 使用一基闭区间，因此 `take 11..20` 跳过前 10 行并最多返回 10 行；尾部越界返回剩余行。start 必须至少为 1，end 不能小于 start。范围总是相对于该 stage 收到的当前结果。
 
 如果业务依赖“前 N 行”，必须先 sort：
 
@@ -227,8 +240,10 @@ filter match state
 | 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、`filter match`、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
 | 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
 | 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较和字符串中的 `|` | `tests/language.rs::executable_examples` |
+| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、字段默认值、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 穷尽性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*` |
+| 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。

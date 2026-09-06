@@ -60,8 +60,14 @@ pub enum Stage {
     Filter(Predicate),
     FilterMatch(MatchPredicate),
     Select(Vec<String>),
-    Sort { column: String, descending: bool },
-    Limit(usize),
+    Sort(Vec<SortKey>),
+    Take { offset: usize, limit: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct SortKey {
+    pub column: String,
+    pub descending: bool,
 }
 
 #[derive(Debug, Clone)]

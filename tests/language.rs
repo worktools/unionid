@@ -50,6 +50,19 @@ fn executable_examples() {
         ["id", "event"]
     );
     assert!(r.rows[0]["id"].cmp_eq(&Value::Int(2)));
+
+    let mut jobs = Engine::memory();
+    let r = ok(&mut jobs, include_str!("../examples/job_queue.uid"));
+    assert_eq!(r.rows.len(), 2);
+    assert!(r.rows[0]["id"].cmp_eq(&Value::Text("job-c".into())));
+    assert!(r.rows[1]["id"].cmp_eq(&Value::Text("job-a".into())));
+    assert_eq!(
+        r.columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "payload", "state"]
+    );
 }
 
 #[test]
@@ -326,6 +339,63 @@ fn stage_order_and_projection_paths_are_preserved() {
         .len(),
         1
     );
+}
+
+#[test]
+fn multi_key_sort_and_inclusive_take_ranges_compose() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Meta =\n  scheduled int\ntype Row =\n  id int\n  priority int\n  meta Meta\ntable rows Row\ninsert rows {id = 1, priority = 2, meta = {scheduled = 5}}\ninsert rows {id = 2, priority = 2, meta = {scheduled = 3}}\ninsert rows {id = 3, priority = 3, meta = {scheduled = 9}}\ninsert rows {id = 4, priority = 2, meta = {scheduled = 3}}\ninsert rows {id = 5, priority = 1, meta = {scheduled = 1}}",
+    );
+    let result = ok(
+        &mut e,
+        "from rows\nsort {\n  -priority,\n  meta.scheduled,\n  id,\n}\ntake 2..4\nselect {id}",
+    );
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .map(|row| match &row["id"] {
+                Value::Int(value) => *value,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>(),
+        [2, 4, 1]
+    );
+    assert_eq!(
+        ok(&mut e, "from rows | sort {id} | take 4..10").rows.len(),
+        2
+    );
+    assert!(ok(&mut e, "from rows | take 6..10").rows.is_empty());
+    assert_eq!(
+        rows(&mut e, "from rows | sort -id | take 2"),
+        rows(&mut e, "from rows | sort {-id} | take 1..2")
+    );
+}
+
+#[test]
+fn sort_keys_and_take_ranges_are_validated_before_scanning() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Ready | Done\ntype Row =\n  id int\n  state State\ntable rows Row",
+    );
+    for source in [
+        "from rows | sort id, -id",
+        "from rows | sort {id, id}",
+        "from rows | sort {id, missing}",
+        "from rows | sort {id, state}",
+        "from rows | take 0..1",
+        "from rows | take 3..2",
+        "from rows | take 1.5",
+        "from rows | take 1..2..3",
+        "from rows | take 1..18446744073709551616",
+    ] {
+        let result = e.execute(source);
+        assert!(!result.ok, "accepted {source}");
+        assert!(result.error.unwrap().span.is_some(), "{source}");
+    }
 }
 
 #[test]

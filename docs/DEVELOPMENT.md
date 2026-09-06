@@ -9,7 +9,8 @@
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。
 - `field type = value` 字段默认值在声明时完成递归类型检查，insert 对嵌套 record 和 sum record 负载逐层补齐；schema 展示、WAL/snapshot 恢复与 hash 均保留默认值。
 - 版本 1 ADT value codec 以 catalog 和期望类型驱动，用稳定 type/field/variant ID 编码命名类型、record、sum、tuple、option/list；不依赖 serde 或 Rust enum 布局，字段重排和显式 rename 保持字节可解释。
-- 换行及单行 pipeline、字段路径、filter/select/sort/take、sum 类型的模式过滤、主键唯一性和等值索引。
+- 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、sum 类型的模式过滤、主键唯一性和等值索引。
+- 以任务队列、嵌套配置、事件收件箱、离线同步和 session/cache 推演 ADT 与日常操作，形成 [实际场景与查询覆盖矩阵](SCENARIOS.md)；ADT 派生和集合查询分别拆为 #35/#36。
 - 查询参考明确记录当前 grammar、stage schema、执行顺序、match 规则、错误类别和已实现/计划边界；任务、配置、事件三个示例都由语言测试执行。
 - 原子脚本、可读 CLI 输出、JSON 输出、文件/stdin、多行 REPL、正确退出码及 EOF 处理。
 - 修复大整数、浮点零值与 enum 负载的索引/扫描一致性；深层索引键按结构编码，避免重复转义造成指数增长；未知字段在空表上也报错。
@@ -45,14 +46,14 @@ cargo run -- run --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 68 项测试通过：`tests/language.rs` 33 项、`tests/storage.rs` 15 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 8 项、`tests/codec.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
+当前全部 70 项测试通过：`tests/language.rs` 35 项、`tests/storage.rs` 15 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 8 项、`tests/codec.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
 ## 后续工作
 
 - #2：以当前查询参考完善完整语言 RFC；类型推断、更新与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
-- #8/#10/#11：在已实现的默认值、版本化 value codec 与 `filter match` 子集上继续完善 typed IR、通用 match 表达式、tuple/嵌套模式、参数、let/derive/group/aggregate。#9/#12 的验收范围已经实现。
+- #8/#10/#11/#34–#36：在已实现的默认值、版本化 value codec、`filter match`、多键 sort 与范围 take 上继续完善 typed IR、通用 match/derive、布尔与集合表达式、参数和 group/aggregate。#9/#12/#34 的验收范围已经实现。
 - #13/#14/#15/#16：先让 redb 固定内部表和单写事务接管 Engine，再补齐故障模型、CRUD/upsert、索引计划及 explain。
 - #17–#20：实现 schema/data migration、ledger、diff、备份还原与显式旧数据转换。
 - #21–#24：继续打磨 REPL 历史/补全/格式化、协议、服务预算和正式发布。

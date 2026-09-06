@@ -15,6 +15,7 @@
 
 ```bash
 cargo run -- run --file examples/tasks.uid
+cargo run -- run --file examples/job_queue.uid
 cargo run -- run --file examples/config.uid --format json
 cargo run -- run --file examples/events.uid
 cargo run --example embedded
@@ -48,6 +49,7 @@ cargo run -- cli --memory
 
 - [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
 - [查询语言参考](docs/QUERY.md)：当前可执行的 pipeline grammar、stage 语义、模式和错误。
+- [实际场景与覆盖矩阵](docs/SCENARIOS.md)：任务队列、配置、事件、同步和 key/value 用法所需的 ADT 与查询缺口。
 - [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
 - [ADT value codec](docs/CODEC.md)：稳定 ID 驱动的持久值格式、限制与 schema evolution 边界。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。

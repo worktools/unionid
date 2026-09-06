@@ -5,7 +5,7 @@ use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
     CmpOp, LocatedStatement, MatchArm, MatchCondition, MatchPattern, MatchPredicate, Pipeline,
-    Predicate, Stage, Statement,
+    Predicate, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -772,19 +772,68 @@ impl Parser {
                 Stage::Select(fields)
             } else if self.word("sort") {
                 self.bump();
-                let descending = self.eat(Kind::Minus);
-                let column = self.path()?;
-                Stage::Sort { column, descending }
+                let braced = self.eat(Kind::Open('{'));
+                self.newlines();
+                let mut keys = Vec::new();
+                let mut seen = BTreeSet::new();
+                loop {
+                    let descending = self.eat(Kind::Minus);
+                    let column = self.path()?;
+                    if !seen.insert(column.clone()) {
+                        return Err(self.error(format!("duplicate sort field '{column}'")));
+                    }
+                    keys.push(SortKey { column, descending });
+                    if !braced {
+                        break;
+                    }
+                    self.newlines();
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                    self.newlines();
+                    if *self.kind() == Kind::Close('}') {
+                        break;
+                    }
+                }
+                if braced {
+                    self.expect(Kind::Close('}'))?;
+                }
+                Stage::Sort(keys)
             } else if self.word("take") || self.word("limit") {
                 self.bump();
                 let token = self.bump();
                 let Kind::Number(n) = token.kind else {
                     return Err(syntax("expected a nonnegative row count", token.span));
                 };
-                Stage::Limit(
-                    n.parse()
-                        .map_err(|_| syntax("invalid row count", token.span))?,
-                )
+                let normalized = n.replace('_', "");
+                if let Some((start, end)) = normalized.split_once("..") {
+                    let start = start
+                        .parse::<usize>()
+                        .map_err(|_| syntax("invalid take range start", token.span))?;
+                    let end = end
+                        .parse::<usize>()
+                        .map_err(|_| syntax("invalid take range end", token.span))?;
+                    if start == 0 {
+                        return Err(syntax("take ranges start at 1", token.span));
+                    }
+                    let limit = end
+                        .checked_sub(start)
+                        .and_then(|distance| distance.checked_add(1))
+                        .ok_or_else(|| {
+                            syntax("take range end must not precede its start", token.span)
+                        })?;
+                    Stage::Take {
+                        offset: start - 1,
+                        limit,
+                    }
+                } else {
+                    Stage::Take {
+                        offset: 0,
+                        limit: normalized
+                            .parse()
+                            .map_err(|_| syntax("invalid row count", token.span))?,
+                    }
+                }
             } else {
                 if piped {
                     return Err(self.error("expected filter / select / sort / take after '|'"));

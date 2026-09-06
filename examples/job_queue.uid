@@ -1,0 +1,62 @@
+# A nested ADT job queue with deterministic multi-key paging.
+type Failure =
+  Network {message text}
+  | InvalidData {field text, message text}
+
+type Payload =
+  Sync {source text, target text}
+  | Webhook {url text, body text}
+
+type JobState =
+  Queued {scheduled_at int, attempt int = 0}
+  | Running {worker text, started_at int}
+  | Succeeded {finished_at int}
+  | Failed {error Failure, retry_at option int = None}
+
+type Job =
+  id text
+  priority int = 0
+  created_at int
+  tags list text = []
+  payload Payload
+  state JobState
+
+table jobs Job
+  key id
+
+insert jobs
+  id = "job-a"
+  priority = 10
+  created_at = 100
+  tags = ["sync", "local"]
+  payload = Sync {source = "inbox", target = "archive"}
+  state = Queued {scheduled_at = 180}
+
+insert jobs
+  id = "job-b"
+  priority = 20
+  created_at = 120
+  payload = Webhook {url = "https://example.test/hook", body = "{}"}
+  state = Queued {scheduled_at = 300}
+
+insert jobs
+  id = "job-c"
+  priority = 10
+  created_at = 90
+  payload = Sync {source = "drafts", target = "outbox"}
+  state = Queued {scheduled_at = 160, attempt = 1}
+
+insert jobs
+  id = "job-d"
+  priority = 50
+  created_at = 80
+  payload = Sync {source = "remote", target = "local"}
+  state = Running {worker = "worker-1", started_at = 150}
+
+from jobs
+filter match state
+  Queued {scheduled_at, ..} => scheduled_at <= 200
+  _ => false
+sort {-priority, created_at, id}
+take 1..2
+select {id, payload, state}

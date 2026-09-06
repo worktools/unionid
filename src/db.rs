@@ -306,16 +306,18 @@ impl Database {
                         })
                         .collect::<Result<_>>()?;
                 }
-                Stage::Sort { column, .. } => {
-                    let ty = self.catalog.field_type(&schema, column)?;
-                    if !self.orderable(ty)? {
-                        return Err(Error::new(
-                            "E_TYPE",
-                            format!("field '{column}' has no ordering"),
-                        ));
+                Stage::Sort(keys) => {
+                    for key in keys {
+                        let ty = self.catalog.field_type(&schema, &key.column)?;
+                        if !self.orderable(ty)? {
+                            return Err(Error::new(
+                                "E_TYPE",
+                                format!("field '{}' has no ordering", key.column),
+                            ));
+                        }
                     }
                 }
-                Stage::Limit(_) => {}
+                Stage::Take { .. } => {}
             }
         }
         let candidates = if let Some(Stage::Filter(pred)) = pipeline.stages.first() {
@@ -361,14 +363,26 @@ impl Database {
                         })
                         .collect();
                 }
-                Stage::Sort { column, descending } => rows.sort_by(|a, b| {
-                    let order = row_field(a, &column)
-                        .zip(row_field(b, &column))
-                        .and_then(|(a, b)| a.cmp_ord(b))
-                        .unwrap_or(std::cmp::Ordering::Equal);
-                    if descending { order.reverse() } else { order }
+                Stage::Sort(keys) => rows.sort_by(|a, b| {
+                    for key in &keys {
+                        let order = row_field(a, &key.column)
+                            .zip(row_field(b, &key.column))
+                            .and_then(|(a, b)| a.cmp_ord(b))
+                            .unwrap_or(std::cmp::Ordering::Equal);
+                        let order = if key.descending {
+                            order.reverse()
+                        } else {
+                            order
+                        };
+                        if order != std::cmp::Ordering::Equal {
+                            return order;
+                        }
+                    }
+                    std::cmp::Ordering::Equal
                 }),
-                Stage::Limit(n) => rows.truncate(n),
+                Stage::Take { offset, limit } => {
+                    rows = rows.into_iter().skip(offset).take(limit).collect()
+                }
             }
         }
         Ok(QueryResponse {
