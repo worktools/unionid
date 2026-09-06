@@ -51,6 +51,20 @@ pub(crate) fn bind_match(
     )
 }
 
+pub(crate) fn bind_derive(
+    catalog: &Catalog,
+    scope: &[Column],
+    expression: &mut BoolExpression,
+) -> Result<ScalarType> {
+    match expression {
+        BoolExpression::Value(value) => bind_scalar(catalog, scope, value, None, "field"),
+        _ => {
+            bind_in_scope(catalog, scope, expression, "field", "derived condition")?;
+            Ok(ScalarType::Bool)
+        }
+    }
+}
+
 fn bind_in_scope(
     catalog: &Catalog,
     scope: &[Column],
@@ -515,6 +529,18 @@ pub(crate) fn evaluate<'values>(
         marker: std::marker::PhantomData,
     };
     evaluate_resolved(catalog, expression, &resolver, budget)
+}
+
+pub(crate) fn evaluate_derive<'values>(
+    catalog: &Catalog,
+    expression: &BoolExpression,
+    values: impl Fn(&str) -> Option<&'values Value> + Copy,
+    budget: &mut EvaluationBudget,
+) -> Result<Value> {
+    match expression {
+        BoolExpression::Value(value) => evaluate_value(catalog, value, values),
+        _ => evaluate(catalog, expression, values, budget).map(Value::Bool),
+    }
 }
 
 trait ValueResolver {

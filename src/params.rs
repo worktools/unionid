@@ -197,6 +197,7 @@ fn visit_pipeline(pipeline: &Pipeline, visitor: &mut impl FnMut(&ScalarExpressio
                     visit_bool(&arm.condition, visitor);
                 }
             }
+            Stage::Derive(derive) => visit_bool(&derive.expression, visitor),
             Stage::DeriveMatch(derive) => {
                 for arm in &derive.arms {
                     visit_match_value(&arm.result, visitor);
@@ -216,6 +217,7 @@ fn visit_pipeline_mut(pipeline: &mut Pipeline, visitor: &mut impl FnMut(&mut Sca
                     visit_bool_mut(&mut arm.condition, visitor);
                 }
             }
+            Stage::Derive(derive) => visit_bool_mut(&mut derive.expression, visitor),
             Stage::DeriveMatch(derive) => {
                 for arm in &mut derive.arms {
                     visit_match_value_mut(&mut arm.result, visitor);

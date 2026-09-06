@@ -676,6 +676,29 @@ impl Database {
                     crate::expression::bind(&self.catalog, &schema, expression)?
                 }
                 Stage::FilterMatch(pred) => crate::matching::bind(&self.catalog, &schema, pred)?,
+                Stage::Derive(derive) => {
+                    if schema.iter().any(|column| column.name == derive.name) {
+                        return Err(Error::new(
+                            "E_FIELD",
+                            format!(
+                                "derive field '{}' already exists; choose a new field name",
+                                derive.name
+                            ),
+                        ));
+                    }
+                    let ty = crate::expression::bind_derive(
+                        &self.catalog,
+                        &schema,
+                        &mut derive.expression,
+                    )?;
+                    derive.output_type = Some(ty.clone());
+                    schema.push(Column {
+                        name: derive.name.clone(),
+                        ty,
+                        default: None,
+                        id: 0,
+                    });
+                }
                 Stage::DeriveMatch(derive) => {
                     schema.push(crate::matching::bind_derive(
                         &self.catalog,
@@ -799,6 +822,26 @@ impl Database {
                     for (position, row) in rows.iter_mut().enumerate() {
                         check_deadline_periodically(deadline, position)?;
                         let value = crate::matching::evaluate_derive(&self.catalog, row, &derive)?;
+                        row.insert(derive.name.clone(), value);
+                    }
+                }
+                Stage::Derive(derive) => {
+                    let output_type = derive.output_type.as_ref().ok_or_else(|| {
+                        Error::new("E_TYPE", "derived expression has no bound output type")
+                    })?;
+                    for (position, row) in rows.iter_mut().enumerate() {
+                        check_deadline_periodically(deadline, position)?;
+                        let raw = crate::expression::evaluate_derive(
+                            &self.catalog,
+                            &derive.expression,
+                            |path| row_field(row, path),
+                            &mut evaluation_budget,
+                        )?;
+                        let value = self.catalog.coerce(
+                            &raw,
+                            output_type,
+                            &format!("derive '{}' result", derive.name),
+                        )?;
                         row.insert(derive.name.clone(), value);
                     }
                 }
