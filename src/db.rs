@@ -233,6 +233,7 @@ impl Database {
                         ));
                     }
                 }
+                Stage::FilterMatch(pred) => crate::matching::bind(&self.catalog, &schema, pred)?,
                 Stage::Select(columns) => {
                     schema = columns
                         .iter()
@@ -284,6 +285,9 @@ impl Database {
         for stage in pipeline.stages {
             match stage {
                 Stage::Filter(pred) => rows.retain(|row| evaluate(row, &pred)),
+                Stage::FilterMatch(pred) => {
+                    rows.retain(|row| crate::matching::evaluate(row, &pred))
+                }
                 Stage::Select(columns) => {
                     rows = rows
                         .into_iter()
@@ -329,7 +333,6 @@ impl Database {
             ScalarType::Int | ScalarType::Float | ScalarType::Text
         ))
     }
-
     /// Indexes are derived data. Rebuild on load so older key encodings cannot
     /// change query semantics after a numeric comparison fix.
     pub fn rebuild_indexes(&mut self) -> Result<()> {
@@ -424,17 +427,20 @@ fn evaluate(row: &BTreeMap<String, Value>, pred: &Predicate) -> bool {
     let Some(lhs) = row_field(row, &pred.column) else {
         return false;
     };
-    match pred.op {
-        CmpOp::Eq => lhs.cmp_eq(&pred.value),
-        CmpOp::Ne => !lhs.cmp_eq(&pred.value),
-        CmpOp::Gt => lhs.cmp_ord(&pred.value) == Some(std::cmp::Ordering::Greater),
-        CmpOp::Lt => lhs.cmp_ord(&pred.value) == Some(std::cmp::Ordering::Less),
+    compare(lhs, pred.op, &pred.value)
+}
+fn compare(lhs: &Value, op: CmpOp, rhs: &Value) -> bool {
+    match op {
+        CmpOp::Eq => lhs.cmp_eq(rhs),
+        CmpOp::Ne => !lhs.cmp_eq(rhs),
+        CmpOp::Gt => lhs.cmp_ord(rhs) == Some(std::cmp::Ordering::Greater),
+        CmpOp::Lt => lhs.cmp_ord(rhs) == Some(std::cmp::Ordering::Less),
         CmpOp::Gte => matches!(
-            lhs.cmp_ord(&pred.value),
+            lhs.cmp_ord(rhs),
             Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
         ),
         CmpOp::Lte => matches!(
-            lhs.cmp_ord(&pred.value),
+            lhs.cmp_ord(rhs),
             Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
         ),
     }

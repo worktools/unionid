@@ -41,7 +41,7 @@
 - 已开始新的无分号语言预览；当前可执行子集见 `docs/LANGUAGE.md`，完整目标见 `docs/DESIGN.md`。
 - 类型声明和查询采用 PRQL 风格，优先空格、换行与缩进，不引入分号或 TypeScript 风格的密集注解。
 - `Engine` 是本地 Rust API、CLI 和 TCP 的共享入口；每次请求是一个原子脚本。
-- 已实现命名 sum/record、tuple、option/list、严格插入、主键及 filter/select/sort/take；match、更新操作及 migration 尚未实现。
+- 已实现命名 sum/record、tuple、option/list、严格插入、主键、filter/select/sort/take，以及带 record 负载绑定与穷尽检查的 `filter match`；通用 match 表达式、更新操作及 migration 尚未实现。
 - 现有 WAL/snapshot 增加同步提交、快照水位、原子发布与占用锁；仍是过渡实现，存储 ADR 和长期格式未冻结。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 

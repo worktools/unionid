@@ -5,6 +5,7 @@ pub mod cli;
 pub mod db;
 pub mod engine;
 pub mod error;
+mod matching;
 pub mod model;
 pub mod query;
 pub mod server;

@@ -3,7 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
-use crate::query::{CmpOp, LocatedStatement, Pipeline, Predicate, Stage, Statement};
+use crate::query::{
+    CmpOp, LocatedStatement, MatchArm, MatchCondition, MatchPattern, MatchPredicate, Pipeline,
+    Predicate, Stage, Statement,
+};
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 
@@ -181,7 +184,7 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                 }
                 '=' | '!' | '>' | '<' => {
                     pos += 1;
-                    if chars.get(pos) == Some(&'=') {
+                    if (ch == '=' && chars.get(pos) == Some(&'>')) || chars.get(pos) == Some(&'=') {
                         pos += 1;
                     }
                     Kind::Op(chars[start..pos].iter().collect())
@@ -704,31 +707,24 @@ impl Parser {
             let piped = self.eat(Kind::Pipe);
             let newline = self.eat(Kind::Newline);
             self.newlines();
-            if !piped && !newline {
+            let after_layout = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent
+                && self.is_pipeline_stage();
+            if !piped && !newline && !after_layout {
                 break;
             }
             let stage = if self.word("filter") {
                 self.bump();
-                let column = self.path()?;
-                let op = match self.bump() {
-                    Token {
-                        kind: Kind::Op(s), ..
-                    } => match s.as_str() {
-                        "=" | "==" => CmpOp::Eq,
-                        "!=" => CmpOp::Ne,
-                        ">" => CmpOp::Gt,
-                        ">=" => CmpOp::Gte,
-                        "<" => CmpOp::Lt,
-                        "<=" => CmpOp::Lte,
-                        _ => return Err(self.error("unsupported comparison operator")),
-                    },
-                    t => return Err(syntax("expected a comparison operator", t.span)),
-                };
-                Stage::Filter(Predicate {
-                    column,
-                    op,
-                    value: self.value(0)?,
-                })
+                if self.word("match") {
+                    Stage::FilterMatch(self.match_predicate()?)
+                } else {
+                    let column = self.path()?;
+                    let op = self.comparison_operator()?;
+                    Stage::Filter(Predicate {
+                        column,
+                        op,
+                        value: self.value(0)?,
+                    })
+                }
             } else if self.word("select") {
                 self.bump();
                 let braced = self.eat(Kind::Open('{'));
@@ -782,5 +778,123 @@ impl Parser {
             stages.push(stage);
         }
         Ok(Statement::Pipeline(Pipeline { from, stages }))
+    }
+
+    fn is_pipeline_stage(&self) -> bool {
+        ["filter", "select", "sort", "take", "limit"]
+            .iter()
+            .any(|word| self.word(word))
+    }
+
+    fn comparison_operator(&mut self) -> Result<CmpOp> {
+        match self.bump() {
+            Token {
+                kind: Kind::Op(s), ..
+            } => match s.as_str() {
+                "=" | "==" => Ok(CmpOp::Eq),
+                "!=" => Ok(CmpOp::Ne),
+                ">" => Ok(CmpOp::Gt),
+                ">=" => Ok(CmpOp::Gte),
+                "<" => Ok(CmpOp::Lt),
+                "<=" => Ok(CmpOp::Lte),
+                _ => Err(self.error("unsupported comparison operator")),
+            },
+            token => Err(syntax("expected a comparison operator", token.span)),
+        }
+    }
+
+    fn match_predicate(&mut self) -> Result<MatchPredicate> {
+        self.expect_word("match")?;
+        let column = self.path()?;
+        self.block()?;
+        let mut arms = Vec::new();
+        self.newlines();
+        while *self.kind() != Kind::Dedent {
+            let pattern = self.match_pattern()?;
+            match self.bump() {
+                Token {
+                    kind: Kind::Op(op), ..
+                } if op == "=>" => {}
+                token => return Err(syntax("expected '=>' after match pattern", token.span)),
+            }
+            let condition = self.match_condition()?;
+            arms.push(MatchArm { pattern, condition });
+            if *self.kind() == Kind::Dedent {
+                break;
+            }
+            self.expect(Kind::Newline)?;
+            self.newlines();
+        }
+        self.expect(Kind::Dedent)?;
+        if arms.is_empty() {
+            return Err(self.error("match requires at least one branch"));
+        }
+        Ok(MatchPredicate { column, arms })
+    }
+
+    fn match_pattern(&mut self) -> Result<MatchPattern> {
+        let mut name = self.identifier()?;
+        if name == "_" {
+            return Ok(MatchPattern::Wildcard);
+        }
+        while self.eat(Kind::Dot) {
+            name.push('.');
+            name.push_str(&self.identifier()?);
+        }
+        let mut fields = Vec::new();
+        let mut rest = false;
+        let record = self.eat(Kind::Open('{'));
+        if record {
+            self.newlines();
+            while *self.kind() != Kind::Close('}') {
+                if self.eat(Kind::Dot) {
+                    self.expect(Kind::Dot)?;
+                    if rest {
+                        return Err(self.error("record pattern can contain '..' only once"));
+                    }
+                    rest = true;
+                } else {
+                    fields.push(self.identifier()?);
+                }
+                self.newlines();
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+                self.newlines();
+                if rest && *self.kind() != Kind::Close('}') {
+                    return Err(self.error("'..' must be the last item in a record pattern"));
+                }
+            }
+            self.expect(Kind::Close('}'))?;
+        }
+        Ok(MatchPattern::Variant {
+            name,
+            fields,
+            record,
+            rest,
+            variant_id: None,
+        })
+    }
+
+    fn match_condition(&mut self) -> Result<MatchCondition> {
+        if self.word("true") {
+            self.bump();
+            return Ok(MatchCondition::Bool(true));
+        }
+        if self.word("false") {
+            self.bump();
+            return Ok(MatchCondition::Bool(false));
+        }
+        let binding = self.path()?;
+        if matches!(self.kind(), Kind::Op(_)) {
+            let op = self.comparison_operator()?;
+            Ok(MatchCondition::Compare {
+                binding,
+                op,
+                value: self.value(0)?,
+            })
+        } else {
+            Ok(MatchCondition::Binding(binding))
+        }
     }
 }

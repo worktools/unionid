@@ -7,7 +7,7 @@
 - 共享 Rust `Engine`，本地 CLI 与 TCP 复用同一个执行、类型校验和原子提交边界。
 - Lexer、源码位置、缩进与换行 AST；命名 sum/record、tuple、option/list、完整值构造和严格校验。
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。
-- 换行及单行 pipeline、字段路径、filter/select/sort/take、主键唯一性和等值索引。
+- 换行及单行 pipeline、字段路径、filter/select/sort/take、sum 类型的模式过滤、主键唯一性和等值索引。
 - 原子脚本、可读 CLI 输出、JSON 输出、文件/stdin、多行 REPL、正确退出码及 EOF 处理。
 - 修复大整数、浮点零值与 enum 负载的索引/扫描一致性；深层索引键按结构编码，避免重复转义造成指数增长；未知字段在空表上也报错。
 - 用隔离的临时目录、动态 TCP 端口和子进程建立测试；增加 macOS/Linux 的 CI 配置。
@@ -36,14 +36,14 @@ cargo run -- run --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-本轮全部 42 项测试通过：`tests/language.rs` 21 项、`tests/storage.rs` 13 项、`tests/interfaces.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复，以及真实 CLI/TCP/并发请求。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
+当前全部 47 项测试通过：`tests/language.rs` 26 项、`tests/storage.rs` 13 项、`tests/interfaces.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复，以及真实 CLI/TCP/并发请求。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
 ## 后续工作
 
 - #2/#7：以当前可执行子集完善语言 RFC 与类型演进契约；默认值、类型兼容矩阵和完整版本策略尚未冻结。
-- #8/#9/#10/#11/#12：继续完善 parser/类型推断、typed IR、match 穷尽检查、参数、let/derive/group/aggregate，完成完整 M1 验收。
+- #8/#9/#10/#11/#12：在已实现的 `filter match` 子集上继续完善 typed IR、通用 match 表达式、tuple/嵌套模式、参数、let/derive/group/aggregate，完成完整 M1 验收。
 - #6/#13/#14/#15/#16：选定持久化方案，补齐故障模型、CRUD/upsert、索引计划及 explain。
 - #17–#20：实现 schema/data migration、ledger、diff、备份还原与显式旧数据转换。
 - #21–#24：继续打磨 REPL 历史/补全/格式化、协议、服务预算和正式发布。
