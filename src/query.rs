@@ -60,6 +60,10 @@ pub enum SchemaMigration {
     DropTable {
         table: String,
     },
+    RenameTable {
+        from: String,
+        to: String,
+    },
     RenameType {
         from: String,
         to: String,

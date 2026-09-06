@@ -33,6 +33,7 @@ rename type Old to New
 add table table_name RowType
 add table table_name RowType key field.path
 drop table table_name
+rename table old_name to new_name
 
 add field Record.field type-expression = literal
 drop field Record.field
@@ -80,6 +81,7 @@ drop key table
 
 ```text
 unionid migration new add_task_priority
+unionid migration diff --db app.redb --schema schema.uid --name add_task_priority
 unionid migration plan --db app.redb
 unionid migration apply --db app.redb
 unionid migration status --db app.redb
@@ -97,4 +99,6 @@ migration m0002_add_task_priority
 
 已应用文件不可修改，也不能从目录删除。CRLF 与 LF 具有相同 checksum，其他注释、格式和内容变化都会被拒绝。文件名排序必须与 parent 链一致，重复 ID、缺少 parent、分叉或 ledger 与当前 schema hash 不一致都会返回 `E_MIGRATION` 或 `E_STORAGE`。ledger 非空后，普通 `run`、本地 CLI 或 TCP 不能直接执行 schema 变更；应用必须经过 runner，数据读写仍可照常使用。
 
-当前 Engine 面向可装入内存的小工作集：plan 和 apply 都克隆候选数据库，schema step 在候选状态中验证和重写行。峰值内存和扫描时间与受影响数据量相关。更细的行数、身份变化和客户端兼容报告由 schema diff 阶段继续完善。
+当前 Engine 面向可装入内存的小工作集：plan 和 apply 都克隆候选数据库，schema step 在候选状态中验证和重写行。峰值内存和扫描时间仍与受影响数据量相关；schema diff 会列出受影响表的当前行数和索引数，并在新增 sum variant 时提示客户端穷尽 match 的兼容风险。
+
+声明式目标 schema 的检查、规范输出、影响报告和 `migration diff` 草稿规则见 [声明式 Schema 与 Diff](SCHEMA-DIFF.md)。diff 不推断 rename 或转换；未决项会阻止草稿被 runner 解析。

@@ -12,6 +12,7 @@ pub mod migration;
 pub mod model;
 pub mod query;
 mod redb_storage;
+pub mod schema;
 pub mod server;
 pub mod snapshot;
 pub mod syntax;
@@ -22,3 +23,6 @@ pub use engine::{Engine, StorageIntegrity};
 pub use error::{Error, Result, Span};
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};
+pub use schema::{
+    SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation, SchemaDiffTableImpact,
+};

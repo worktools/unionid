@@ -5,7 +5,8 @@ use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use unionid::{
-    Engine, MigrationApply, MigrationPlan, MigrationStatus, QueryResponse, UpsertAction, Value, cli,
+    Engine, MigrationApply, MigrationPlan, MigrationStatus, QueryResponse, SchemaCheck,
+    UpsertAction, Value, cli,
 };
 
 #[test]
@@ -186,6 +187,99 @@ fn migration_cli_creates_plans_applies_and_reports_status() {
         .unwrap();
     assert!(!changed.status.success());
     assert!(String::from_utf8_lossy(&changed.stderr).contains("was changed"));
+}
+
+#[test]
+fn schema_cli_checks_diffs_and_prints_the_applied_target() {
+    let dir = TempDir::new();
+    let schema = dir.0.join("schema.uid");
+    let migrations = dir.0.join("migrations");
+    let database = dir.0.join("state.redb");
+    std::fs::write(
+        &schema,
+        "type State = Pending | Complete\ntype Task =\n  id int\n  state State\ntable tasks Task\n  key id\ncreate index tasks (state)\n",
+    )
+    .unwrap();
+
+    let checked = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "schema",
+            "check",
+            "--file",
+            schema.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let checked: SchemaCheck = serde_json::from_slice(&checked.stdout).unwrap();
+
+    let diff = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "diff",
+            "--db",
+            database.to_str().unwrap(),
+            "--schema",
+            schema.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--name",
+            "initial",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        diff.status.success(),
+        "{}",
+        String::from_utf8_lossy(&diff.stderr)
+    );
+    let diff: serde_json::Value = serde_json::from_slice(&diff.stdout).unwrap();
+    assert_eq!(diff["diff"]["runnable"], true);
+    assert!(!database.exists(), "diff must not create the live database");
+
+    let apply = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "apply",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+
+    let printed = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "schema",
+            "print",
+            "--db",
+            database.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        printed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    let printed: SchemaCheck = serde_json::from_slice(&printed.stdout).unwrap();
+    assert_eq!(printed.normalized, checked.normalized);
 }
 
 #[test]

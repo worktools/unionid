@@ -761,6 +761,14 @@ impl Parser {
                     from,
                     to: self.identifier()?,
                 })
+            } else if self.word("table") {
+                self.bump();
+                let from = self.identifier()?;
+                self.expect_word("to")?;
+                Ok(SchemaMigration::RenameTable {
+                    from,
+                    to: self.identifier()?,
+                })
             } else if self.word("field") {
                 self.bump();
                 let (owner, from) = self.migration_member("field")?;

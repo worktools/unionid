@@ -959,6 +959,58 @@ impl Database {
         self.objects.keys().cloned().collect()
     }
 
+    pub(crate) fn schema_tables(&self) -> Vec<&Table> {
+        self.objects
+            .values()
+            .map(|object| match object {
+                DbObject::Table(table) => table,
+            })
+            .collect()
+    }
+
+    pub(crate) fn schema_indexes(&self) -> Vec<(&str, &IndexDefinition)> {
+        self.index_definitions
+            .iter()
+            .flat_map(|(table, definitions)| {
+                definitions
+                    .values()
+                    .map(move |definition| (table.as_str(), definition))
+            })
+            .collect()
+    }
+
+    pub(crate) fn schema_type_impact(&self, name: &str) -> Vec<(String, usize, usize)> {
+        let Some(definition) = self.catalog.types.get(name) else {
+            return Vec::new();
+        };
+        let mut impact = self
+            .schema_tables()
+            .into_iter()
+            .filter(|table| {
+                table.row_type == Some(definition.id)
+                    || table.schema.iter().any(|column| {
+                        type_reaches(
+                            &self.catalog,
+                            &column.ty,
+                            definition.id,
+                            &mut BTreeSet::new(),
+                        )
+                    })
+            })
+            .map(|table| {
+                (
+                    table.name.clone(),
+                    table.rows.len(),
+                    self.index_definitions
+                        .get(&table.name)
+                        .map_or(0, BTreeMap::len),
+                )
+            })
+            .collect::<Vec<_>>();
+        impact.sort();
+        impact
+    }
+
     pub(crate) fn durable_meta(&self) -> DurableMeta {
         DurableMeta {
             sequence: self.sequence,
@@ -1280,7 +1332,10 @@ impl Database {
                 )),
             }
         }
-        for (name, DbObject::Table(t)) in &self.objects {
+        let mut tables = self.schema_tables();
+        tables.sort_by_key(|table| table.id);
+        for t in tables {
+            let name = &t.name;
             let row = t
                 .row_type
                 .and_then(|id| self.catalog.definition(id).ok())
@@ -1300,7 +1355,52 @@ impl Database {
                 lines.push(format!("  key {key}"));
             }
         }
+        let mut indexes = self.schema_indexes();
+        indexes.sort_by_key(|(_, definition)| definition.id);
+        for (table, definition) in indexes {
+            if self
+                .table(table)
+                .ok()
+                .and_then(|table| table.primary_key.as_deref())
+                == Some(definition.column.as_str())
+            {
+                continue;
+            }
+            lines.push(format!("create index {table} ({})", definition.column));
+        }
         lines.join("\n")
+    }
+}
+
+fn type_reaches(catalog: &Catalog, ty: &ScalarType, target: u64, seen: &mut BTreeSet<u64>) -> bool {
+    match ty {
+        ScalarType::Ref(id) => {
+            *id == target
+                || seen.insert(*id)
+                    && catalog
+                        .definition(*id)
+                        .is_ok_and(|definition| type_reaches(catalog, &definition.ty, target, seen))
+        }
+        ScalarType::Record(fields) => fields
+            .iter()
+            .any(|field| type_reaches(catalog, &field.ty, target, seen)),
+        ScalarType::Enum(sum) => sum.variants.iter().any(|variant| {
+            variant
+                .args
+                .iter()
+                .any(|argument| type_reaches(catalog, argument, target, seen))
+        }),
+        ScalarType::Tuple(items) => items
+            .iter()
+            .any(|item| type_reaches(catalog, item, target, seen)),
+        ScalarType::Option(inner) | ScalarType::List(inner) => {
+            type_reaches(catalog, inner, target, seen)
+        }
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Named(_) => false,
     }
 }
 

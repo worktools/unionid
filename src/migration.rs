@@ -206,6 +206,9 @@ pub fn describe_step(step: &SchemaMigration) -> (String, bool) {
             false,
         ),
         SchemaMigration::DropTable { table } => (format!("drop table {table}"), true),
+        SchemaMigration::RenameTable { from, to } => {
+            (format!("rename table {from} to {to}"), false)
+        }
         SchemaMigration::RenameType { from, to } => (format!("rename type {from} to {to}"), false),
         SchemaMigration::AddField { owner, column } => {
             (format!("add field {owner}.{}", column.name), false)
