@@ -693,6 +693,104 @@ fn typed_arithmetic_composes_filters_match_conditions_and_derives() {
 }
 
 #[test]
+fn regular_derives_add_typed_scalar_and_boolean_columns() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Score = int\ntype Attempt = {error option text}\ntype Job =\n  id int\n  base Score\n  bonus Score\n  attempts int\n  limit int\n  archived bool\n  history list Attempt\ntable jobs Job\ninsert jobs {id = 1, base = 4, bonus = 3, attempts = 2, limit = 3, archived = false, history = [{error = Some \"timeout\"}]}\ninsert jobs {id = 2, base = 5, bonus = 1, attempts = 4, limit = 3, archived = true, history = [{error = None}]}",
+    );
+
+    let result = ok(
+        &mut e,
+        "from jobs\nderive score = base + bonus * 2\nderive doubled = score * 2\nderive needs_retry =\n  attempts < limit\n  and not archived\nderive has_error = any history (attempt -> is_some attempt.error)\nfilter needs_retry and has_error\nselect {id, score, doubled, needs_retry, has_error}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(result.rows[0]["score"].unwrapped().cmp_eq(&Value::Int(10)));
+    assert!(
+        result.rows[0]["doubled"]
+            .unwrapped()
+            .cmp_eq(&Value::Int(20))
+    );
+    assert!(result.rows[0]["needs_retry"].cmp_eq(&Value::Bool(true)));
+    assert!(result.rows[0]["has_error"].cmp_eq(&Value::Bool(true)));
+    assert_eq!(result.columns[1].ty, "Score");
+    assert_eq!(result.columns[2].ty, "Score");
+    assert_eq!(result.columns[3].ty, "bool");
+    assert_eq!(result.columns[4].ty, "bool");
+
+    let copied = ok(
+        &mut e,
+        "from jobs | derive copied = history | select {id, history, copied} | sort id",
+    );
+    assert_eq!(copied.columns[2].ty, "list Attempt");
+    assert!(copied.rows[0]["copied"].cmp_eq(&copied.rows[0]["history"]));
+}
+
+#[test]
+fn regular_derives_infer_prepared_parameters_and_short_circuit() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Row =\n  id int\n  value int\ntable rows Row\ninsert rows {id = 1, value = 4}",
+    );
+    let prepared = e
+        .prepare(
+            "from rows\nderive adjusted = value + $increment\nderive matches = adjusted >= $minimum\nderive safe = false and value / 0 == 1\nselect {id, adjusted, matches, safe}",
+        )
+        .unwrap();
+    assert_eq!(prepared.parameter_types()["increment"], "int");
+    assert_eq!(prepared.parameter_types()["minimum"], "int");
+    let result = e.query(
+        &prepared,
+        [
+            ("increment".into(), Value::Int(3)),
+            ("minimum".into(), Value::Int(7)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert!(result.ok, "{}", result.message);
+    assert!(result.rows[0]["adjusted"].cmp_eq(&Value::Int(7)));
+    assert!(result.rows[0]["matches"].cmp_eq(&Value::Bool(true)));
+    assert!(result.rows[0]["safe"].cmp_eq(&Value::Bool(false)));
+}
+
+#[test]
+fn regular_derives_are_checked_before_scanning_and_follow_stage_scope() {
+    let setup = "type State = Ready | Done\ntype Row =\n  id int\n  state State\n  maybe option int\ntable rows Row";
+    for (pipeline, code, message) in [
+        ("derive value = missing", "E_FIELD", "unknown field"),
+        ("derive value = None", "E_TYPE", "cannot infer"),
+        ("derive id = 1", "E_FIELD", "already exists"),
+        ("derive invalid = 1 and true", "E_TYPE", "must be bool"),
+        (
+            "select {id}\nderive copy = state",
+            "E_FIELD",
+            "unknown field",
+        ),
+    ] {
+        let mut e = Engine::memory();
+        ok(&mut e, setup);
+        let result = e.execute(&format!("from rows\n{pipeline}"));
+        assert!(!result.ok, "accepted {pipeline}");
+        let error = result.error.unwrap();
+        assert_eq!(error.code, code, "{pipeline}: {error}");
+        assert!(error.message.contains(message), "{pipeline}: {error}");
+    }
+
+    let mut e = Engine::memory();
+    ok(&mut e, setup);
+    let result = ok(
+        &mut e,
+        "from rows\nderive present = is_some maybe\nderive state_copy = state\nselect {present, state_copy}",
+    );
+    assert!(result.rows.is_empty());
+    assert_eq!(result.columns[0].ty, "bool");
+    assert_eq!(result.columns[1].ty, "State");
+}
+
+#[test]
 fn arithmetic_precedence_grouping_and_integer_division_are_explicit() {
     let mut engine = Engine::memory();
     ok(

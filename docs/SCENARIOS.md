@@ -44,7 +44,7 @@ type Job =
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行。
 - 原子 claim：按 id 和旧状态筛选，把 `Queued` 改成 `Running` 并返回新值，属于 #15；状态解构与新值表达式复用 #35。
 - 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter match state` 组合即可限定状态。
-- 检查嵌套执行历史：`any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素，同时读取外层行字段；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
+- 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
 - 按状态计数：`derive match` 已可把 sum 分支归一为状态名，后续 group/aggregate 由 #60 跟踪。
 
 列表查询必须提供唯一的最终排序键，例如 `sort {-priority, created_at, id}`。只按 priority 分页会让相同优先级的跨请求边界不稳定。
@@ -176,7 +176,7 @@ type Session =
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
 | 固定 record 的嵌套路径过滤/投影 | 已实现 | option/sum 不能直接穿透 | 已满足基础 |
 | 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载、record/tuple/sum/option 嵌套 pattern，以及同 constructor 多分支的完整覆盖分析 | — | #35，P0 |
-| 从 ADT 分支派生统一结果 | 已实现递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | 普通非 match derive 与通用纯函数 | #59/#61，P0 |
+| 派生普通值或从 ADT 分支归一结果 | 已实现 scalar/bool 普通 derive、递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | 查询局部纯函数 | #61，P0 |
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none | 通用高阶函数延后 | 已满足 v0.1 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec 与 schema-aware prepared query | option helper/元素谓词可继续扩展 | #10/#22/#36 |

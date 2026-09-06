@@ -2,7 +2,7 @@
 
 本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)。
 
-当前包含类型与表声明、insert/upsert/update/delete、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、ADT `derive match`、select、sort 和 take。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、insert/upsert/update/delete、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、普通与 ADT `derive`、select、sort 和 take。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
 ## 类型、表与值
 
@@ -70,6 +70,7 @@ take 20
 | 数据源 | `from tasks` | 开始查询 |
 | 布尔过滤 | `filter any attempts (attempt -> attempt.failed)` | 组合 bool、比较、Option 检查、list/text 长度、成员判断与元素字段谓词 |
 | 模式过滤 | `filter match state` | 按 sum 变体及其 record 负载判断 |
+| 普通派生 | `derive score = priority + bonus` | 产生 scalar 或 bool typed 列并加入后续 stage 作用域 |
 | ADT 派生 | `derive label = match state ...` | 穷尽解构 sum/option，追加统一类型的结果列 |
 | 投影 | `select {id, owner.email}` | 保留列，响应按声明的列顺序展示 |
 | 排序 | `sort id` / `sort {-priority, created_at, id}` | 单列或多列词典序；支持 int、float、text |
@@ -78,7 +79,7 @@ take 20
 
 支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减，复杂算术可在括号内换行。运算数必须归一为同一个 int 或 float 类型；整数除法向零截断，溢出、除零或非有限 float 返回 `E_ARITH`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 提供有类型、可嵌套且有预算的元素字段谓词，`is_some`/`is_none` 显式检查 Option。函数使用空格传参。复杂条件可放在 `filter` 或 match 分支 `=>` 后的缩进块中，括号内部也可跨行；混用 `and` 与 `or` 时规范写法加括号明确分组。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；跨请求分页应以唯一主键结束排序。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。
 
-模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。match condition 与普通 filter 共用布尔、集合和数值表达式。`derive` 分支可返回 binding/literal/算术表达式，或用 binding 和算术结果构造 `Some (attempt + 1)`、`State.Done`、`Summary {label = message}`、tuple、record 和 list；普通非 match derive 由 #59 跟踪，查询局部纯函数由 #61 跟踪。
+模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。match condition 与普通 filter 共用布尔、集合和数值表达式。`derive name = expression` 直接追加 scalar 或 bool 列；结果保留命名类型，typed 参数在扫描前推导，后续 filter/derive/select/sort 可立即引用。`derive match` 分支还可返回 binding/literal/算术表达式，或用 binding 和算术结果构造 `Some (attempt + 1)`、`State.Done`、`Summary {label = message}`、tuple、record 和 list。查询局部纯函数由 #61 跟踪。
 
 兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。filter、match condition、derive 数值表达式与 update `set` 可引用 `$name`；完整 insert/upsert row 写成 `insert tasks $row`。参数由调用端提供 typed value，在 AST 上绑定并在扫描前按上下文检查，详见[版本化接口与参数](PROTOCOL.md)。`group/aggregate` 与完整表达式的当前状态统一记录在 [查询能力表](QUERY.md#能力状态)。
 

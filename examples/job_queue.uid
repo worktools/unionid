@@ -74,12 +74,14 @@ insert jobs
   state = Failed {error = Network {message = "timeout"}, retry_at = Some 240}
 
 from jobs
-filter any history (attempt ->
+derive has_retryable_history = any history (attempt ->
   attempt.outcome == AttemptOutcome.Rejected {code = 503}
   and any attempt.checkpoints (checkpoint -> checkpoint >= 3)
   and is_some attempt.note
 )
-select {id}
+derive weighted_priority = priority + length history
+filter has_retryable_history
+select {id, weighted_priority}
 
 from jobs
 filter match state

@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
-    ArithmeticOp, BoolExpression, CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchField,
-    MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField,
-    MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression, SchemaMigration,
-    SetAssignment, SortKey, Stage, Statement,
+    ArithmeticOp, BoolExpression, CmpOp, DeriveExpression, DeriveMatch, LocatedStatement, MatchArm,
+    MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
+    MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
+    SchemaMigration, SetAssignment, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -1181,11 +1181,19 @@ impl Parser {
                 if nested {
                     self.block()?;
                 }
-                let expression = self.match_value_expression(name)?;
+                let stage = if self.word("match") {
+                    Stage::DeriveMatch(self.match_value_expression(name)?)
+                } else {
+                    Stage::Derive(DeriveExpression {
+                        name,
+                        expression: self.bool_expression(0, nested)?,
+                        output_type: None,
+                    })
+                };
                 if nested {
                     self.expect(Kind::Dedent)?;
                 }
-                Stage::DeriveMatch(expression)
+                stage
             } else if self.word("select") {
                 self.bump();
                 let braced = self.eat(Kind::Open('{'));

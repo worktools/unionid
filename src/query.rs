@@ -187,10 +187,18 @@ pub struct Pipeline {
 pub enum Stage {
     Filter(BoolExpression),
     FilterMatch(MatchPredicate),
+    Derive(DeriveExpression),
     DeriveMatch(DeriveMatch),
     Select(Vec<String>),
     Sort(Vec<SortKey>),
     Take { offset: usize, limit: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct DeriveExpression {
+    pub name: String,
+    pub expression: BoolExpression,
+    pub output_type: Option<ScalarType>,
 }
 
 #[derive(Debug, Clone)]
