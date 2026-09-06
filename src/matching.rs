@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, EnumType, ScalarType, Value};
 use crate::query::{
-    CmpOp, DeriveMatch, MatchCondition, MatchPattern, MatchPayload, MatchPredicate, MatchTag,
-    MatchValue, MatchValueField, MatchValuePayload,
+    DeriveMatch, MatchPattern, MatchPayload, MatchPredicate, MatchTag, MatchValue, MatchValueField,
+    MatchValuePayload,
 };
 
 /// Bind a parsed match predicate to catalog identities and payload types.
@@ -20,7 +20,7 @@ pub(crate) fn bind(catalog: &Catalog, schema: &[Column], pred: &mut MatchPredica
         arm_count,
     )?;
     for (arm, bindings) in pred.arms.iter_mut().zip(&bindings) {
-        bind_condition(catalog, &mut arm.condition, bindings)?;
+        crate::expression::bind_match(catalog, bindings, &mut arm.condition)?;
     }
     Ok(())
 }
@@ -462,38 +462,6 @@ fn combine_patterns(infos: Vec<PatternInfo>) -> Result<PatternInfo> {
     })
 }
 
-fn bind_condition(
-    catalog: &Catalog,
-    condition: &mut MatchCondition,
-    bindings: &[Column],
-) -> Result<()> {
-    match condition {
-        MatchCondition::Bool(_) => Ok(()),
-        MatchCondition::Binding(binding) => {
-            let ty = binding_type(catalog, bindings, binding)?;
-            if matches!(catalog.underlying(ty)?, ScalarType::Bool) {
-                Ok(())
-            } else {
-                Err(Error::new(
-                    "E_TYPE",
-                    format!("match condition '{binding}' must be bool"),
-                ))
-            }
-        }
-        MatchCondition::Compare { binding, op, value } => {
-            let ty = binding_type(catalog, bindings, binding)?;
-            *value = catalog.coerce(value, ty, binding)?;
-            if !matches!(op, CmpOp::Eq | CmpOp::Ne) && !orderable(catalog, ty)? {
-                return Err(Error::new(
-                    "E_TYPE",
-                    format!("match binding '{binding}' has no ordering"),
-                ));
-            }
-            Ok(())
-        }
-    }
-}
-
 fn infer_result_type(
     catalog: &Catalog,
     result: &MatchValue,
@@ -924,20 +892,15 @@ fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
     }
 }
 
-fn orderable(catalog: &Catalog, ty: &ScalarType) -> Result<bool> {
-    Ok(matches!(
-        catalog.underlying(ty)?,
-        ScalarType::Int | ScalarType::Float | ScalarType::Text
-    ))
-}
-
 pub(crate) fn evaluate(row: &BTreeMap<String, Value>, pred: &MatchPredicate) -> bool {
     let Some(value) = row_field(row, &pred.column) else {
         return false;
     };
     for arm in &pred.arms {
         if let Some(bindings) = match_bindings(value, &arm.pattern) {
-            return evaluate_condition(&bindings, &arm.condition);
+            return crate::expression::evaluate(&arm.condition, |path| {
+                binding_value(&bindings, path)
+            });
         }
     }
     false
@@ -1211,21 +1174,6 @@ fn match_payload<'p, 'v>(
     }
 }
 
-fn evaluate_condition(bindings: &BTreeMap<&str, &Value>, condition: &MatchCondition) -> bool {
-    match condition {
-        MatchCondition::Bool(value) => *value,
-        MatchCondition::Binding(binding) => {
-            matches!(
-                binding_value(bindings, binding).map(Value::unwrapped),
-                Some(Value::Bool(true))
-            )
-        }
-        MatchCondition::Compare { binding, op, value } => {
-            binding_value(bindings, binding).is_some_and(|binding| compare(binding, *op, value))
-        }
-    }
-}
-
 fn binding_value<'a>(bindings: &BTreeMap<&str, &'a Value>, path: &str) -> Option<&'a Value> {
     let (head, tail) = path.split_once('.').unwrap_or((path, ""));
     let value = *bindings.get(head)?;
@@ -1242,21 +1190,4 @@ fn row_field<'a>(row: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a Val
     }
     let (head, tail) = path.split_once('.')?;
     row.get(head)?.field(tail)
-}
-
-fn compare(lhs: &Value, op: CmpOp, rhs: &Value) -> bool {
-    match op {
-        CmpOp::Eq => lhs.cmp_eq(rhs),
-        CmpOp::Ne => !lhs.cmp_eq(rhs),
-        CmpOp::Gt => lhs.cmp_ord(rhs) == Some(std::cmp::Ordering::Greater),
-        CmpOp::Lt => lhs.cmp_ord(rhs) == Some(std::cmp::Ordering::Less),
-        CmpOp::Gte => matches!(
-            lhs.cmp_ord(rhs),
-            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-        ),
-        CmpOp::Lte => matches!(
-            lhs.cmp_ord(rhs),
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        ),
-    }
 }

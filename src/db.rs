@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, DbObject, Row, ScalarType, Table, Value};
-use crate::query::{CmpOp, Pipeline, Predicate, Stage, Statement};
+use crate::query::{Pipeline, Stage, Statement};
 
 type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<usize>>>>;
 
@@ -282,15 +282,8 @@ impl Database {
         // Validate and bind every stage before touching any rows, including empty tables.
         for stage in &mut pipeline.stages {
             match stage {
-                Stage::Filter(pred) => {
-                    let ty = self.catalog.field_type(&schema, &pred.column)?;
-                    pred.value = self.catalog.coerce(&pred.value, ty, &pred.column)?;
-                    if !matches!(pred.op, CmpOp::Eq | CmpOp::Ne) && !self.orderable(ty)? {
-                        return Err(Error::new(
-                            "E_TYPE",
-                            format!("field '{}' has no ordering", pred.column),
-                        ));
-                    }
+                Stage::Filter(expression) => {
+                    crate::expression::bind(&self.catalog, &schema, expression)?
                 }
                 Stage::FilterMatch(pred) => crate::matching::bind(&self.catalog, &schema, pred)?,
                 Stage::DeriveMatch(derive) => {
@@ -327,20 +320,13 @@ impl Database {
                 Stage::Take { .. } => {}
             }
         }
-        let candidates = if let Some(Stage::Filter(pred)) = pipeline.stages.first() {
-            if matches!(pred.op, CmpOp::Eq) {
+        let candidates = if let Some(Stage::Filter(expression)) = pipeline.stages.first() {
+            crate::expression::simple_index_equality(expression).and_then(|(column, value)| {
                 self.indexes
                     .get(&pipeline.from)
-                    .and_then(|cols| cols.get(&pred.column))
-                    .map(|posting| {
-                        posting
-                            .get(&pred.value.index_key())
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-            } else {
-                None
-            }
+                    .and_then(|cols| cols.get(column))
+                    .map(|posting| posting.get(&value.index_key()).cloned().unwrap_or_default())
+            })
         } else {
             None
         };
@@ -353,7 +339,9 @@ impl Database {
         };
         for stage in pipeline.stages {
             match stage {
-                Stage::Filter(pred) => rows.retain(|row| evaluate(row, &pred)),
+                Stage::Filter(expression) => rows.retain(|row| {
+                    crate::expression::evaluate(&expression, |path| row_field(row, path))
+                }),
                 Stage::FilterMatch(pred) => {
                     rows.retain(|row| crate::matching::evaluate(row, &pred))
                 }
@@ -634,27 +622,4 @@ fn row_field<'a>(row: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a Val
     }
     let (head, tail) = path.split_once('.')?;
     row.get(head)?.field(tail)
-}
-
-fn evaluate(row: &BTreeMap<String, Value>, pred: &Predicate) -> bool {
-    let Some(lhs) = row_field(row, &pred.column) else {
-        return false;
-    };
-    compare(lhs, pred.op, &pred.value)
-}
-fn compare(lhs: &Value, op: CmpOp, rhs: &Value) -> bool {
-    match op {
-        CmpOp::Eq => lhs.cmp_eq(rhs),
-        CmpOp::Ne => !lhs.cmp_eq(rhs),
-        CmpOp::Gt => lhs.cmp_ord(rhs) == Some(std::cmp::Ordering::Greater),
-        CmpOp::Lt => lhs.cmp_ord(rhs) == Some(std::cmp::Ordering::Less),
-        CmpOp::Gte => matches!(
-            lhs.cmp_ord(rhs),
-            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-        ),
-        CmpOp::Lte => matches!(
-            lhs.cmp_ord(rhs),
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        ),
-    }
 }

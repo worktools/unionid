@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
-    CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchCondition, MatchField, MatchPattern,
+    BoolExpression, CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchField, MatchPattern,
     MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField, MatchValuePayload,
-    Pipeline, Predicate, SortKey, Stage, Statement,
+    Pipeline, ScalarExpression, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -694,14 +694,11 @@ impl Parser {
                 }
                 let args = if self.eat(Kind::Open('(')) {
                     self.values(')', depth + 1)?
-                } else if matches!(
-                    self.kind(),
-                    Kind::Open('{')
-                        | Kind::Open('[')
-                        | Kind::Number(_)
-                        | Kind::Text(_)
-                        | Kind::Ident(_)
-                ) {
+                } else if match self.kind() {
+                    Kind::Open('{') | Kind::Open('[') | Kind::Number(_) | Kind::Text(_) => true,
+                    Kind::Ident(word) => !matches!(word.as_str(), "and" | "or"),
+                    _ => false,
+                } {
                     vec![self.value(depth + 1)?]
                 } else {
                     Vec::new()
@@ -734,13 +731,7 @@ impl Parser {
                 if self.word("match") {
                     Stage::FilterMatch(self.match_predicate()?)
                 } else {
-                    let column = self.path()?;
-                    let op = self.comparison_operator()?;
-                    Stage::Filter(Predicate {
-                        column,
-                        op,
-                        value: self.value(0)?,
-                    })
+                    Stage::Filter(self.bool_expression(0)?)
                 }
             } else if self.word("derive") {
                 self.bump();
@@ -1184,25 +1175,105 @@ impl Parser {
         Ok(fields)
     }
 
-    fn match_condition(&mut self) -> Result<MatchCondition> {
-        if self.word("true") {
+    fn match_condition(&mut self) -> Result<BoolExpression> {
+        self.bool_expression(0)
+    }
+
+    fn bool_expression(&mut self, depth: usize) -> Result<BoolExpression> {
+        self.bool_or(depth)
+    }
+
+    fn bool_or(&mut self, depth: usize) -> Result<BoolExpression> {
+        self.depth(depth)?;
+        let mut expression = self.bool_and(depth)?;
+        let mut expression_depth = depth;
+        while self.word("or") {
             self.bump();
-            return Ok(MatchCondition::Bool(true));
+            expression_depth += 1;
+            self.depth(expression_depth)?;
+            expression = BoolExpression::Or(
+                Box::new(expression),
+                Box::new(self.bool_and(expression_depth)?),
+            );
         }
-        if self.word("false") {
+        Ok(expression)
+    }
+
+    fn bool_and(&mut self, depth: usize) -> Result<BoolExpression> {
+        self.depth(depth)?;
+        let mut expression = self.bool_not(depth)?;
+        let mut expression_depth = depth;
+        while self.word("and") {
             self.bump();
-            return Ok(MatchCondition::Bool(false));
+            expression_depth += 1;
+            self.depth(expression_depth)?;
+            expression = BoolExpression::And(
+                Box::new(expression),
+                Box::new(self.bool_not(expression_depth)?),
+            );
         }
-        let binding = self.path()?;
+        Ok(expression)
+    }
+
+    fn bool_not(&mut self, depth: usize) -> Result<BoolExpression> {
+        self.depth(depth)?;
+        if self.word("not") {
+            self.bump();
+            Ok(BoolExpression::Not(Box::new(self.bool_not(depth + 1)?)))
+        } else {
+            self.bool_primary(depth)
+        }
+    }
+
+    fn bool_primary(&mut self, depth: usize) -> Result<BoolExpression> {
+        self.depth(depth)?;
+        if self.eat(Kind::Open('(')) {
+            let expression = self.bool_expression(depth + 1)?;
+            self.expect(Kind::Close(')'))?;
+            return Ok(expression);
+        }
+        if self.word("contains") {
+            self.bump();
+            return Ok(BoolExpression::Contains {
+                collection: self.scalar_expression(depth + 1)?,
+                item: self.scalar_expression(depth + 1)?,
+            });
+        }
+        let left = self.scalar_expression(depth)?;
         if matches!(self.kind(), Kind::Op(_)) {
             let op = self.comparison_operator()?;
-            Ok(MatchCondition::Compare {
-                binding,
+            Ok(BoolExpression::Compare {
+                left,
                 op,
-                value: self.value(0)?,
+                right: self.scalar_expression(depth)?,
             })
         } else {
-            Ok(MatchCondition::Binding(binding))
+            Ok(BoolExpression::Value(left))
+        }
+    }
+
+    fn scalar_expression(&mut self, depth: usize) -> Result<ScalarExpression> {
+        self.depth(depth)?;
+        if self.word("length") {
+            self.bump();
+            return Ok(ScalarExpression::Length(Box::new(
+                self.scalar_expression(depth + 1)?,
+            )));
+        }
+        match self.kind().clone() {
+            Kind::Ident(name)
+                if matches!(name.as_str(), "true" | "false" | "null")
+                    || name.starts_with(|ch: char| ch.is_ascii_uppercase()) =>
+            {
+                Ok(ScalarExpression::Literal(self.value(depth + 1)?))
+            }
+            Kind::Ident(_) => Ok(ScalarExpression::Reference(self.path()?)),
+            Kind::Text(_)
+            | Kind::Number(_)
+            | Kind::Open('{')
+            | Kind::Open('[')
+            | Kind::Open('(') => Ok(ScalarExpression::Literal(self.value(depth + 1)?)),
+            _ => Err(self.error("expected a field, binding, literal, or length expression")),
         }
     }
 }
