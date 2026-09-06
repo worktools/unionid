@@ -1,8 +1,8 @@
 # unionid：原生代数类型数据库设计草案
 
-日期：2026-09-06。状态：完整目标设计，部分子集已实现；当前可执行范围见 [LANGUAGE.md](LANGUAGE.md)，实现与验证见 [开发记录](DEVELOPMENT.md)。其余语法由 M0 的语言设计 issue 继续收敛。用户已明确：类型定义也采用 PRQL 风格，不使用分号，减少影响阅读的标点，不采用 TypeScript 风格的密集类型注解。
+日期：2026-09-06。状态：完整目标设计，部分子集已实现；当前可执行范围见 [LANGUAGE.md](LANGUAGE.md)，查询语义和能力状态见 [QUERY.md](QUERY.md)，实现与验证见 [开发记录](DEVELOPMENT.md)。其余语法由 M0 的语言设计 issue 继续收敛。用户已明确：类型定义也采用 PRQL 风格，不使用分号，减少影响阅读的标点，不采用 TypeScript 风格的密集类型注解。
 
-本文说明设计理由与目标体验；执行顺序、依赖和完成状态以 [GitHub issues](https://github.com/worktools/unionid/issues) 为准，入口见 [路线图](ROADMAP.md)。当前可运行语法见 [语言文档](LANGUAGE.md)。
+本文说明设计理由与目标体验；执行顺序、依赖和完成状态以 [GitHub issues](https://github.com/worktools/unionid/issues) 为准，入口见 [路线图](ROADMAP.md)。当前可运行语法见 [语言文档](LANGUAGE.md)，当前查询行为见 [查询语言参考](QUERY.md)。
 
 ## 1. 产品定位
 
@@ -35,7 +35,7 @@ SQLite 的本地应用定位与 Redis 的可选持久化分别提供使用方式
 
 ## 3. 目标语言体验
 
-以下是提案示例，不是当前可执行命令。类型定义和查询采用一致的 PRQL 风格：以换行组织操作，空格表达参数应用，尽量让文字承担含义。**无分号、少标点是已确定的设计约束**；下面的缩进式字段声明与 ADT 分支是本轮推荐草案，具体布局规则由 [语言 issue #2](https://github.com/worktools/unionid/issues/2) 验证后冻结。
+以下是完整目标的提案示例，其中包含当前尚未实现的参数、derive、通用 match 和写操作，不能直接作为脚本执行。已实现的查询形式及限制以 [QUERY.md](QUERY.md) 为准。类型定义和查询采用一致的 PRQL 风格：以换行组织操作，空格表达参数应用，尽量让文字承担含义。**无分号、少标点是已确定的设计约束**；下面的缩进式字段声明与 ADT 分支是本轮推荐草案，具体布局规则由 [语言 issue #2](https://github.com/worktools/unionid/issues/2) 验证后冻结。
 
 PRQL 本身使用空格调用函数，并允许换行连接 pipeline；我们借鉴这些习惯。[PRQL 函数调用与 pipeline](https://prql-lang.org/book/reference/syntax/function-calls.html) PRQL 的类型设计页也讨论 sum/product 组合，但下面的 `field type`、缩进声明和带 tag 的构造器是 unionid 的提案，不能当作现有 PRQL 语法或编译器能力。[PRQL 类型设计](https://prql-lang.org/book/reference/spec/type-system.html)
 

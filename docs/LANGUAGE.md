@@ -1,6 +1,6 @@
 # 当前可运行的语言预览
 
-本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)。
+本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)。
 
 当前包含类型与表声明、insert、普通 filter、sum 类型的 `filter match`、select、sort 和 take。`derive`、函数、参数、更新与 migration 尚未实现。
 
@@ -45,7 +45,7 @@ insert tasks
 
 ## 查询
 
-### Pipeline
+完整的 stage、类型检查、执行顺序、模式规则、错误和测试映射见 [查询语言参考](QUERY.md)。下面是规范的多行写法：
 
 ```text
 from tasks
@@ -57,9 +57,9 @@ sort id
 take 20
 ```
 
-已支持：
+当前 transform：
 
-| 操作 | 形式 | 语义 |
+| 操作 | 规范形式 | 语义 |
 | --- | --- | --- |
 | 数据源 | `from tasks` | 开始查询 |
 | 值过滤 | `filter id >= 1` | 比较字段路径与字面量 |
@@ -69,48 +69,9 @@ take 20
 | 截取 | `take 20` | 保留当前结果前 20 行 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 与多行 pipeline 同语义 |
 
-支持 `==`、`!=`、`>`、`>=`、`<`、`<=`；旧式 `=`、`limit`、无花括号 `select id,name` 仍可用。所有 stage 从左到右执行，`take` 和 `filter` 不可交换。未排序查询不承诺稳定行序。
+支持 `==`、`!=`、`>`、`>=`、`<`、`<=`。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。
 
-字段和谓词类型在扫描之前校验，空表也会报未知字段；投影之后不能访问已移除列。选择嵌套字段时结果列名是完整路径，如 `owner.email`。sum、option 和容器可做完整值相等比较，不能排序或通过普通字段路径直接穿过 variant/option。
-
-### 模式过滤
-
-`filter match` 用于检查 sum 类型的一个字段，并安全读取当前变体携带的 record 字段：
-
-```text
-from tasks
-filter match state
-  Pending => false
-  Running {worker, attempt} => worker == "local"
-  Done {result} => result == "ok"
-  Failed {retryable, ..} => retryable
-select {id, title}
-```
-
-当前模式规则：
-
-- 分支写成 `pattern => condition`，必须缩进在 `filter match <field>` 下面。match 结束后，后续 pipeline stage 回到原缩进。
-- unit 变体直接写 `Pending`。record 负载写 `Running {worker, attempt}`；字段名同时成为该分支的局部绑定。
-- `{attempt, ..}` 表示绑定 `attempt` 并忽略其余负载字段。不写 `..` 时必须列出全部字段，避免 schema 新增字段后被静默忽略。
-- `_` 覆盖尚未匹配的所有变体，必须是最后一项。没有 `_` 时必须逐项覆盖 sum 的全部变体；遗漏、重复和不可达分支在扫描前报 `E_MATCH`。
-- 构造器由被匹配字段的类型确定，也可写限定名 `State.Running`。其他命名 sum 的同名构造器会被拒绝。
-- condition 当前支持 `true`、`false`、一个 bool 绑定，或 `binding <op> literal`；binding 可以继续访问嵌套 record 路径。绑定只在其分支内有效。
-- 当前只支持 unit 和单个 record 负载的模式。tuple/位置负载、字段重命名、嵌套模式、通用 match 表达式和 match 结果投影尚未实现。
-
-对应的紧凑语法轮廓是：
-
-```text
-query           = from table (stage)*
-stage           = filter | filter-match | select | sort | take
-filter-match    = "filter match" field-path newline indented-arm+
-indented-arm    = pattern "=>" condition
-pattern         = "_" | [Type "."] Variant ["{" bindings ["," ".."] "}"]
-condition       = bool | binding | binding comparison literal
-```
-
-Int 精确比较，Float 使用精确数值相等而非 epsilon，统一两种浮点零值；拒绝非有限 Float 和超出 i64 的整数字面量。Float 位置可以接受能够精确表示的整数常量；Int 位置不接受浮点字面量，也不会把数字静默变成文本。
-
-索引兼容入口为 `create index tasks (owner.email)`，也支持整个 enum 值的等值索引；主键自动建索引。查询开头的等值 filter 可以通过索引直接取得候选行，其他情况使用扫描。索引与扫描共用类型化相等规则。
+兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。`derive`、`group/aggregate`、参数、通用 match 表达式及写操作的当前状态统一记录在 [查询能力表](QUERY.md#能力状态)。
 
 ## 脚本边界与错误
 
@@ -127,6 +88,7 @@ Int 精确比较，Float 使用精确数值相等而非 epsilon，统一两种�
 ```bash
 cargo run -- run --file examples/tasks.uid
 cargo run -- run --file examples/config.uid --format json
+cargo run -- run --file examples/events.uid
 cargo run -- cli --memory
 cargo run --example embedded
 ```

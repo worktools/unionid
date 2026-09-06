@@ -1,0 +1,234 @@
+# 查询语言参考
+
+本页描述 **当前版本可以执行** 的查询语法与语义，是查询行为的规范入口。类型、表和写入语法见 [LANGUAGE.md](LANGUAGE.md)；尚未实现的表达式、transform、DML 和 migration 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
+
+unionid 的查询从表开始，按书写顺序经过一组 transform：
+
+```text
+from tasks
+filter match state
+  Running {attempt, ..} => attempt >= 2
+  _ => false
+select {id, title, owner.email}
+sort id
+take 20
+```
+
+## 能力状态
+
+| 能力 | 当前形式 | 状态 | 后续任务 |
+| --- | --- | --- | --- |
+| 数据源 | `from table` | 已实现 | — |
+| 值过滤 | `filter field >= literal` | 已实现 | #10 扩展为通用表达式 |
+| sum 模式过滤 | `filter match field` | 已实现 unit、单个 record 负载和穷尽检查 | #10 增加位置、tuple、嵌套模式与通用 match |
+| 投影 | `select {field, nested.field}` | 已实现 | #11 与派生列组合 |
+| 排序 | `sort field` / `sort -field` | 已实现单列 | #11 扩展查询组合 |
+| 截取 | `take 20` | 已实现 | — |
+| 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
+| 参数 | `$id` | 未实现 | #10、#22 |
+| 派生列 | `derive` | 未实现 | #11 |
+| 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
+| 更新与删除 | `update`、`delete`、`upsert` | 未实现 | #15 |
+| migration 查询与转换 | `migration` | 未实现 | #17、#18 |
+| join、window、递归和高阶函数 | — | v0.1 延后 | #25 |
+
+“未实现”的词只在状态表和限制说明中出现。除明确标为反例的片段外，本页其余查询代码均可由当前 parser 执行。
+
+## Pipeline 语法
+
+推荐的多行形式每行写一个 stage，不使用分号或逐行管道符：
+
+```text
+from config
+filter endpoint.port >= 8000
+select {name, endpoint.host, mode}
+sort name
+take 10
+```
+
+紧凑查询可在同一行使用 `|`：
+
+```text
+from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
+```
+
+两种形式按相同顺序产生相同结果。规范语法轮廓如下：
+
+```text
+query             = "from" table pipeline-stage*
+pipeline-stage    = newline stage | "|" stage
+stage             = value-filter | match-filter | select | sort | take
+
+value-filter      = "filter" field-path comparison literal
+match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
+match-arm         = pattern "=>" condition newline?
+select            = "select" "{" field-path ("," field-path)* ","? "}"
+sort              = "sort" "-"? field-path
+take              = "take" nonnegative-integer
+
+pattern           = "_" | qualified-variant record-pattern?
+qualified-variant = Variant | Type "." Variant
+record-pattern    = "{" (binding ("," binding)* ("," "..")? | "..")? "}"
+condition         = bool | binding | binding comparison literal
+comparison        = "==" | "!=" | ">" | ">=" | "<" | "<="
+field-path        = identifier ("." identifier)*
+```
+
+`=`、`limit` 和不带花括号的 `select id,name` 是兼容入口。新文档和格式化输出应使用 `==`、`take` 与 `select {id, name}`。
+
+## 执行模型
+
+Pipeline 严格从左到右执行。每个 stage 接收前一个 stage 的行和 schema，再产生下一个 stage 的输入。优化不能跨越会改变结果的边界，例如：
+
+```text
+from tasks | take 1 | filter id > 1
+```
+
+与下面的查询语义不同：
+
+```text
+from tasks | filter id > 1 | take 1
+```
+
+引擎在读取任何行之前，按 stage 顺序检查整条 pipeline。空表上的未知字段、类型错误、非穷尽 match 仍然报错。`select` 会改变后续 schema，因此投影掉的字段不能再用于 filter、match 或 sort。
+
+| Stage | 输出 schema | 行与顺序语义 | 空输入 |
+| --- | --- | --- | --- |
+| `from` | 表的完整行类型 | 读取表；未排序行序不构成承诺 | 返回带完整 schema 的空结果 |
+| `filter` | 不变 | 只保留条件为真的行 | 仍执行字段与类型检查 |
+| `filter match` | 不变 | 每行按其 sum 变体执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
+| `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
+| `sort` | 不变 | 单列升序或降序；相同键的次序不承诺 | 返回空结果 |
+| `take` | 不变 | 保留当前结果的前 N 行；无 sort 时“前”不稳定 | 返回空结果 |
+
+最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
+
+## 值过滤
+
+值过滤比较字段路径和一个完整字面量：
+
+```text
+from config
+filter endpoint.port >= 8000
+select {name, endpoint.host}
+```
+
+- `==` 和 `!=` 支持能够按字段类型校验的完整值，包括 record、tuple、sum、option 和 list。
+- `>`、`>=`、`<`、`<=` 当前只支持 int、float 和 text。
+- Int 使用精确 i64 比较。Float 使用精确数值相等，`-0.0` 与 `0.0` 相等；拒绝 NaN、Infinity 和超出 i64 的整数。
+- Float 字段可接受能够精确表示的整数字面量；Int 字段不接受浮点字面量。数字不会自动转换成 text。
+- 普通字段路径只能穿过 record。variant 和 option 的内容必须用显式模式处理。
+
+如果查询的第一个 stage 是等值 filter，并且该字段有索引，引擎可以直接读取候选行。索引和扫描共用相同的类型化相等规则；是否存在索引不能改变结果。
+
+## 模式过滤
+
+`filter match` 检查一个 sum 字段，并在当前变体的 record 负载中建立局部绑定：
+
+```text
+from tasks
+filter match state
+  Pending => false
+  Running {worker, attempt} => worker == "local"
+  Done {result} => result == "ok"
+  Failed {retryable, ..} => retryable
+select {id, title}
+```
+
+模式分支必须比 `filter match` 多缩进一层。分支块结束后，后续 stage 回到 `from` 的 pipeline 缩进：
+
+```text
+from tasks
+filter match state
+  Running {attempt, ..} => attempt >= 2
+  _ => false
+select {id}
+take 1
+```
+
+当前规则如下：
+
+- unit 变体直接写 `Pending`。带单个 record 负载的变体写 `Running {worker, attempt}`。
+- record 字段名同时是该分支的局部绑定。绑定可以继续访问嵌套 record，例如 `meta.attempts >= 3`。
+- `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
+- `_` 覆盖尚未出现的变体，必须位于最后。没有 `_` 时必须覆盖全部变体。
+- 构造器由被匹配字段的命名类型确定，也可写成 `State.Running`。其他命名 sum 的同名构造器不会混用。
+- condition 当前只能是 `true`、`false`、一个 bool 绑定，或者 `binding <op> literal`。绑定只在所属分支内有效。
+- 位置负载、tuple 负载、字段重命名、嵌套模式、通用 match 表达式和 match 结果投影尚未实现。
+
+未知构造器、重复变体、通配分支后的不可达分支、遗漏变体、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum 来源或非 bool 条件返回类型错误。
+
+## 投影、排序与截取
+
+`select` 接受一个或多个字段路径，拒绝重复或未知字段。输出列顺序就是选择顺序：
+
+```text
+from tasks
+select {title, id, owner.email}
+```
+
+`sort field` 升序排列，`sort -field` 降序排列。当前只接受 int、float 和 text；相同键之间没有稳定性承诺。`take N` 接受非负整数，`take 0` 返回空行但仍保留当前结果 schema。
+
+如果业务依赖“前 N 行”，必须先 sort：
+
+```text
+from tasks
+sort id
+take 20
+```
+
+## 布局与语句边界
+
+- 顶层 `from` 开始一条查询。同层 `filter`、`select`、`sort`、`take` 或兼容的 `limit` 延续当前 pipeline。
+- `filter match` 的分支通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
+- 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
+- 括号和集合内允许换行。字符串里的 `|`、逗号和 `#` 都是文本，不参与分隔。
+- 同层出现新的 `from`、`type`、`table`、`insert` 或 `create` 时，前一条查询结束并开始新语句。
+- REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分。
+
+当前不支持任意表达式跨行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值或布局嵌套；超限返回受控错误。
+
+## 错误与响应
+
+查询失败返回结构化 `error`，其中包含错误码、可读消息和可选 `span {line, column}`。语法错误定位到 token；执行前检查目前定位到所属语句，并在消息中给出字段或绑定路径。
+
+常见错误类别：
+
+| 错误 | 例子 |
+| --- | --- |
+| `E_FIELD` | 未知字段，或 `select` 后访问已经移除的字段 |
+| `E_TYPE` | 对 sum 排序、比较类型不匹配、match 非 sum 字段 |
+| `E_MATCH` | 未知/重复构造器、非穷尽 match、错误负载字段或分支绑定 |
+| `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
+| `E_LIMIT` | 源码、token 数或嵌套深度超过限制 |
+
+成功响应包含 `rows` 和有序的 `columns {name, ty}`。未命中任何行时仍返回推导后的 columns。
+
+以下片段是故意失败的反例：
+
+| 反例 | 结果 |
+| --- | --- |
+| `from tasks \| filter missing == 1` | `E_FIELD`：字段不存在，即使 tasks 为空也会报错 |
+| `from tasks \| select {id} \| sort state` | `E_FIELD`：state 已被投影移除 |
+| `from tasks \| sort state` | `E_TYPE`：sum 类型没有排序语义 |
+
+非穷尽模式在扫描前返回 `E_MATCH`：
+
+```text
+from tasks
+filter match state
+  Pending => true
+```
+
+## 可执行示例与测试
+
+| 场景 | 示例 | 覆盖内容 | 自动验证 |
+| --- | --- | --- | --- |
+| 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、`filter match`、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
+| 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
+| 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较和字符串中的 `|` | `tests/language.rs::executable_examples` |
+| Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
+| 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
+| 模式检查 | 测试内脚本 | 穷尽性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*` |
+
+新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。

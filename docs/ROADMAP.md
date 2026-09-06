@@ -1,10 +1,10 @@
 # unionid 路线图
 
-规划日期：2026-09-06。已在 GitHub 创建 1 个总览、24 个具体任务和 5 个里程碑；第一轮语言预览已开始实施，见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
+规划日期：2026-09-06。已在 GitHub 创建 1 个总览、25 个具体任务和 5 个里程碑；第一轮语言预览已开始实施，见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
-[设计草案](DESIGN.md)说明定位、目标语法和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
+[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，无分号、减少标点。本轮草案采用 `field type`、`option text`／`list text`、缩进式声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不再沿用 TypeScript 风格字段注解或逐行 `|>`。
 
@@ -34,6 +34,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 | [#5](https://github.com/worktools/unionid/issues/5) | [核心] 提取共享 Engine 库与本地执行入口 | P0 | [#2](https://github.com/worktools/unionid/issues/2)、[#3](https://github.com/worktools/unionid/issues/3) |
 | [#6](https://github.com/worktools/unionid/issues/6) | [设计] 验证并选定持久化后端 | P0 | [#3](https://github.com/worktools/unionid/issues/3)、[#5](https://github.com/worktools/unionid/issues/5) |
 | [#7](https://github.com/worktools/unionid/issues/7) | [设计] 定义类型身份、Schema 版本与演进规则 | P0 | [#2](https://github.com/worktools/unionid/issues/2) |
+| [#28](https://github.com/worktools/unionid/issues/28) | [文档] 整理 v0.1 查询语言规范与可执行示例 | P0 | [#2](https://github.com/worktools/unionid/issues/2) 的可执行规范子任务 |
 
 ### M1 · ADT 与查询语言预览
 
@@ -78,10 +79,12 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 
 ## 建议从哪里开始
 
-1. 推进 [#2](https://github.com/worktools/unionid/issues/2)（产品与语言）和 [#3](https://github.com/worktools/unionid/issues/3)（回归基线），明确第一版样例与正确性规则。
-2. 修正 [#4](https://github.com/worktools/unionid/issues/4)（比较/索引），完成 [#5](https://github.com/worktools/unionid/issues/5)（共享引擎）和 [#7](https://github.com/worktools/unionid/issues/7)（类型身份与演进契约）。
-3. 通过 [#6](https://github.com/worktools/unionid/issues/6) 选定持久化方案，同时用 M1 的任务打通内存 ADT 查询切片。
-4. 按 M2→M3→M4 交付可靠写入、长期演进和日常体验；CLI 基础与诊断可随前面阶段逐步完善。
+[#3](https://github.com/worktools/unionid/issues/3)、[#4](https://github.com/worktools/unionid/issues/4) 和 [#5](https://github.com/worktools/unionid/issues/5) 已完成；实时状态和证据仍以 GitHub 为准。当前执行顺序是：
+
+1. 完成 [#28](https://github.com/worktools/unionid/issues/28)，以当前可执行查询规范回写 [#2](https://github.com/worktools/unionid/issues/2)。
+2. 通过 [#6](https://github.com/worktools/unionid/issues/6) 只选一个长期持久化方案，再用 [#7](https://github.com/worktools/unionid/issues/7) 冻结类型身份、schema revision 和演进契约。
+3. 按 [#8](https://github.com/worktools/unionid/issues/8) → [#10](https://github.com/worktools/unionid/issues/10) → [#9](https://github.com/worktools/unionid/issues/9)/[#12](https://github.com/worktools/unionid/issues/12) → [#11](https://github.com/worktools/unionid/issues/11) 完成 M1。
+4. 按 M2→M3→M4 交付可靠写入、CRUD、长期演进和日常体验；CLI 基础与诊断随前面阶段逐步完善。
 
 类型演进规则刻意放在 M0，避免 migration 被当作事后附加；完整 migration 执行要等原子存储与 DML 成熟。
 
