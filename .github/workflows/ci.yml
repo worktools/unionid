@@ -18,3 +18,8 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo run --locked -- run --file examples/tasks.uid
+      - run: cargo fmt --check --manifest-path tools/storage-eval/Cargo.toml
+      - run: cargo check --locked --manifest-path tools/storage-eval/Cargo.toml
+      - run: cargo clippy --locked --manifest-path tools/storage-eval/Cargo.toml --all-targets -- -D warnings
+      - run: cargo run --locked --manifest-path tools/storage-eval/Cargo.toml -- redb "${RUNNER_TEMP}/unionid-redb.db" 5
+      - run: cargo run --locked --manifest-path tools/storage-eval/Cargo.toml -- sqlite "${RUNNER_TEMP}/unionid-sqlite.db" 5
