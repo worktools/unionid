@@ -37,7 +37,7 @@ type Job =
 - 查找可运行任务：解构 `Queued`，比较 `scheduled_at`，按 priority、时间和 id 排序后取一页，并把状态派生为统一的 text 标签。失败任务可直接用 `Failed {error = Network {message}, retry_at = Some at}` 解构嵌套失败原因和重试时间。当前完整示例见 [job_queue.uid](../examples/job_queue.uid)。
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行。
 - 原子 claim：按 id 和旧状态筛选，把 `Queued` 改成 `Running` 并返回新值，属于 #15；状态解构与新值表达式复用 #35。
-- 查询带 `sync` 标签的失败任务：需要 #36 的布尔表达式与 `contains`。
+- 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter match state` 组合即可限定状态。
 - 按状态计数：需要 #11 的 group/aggregate；sum 分支归一为状态名需要 #35。
 
 列表查询必须提供唯一的最终排序键，例如 `sort {-priority, created_at, id}`。只按 priority 分页会让相同优先级的跨请求边界不稳定。
@@ -77,7 +77,7 @@ type ServiceConfig =
 
 - 按 environment、owner 和固定 record 路径筛选；普通 record 路径当前已支持，option 需要 #35 显式解构。
 - 只列出 HTTP 服务并投影 `base_url`；需要 #35 的 match expression，因为字段只存在于 `Http` 分支。
-- 判断 header 或 validation issue 是否存在；需要 #36 的 `contains`/`any` 集合能力。
+- 判断某个完整 header 或 validation issue 是否存在可用 `contains`；按元素字段写谓词仍需要 #36 的 `any/all`。
 - 整体 upsert 一份配置并校验嵌套类型；严格 insert 已有，upsert 属于 #15。
 - 把 `Bearer` 改名或给 `Http` 增加字段；身份保留、回填和转换属于 #17–#19。
 
@@ -111,7 +111,7 @@ type Event =
   delivery DeliveryState = Pending
 ```
 
-常见工作流包括筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。当前 `filter match` 能筛选单 record 负载；派生摘要与嵌套模式由 #35 承接，组合条件/失败集合由 #36 承接，状态更新与保留期删除由 #15 承接，统计由 #11 承接。
+常见工作流包括筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。当前 `filter match` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；派生摘要与嵌套模式由 #35 承接，失败集合的元素谓词由 #36 承接，状态更新与保留期删除由 #15 承接，统计由 #11 承接。
 
 ## 4. 离线同步与冲突状态
 
@@ -169,8 +169,8 @@ type Session =
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
 | 固定 record 的嵌套路径过滤/投影 | 已实现 | option/sum 不能直接穿透 | 已满足基础 |
 | 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载和 record/tuple/sum/option 嵌套 pattern | 多个同 constructor 分支的完整嵌套穷尽分析 | #35，P0 |
-| 从 ADT 分支派生统一结果 | 已实现递归 pattern，以及从 binding 构造 option/sum/record/tuple/list | 布尔/算术/函数表达式 | #36，P0 |
-| 多条件、标签和集合判断 | 未实现 | bool expression、contains/length/any | #36，P0 |
+| 从 ADT 分支派生统一结果 | 已实现递归 pattern，以及从 binding 构造 option/sum/record/tuple/list | 派生结果中的算术/函数表达式 | #36，P0 |
+| 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length | any/all 元素谓词与 option helper | #36，P0 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
 | 参数化 key/time/user 输入 | 未实现 | typed params、schema revision 重绑定 | #10/#22，P0/P1 |
 | 原子状态转换、upsert、delete | 未实现 | pipeline DML、约束与返回值 | #15，P0 |

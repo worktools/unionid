@@ -6,6 +6,7 @@ pub mod codec;
 pub mod db;
 pub mod engine;
 pub mod error;
+mod expression;
 mod matching;
 pub mod migration;
 pub mod model;

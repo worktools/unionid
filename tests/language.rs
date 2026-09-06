@@ -418,6 +418,103 @@ fn newline_and_inline_pipelines_have_identical_results() {
 }
 
 #[test]
+fn boolean_filters_compose_fields_lists_and_length() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Tag = Sync | Local | Remote\ntype Tags = list Tag\ntype Job =\n  id int\n  priority int\n  threshold int\n  archived bool\n  tags Tags\n  label text\ntable jobs Job\ninsert jobs {id = 1, priority = 0, threshold = 10, archived = true, tags = [], label = \"old\"}\ninsert jobs {id = 2, priority = 10, threshold = 10, archived = false, tags = [Sync], label = \"sync\"}\ninsert jobs {id = 3, priority = 0, threshold = 10, archived = false, tags = [Sync, Local], label = \"草稿\"}",
+    );
+
+    let result = ok(
+        &mut e,
+        "from jobs\nfilter archived or priority >= threshold and contains tags Sync\nsort id\nselect {id}",
+    );
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .map(|row| &row["id"])
+            .filter_map(|value| match value {
+                Value::Int(value) => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+
+    let grouped = ok(
+        &mut e,
+        "from jobs\nfilter (archived or priority >= threshold) and contains tags Sync\nfilter contains tags Sync and not archived\nfilter length tags >= 1 and length label == 4\nselect {id}",
+    );
+    assert_eq!(grouped.rows.len(), 1);
+    assert!(grouped.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert_eq!(
+        ok(&mut e, "from jobs | filter 10 <= priority | sort id")
+            .rows
+            .len(),
+        1
+    );
+    assert!(
+        ok(&mut e, "from jobs | filter contains [] 1")
+            .rows
+            .is_empty()
+    );
+    assert_eq!(
+        ok(&mut e, "from jobs | filter length label == 2")
+            .rows
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn match_conditions_share_boolean_and_collection_expressions() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Ready {urgent bool, attempts int, max_attempts int, tags list text} | Done\ntype Job =\n  id int\n  state State\ntable jobs Job\ninsert jobs {id = 1, state = Ready {urgent = true, attempts = 1, max_attempts = 3, tags = [\"sync\"]}}\ninsert jobs {id = 2, state = Ready {urgent = true, attempts = 3, max_attempts = 3, tags = [\"sync\"]}}\ninsert jobs {id = 3, state = Done}",
+    );
+    let result = ok(
+        &mut e,
+        "from jobs\nfilter match state\n  Ready {urgent, attempts, max_attempts, tags} => urgent and attempts < max_attempts and contains tags \"sync\"\n  Done => false\nselect {id}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
+fn boolean_expressions_are_checked_before_scanning_empty_tables() {
+    let setup = "type State = Ready {urgent bool, attempts int} | Done\ntype Job =\n  priority int\n  archived bool\n  maybe option bool\n  tags list text\n  state State\ntable jobs Job";
+    for (query, code, message) in [
+        ("filter priority and archived", "E_TYPE", "must be bool"),
+        ("filter contains priority 1", "E_TYPE", "expects a list"),
+        ("filter contains tags 1", "E_TYPE", "expected text"),
+        ("filter length priority > 0", "E_TYPE", "length expects"),
+        ("filter archived or missing", "E_FIELD", "unknown field"),
+        ("filter maybe", "E_TYPE", "must be bool"),
+        (
+            "filter match state\n  Ready {urgent, attempts} => attempts and urgent\n  Done => false",
+            "E_TYPE",
+            "must be bool",
+        ),
+    ] {
+        let mut e = Engine::memory();
+        ok(&mut e, setup);
+        let result = e.execute(&format!("from jobs\n{query}"));
+        assert!(!result.ok, "accepted {query}");
+        let error = result.error.unwrap();
+        assert_eq!(error.code, code, "{query}: {error}");
+        assert!(error.message.contains(message), "{query}: {error}");
+    }
+
+    let mut e = Engine::memory();
+    ok(&mut e, setup);
+    let too_deep = format!("from jobs | filter {}archived", "not ".repeat(64));
+    let error = e.execute(&too_deep).error.unwrap();
+    assert_eq!(error.code, "E_LIMIT");
+}
+
+#[test]
 fn exact_i64_comparisons_with_and_without_indexes() {
     let values = [
         i64::MIN,
@@ -460,6 +557,7 @@ fn exact_i64_comparisons_with_and_without_indexes() {
             }
         }
     }
+    assert_eq!(ok(&mut e, "from t | filter 1 == n").rows.len(), 1);
     assert!(!e.execute("from t | filter n == 1.0").ok);
 }
 
@@ -476,6 +574,7 @@ fn float_zero_and_nested_enum_equality_keys_are_consistent() {
         }
         assert_eq!(ok(&mut e, "from t | filter n == 0.0").rows.len(), 2);
         assert_eq!(ok(&mut e, "from t | filter n == 0").rows.len(), 2);
+        assert_eq!(ok(&mut e, "from t | filter 0 == n").rows.len(), 2);
         assert_eq!(ok(&mut e, "from t | filter kind == A(-0.0)").rows.len(), 2);
         assert_eq!(
             ok(&mut e, "from t | filter n == 0.0000000000000001")

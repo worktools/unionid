@@ -57,7 +57,7 @@ pub struct Pipeline {
 
 #[derive(Debug, Clone)]
 pub enum Stage {
-    Filter(Predicate),
+    Filter(BoolExpression),
     FilterMatch(MatchPredicate),
     DeriveMatch(DeriveMatch),
     Select(Vec<String>),
@@ -80,7 +80,7 @@ pub struct MatchPredicate {
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
-    pub condition: MatchCondition,
+    pub condition: BoolExpression,
 }
 
 #[derive(Debug, Clone)]
@@ -160,21 +160,27 @@ pub struct MatchValueField {
 }
 
 #[derive(Debug, Clone)]
-pub enum MatchCondition {
-    Bool(bool),
-    Binding(String),
+pub enum BoolExpression {
+    Value(ScalarExpression),
     Compare {
-        binding: String,
+        left: ScalarExpression,
         op: CmpOp,
-        value: Value,
+        right: ScalarExpression,
     },
+    Contains {
+        collection: ScalarExpression,
+        item: ScalarExpression,
+    },
+    Not(Box<BoolExpression>),
+    And(Box<BoolExpression>, Box<BoolExpression>),
+    Or(Box<BoolExpression>, Box<BoolExpression>),
 }
 
 #[derive(Debug, Clone)]
-pub struct Predicate {
-    pub column: String,
-    pub op: CmpOp,
-    pub value: Value,
+pub enum ScalarExpression {
+    Reference(String),
+    Literal(Value),
+    Length(Box<ScalarExpression>),
 }
 
 #[derive(Debug, Clone, Copy)]

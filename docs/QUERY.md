@@ -25,7 +25,7 @@ take 20
 | 能力 | 当前形式 | 状态 | 后续任务 |
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
-| 值过滤 | `filter field >= literal` | 已实现 | #10 扩展为通用表达式 |
+| 布尔过滤 | `filter priority >= 10 and contains tags "sync"` | 已实现括号、`not/and/or`、字段间比较、`contains/length` | #36 扩展算术、option helper 与元素谓词 |
 | sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、递归 record/tuple/sum/option pattern 和穷尽检查 | #35 完善嵌套穷尽分析 |
 | 投影 | `select {field, nested.field}` | 已实现 | #11 与派生列组合 |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | #16 增加索引计划 |
@@ -33,7 +33,7 @@ take 20
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` | 未实现 | #10、#22 |
 | ADT 派生列 | `derive x = match ...` | 已实现递归 pattern 与 option/sum/product/list 值构造 | #35 完善穷尽分析；#36 增加布尔/算术/函数表达式 |
-| 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 未实现 | #36 |
+| 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 已实现于普通 filter 与 match condition | #36 扩展 `any/all` 等能力 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
 | 更新与删除 | `update`、`delete`、`upsert` | 未实现 | #15 |
@@ -67,7 +67,7 @@ query             = "from" table pipeline-stage*
 pipeline-stage    = newline stage | "|" stage
 stage             = value-filter | match-filter | derive-match | select | sort | take
 
-value-filter      = "filter" field-path comparison literal
+value-filter      = "filter" bool-expression
 match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
 match-arm         = arm-pattern "=>" condition newline?
 derive-match      = "derive" identifier "=" nested-match-expression
@@ -95,7 +95,14 @@ record-pattern    = "{" (field-pattern ("," field-pattern)* ("," "..")? | "..")?
 field-pattern     = identifier ("=" pattern)?
 tuple-pattern     = "(" pattern "," (pattern ("," pattern)*)? ")"
 binding           = lowercase-identifier
-condition         = bool | binding | binding comparison literal
+condition         = bool-expression
+bool-expression   = or-expression
+or-expression     = and-expression ("or" and-expression)*
+and-expression    = not-expression ("and" not-expression)*
+not-expression    = "not" not-expression | bool-primary
+bool-primary      = "(" bool-expression ")" | contains-call | scalar-expression (comparison scalar-expression)?
+contains-call     = "contains" scalar-expression scalar-expression
+scalar-expression = field-path | literal | "length" scalar-expression
 comparison        = "==" | "!=" | ">" | ">=" | "<" | "<="
 field-path        = identifier ("." identifier)*
 ```
@@ -130,23 +137,28 @@ from tasks | filter id > 1 | take 1
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
-## 值过滤
+## 布尔过滤表达式
 
-值过滤比较字段路径和一个完整字面量：
+普通 `filter` 接受一个静态类型为 bool 的表达式：
 
 ```text
-from config
-filter endpoint.port >= 8000
-select {name, endpoint.host}
+from jobs
+filter not archived and priority >= threshold
+filter contains tags "sync" or length tags == 0
+select {id, priority}
 ```
 
-- `==` 和 `!=` 支持能够按字段类型校验的完整值，包括 record、tuple、sum、option 和 list。
+- 比较的两侧可以是字段路径、literal 或 `length`。因此支持字段与字段、字段与 literal，以及 `length tags >= minimum_tags`；至少一侧必须能确定类型。
+- `==` 和 `!=` 支持类型一致的完整值，包括 record、tuple、sum、option 和 list。literal 会按另一侧的类型检查，因此 `contains [] 1` 是类型明确且恒为 false 的合法表达式。
 - `>`、`>=`、`<`、`<=` 当前只支持 int、float 和 text。
 - Int 使用精确 i64 比较。Float 使用精确数值相等，`-0.0` 与 `0.0` 相等；拒绝 NaN、Infinity 和超出 i64 的整数。
 - Float 字段可接受能够精确表示的整数字面量；Int 字段不接受浮点字面量。数字不会自动转换成 text。
+- `contains collection item` 只接受 list，并按 list 元素的完整类型化相等语义判断；元素可以是命名 ADT。`length` 接受 list 或 text，分别返回元素数或 Unicode scalar 数。
+- bool 字段可以直接作为条件。其他类型不隐式转换为 bool；option 也不提供 truthiness，必须显式 match。
+- 优先级从高到低为括号／比较／函数、`not`、`and`、`or`。`and` 和 `or` 在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。
 - 普通字段路径只能穿过 record。variant 和 option 的内容必须用显式模式处理。
 
-如果查询的第一个 stage 是等值 filter，并且该字段有索引，引擎可以直接读取候选行。索引和扫描共用相同的类型化相等规则；是否存在索引不能改变结果。
+如果查询的第一个 stage 是单纯的 `field == literal` 或 `literal == field`，并且该字段有索引，引擎可以直接读取候选行。复合布尔表达式暂时扫描候选表。索引和扫描共用相同的类型化相等规则；是否存在索引不能改变结果。
 
 ## 模式过滤
 
@@ -182,7 +194,7 @@ take 1
 - `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
 - 顶层 `_` 覆盖尚未出现的变体，必须位于最后。没有 `_` 时必须覆盖全部变体。包含嵌套 constructor 的分支只覆盖满足该嵌套模式的值，因此当前需要最后的 `_` 处理其余值；不会把 `Failed {retry_at = Some at, ..}` 误认为覆盖了所有 `Failed`。
 - 构造器由被匹配字段的命名类型确定，也可写成 `State.Running`。其他命名 sum 的同名构造器不会混用。
-- condition 当前只能是 `true`、`false`、一个 bool 绑定，或者 `binding <op> literal`。绑定只在所属分支内有效。
+- condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`not/and/or`、`contains/length`。绑定只在所属分支内有效。
 - 每个顶层 constructor 当前最多出现一次。需要为同一个 constructor 写多个嵌套分支的完整穷尽分析仍由 #35 跟踪；现阶段用一个嵌套分支加最终 `_` 表达优先匹配和兜底。
 
 未知构造器、重复分支、通配分支后的不可达分支、遗漏 constructor、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum/option 来源或非 bool 条件返回类型错误。
@@ -207,7 +219,7 @@ select {id, retry_at}
 
 引擎先从 binding、primitive literal、`Some value`、结构化 product 或限定 constructor 推导结果类型，再按该类型检查全部分支。`None`、空 list/record 和未限定的普通 sum constructor 不能单独确定类型，但可在其他分支已经给出类型时使用；需要主动确定命名 sum 时写 `Type.Variant`，命名 record 写 `TypeName {...}`。不同命名类型不会因结构相同而统一。
 
-分支必须穷尽且结果类型一致，constructor 归属、参数数量和每个嵌套值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option；结果当前不支持比较、布尔组合、算术或函数调用，这些由 #36 的通用表达式继续扩展。为同一顶层 constructor 写多个互补嵌套分支和 prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
+分支必须穷尽且结果类型一致，constructor 归属、参数数量和每个嵌套值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option；派生结果尚未复用 filter 的布尔／函数节点，也不支持算术，这些由 #36 的通用 value expression 继续扩展。为同一顶层 constructor 写多个互补嵌套分支和 prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
 
 ## 投影、排序与截取
 
@@ -288,11 +300,12 @@ filter match state
 | 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、`filter match`、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
 | 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
 | 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较和字符串中的 `|` | `tests/language.rs::executable_examples` |
-| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、嵌套 pattern、字段默认值、ADT derive、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
+| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、布尔/集合 filter、嵌套 pattern、ADT derive、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 穷尽性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*` |
 | ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
+| 布尔与集合表达式 | 测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length` 和空表错误 | `boolean_filters_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。

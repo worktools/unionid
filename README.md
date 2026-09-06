@@ -4,6 +4,7 @@
 
 - 无分号的命名和类型、嵌套 record/tuple、`option` 与 `list`
 - PRQL 风格换行查询：`filter/filter match/derive/select/sort/take`
+- 可组合的布尔过滤：`not/and/or`、字段间比较、`contains/length`
 - 共享 Rust 引擎、本地 CLI 与 TCP 服务
 - 严格类型检查、字段默认值、主键、等值索引及原子脚本
 - 稳定 catalog 身份、原子 schema revision 与可校验 hash
@@ -39,7 +40,7 @@ cargo run -- cli --memory
 
 输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和嵌套 pattern，`derive x = match ...` 可从 binding 构造新的 option、sum、record、tuple 和 list。布尔/算术/函数表达式、`let/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和嵌套 pattern，`derive x = match ...` 可从 binding 构造新的 option、sum、record、tuple 和 list。普通 filter 与 match condition 支持括号、`not/and/or`、字段间比较和 `contains/length`。算术、通用函数、`let/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
 
 ## 后续方向与计划
 

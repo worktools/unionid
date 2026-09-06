@@ -43,6 +43,7 @@ insert jobs
   id = "job-c"
   priority = 10
   created_at = 90
+  tags = ["sync"]
   payload = Sync {source = "drafts", target = "outbox"}
   state = Queued {scheduled_at = 160, attempt = 1}
 
@@ -71,6 +72,7 @@ derive retry_at =
 select {id, state, retry_at}
 
 from jobs
+filter priority >= 10 and contains tags "sync"
 filter match state
   Queued {scheduled_at, ..} => scheduled_at <= 200
   _ => false
