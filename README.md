@@ -30,6 +30,8 @@ cargo run -- run --file examples/schema_migration.uid
 cargo run -- migration plan --db app.redb --dir examples/migrations
 cargo run -- migration apply --db app.redb --dir examples/migrations
 cargo run -- migration status --db app.redb --dir examples/migrations
+cargo run -- schema check --file examples/schema.uid
+cargo run -- migration diff --db app.redb --schema examples/schema.uid --name sync_schema
 cargo run --example embedded
 ```
 
@@ -58,7 +60,7 @@ cargo run -- cli --memory
 
 输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较和 `contains/length`。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/apply/status` 管理不可变迁移历史。通用函数、`let/group` 和参数绑定还在后续计划中。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)，声明式目标结构与草稿生成见 [SCHEMA-DIFF.md](docs/SCHEMA-DIFF.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较和 `contains/length`。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/diff/apply/status` 管理不可变迁移历史。通用函数、`let/group` 和参数绑定还在后续计划中。
 
 复杂条件推荐在 `filter` 或 match 分支的 `=>` 后换行并缩进；混用 `and` 与 `or` 时用括号写清分组。语言会减少无助于理解的标点，同时保留括号和集合边界等必要符号。
 
@@ -73,6 +75,7 @@ cargo run -- cli --memory
 - [实际场景与覆盖矩阵](docs/SCENARIOS.md)：任务队列、配置、事件、同步和 key/value 用法所需的 ADT 与查询缺口。
 - [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
 - [Schema migration 语言](docs/MIGRATIONS.md)：当前可执行的显式演进、typed conversion 与约束边界。
+- [声明式 Schema 与 Diff](docs/SCHEMA-DIFF.md)：规范化 schema、影响报告和不可猜测的迁移草稿。
 - [ADT value codec](docs/CODEC.md)：稳定 ID 驱动的持久值格式、限制与 schema evolution 边界。
 - [redb 持久模式](docs/STORAGE.md)：本地／服务入口、事务承诺、内部表与当前限制。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。

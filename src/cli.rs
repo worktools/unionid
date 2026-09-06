@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_directory};
-use crate::{Engine, QueryResponse, Value};
+use crate::{Engine, QueryResponse, SchemaCheck, Value};
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
     run_local_engine(Engine::memory(), source, json)
@@ -47,6 +47,123 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
 
 pub fn migration_new(directory: impl AsRef<Path>, name: &str) -> Result<PathBuf, String> {
     let directory = directory.as_ref();
+    let (path, id, parent) = next_migration(directory, name)?;
+    let mut source = format!("migration {id}\n");
+    if let Some(parent) = parent {
+        source.push_str(&format!("  parent {parent}\n"));
+    }
+    source.push_str("  # Add one or more schema operations here\n");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("create '{}': {error}", path.display()))?;
+    file.write_all(source.as_bytes())
+        .map_err(|error| format!("write '{}': {error}", path.display()))?;
+    Ok(path)
+}
+
+pub fn schema_check(path: impl AsRef<Path>, json: bool) -> Result<(), String> {
+    let path = path.as_ref();
+    let source = read_source(
+        std::fs::File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?,
+    )?;
+    let checked = Engine::check_schema(&source).map_err(|error| error.to_string())?;
+    print_schema_check(&checked, json)
+}
+
+pub fn schema_print(db: impl Into<PathBuf>, json: bool) -> Result<(), String> {
+    let db = db.into();
+    require_existing_database(&db)?;
+    let engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
+    let checked = SchemaCheck {
+        schema: engine.schema_info(),
+        normalized: engine.schema(),
+    };
+    print_schema_check(&checked, json)
+}
+
+pub fn migration_diff(
+    db: impl Into<PathBuf>,
+    schema_path: impl AsRef<Path>,
+    directory: impl AsRef<Path>,
+    name: &str,
+    json: bool,
+) -> Result<(), String> {
+    let schema_path = schema_path.as_ref();
+    let target_source =
+        read_source(std::fs::File::open(schema_path).map_err(|error| {
+            format!("open target schema '{}': {error}", schema_path.display())
+        })?)?;
+    let db = db.into();
+    let engine = if db.exists() {
+        Engine::open_redb(db).map_err(|error| error.to_string())?
+    } else {
+        Engine::memory()
+    };
+    let (path, id, parent) = next_migration(directory.as_ref(), name)?;
+    let result = engine
+        .diff_schema(&target_source, &id, parent.as_deref())
+        .map_err(|error| error.to_string())?;
+    if result.operations.is_empty() {
+        return Err("schema already matches the target; no migration was created".into());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("create '{}': {error}", path.display()))?;
+    file.write_all(result.migration_source.as_bytes())
+        .map_err(|error| format!("write '{}': {error}", path.display()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "diff": result,
+            }))
+            .map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("{}", path.display());
+        for operation in &result.operations {
+            println!(
+                "  {}{}{}",
+                operation.description,
+                if operation.destructive {
+                    " [destructive]"
+                } else {
+                    ""
+                },
+                if operation.requires_input {
+                    " [requires input]"
+                } else {
+                    ""
+                }
+            );
+        }
+        for impact in &result.impacts {
+            for table in &impact.tables {
+                println!(
+                    "  affects {} through {}: {} row(s), {} index(es)",
+                    table.table, impact.type_name, table.rows, table.indexes
+                );
+            }
+        }
+        for warning in &result.warnings {
+            eprintln!("warning: {warning}");
+        }
+        if !result.runnable {
+            eprintln!("draft requires explicit edits to every todo line before plan/apply");
+        }
+    }
+    Ok(())
+}
+
+fn next_migration(
+    directory: &Path,
+    name: &str,
+) -> Result<(PathBuf, String, Option<String>), String> {
     std::fs::create_dir_all(directory)
         .map_err(|error| format!("create '{}': {error}", directory.display()))?;
     let existing = load_directory(directory).map_err(|error| error.to_string())?;
@@ -67,21 +184,27 @@ pub fn migration_new(directory: impl AsRef<Path>, name: &str) -> Result<PathBuf,
         .checked_add(1)
         .ok_or_else(|| "migration number exhausted".to_string())?;
     let slug = migration_slug(name)?;
-    let id = format!("m{number:04}_{slug}");
-    let path = directory.join(format!("{number:04}_{slug}.uid"));
-    let mut source = format!("migration {id}\n");
-    if let Some(parent) = existing.last() {
-        source.push_str(&format!("  parent {}\n", parent.id));
+    Ok((
+        directory.join(format!("{number:04}_{slug}.uid")),
+        format!("m{number:04}_{slug}"),
+        existing.last().map(|file| file.id.clone()),
+    ))
+}
+
+fn print_schema_check(checked: &SchemaCheck, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(checked).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!("{}", checked.normalized);
+        eprintln!(
+            "schema revision {}\nschema hash {}",
+            checked.schema.revision, checked.schema.hash
+        );
     }
-    source.push_str("  # Add one or more schema operations here\n");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|error| format!("create '{}': {error}", path.display()))?;
-    file.write_all(source.as_bytes())
-        .map_err(|error| format!("write '{}': {error}", path.display()))?;
-    Ok(path)
+    Ok(())
 }
 
 pub fn migration_plan(

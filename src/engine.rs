@@ -453,6 +453,19 @@ impl Engine {
         self.db.migration_history()
     }
 
+    pub fn check_schema(source: &str) -> Result<crate::schema::SchemaCheck> {
+        crate::schema::check(source)
+    }
+
+    pub fn diff_schema(
+        &self,
+        target_source: &str,
+        migration_id: &str,
+        parent: Option<&str>,
+    ) -> Result<crate::schema::SchemaDiff> {
+        crate::schema::diff(&self.db, target_source, migration_id, parent)
+    }
+
     fn with_schema(&self, mut response: QueryResponse) -> QueryResponse {
         response.schema = Some(self.db.schema_info());
         response

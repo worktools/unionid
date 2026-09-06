@@ -43,6 +43,7 @@ impl Database {
                     .map(|_| ())
             }
             SchemaMigration::DropTable { table } => self.drop_table(&table),
+            SchemaMigration::RenameTable { from, to } => self.rename_table(&from, to),
             SchemaMigration::RenameType { from, to } => self.rename_type(&from, to),
             SchemaMigration::AddField { owner, column } => self.add_field(&owner, column),
             SchemaMigration::DropField { owner, field } => self.drop_field(&owner, &field),
@@ -110,6 +111,27 @@ impl Database {
         }
         self.indexes.remove(name);
         self.index_definitions.remove(name);
+        Ok(())
+    }
+
+    fn rename_table(&mut self, from: &str, to: String) -> Result<()> {
+        if self.objects.contains_key(&to) || self.catalog.types.contains_key(&to) {
+            return Err(Error::new(
+                "E_SCHEMA",
+                format!("schema name '{to}' already exists"),
+            ));
+        }
+        let Some(DbObject::Table(mut table)) = self.objects.remove(from) else {
+            return Err(Error::new("E_TABLE", format!("table '{from}' not found")));
+        };
+        table.name = to.clone();
+        self.objects.insert(to.clone(), DbObject::Table(table));
+        if let Some(indexes) = self.indexes.remove(from) {
+            self.indexes.insert(to.clone(), indexes);
+        }
+        if let Some(definitions) = self.index_definitions.remove(from) {
+            self.index_definitions.insert(to, definitions);
+        }
         Ok(())
     }
 

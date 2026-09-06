@@ -75,6 +75,11 @@ enum Command {
         #[command(subcommand)]
         command: MigrationCommand,
     },
+    /// Validate and print declarative schema files.
+    Schema {
+        #[command(subcommand)]
+        command: SchemaCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -109,6 +114,37 @@ enum MigrationCommand {
         db: PathBuf,
         #[arg(long, default_value = "migrations")]
         dir: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Generate an explicit migration draft from a target schema.
+    Diff {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        schema: PathBuf,
+        #[arg(long, default_value = "migrations")]
+        dir: PathBuf,
+        #[arg(long, default_value = "schema update")]
+        name: String,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SchemaCommand {
+    /// Validate a schema file and print its normalized form.
+    Check {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Print the normalized schema stored in a redb database.
+    Print {
+        #[arg(long)]
+        db: PathBuf,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -182,6 +218,21 @@ fn run() -> Result<(), String> {
             }
             MigrationCommand::Status { db, dir, format } => {
                 cli::migration_status(db, dir, matches!(format, Format::Json))
+            }
+            MigrationCommand::Diff {
+                db,
+                schema,
+                dir,
+                name,
+                format,
+            } => cli::migration_diff(db, schema, dir, &name, matches!(format, Format::Json)),
+        },
+        Command::Schema { command } => match command {
+            SchemaCommand::Check { file, format } => {
+                cli::schema_check(file, matches!(format, Format::Json))
+            }
+            SchemaCommand::Print { db, format } => {
+                cli::schema_print(db, matches!(format, Format::Json))
             }
         },
     }
