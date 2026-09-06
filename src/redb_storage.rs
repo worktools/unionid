@@ -1,5 +1,6 @@
 //! Transactional redb storage for the durable Engine mode.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use redb::{
@@ -33,6 +34,7 @@ const INDEX_MAGIC: &[u8; 4] = b"UIDI";
 
 pub(crate) struct RedbStore {
     database: RedbDatabase,
+    committed: PreparedState,
 }
 
 pub(crate) enum CommitFailure {
@@ -66,18 +68,28 @@ impl RedbStore {
         }
         let fresh = std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0);
         let database = RedbDatabase::create(&path).map_err(open_error)?;
-        let store = Self { database };
+        let empty = Database::default();
+        let mut store = Self {
+            database,
+            committed: PreparedState::new(&empty)?,
+        };
         if fresh {
             store
-                .commit(&Database::default())
+                .commit(&empty, &empty)
                 .map_err(CommitFailure::into_error)?;
         }
-        let loaded = store.load()?;
+        let (loaded, committed) = store.load()?;
+        store.committed = committed;
         Ok((store, loaded))
     }
 
-    pub(crate) fn commit(&self, database: &Database) -> std::result::Result<(), CommitFailure> {
-        let prepared = PreparedCommit::new(database).map_err(CommitFailure::Definite)?;
+    pub(crate) fn commit(
+        &mut self,
+        _previous: &Database,
+        database: &Database,
+    ) -> std::result::Result<(), CommitFailure> {
+        let next = PreparedState::new(database).map_err(CommitFailure::Definite)?;
+        let prepared = PreparedDelta::between(&self.committed, &next);
         let mut transaction = self
             .database
             .begin_write()
@@ -90,56 +102,37 @@ impl RedbStore {
             let mut table = transaction
                 .open_table(META)
                 .map_err(|error| CommitFailure::definite("open meta table", error))?;
-            table
-                .retain(|_, _| false)
-                .map_err(|error| CommitFailure::definite("clear meta table", error))?;
             write_meta(&mut table, &prepared.meta).map_err(CommitFailure::Definite)?;
         }
         {
             let mut table = transaction
                 .open_table(CATALOG)
                 .map_err(|error| CommitFailure::definite("open catalog table", error))?;
-            table
-                .retain(|_, _| false)
-                .map_err(|error| CommitFailure::definite("clear catalog table", error))?;
-            for (key, value) in &prepared.catalog {
-                table
-                    .insert(key.as_slice(), value.as_slice())
-                    .map_err(|error| CommitFailure::definite("write catalog entry", error))?;
-            }
+            apply_bytes_delta(&mut table, &prepared.catalog, "catalog entry")
+                .map_err(CommitFailure::Definite)?;
         }
         {
             let mut table = transaction
                 .open_table(ROWS)
                 .map_err(|error| CommitFailure::definite("open rows table", error))?;
-            table
-                .retain(|_, _| false)
-                .map_err(|error| CommitFailure::definite("clear rows table", error))?;
-            for (key, value) in &prepared.rows {
-                table
-                    .insert(key.as_slice(), value.as_slice())
-                    .map_err(|error| CommitFailure::definite("write row", error))?;
-            }
+            apply_bytes_delta(&mut table, &prepared.rows, "row")
+                .map_err(CommitFailure::Definite)?;
         }
         {
             let mut table = transaction
                 .open_table(SECONDARY_INDEX)
                 .map_err(|error| CommitFailure::definite("open secondary index table", error))?;
-            table
-                .retain(|_, _| false)
-                .map_err(|error| CommitFailure::definite("clear secondary index table", error))?;
-            for key in &prepared.secondary_indexes {
-                table.insert(key.as_slice(), 0).map_err(|error| {
-                    CommitFailure::definite("write secondary index entry", error)
-                })?;
-            }
+            apply_set_delta(&mut table, &prepared.secondary_indexes)
+                .map_err(CommitFailure::Definite)?;
         }
         transaction
             .open_table(MIGRATION_LEDGER)
             .map_err(|error| CommitFailure::definite("open migration ledger table", error))?;
         transaction
             .commit()
-            .map_err(|error| CommitFailure::uncertain("commit redb transaction", error))
+            .map_err(|error| CommitFailure::uncertain("commit redb transaction", error))?;
+        self.committed = next;
+        Ok(())
     }
 
     pub(crate) fn check_integrity(&mut self) -> Result<(bool, Database)> {
@@ -147,11 +140,12 @@ impl RedbStore {
             .database
             .check_integrity()
             .map_err(|error| storage_error("check redb integrity", error))?;
-        let database = self.load()?;
+        let (database, committed) = self.load()?;
+        self.committed = committed;
         Ok((backend_clean, database))
     }
 
-    fn load(&self) -> Result<Database> {
+    fn load(&self) -> Result<(Database, PreparedState)> {
         let transaction = self
             .database
             .begin_read()
@@ -162,41 +156,49 @@ impl RedbStore {
                 .map_err(|error| storage_error("open meta table", error))?;
             read_meta(&table)?
         };
-        let entries = {
+        let (entries, stored_catalog) = {
             let table = transaction
                 .open_table(CATALOG)
                 .map_err(|error| storage_error("open catalog table", error))?;
             let mut entries = Vec::new();
+            let mut stored = BTreeMap::new();
             for entry in table
                 .iter()
                 .map_err(|error| storage_error("iterate catalog table", error))?
             {
                 let (key, value) =
                     entry.map_err(|error| storage_error("read catalog entry", error))?;
-                entries.push(decode_catalog_entry(key.value(), value.value())?);
+                let key = key.value().to_vec();
+                let value = value.value().to_vec();
+                entries.push(decode_catalog_entry(&key, &value)?);
+                stored.insert(key, value);
             }
-            entries
+            (entries, stored)
         };
-        let rows = {
+        let (rows, stored_rows) = {
             let table = transaction
                 .open_table(ROWS)
                 .map_err(|error| storage_error("open rows table", error))?;
             let mut rows = Vec::new();
+            let mut stored = BTreeMap::new();
             for entry in table
                 .iter()
                 .map_err(|error| storage_error("iterate rows table", error))?
             {
                 let (key, value) = entry.map_err(|error| storage_error("read row", error))?;
-                let (table_id, row_id) = decode_row_key(key.value())?;
-                rows.push((table_id, row_id, value.value().to_vec()));
+                let key = key.value().to_vec();
+                let value = value.value().to_vec();
+                let (table_id, row_id) = decode_row_key(&key)?;
+                rows.push((table_id, row_id, value.clone()));
+                stored.insert(key, value);
             }
-            rows
+            (rows, stored)
         };
         let stored_indexes = {
             let table = transaction
                 .open_table(SECONDARY_INDEX)
                 .map_err(|error| storage_error("open secondary index table", error))?;
-            let mut keys = Vec::new();
+            let mut keys = BTreeSet::new();
             for entry in table
                 .iter()
                 .map_err(|error| storage_error("iterate secondary index table", error))?
@@ -204,56 +206,61 @@ impl RedbStore {
                 let (key, _) =
                     entry.map_err(|error| storage_error("read secondary index entry", error))?;
                 validate_index_key(key.value())?;
-                keys.push(key.value().to_vec());
+                keys.insert(key.value().to_vec());
             }
             keys
         };
         transaction
             .open_table(MIGRATION_LEDGER)
             .map_err(|error| storage_error("open migration ledger table", error))?;
-        let database = Database::from_durable(meta, entries, rows)?;
-        let mut expected_indexes = database
+        let database = Database::from_durable(meta.clone(), entries, rows)?;
+        let expected_indexes = database
             .durable_secondary_indexes()?
             .into_iter()
             .map(|(index_id, value, row_id)| encode_index_key(index_id, &value, row_id))
-            .collect::<Result<Vec<_>>>()?;
-        expected_indexes.sort();
+            .collect::<Result<BTreeSet<_>>>()?;
         if stored_indexes != expected_indexes {
             return Err(Error::new(
                 "E_STORAGE",
                 "durable secondary indexes do not match the stored rows and catalog",
             ));
         }
-        Ok(database)
+        let committed = PreparedState {
+            meta,
+            catalog: stored_catalog,
+            rows: stored_rows,
+            secondary_indexes: stored_indexes,
+        };
+        Ok((database, committed))
     }
 }
 
-struct PreparedCommit {
+struct PreparedState {
     meta: DurableMeta,
-    catalog: Vec<(Vec<u8>, Vec<u8>)>,
-    rows: Vec<(Vec<u8>, Vec<u8>)>,
-    secondary_indexes: Vec<Vec<u8>>,
+    catalog: BTreeMap<Vec<u8>, Vec<u8>>,
+    rows: BTreeMap<Vec<u8>, Vec<u8>>,
+    secondary_indexes: BTreeSet<Vec<u8>>,
 }
 
-impl PreparedCommit {
+impl PreparedState {
     fn new(database: &Database) -> Result<Self> {
-        let mut catalog = Vec::new();
+        let mut catalog = BTreeMap::new();
         for entry in database.durable_catalog_entries() {
-            catalog.push((
+            catalog.insert(
                 encode_catalog_key(entry.kind_tag(), entry.stable_id()),
                 encode_catalog_entry(&entry)?,
-            ));
+            );
         }
         let rows = database
             .durable_rows()?
             .into_iter()
             .map(|(table_id, row_id, value)| (encode_row_key(table_id, row_id), value))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
         let secondary_indexes = database
             .durable_secondary_indexes()?
             .into_iter()
             .map(|(index_id, value, row_id)| encode_index_key(index_id, &value, row_id))
-            .collect::<Result<_>>()?;
+            .collect::<Result<BTreeSet<_>>>()?;
         Ok(Self {
             meta: database.durable_meta(),
             catalog,
@@ -261,6 +268,145 @@ impl PreparedCommit {
             secondary_indexes,
         })
     }
+}
+
+struct PreparedDelta {
+    meta: DurableMeta,
+    catalog: BytesDelta,
+    rows: BytesDelta,
+    secondary_indexes: SetDelta,
+}
+
+impl PreparedDelta {
+    #[cfg(test)]
+    fn new(previous: &Database, database: &Database) -> Result<Self> {
+        let previous = PreparedState::new(previous)?;
+        let next = PreparedState::new(database)?;
+        Ok(Self::between(&previous, &next))
+    }
+
+    fn between(previous: &PreparedState, next: &PreparedState) -> Self {
+        Self {
+            meta: next.meta.clone(),
+            catalog: BytesDelta::between(&previous.catalog, &next.catalog),
+            rows: BytesDelta::between(&previous.rows, &next.rows),
+            secondary_indexes: SetDelta::between(
+                &previous.secondary_indexes,
+                &next.secondary_indexes,
+            ),
+        }
+    }
+}
+
+struct BytesDelta {
+    deletes: Vec<BytesDelete>,
+    writes: Vec<BytesWrite>,
+}
+
+struct BytesDelete {
+    key: Vec<u8>,
+    expected: Vec<u8>,
+}
+
+struct BytesWrite {
+    key: Vec<u8>,
+    expected: Option<Vec<u8>>,
+    value: Vec<u8>,
+}
+
+impl BytesDelta {
+    fn between(previous: &BTreeMap<Vec<u8>, Vec<u8>>, next: &BTreeMap<Vec<u8>, Vec<u8>>) -> Self {
+        let deletes = previous
+            .iter()
+            .filter(|(key, _)| !next.contains_key(*key))
+            .map(|(key, value)| BytesDelete {
+                key: key.clone(),
+                expected: value.clone(),
+            })
+            .collect();
+        let writes = next
+            .iter()
+            .filter_map(|(key, value)| match previous.get(key) {
+                Some(previous) if previous == value => None,
+                previous => Some(BytesWrite {
+                    key: key.clone(),
+                    expected: previous.cloned(),
+                    value: value.clone(),
+                }),
+            })
+            .collect();
+        Self { deletes, writes }
+    }
+}
+
+struct SetDelta {
+    deletes: Vec<Vec<u8>>,
+    inserts: Vec<Vec<u8>>,
+}
+
+impl SetDelta {
+    fn between(previous: &BTreeSet<Vec<u8>>, next: &BTreeSet<Vec<u8>>) -> Self {
+        Self {
+            deletes: previous.difference(next).cloned().collect(),
+            inserts: next.difference(previous).cloned().collect(),
+        }
+    }
+}
+
+fn apply_bytes_delta(
+    table: &mut redb::Table<'_, &[u8], &[u8]>,
+    delta: &BytesDelta,
+    entry_name: &str,
+) -> Result<()> {
+    for deleted in &delta.deletes {
+        let removed = table
+            .remove(deleted.key.as_slice())
+            .map_err(|error| storage_error(&format!("delete {entry_name}"), error))?;
+        if removed.as_ref().map(|value| value.value()) != Some(deleted.expected.as_slice()) {
+            return Err(Error::new(
+                "E_STORAGE",
+                format!("stored {entry_name} changed before incremental delete"),
+            ));
+        }
+    }
+    for write in &delta.writes {
+        let replaced = table
+            .insert(write.key.as_slice(), write.value.as_slice())
+            .map_err(|error| storage_error(&format!("write {entry_name}"), error))?;
+        if replaced.as_ref().map(|value| value.value().to_vec()) != write.expected {
+            return Err(Error::new(
+                "E_STORAGE",
+                format!("stored {entry_name} changed before incremental write"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_set_delta(table: &mut redb::Table<'_, &[u8], u8>, delta: &SetDelta) -> Result<()> {
+    for key in &delta.deletes {
+        let removed = table
+            .remove(key.as_slice())
+            .map_err(|error| storage_error("delete secondary index entry", error))?;
+        if removed.is_none() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "secondary index entry disappeared before incremental delete",
+            ));
+        }
+    }
+    for key in &delta.inserts {
+        let replaced = table
+            .insert(key.as_slice(), 0)
+            .map_err(|error| storage_error("write secondary index entry", error))?;
+        if replaced.is_some() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "secondary index entry appeared before incremental insert",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_meta(table: &mut redb::Table<'_, &str, &[u8]>, meta: &DurableMeta) -> Result<()> {
@@ -485,4 +631,52 @@ fn open_error(error: redb::DatabaseError) -> Error {
 
 fn storage_error(context: &str, error: impl std::fmt::Display) -> Error {
     Error::new("E_STORAGE", format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn execute(database: &mut Database, source: &str) {
+        let statements = crate::syntax::parse(source).unwrap();
+        let changes_schema = statements
+            .iter()
+            .any(|statement| statement.statement.changes_schema());
+        for statement in statements {
+            database.execute(statement.statement).unwrap();
+        }
+        if changes_schema {
+            database.advance_schema_revision().unwrap();
+        }
+        database.sequence += 1;
+    }
+
+    #[test]
+    fn delta_plan_only_contains_changed_stable_keys() {
+        let mut previous = Database::default();
+        execute(
+            &mut previous,
+            "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ncreate index entries (label)\ninsert entries {id = 1, label = \"one\"}\ninsert entries {id = 2, label = \"two\"}",
+        );
+        let unchanged = PreparedDelta::new(&previous, &previous).unwrap();
+        assert!(unchanged.catalog.deletes.is_empty());
+        assert!(unchanged.catalog.writes.is_empty());
+        assert!(unchanged.rows.deletes.is_empty());
+        assert!(unchanged.rows.writes.is_empty());
+        assert!(unchanged.secondary_indexes.deletes.is_empty());
+        assert!(unchanged.secondary_indexes.inserts.is_empty());
+
+        let mut next = previous.clone();
+        execute(
+            &mut next,
+            "update entries | filter id == 1 | set label = \"changed\"\ndelete entries | filter id == 2\ninsert entries {id = 3, label = \"three\"}",
+        );
+        let delta = PreparedDelta::new(&previous, &next).unwrap();
+        assert_eq!(delta.catalog.deletes.len(), 0);
+        assert_eq!(delta.catalog.writes.len(), 1);
+        assert_eq!(delta.rows.deletes.len(), 1);
+        assert_eq!(delta.rows.writes.len(), 2);
+        assert_eq!(delta.secondary_indexes.deletes.len(), 3);
+        assert_eq!(delta.secondary_indexes.inserts.len(), 3);
+    }
 }

@@ -38,8 +38,8 @@ take 20
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 已实现于普通 filter 与 match condition | #36 扩展 `any/all` 等能力 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
-| 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows 与原子约束维护 | #15 继续增量持久写 |
-| Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId 和结构化 action | #15 继续增量持久写 |
+| 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows、原子约束与增量持久维护 | #15 |
+| Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId、结构化 action 与增量持久维护 | #15 |
 | migration 查询与转换 | `migration` | 未实现 | #17、#18 |
 | join、window、递归和高阶函数 | — | v0.1 延后 | #25 |
 
@@ -199,7 +199,7 @@ set 的字段路径按表的完整 row schema 绑定，右侧接受当前 scalar
 
 同一 update 的多个 set 同时求值，右侧全部读取修改前的行。父路径与子路径不能同时赋值，例如 `set owner = {...}` 与 `set owner.email = ...` 会返回 `E_QUERY`。每行形成完整候选 record 后重新类型检查，全部候选形成后检查主键唯一性，再一起替换 rows 和 indexes。任何 filter、算术、类型或约束错误都会由 Engine 丢弃整个请求的候选状态；redb 模式在同一事务提交。
 
-insert/upsert/update/delete 成功时响应包含 `affected_rows`；未匹配 update/delete 返回 0。upsert 还返回结构化 `upsert_action: inserted|updated`。upsert 输入是一份按 schema 默认值补齐的完整 row：命中主键时替换整个值并保留 RowId，未命中时分配新 RowId。局部修改仍使用 update。删除后的 RowId 不复用。当前执行器会重建该表的内存索引，redb 仍重写完整逻辑状态；#15 后续把持久提交收敛为 row/index delta。
+insert/upsert/update/delete 成功时响应包含 `affected_rows`；未匹配 update/delete 返回 0。upsert 还返回结构化 `upsert_action: inserted|updated`。upsert 输入是一份按 schema 默认值补齐的完整 row：命中主键时替换整个值并保留 RowId，未命中时分配新 RowId。局部修改仍使用 update，删除后的 RowId 不复用。当前执行器会重建受影响表的内存索引；redb 在请求提交时只删除或写入前后状态中变化的 catalog/row/index 稳定键。
 
 ## 执行模型
 

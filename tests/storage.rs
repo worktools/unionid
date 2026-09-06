@@ -122,6 +122,62 @@ fn redb_atomic_adt_batches_survive_reopen() {
 }
 
 #[test]
+fn redb_incremental_commit_handles_schema_and_multi_table_batches() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "type Entry =\n  id int\n  label text\ntable active Entry\n  key id\ntable archive Entry\n  key id\ncreate index active (label)\ninsert active {id = 1, label = \"old\"}\ninsert archive {id = 2, label = \"remove\"}",
+                )
+                .ok
+        );
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        transaction
+            .open_table(REDB_MIGRATION_LEDGER)
+            .unwrap()
+            .insert(42, b"reserved".as_slice())
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    drop(database);
+
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        let changed = engine.execute(
+            "type Audit =\n  id int\n  message text\ntable audits Audit\n  key id\ninsert audits {id = 10, message = \"created\"}\nupdate active | filter id == 1 | set label = \"new\"\ndelete archive | filter id == 2",
+        );
+        assert!(changed.ok, "{}", changed.message);
+        let integrity = engine.check_integrity().unwrap();
+        assert!(integrity.backend_clean);
+    }
+
+    let mut reopened = Engine::open_redb(path.clone()).unwrap();
+    assert_eq!(
+        reopened
+            .execute("from active | filter label == \"new\"")
+            .rows
+            .len(),
+        1
+    );
+    assert!(reopened.execute("from archive").rows.is_empty());
+    assert_eq!(reopened.execute("from audits").rows.len(), 1);
+    drop(reopened);
+
+    let database = RedbDatabase::open(path).unwrap();
+    let transaction = database.begin_read().unwrap();
+    let ledger = transaction.open_table(REDB_MIGRATION_LEDGER).unwrap();
+    assert_eq!(ledger.get(42).unwrap().unwrap().value(), b"reserved");
+}
+
+#[test]
 fn redb_upgrades_and_persists_the_per_table_row_id_cursor() {
     let dir = TempDir::new();
     let path = dir.0.join("state.redb");
