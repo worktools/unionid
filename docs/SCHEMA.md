@@ -1,6 +1,6 @@
 # Schema 身份、版本与演进契约
 
-状态：v0.1 契约，2026-09-06。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现的部分是稳定 ID、原子 schema revision、schema hash、共享名称空间和响应元数据；rename 与 migration 语法由 #17–#19 实现。
+状态：v0.1 契约，2026-09-06。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现的部分是稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据和[版本化 ADT value codec](CODEC.md)；rename 与 migration 语法由 #17–#19 实现。
 
 存储格式版本、语言／协议版本与应用 schema revision 是三个独立概念：升级 unionid 二进制不自动修改应用 schema，读取目标 schema 文件也不会隐式迁移已有数据。
 
@@ -115,6 +115,6 @@ apply 前必须验证：
 
 ## 6. 与 redb 的边界
 
-redb catalog 表持久化上述 ID、revision、hash manifest 版本和 migration head。row codec 使用 type/field/variant ID，secondary index key 使用 index/table/field identity；名称不进入值的身份编码。一个 Engine schema 脚本对应一个 redb 写事务，提交成功后响应中的 revision/hash 才可见。
+redb catalog 表持久化上述 ID、revision、hash manifest 版本和 migration head。已实现的 row codec 使用 type/field/variant ID，按 field ID 排序 record，并严格拒绝未知身份或形状；名称不进入值的身份编码。secondary index key 使用 index/table/field identity。一个 Engine schema 脚本对应一个 redb 写事务，提交成功后响应中的 revision/hash 才可见。
 
 旧 WAL/snapshot 没有 revision 时，恢复过程把其中完整的非空 catalog 视作 revision 1 的导入基线；已有稳定 ID 保留，缺失的 table/index ID 按确定顺序补齐。#20 的正式导入工具还会校验行数、catalog、revision 和 hash，并保留原文件。

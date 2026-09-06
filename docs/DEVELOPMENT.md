@@ -8,6 +8,7 @@
 - Lexer、源码位置、缩进与换行 AST；命名 sum/record、tuple、option/list、完整值构造和严格校验。
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。
 - `field type = value` 字段默认值在声明时完成递归类型检查，insert 对嵌套 record 和 sum record 负载逐层补齐；schema 展示、WAL/snapshot 恢复与 hash 均保留默认值。
+- 版本 1 ADT value codec 以 catalog 和期望类型驱动，用稳定 type/field/variant ID 编码命名类型、record、sum、tuple、option/list；不依赖 serde 或 Rust enum 布局，字段重排和显式 rename 保持字节可解释。
 - 换行及单行 pipeline、字段路径、filter/select/sort/take、sum 类型的模式过滤、主键唯一性和等值索引。
 - 查询参考明确记录当前 grammar、stage schema、执行顺序、match 规则、错误类别和已实现/计划边界；任务、配置、事件三个示例都由语言测试执行。
 - 原子脚本、可读 CLI 输出、JSON 输出、文件/stdin、多行 REPL、正确退出码及 EOF 处理。
@@ -44,15 +45,15 @@ cargo run -- run --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 60 项测试通过：`tests/language.rs` 33 项、`tests/storage.rs` 15 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复、migration 历史约束，以及真实 CLI/TCP/并发请求。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
+当前全部 68 项测试通过：`tests/language.rs` 33 项、`tests/storage.rs` 15 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 8 项、`tests/codec.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
 ## 后续工作
 
 - #2：以当前查询参考完善完整语言 RFC；类型推断、更新与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
-- #8/#9/#10/#11：在已实现的默认值与 `filter match` 子集上继续完善版本化 value codec、typed IR、通用 match 表达式、tuple/嵌套模式、参数、let/derive/group/aggregate。#12 的内存端到端切片已满足验收，合并对应 PR 后关闭。
-- #13/#14/#15/#16：按 redb ADR 接入持久事务，补齐故障模型、CRUD/upsert、索引计划及 explain。
+- #8/#10/#11：在已实现的默认值、版本化 value codec 与 `filter match` 子集上继续完善 typed IR、通用 match 表达式、tuple/嵌套模式、参数、let/derive/group/aggregate。#9/#12 的验收范围已经实现。
+- #13/#14/#15/#16：先让 redb 固定内部表和单写事务接管 Engine，再补齐故障模型、CRUD/upsert、索引计划及 explain。
 - #17–#20：实现 schema/data migration、ledger、diff、备份还原与显式旧数据转换。
 - #21–#24：继续打磨 REPL 历史/补全/格式化、协议、服务预算和正式发布。
 

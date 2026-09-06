@@ -43,6 +43,7 @@
 - `Engine` 是本地 Rust API、CLI 和 TCP 的共享入口；每次请求是一个原子脚本。
 - 已实现命名 sum/record、tuple、option/list、严格插入、主键、filter/select/sort/take，以及带 record 负载绑定与穷尽检查的 `filter match`；通用 match 表达式、更新操作及 migration 尚未实现。
 - 字段可用 `field type = value` 声明默认值；默认值在 schema 阶段类型检查，insert 会对嵌套 record 和 sum record 负载逐层补齐。
+- 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，下一步接入 redb `rows` 表。
 - 已通过 `docs/adr/0001-redb-storage.md` 选定 redb 作为长期事务后端；主 Engine 尚未接入。现有 WAL/snapshot 仍是过渡实现。
 - `docs/SCHEMA.md` 已定义类型演进契约；类型、字段、变体、表和索引使用统一稳定 ID，每次原子 schema 变更产生一个 revision 与 SHA-256 hash，Engine 响应携带版本信息。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
