@@ -10,7 +10,7 @@
 - `field type = value` 字段默认值在声明时完成递归类型检查，insert 对嵌套 record 和 sum record 负载逐层补齐；schema 展示、WAL/snapshot 恢复与 hash 均保留默认值。
 - 版本 1 ADT value codec 以 catalog 和期望类型驱动，用稳定 type/field/variant ID 编码命名类型、record、sum、tuple、option/list；不依赖 serde 或 Rust enum 布局，字段重排和显式 rename 保持字节可解释。
 - 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter 与 match condition 共用布尔表达式 binder/evaluator，支持括号、`not/and/or`、字段或 binding 间比较、list `contains` 及 list/text `length`；复杂条件可使用 `filter`／`=>` 后的缩进块或跨行括号。
-- match 支持 sum 的 unit/record/位置负载、option 的 None/Some，以及 record/tuple/sum/option 的递归 pattern；record 字段可重命名绑定，分支可从 binding 递归构造 option/sum/record/tuple/list，并静态统一结果类型。命名 record 构造会补齐字段默认值；派生列可继续 filter/sort/select，空表也执行全部检查。
+- match 支持 sum 的 unit/record/位置负载、option 的 None/Some，以及 record/tuple/sum/option 的递归 pattern；有预算的 pattern matrix 允许同一顶层 constructor 使用互补嵌套分支，并检查完整穷尽性、不可达分支和积类型相关性。record 字段可重命名绑定，分支可从 binding 递归构造 option/sum/record/tuple/list，并静态统一结果类型。命名 record 构造会补齐字段默认值；派生列可继续 filter/sort/select，空表也执行全部检查。
 - 以任务队列、嵌套配置、事件收件箱、离线同步和 session/cache 推演 ADT 与日常操作，形成 [实际场景与查询覆盖矩阵](SCENARIOS.md)；ADT 派生和集合查询分别拆为 #35/#36。
 - 查询参考明确记录当前 grammar、stage schema、执行顺序、match 规则、错误类别和已实现/计划边界；任务、配置、事件三个示例都由语言测试执行。
 - 原子脚本、可读 CLI 输出、JSON 输出、文件/stdin、多行 REPL、正确退出码及 EOF 处理。
@@ -47,14 +47,14 @@ cargo run -- run --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 83 项测试通过：`tests/language.rs` 48 项、`tests/storage.rs` 15 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 8 项、`tests/codec.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
+当前全部 85 项测试通过：`tests/language.rs` 50 项、`tests/storage.rs` 15 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 8 项、`tests/codec.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
 ## 后续工作
 
 - #2：以当前查询参考完善完整语言 RFC；类型推断、更新与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
-- #8/#10/#11/#34–#36：在已实现的默认值、版本化 value codec、递归 ADT pattern、typed value construction、多键 sort、范围 take、布尔组合和基础集合函数上继续完善算术、option/元素谓词、参数和 group/aggregate。#9/#12/#34 已完成；#35 已具备递归解构和新值构造，仍缺同 constructor 多分支穷尽分析与 prepared plan 重绑定。
+- #8/#10/#11/#34–#36：在已实现的默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、typed value construction、多键 sort、范围 take、布尔组合和基础集合函数上继续完善算术、option/元素谓词、参数和 group/aggregate。#9/#12/#34 已完成；#35 的查询侧只剩 prepared plan 在 schema revision 变化后的重绑定。
 - #13/#14/#15/#16：先让 redb 固定内部表和单写事务接管 Engine，再补齐故障模型、CRUD/upsert、索引计划及 explain。
 - #17–#20：实现 schema/data migration、ledger、diff、备份还原与显式旧数据转换。
 - #21–#24：继续打磨 REPL 历史/补全/格式化、协议、服务预算和正式发布。

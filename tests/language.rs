@@ -47,9 +47,10 @@ fn executable_examples() {
             .iter()
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>(),
-        ["id", "event"]
+        ["id", "event_kind", "event"]
     );
     assert!(r.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(r.rows[0]["event_kind"].cmp_eq(&Value::Text("purchase".into())));
 
     let mut jobs = Engine::memory();
     let r = ok(&mut jobs, include_str!("../examples/job_queue.uid"));
@@ -63,6 +64,14 @@ fn executable_examples() {
             .collect::<Vec<_>>(),
         ["id", "state_label", "payload", "state"]
     );
+
+    let mut sync = Engine::memory();
+    let r = ok(&mut sync, include_str!("../examples/sync_conflicts.uid"));
+    assert_eq!(r.rows.len(), 3);
+    assert!(r.rows[0]["id"].cmp_eq(&Value::Text("docs".into())));
+    assert!(r.rows[0]["local_change"].cmp_eq(&Value::Text("modified".into())));
+    assert!(r.rows[1]["local_change"].cmp_eq(&Value::Text("added".into())));
+    assert!(r.rows[2]["local_change"].cmp_eq(&Value::Text("none".into())));
 }
 
 #[test]
@@ -1070,6 +1079,78 @@ fn nested_patterns_are_typed_and_refutable_on_empty_tables() {
             result.message
         );
     }
+}
+
+#[test]
+fn complementary_nested_patterns_are_exhaustive_and_reachable() {
+    let setup = "type Change =\n  Added {path text}\n  | Modified {path text, before text, after text}\n  | Deleted {path text, before text}\ntype SyncState =\n  Clean {revision text}\n  | Conflict {local Change, remote Change}\ntype Workspace =\n  id text\n  state SyncState\ntable workspaces Workspace";
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        &format!(
+            "{setup}\ninsert workspaces {{id = \"a\", state = Conflict {{local = Added {{path = \"a.txt\"}}, remote = Deleted {{path = \"a.txt\", before = \"old\"}}}}}}\ninsert workspaces {{id = \"b\", state = Conflict {{local = Modified {{path = \"b.txt\", before = \"old\", after = \"new\"}}, remote = Added {{path = \"b.txt\"}}}}}}\ninsert workspaces {{id = \"c\", state = Conflict {{local = Deleted {{path = \"c.txt\", before = \"old\"}}, remote = Added {{path = \"c.txt\"}}}}}}\ninsert workspaces {{id = \"d\", state = Clean {{revision = \"r1\"}}}}"
+        ),
+    );
+    let result = ok(
+        &mut engine,
+        "from workspaces\nderive local_kind =\n  match state\n    Conflict {local = Added {path}, ..} => \"added\"\n    Conflict {local = Modified {path, ..}, ..} => \"modified\"\n    Conflict {local = Deleted {path, ..}, ..} => \"deleted\"\n    Clean {..} => \"clean\"\nsort id\nselect {id, local_kind}",
+    );
+    for (row, expected) in result
+        .rows
+        .iter()
+        .zip(["added", "modified", "deleted", "clean"])
+    {
+        assert!(row["local_kind"].cmp_eq(&Value::Text(expected.into())));
+    }
+
+    let mut empty = Engine::memory();
+    ok(&mut empty, setup);
+    let missing = empty.execute(
+        "from workspaces\nderive local_kind =\n  match state\n    Conflict {local = Added {..}, ..} => \"added\"\n    Conflict {local = Modified {..}, ..} => \"modified\"\n    Clean {..} => \"clean\"",
+    );
+    assert!(!missing.ok);
+    assert_eq!(missing.error.as_ref().unwrap().code, "E_MATCH");
+    assert!(
+        missing.message.contains("missing Conflict"),
+        "{}",
+        missing.message
+    );
+    assert!(missing.message.contains("Deleted"), "{}", missing.message);
+
+    let unreachable = empty.execute(
+        "from workspaces\nderive local_kind =\n  match state\n    Conflict {local, ..} => \"conflict\"\n    Conflict {local = Added {..}, ..} => \"added\"\n    Clean {..} => \"clean\"",
+    );
+    assert!(!unreachable.ok);
+    assert_eq!(unreachable.error.as_ref().unwrap().code, "E_MATCH");
+    assert!(
+        unreachable.message.contains("branch 2 is unreachable"),
+        "{}",
+        unreachable.message
+    );
+}
+
+#[test]
+fn nested_pattern_coverage_preserves_product_correlations() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type PairState = Pair((option int, option int)) | Empty\ntype Row =\n  state PairState\ntable rows Row",
+    );
+    let exhaustive = ok(
+        &mut engine,
+        "from rows\nderive category =\n  match state\n    Pair (Some _, _) => \"left\"\n    Pair (None, Some _) => \"right\"\n    Pair (None, None) => \"neither\"\n    Empty => \"empty\"",
+    );
+    assert!(exhaustive.rows.is_empty());
+
+    let non_exhaustive = engine.execute(
+        "from rows\nderive category =\n  match state\n    Pair (Some _, None) => \"left\"\n    Pair (None, Some _) => \"right\"\n    Pair (None, None) => \"neither\"\n    Empty => \"empty\"",
+    );
+    assert!(!non_exhaustive.ok);
+    assert!(
+        non_exhaustive.message.contains("Some"),
+        "{}",
+        non_exhaustive.message
+    );
 }
 
 #[test]

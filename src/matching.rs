@@ -97,9 +97,8 @@ fn bind_patterns<'a>(
     arm_count: usize,
 ) -> Result<Vec<Vec<Column>>> {
     let source = match_source(catalog, source_ty, source_name)?;
-    let mut seen = BTreeSet::new();
-    let mut covered = BTreeSet::new();
-    let mut wildcard = false;
+    let mut matrix: Vec<Vec<CoveragePattern>> = Vec::with_capacity(arm_count);
+    let mut budget = CoverageBudget::default();
     let mut all_bindings = Vec::with_capacity(arm_count);
     for (index, pattern) in patterns.into_iter().enumerate() {
         let bindings = match pattern {
@@ -110,23 +109,13 @@ fn bind_patterns<'a>(
                         "wildcard match branch must be last; later branches are unreachable",
                     ));
                 }
-                wildcard = true;
                 Vec::new()
             }
             MatchPattern::Constructor { name, payload, tag } => {
                 let (resolved_tag, argument_types, display_name) =
                     resolve_constructor(catalog, &source, source_name, name)?;
-                if !seen.insert(resolved_tag) {
-                    return Err(Error::new(
-                        "E_MATCH",
-                        format!("constructor '{display_name}' is matched more than once"),
-                    ));
-                }
                 *tag = Some(resolved_tag);
                 let info = bind_payload(catalog, &display_name, &argument_types, payload)?;
-                if info.irrefutable {
-                    covered.insert(resolved_tag);
-                }
                 info.bindings
             }
             _ => {
@@ -136,28 +125,55 @@ fn bind_patterns<'a>(
                 ));
             }
         };
+        let coverage = coverage_pattern(catalog, source_ty, pattern, source_name)?;
+        if !pattern_is_useful(
+            catalog,
+            &matrix,
+            std::slice::from_ref(&coverage),
+            std::slice::from_ref(source_ty),
+            &mut budget,
+        )? {
+            let duplicate = matrix
+                .iter()
+                .any(|row| row.as_slice() == std::slice::from_ref(&coverage));
+            let message = if duplicate {
+                coverage.root_name().map_or_else(
+                    || format!("match branch {} is matched more than once", index + 1),
+                    |name| {
+                        format!(
+                            "constructor '{name}' is matched more than once with the same pattern"
+                        )
+                    },
+                )
+            } else {
+                format!(
+                    "match branch {} is unreachable; its pattern is already covered by earlier branches",
+                    index + 1
+                )
+            };
+            return Err(Error::new("E_MATCH", message));
+        }
+        matrix.push(vec![coverage]);
         all_bindings.push(bindings);
     }
-    if !wildcard {
-        let missing = match &source {
-            MatchSource::Enum(enum_type) => enum_type
-                .variants
-                .iter()
-                .filter(|variant| !covered.contains(&MatchTag::Variant(variant.id)))
-                .map(|variant| variant.name.clone())
-                .collect::<Vec<_>>(),
-            MatchSource::Option(_) => [(MatchTag::None, "None"), (MatchTag::Some, "Some")]
-                .into_iter()
-                .filter(|(tag, _)| !covered.contains(tag))
-                .map(|(_, name)| name.into())
-                .collect(),
-        };
-        if !missing.is_empty() {
-            return Err(Error::new(
-                "E_MATCH",
-                format!("non-exhaustive match; missing {}", missing.join(", ")),
-            ));
-        }
+    if let Some(witness) = uncovered_patterns(
+        catalog,
+        &matrix,
+        std::slice::from_ref(source_ty),
+        &mut budget,
+    )? {
+        let missing = missing_top_level_constructors(catalog, source_ty, &matrix, &mut budget)?;
+        let witness = witness
+            .first()
+            .map(CoveragePattern::display)
+            .unwrap_or_else(|| "_".into());
+        return Err(Error::new(
+            "E_MATCH",
+            format!(
+                "non-exhaustive match; missing {}; uncovered example {witness}",
+                missing.join(", ")
+            ),
+        ));
     }
     Ok(all_bindings)
 }
@@ -307,14 +323,12 @@ fn bind_payload(
 
 struct PatternInfo {
     bindings: Vec<Column>,
-    irrefutable: bool,
 }
 
 impl PatternInfo {
     fn irrefutable() -> Self {
         Self {
             bindings: Vec::new(),
-            irrefutable: true,
         }
     }
 }
@@ -334,17 +348,13 @@ fn bind_nested_pattern(
                 default: None,
                 id: 0,
             }],
-            irrefutable: true,
         }),
         MatchPattern::Constructor { name, payload, tag } => {
             let source = match_source(catalog, expected, context)?;
             let (resolved_tag, argument_types, display_name) =
                 resolve_constructor(catalog, &source, context, name)?;
             *tag = Some(resolved_tag);
-            let mut info = bind_payload(catalog, &display_name, &argument_types, payload)?;
-            info.irrefutable &=
-                matches!(&source, MatchSource::Enum(enum_type) if enum_type.variants.len() == 1);
-            Ok(info)
+            bind_payload(catalog, &display_name, &argument_types, payload)
         }
         MatchPattern::Record { fields, rest } => {
             let ScalarType::Record(definitions) = catalog.underlying(expected)? else {
@@ -443,9 +453,7 @@ fn bind_record_fields(
 fn combine_patterns(infos: Vec<PatternInfo>) -> Result<PatternInfo> {
     let mut seen = BTreeSet::new();
     let mut bindings = Vec::new();
-    let mut irrefutable = true;
     for info in infos {
-        irrefutable &= info.irrefutable;
         for binding in info.bindings {
             if !seen.insert(binding.name.clone()) {
                 return Err(Error::new(
@@ -456,10 +464,475 @@ fn combine_patterns(infos: Vec<PatternInfo>) -> Result<PatternInfo> {
             bindings.push(binding);
         }
     }
-    Ok(PatternInfo {
-        bindings,
-        irrefutable,
+    Ok(PatternInfo { bindings })
+}
+
+const MAX_COVERAGE_STEPS: usize = 100_000;
+
+// Bindings and wildcards cover the same value space. Constructors retain only
+// the shape needed by the usefulness algorithm; binding types stay in the
+// regular typed pattern tree used during evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoveragePattern {
+    Wildcard,
+    Constructor(CoverageConstructor, Vec<CoveragePattern>),
+}
+
+impl CoveragePattern {
+    fn root_name(&self) -> Option<String> {
+        match self {
+            Self::Wildcard => None,
+            Self::Constructor(constructor, _) => constructor.name(),
+        }
+    }
+
+    fn display(&self) -> String {
+        match self {
+            Self::Wildcard => "_".into(),
+            Self::Constructor(CoverageConstructor::Variant { name, .. }, arguments) => {
+                if arguments.is_empty() {
+                    name.clone()
+                } else if let [Self::Constructor(CoverageConstructor::Record(fields), values)] =
+                    arguments.as_slice()
+                {
+                    format!("{name} {}", display_record(fields, values))
+                } else {
+                    format!(
+                        "{name}({})",
+                        arguments
+                            .iter()
+                            .map(Self::display)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
+            Self::Constructor(CoverageConstructor::None, _) => "None".into(),
+            Self::Constructor(CoverageConstructor::Some, arguments) => {
+                format!(
+                    "Some {}",
+                    arguments
+                        .first()
+                        .map(Self::display)
+                        .unwrap_or_else(|| "_".into())
+                )
+            }
+            Self::Constructor(CoverageConstructor::Record(fields), values) => {
+                display_record(fields, values)
+            }
+            Self::Constructor(CoverageConstructor::Tuple, values) => format!(
+                "({})",
+                values
+                    .iter()
+                    .map(Self::display)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+fn display_record(fields: &[String], values: &[CoveragePattern]) -> String {
+    format!(
+        "{{{}}}",
+        fields
+            .iter()
+            .zip(values)
+            .map(|(field, value)| format!("{field} = {}", value.display()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoverageConstructor {
+    Variant { id: u64, name: String },
+    None,
+    Some,
+    Record(Vec<String>),
+    Tuple,
+}
+
+impl CoverageConstructor {
+    fn name(&self) -> Option<String> {
+        match self {
+            Self::Variant { name, .. } => Some(name.clone()),
+            Self::None => Some("None".into()),
+            Self::Some => Some("Some".into()),
+            Self::Record(_) | Self::Tuple => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ConstructorSpec {
+    constructor: CoverageConstructor,
+    arguments: Vec<ScalarType>,
+}
+
+struct CoverageBudget {
+    remaining: usize,
+}
+
+impl Default for CoverageBudget {
+    fn default() -> Self {
+        Self {
+            remaining: MAX_COVERAGE_STEPS,
+        }
+    }
+}
+
+impl CoverageBudget {
+    fn step(&mut self) -> Result<()> {
+        self.remaining = self.remaining.checked_sub(1).ok_or_else(|| {
+            Error::new(
+                "E_LIMIT",
+                format!(
+                    "match coverage analysis exceeds {MAX_COVERAGE_STEPS} steps; simplify the nested patterns"
+                ),
+            )
+        })?;
+        Ok(())
+    }
+}
+
+fn coverage_pattern(
+    catalog: &Catalog,
+    expected: &ScalarType,
+    pattern: &MatchPattern,
+    context: &str,
+) -> Result<CoveragePattern> {
+    match pattern {
+        MatchPattern::Wildcard | MatchPattern::Binding(_) => Ok(CoveragePattern::Wildcard),
+        MatchPattern::Constructor { name, payload, .. } => {
+            let source = match_source(catalog, expected, context)?;
+            let (tag, arguments, display_name) =
+                resolve_constructor(catalog, &source, context, name)?;
+            let constructor = match tag {
+                MatchTag::Variant(id) => CoverageConstructor::Variant {
+                    id,
+                    name: display_name,
+                },
+                MatchTag::None => CoverageConstructor::None,
+                MatchTag::Some => CoverageConstructor::Some,
+            };
+            let values = match payload {
+                MatchPayload::Unit => Vec::new(),
+                MatchPayload::Record { fields, .. } => {
+                    let [record_type] = arguments.as_slice() else {
+                        return Err(Error::new(
+                            "E_MATCH",
+                            format!("invalid record payload in pattern for {context}"),
+                        ));
+                    };
+                    vec![coverage_record_pattern(
+                        catalog,
+                        record_type,
+                        fields,
+                        context,
+                    )?]
+                }
+                MatchPayload::Positional(patterns) => patterns
+                    .iter()
+                    .zip(&arguments)
+                    .map(|(pattern, ty)| coverage_pattern(catalog, ty, pattern, context))
+                    .collect::<Result<_>>()?,
+            };
+            Ok(CoveragePattern::Constructor(constructor, values))
+        }
+        MatchPattern::Record { fields, .. } => {
+            coverage_record_pattern(catalog, expected, fields, context)
+        }
+        MatchPattern::Tuple(patterns) => {
+            let ScalarType::Tuple(items) = catalog.underlying(expected)? else {
+                return Err(Error::new(
+                    "E_MATCH",
+                    format!("{context} is not a tuple and cannot use a tuple pattern"),
+                ));
+            };
+            let values = patterns
+                .iter()
+                .zip(items)
+                .map(|(pattern, ty)| coverage_pattern(catalog, ty, pattern, context))
+                .collect::<Result<_>>()?;
+            Ok(CoveragePattern::Constructor(
+                CoverageConstructor::Tuple,
+                values,
+            ))
+        }
+    }
+}
+
+fn coverage_record_pattern(
+    catalog: &Catalog,
+    expected: &ScalarType,
+    fields: &[crate::query::MatchField],
+    context: &str,
+) -> Result<CoveragePattern> {
+    let ScalarType::Record(definitions) = catalog.underlying(expected)? else {
+        return Err(Error::new(
+            "E_MATCH",
+            format!("{context} is not a record and cannot use a record pattern"),
+        ));
+    };
+    let values = definitions
+        .iter()
+        .map(|definition| {
+            fields
+                .iter()
+                .find(|field| field.field == definition.name)
+                .map_or(Ok(CoveragePattern::Wildcard), |field| {
+                    coverage_pattern(catalog, &definition.ty, &field.pattern, context)
+                })
+        })
+        .collect::<Result<_>>()?;
+    Ok(CoveragePattern::Constructor(
+        CoverageConstructor::Record(definitions.iter().map(|field| field.name.clone()).collect()),
+        values,
+    ))
+}
+
+fn constructor_specs(catalog: &Catalog, ty: &ScalarType) -> Result<Option<Vec<ConstructorSpec>>> {
+    Ok(match catalog.underlying(ty)? {
+        ScalarType::Enum(enum_type) => Some(
+            enum_type
+                .variants
+                .iter()
+                .map(|variant| ConstructorSpec {
+                    constructor: CoverageConstructor::Variant {
+                        id: variant.id,
+                        name: variant.name.clone(),
+                    },
+                    arguments: variant.args.clone(),
+                })
+                .collect(),
+        ),
+        ScalarType::Option(inner) => Some(vec![
+            ConstructorSpec {
+                constructor: CoverageConstructor::None,
+                arguments: Vec::new(),
+            },
+            ConstructorSpec {
+                constructor: CoverageConstructor::Some,
+                arguments: vec![inner.as_ref().clone()],
+            },
+        ]),
+        ScalarType::Record(fields) => Some(vec![ConstructorSpec {
+            constructor: CoverageConstructor::Record(
+                fields.iter().map(|field| field.name.clone()).collect(),
+            ),
+            arguments: fields.iter().map(|field| field.ty.clone()).collect(),
+        }]),
+        ScalarType::Tuple(items) => Some(vec![ConstructorSpec {
+            constructor: CoverageConstructor::Tuple,
+            arguments: items.clone(),
+        }]),
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::List(_)
+        | ScalarType::Named(_)
+        | ScalarType::Ref(_) => None,
     })
+}
+
+fn pattern_is_useful(
+    catalog: &Catalog,
+    matrix: &[Vec<CoveragePattern>],
+    query: &[CoveragePattern],
+    types: &[ScalarType],
+    budget: &mut CoverageBudget,
+) -> Result<bool> {
+    // This is the single-scrutinee form of pattern-matrix usefulness analysis.
+    // Expanding product constructors into more columns preserves correlations
+    // between tuple/record fields instead of checking each field independently.
+    budget.step()?;
+    if query.is_empty() {
+        return Ok(matrix.is_empty());
+    }
+    let Some((head_type, tail_types)) = types.split_first() else {
+        return Err(Error::new(
+            "E_MATCH",
+            "invalid pattern coverage type vector",
+        ));
+    };
+    match &query[0] {
+        CoveragePattern::Wildcard => {
+            if let Some(constructors) = constructor_specs(catalog, head_type)? {
+                for constructor in constructors {
+                    let specialized = specialize_matrix(
+                        matrix,
+                        &constructor.constructor,
+                        constructor.arguments.len(),
+                    );
+                    let mut specialized_query =
+                        vec![CoveragePattern::Wildcard; constructor.arguments.len()];
+                    specialized_query.extend_from_slice(&query[1..]);
+                    let mut specialized_types = constructor.arguments;
+                    specialized_types.extend_from_slice(tail_types);
+                    if pattern_is_useful(
+                        catalog,
+                        &specialized,
+                        &specialized_query,
+                        &specialized_types,
+                        budget,
+                    )? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            } else {
+                pattern_is_useful(
+                    catalog,
+                    &default_matrix(matrix),
+                    &query[1..],
+                    tail_types,
+                    budget,
+                )
+            }
+        }
+        CoveragePattern::Constructor(constructor, arguments) => {
+            let spec = constructor_specs(catalog, head_type)?
+                .and_then(|constructors| {
+                    constructors
+                        .into_iter()
+                        .find(|candidate| candidate.constructor == *constructor)
+                })
+                .ok_or_else(|| {
+                    Error::new("E_MATCH", "pattern constructor does not match its type")
+                })?;
+            let specialized = specialize_matrix(matrix, constructor, spec.arguments.len());
+            let mut specialized_query = arguments.clone();
+            specialized_query.extend_from_slice(&query[1..]);
+            let mut specialized_types = spec.arguments;
+            specialized_types.extend_from_slice(tail_types);
+            pattern_is_useful(
+                catalog,
+                &specialized,
+                &specialized_query,
+                &specialized_types,
+                budget,
+            )
+        }
+    }
+}
+
+fn uncovered_patterns(
+    catalog: &Catalog,
+    matrix: &[Vec<CoveragePattern>],
+    types: &[ScalarType],
+    budget: &mut CoverageBudget,
+) -> Result<Option<Vec<CoveragePattern>>> {
+    budget.step()?;
+    let Some((head_type, tail_types)) = types.split_first() else {
+        return Ok(matrix.is_empty().then(Vec::new));
+    };
+    if let Some(constructors) = constructor_specs(catalog, head_type)? {
+        for constructor in constructors {
+            let specialized = specialize_matrix(
+                matrix,
+                &constructor.constructor,
+                constructor.arguments.len(),
+            );
+            let mut specialized_types = constructor.arguments.clone();
+            specialized_types.extend_from_slice(tail_types);
+            if let Some(mut witness) =
+                uncovered_patterns(catalog, &specialized, &specialized_types, budget)?
+            {
+                let tail = witness.split_off(constructor.arguments.len());
+                let mut result = vec![CoveragePattern::Constructor(
+                    constructor.constructor,
+                    witness,
+                )];
+                result.extend(tail);
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    } else {
+        uncovered_patterns(catalog, &default_matrix(matrix), tail_types, budget).map(|result| {
+            result.map(|mut tail| {
+                tail.insert(0, CoveragePattern::Wildcard);
+                tail
+            })
+        })
+    }
+}
+
+fn missing_top_level_constructors(
+    catalog: &Catalog,
+    source_type: &ScalarType,
+    matrix: &[Vec<CoveragePattern>],
+    budget: &mut CoverageBudget,
+) -> Result<Vec<String>> {
+    let constructors = constructor_specs(catalog, source_type)?.ok_or_else(|| {
+        Error::new(
+            "E_MATCH",
+            "top-level match source does not have constructors",
+        )
+    })?;
+    let mut missing = Vec::new();
+    for constructor in constructors {
+        let pattern = CoveragePattern::Constructor(
+            constructor.constructor.clone(),
+            vec![CoveragePattern::Wildcard; constructor.arguments.len()],
+        );
+        if pattern_is_useful(
+            catalog,
+            matrix,
+            std::slice::from_ref(&pattern),
+            std::slice::from_ref(source_type),
+            budget,
+        )? {
+            missing.push(
+                constructor
+                    .constructor
+                    .name()
+                    .unwrap_or_else(|| pattern.display()),
+            );
+        }
+    }
+    if missing.is_empty() {
+        missing.push("a nested value".into());
+    }
+    Ok(missing)
+}
+
+fn specialize_matrix(
+    matrix: &[Vec<CoveragePattern>],
+    constructor: &CoverageConstructor,
+    arity: usize,
+) -> Vec<Vec<CoveragePattern>> {
+    matrix
+        .iter()
+        .filter_map(|row| {
+            let (head, tail) = row.split_first()?;
+            match head {
+                CoveragePattern::Wildcard => {
+                    let mut specialized = vec![CoveragePattern::Wildcard; arity];
+                    specialized.extend_from_slice(tail);
+                    Some(specialized)
+                }
+                CoveragePattern::Constructor(candidate, arguments) if candidate == constructor => {
+                    let mut specialized = arguments.clone();
+                    specialized.extend_from_slice(tail);
+                    Some(specialized)
+                }
+                CoveragePattern::Constructor(_, _) => None,
+            }
+        })
+        .collect()
+}
+
+fn default_matrix(matrix: &[Vec<CoveragePattern>]) -> Vec<Vec<CoveragePattern>> {
+    matrix
+        .iter()
+        .filter_map(|row| {
+            let (head, tail) = row.split_first()?;
+            matches!(head, CoveragePattern::Wildcard).then(|| tail.to_vec())
+        })
+        .collect()
 }
 
 fn infer_result_type(
