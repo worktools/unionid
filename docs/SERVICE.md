@@ -17,7 +17,7 @@ unionid server 面向本机受信应用：默认监听 <code>127.0.0.1:7878</cod
 | 空闲连接 / socket write | 30 秒 | 关闭空闲或不读取响应的客户端 |
 | match coverage | 100,000 analysis steps | 返回 <code>E_LIMIT</code>，要求简化嵌套 pattern |
 
-查询、写批次与 migration 使用同一个 Engine mutex，最多只有一个请求进入 Engine；其他已接纳连接形成至多 64 个等待者，因此不会产生无界线程或请求队列。读写只观察完整的 Engine 提交。查询扫描和 aggregate 输出定期检查 deadline；其他批次至少在每条语句前后检查，若计算期间越过 deadline，候选状态会被丢弃而不发布。排序受 working-row 上限约束；group/aggregate 另有限制 group 数、accumulator cell 和估算状态内存，查询局部函数限制定义数、调用深度和展开步骤，具体数值见 [QUERY.md](QUERY.md)。
+查询、写批次与 migration 使用同一个 Engine mutex，最多只有一个请求进入 Engine；其他已接纳连接形成至多 64 个等待者，因此不会产生无界线程或请求队列。读写只观察完整的 Engine 提交。查询扫描和 aggregate 输出定期检查 deadline；其他批次至少在每条语句前后检查，若计算期间越过 deadline，候选状态会被丢弃而不发布。排序受 working-row 上限约束；group/aggregate 另有限制 group 数、accumulator cell 和估算状态内存，查询局部函数限制定义数、调用深度和展开步骤，具体数值见 [QUERY.md](QUERY.md)。`explain` 只绑定查询并读取表／索引元数据和目标 posting，不扫描或复制数据行。
 
 TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON byte buffer。版本化响应超限时仍回显 request ID 与 schema；旧协议得到旧格式的 <code>E_LIMIT</code>。
 

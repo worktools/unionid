@@ -404,11 +404,13 @@ impl Parser {
                 self.delete()?
             } else if self.word("migration") {
                 self.migration()?
+            } else if self.word("explain") {
+                self.explain()?
             } else if self.word("from") {
                 self.pipeline()?
             } else {
                 return Err(self.error(
-                    "expected type / table / insert / upsert / update / delete / migration / from (or legacy create table/index)",
+                    "expected type / table / insert / upsert / update / delete / migration / explain / from (or legacy create table/index)",
                 ));
             };
             out.push(LocatedStatement { statement, span });
@@ -429,6 +431,21 @@ impl Parser {
             return Err(self.error("empty script"));
         }
         Ok(out)
+    }
+
+    fn explain(&mut self) -> Result<Statement> {
+        self.expect_word("explain")?;
+        let nested = *self.kind() == Kind::Newline;
+        if nested {
+            self.block()?;
+        }
+        let Statement::Pipeline(pipeline) = self.pipeline()? else {
+            unreachable!("pipeline parser must return a pipeline statement")
+        };
+        if nested {
+            self.expect(Kind::Dedent)?;
+        }
+        Ok(Statement::Explain(pipeline))
     }
 
     fn define_type(&mut self) -> Result<Statement> {

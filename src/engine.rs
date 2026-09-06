@@ -250,8 +250,9 @@ impl Engine {
             ));
         }
         for located in &mut statements {
-            let Statement::Pipeline(pipeline) = &mut located.statement else {
-                unreachable!("mutating statements were rejected")
+            let pipeline = match &mut located.statement {
+                Statement::Explain(pipeline) | Statement::Pipeline(pipeline) => pipeline,
+                _ => unreachable!("mutating statements were rejected"),
             };
             self.db
                 .prepare_pipeline(pipeline)

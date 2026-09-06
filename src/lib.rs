@@ -23,7 +23,10 @@ pub mod syntax;
 pub mod wal;
 
 pub use backup::BackupInfo;
-pub use db::{QueryResponse, SchemaInfo, UpsertAction};
+pub use db::{
+    QueryAccessKind, QueryAccessPlan, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind,
+    SchemaInfo, UpsertAction,
+};
 pub use engine::{Engine, PreparedQuery, StorageIntegrity};
 pub use error::{Error, Result, Span};
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};

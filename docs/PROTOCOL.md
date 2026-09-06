@@ -55,11 +55,11 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 }
 ~~~
 
-<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>，upsert 另有 <code>upsert_action</code>；warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
+<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；它不执行数据行。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>，upsert 另有 <code>upsert_action</code>；warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
 
 ## Rust 嵌入接口
 
-<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline 并记录当前 schema revision/hash，<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
+<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline 或 explain 并记录当前 schema revision/hash，<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
 
 可运行示例：
 

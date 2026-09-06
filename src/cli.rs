@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_directory};
-use crate::{Engine, ProtocolRequest, ProtocolResponse, QueryResponse, SchemaCheck, Value, backup};
+use crate::{
+    Engine, ProtocolRequest, ProtocolResponse, QueryAccessKind, QueryResponse, QueryStageKind,
+    SchemaCheck, Value, backup,
+};
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
     run_local_engine(Engine::memory(), source, json)
@@ -578,7 +581,46 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
         eprintln!("warning: {warning}");
     }
     if !json {
-        if response.columns.is_empty() {
+        if let Some(plan) = &response.plan {
+            let access = match plan.access.kind {
+                QueryAccessKind::FullScan => "full_scan",
+                QueryAccessKind::PrimaryKeyLookup => "primary_key_lookup",
+                QueryAccessKind::SecondaryIndexLookup => "secondary_index_lookup",
+            };
+            let index = plan
+                .access
+                .index
+                .as_deref()
+                .map(|index| format!(" via {index}"))
+                .unwrap_or_default();
+            let condition = plan
+                .access
+                .condition
+                .as_deref()
+                .map(|condition| format!(" using {condition}"))
+                .unwrap_or_default();
+            println!("table | {}", plan.table);
+            println!(
+                "access | {access}{index}{condition} ({} of {} row(s))",
+                plan.access.estimated_rows, plan.access.table_rows
+            );
+            println!(
+                "stages | {}",
+                plan.stages
+                    .iter()
+                    .map(|stage| query_stage_name(&stage.kind))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            );
+            println!(
+                "result | {}",
+                plan.result_schema
+                    .iter()
+                    .map(|column| format!("{} {}", column.name, column.ty))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        } else if response.columns.is_empty() {
             println!("{}", response.message);
         } else {
             println!(
@@ -605,6 +647,20 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn query_stage_name(stage: &QueryStageKind) -> &'static str {
+    match stage {
+        QueryStageKind::Let => "let",
+        QueryStageKind::Filter => "filter",
+        QueryStageKind::FilterMatch => "filter_match",
+        QueryStageKind::Derive => "derive",
+        QueryStageKind::DeriveMatch => "derive_match",
+        QueryStageKind::Aggregate => "aggregate",
+        QueryStageKind::Select => "select",
+        QueryStageKind::Sort => "sort",
+        QueryStageKind::Take => "take",
+    }
 }
 
 pub fn display_value(value: &Value) -> String {

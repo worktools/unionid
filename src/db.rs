@@ -23,6 +23,11 @@ pub const MAX_AGGREGATE_OUTPUTS: usize = 256;
 pub const MAX_AGGREGATE_CELLS: usize = 1_000_000;
 pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
 
+struct PlannedAccess {
+    plan: QueryAccessPlan,
+    candidates: Option<Vec<RowId>>,
+}
+
 struct GroupAccumulator {
     fields: Vec<(String, Value)>,
     states: Vec<AggregateState>,
@@ -302,6 +307,53 @@ pub struct ResponseColumn {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum QueryAccessKind {
+    FullScan,
+    PrimaryKeyLookup,
+    SecondaryIndexLookup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryAccessPlan {
+    pub kind: QueryAccessKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    pub estimated_rows: usize,
+    pub table_rows: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryStageKind {
+    Let,
+    Filter,
+    FilterMatch,
+    Derive,
+    DeriveMatch,
+    Aggregate,
+    Select,
+    Sort,
+    Take,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryPlanStage {
+    pub position: usize,
+    pub kind: QueryStageKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryPlan {
+    pub table: String,
+    pub access: QueryAccessPlan,
+    pub stages: Vec<QueryPlanStage>,
+    pub result_schema: Vec<ResponseColumn>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum UpsertAction {
     Inserted,
     Updated,
@@ -324,6 +376,8 @@ pub struct QueryResponse {
     pub affected_rows: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upsert_action: Option<UpsertAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<QueryPlan>,
 }
 
 impl QueryResponse {
@@ -338,6 +392,7 @@ impl QueryResponse {
             schema: None,
             affected_rows: None,
             upsert_action: None,
+            plan: None,
         }
     }
 
@@ -352,6 +407,7 @@ impl QueryResponse {
             schema: None,
             affected_rows: None,
             upsert_action: None,
+            plan: None,
         }
     }
 
@@ -437,6 +493,7 @@ impl Database {
                 parent: _,
                 steps,
             } => self.migrate(&name, steps),
+            Statement::Explain(pipeline) => self.explain(pipeline),
             Statement::Pipeline(pipeline) => self.query(pipeline, deadline),
         }
     }
@@ -765,16 +822,7 @@ impl Database {
 
     fn mutation_target_ids(&self, target: &Pipeline) -> Result<Vec<RowId>> {
         let table = self.table(&target.from)?;
-        let candidates = if let Some(Stage::Filter(expression)) = target.stages.first() {
-            crate::expression::simple_index_equality(expression).and_then(|(column, value)| {
-                self.indexes
-                    .get(&target.from)
-                    .and_then(|columns| columns.get(column))
-                    .map(|posting| posting.get(&value.index_key()).cloned().unwrap_or_default())
-            })
-        } else {
-            None
-        };
+        let candidates = self.plan_access(target)?.candidates;
         let mut rows = match candidates {
             Some(ids) => ids
                 .into_iter()
@@ -1100,6 +1148,90 @@ impl Database {
         Ok(output)
     }
 
+    fn explain(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
+        let schema = self.prepare_pipeline(&mut pipeline)?;
+        let access = self.plan_access(&pipeline)?.plan;
+        let result_schema = schema
+            .iter()
+            .map(|column| ResponseColumn {
+                name: column.name.clone(),
+                ty: self.catalog.describe(&column.ty),
+            })
+            .collect();
+        let stages = pipeline
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(position, stage)| QueryPlanStage {
+                position: position + 1,
+                kind: match stage {
+                    Stage::Let(_) => QueryStageKind::Let,
+                    Stage::Filter(_) => QueryStageKind::Filter,
+                    Stage::FilterMatch(_) => QueryStageKind::FilterMatch,
+                    Stage::Derive(_) => QueryStageKind::Derive,
+                    Stage::DeriveMatch(_) => QueryStageKind::DeriveMatch,
+                    Stage::Aggregate(_) => QueryStageKind::Aggregate,
+                    Stage::Select(_) => QueryStageKind::Select,
+                    Stage::Sort(_) => QueryStageKind::Sort,
+                    Stage::Take { .. } => QueryStageKind::Take,
+                },
+            })
+            .collect();
+        let mut response = QueryResponse::ok_message("query plan");
+        response.plan = Some(QueryPlan {
+            table: pipeline.from,
+            access,
+            stages,
+            result_schema,
+        });
+        Ok(response)
+    }
+
+    fn plan_access(&self, pipeline: &Pipeline) -> Result<PlannedAccess> {
+        let table = self.table(&pipeline.from)?;
+        let indexed_filter = pipeline
+            .stages
+            .iter()
+            .find(|stage| !matches!(stage, Stage::Let(_)))
+            .and_then(|stage| match stage {
+                Stage::Filter(expression) => crate::expression::simple_index_equality(expression),
+                _ => None,
+            });
+        if let Some((column, value)) = indexed_filter
+            && let Some(posting) = self
+                .indexes
+                .get(&pipeline.from)
+                .and_then(|columns| columns.get(column))
+        {
+            let candidates = posting.get(&value.index_key()).cloned().unwrap_or_default();
+            let kind = if table.primary_key.as_deref() == Some(column) {
+                QueryAccessKind::PrimaryKeyLookup
+            } else {
+                QueryAccessKind::SecondaryIndexLookup
+            };
+            return Ok(PlannedAccess {
+                plan: QueryAccessPlan {
+                    kind,
+                    index: Some(format!("{}.{}", pipeline.from, column)),
+                    condition: Some(format!("{} == {}", column, value.source_text())),
+                    estimated_rows: candidates.len(),
+                    table_rows: table.rows.len(),
+                },
+                candidates: Some(candidates),
+            });
+        }
+        Ok(PlannedAccess {
+            plan: QueryAccessPlan {
+                kind: QueryAccessKind::FullScan,
+                index: None,
+                condition: None,
+                estimated_rows: table.rows.len(),
+                table_rows: table.rows.len(),
+            },
+            candidates: None,
+        })
+    }
+
     fn query(
         &self,
         mut pipeline: Pipeline,
@@ -1108,16 +1240,7 @@ impl Database {
         check_deadline(deadline)?;
         let schema = self.prepare_pipeline(&mut pipeline)?;
         let table = self.table(&pipeline.from)?;
-        let candidates = if let Some(Stage::Filter(expression)) = pipeline.stages.first() {
-            crate::expression::simple_index_equality(expression).and_then(|(column, value)| {
-                self.indexes
-                    .get(&pipeline.from)
-                    .and_then(|cols| cols.get(column))
-                    .map(|posting| posting.get(&value.index_key()).cloned().unwrap_or_default())
-            })
-        } else {
-            None
-        };
+        let candidates = self.plan_access(&pipeline)?.candidates;
         let working_rows = candidates
             .as_ref()
             .map_or(table.rows.len(), std::vec::Vec::len);
@@ -1278,6 +1401,7 @@ impl Database {
             schema: None,
             affected_rows: None,
             upsert_action: None,
+            plan: None,
         })
     }
 

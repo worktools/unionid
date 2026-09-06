@@ -30,7 +30,7 @@ take 20
 | 布尔过滤 | `filter priority + bonus >= 10` | 已实现括号、`not/and/or`、有类型算术、字段间比较、Option 辅助函数与集合谓词 | — |
 | sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、递归 record/tuple/sum/option pattern，以及完整嵌套穷尽与不可达检查 | — |
 | 投影 | `select {field, nested.field}` | 已实现并可选择普通或 ADT 派生列 | — |
-| 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | #16 增加索引计划 |
+| 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | — |
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol 与 schema-aware prepared query | #22 |
@@ -39,6 +39,7 @@ take 20
 | 其他派生列 | `derive score = priority + bonus` | 已实现 scalar 与 bool expression、typed 参数及后续 stage 作用域 | — |
 | 分组与汇总 | `aggregate` / `group {key} ...` | 已实现 count/sum/min/max、typed 空输入语义与资源上限 | — |
 | 查询局部定义 | `let retryable = attempt -> attempt < 3` | 已实现常量、单/多参数非递归纯函数、有限推断、词法遮蔽与展开预算 | — |
+| 执行计划 | `explain from tasks \| filter id == 1` | 已实现 full scan、主键／二级索引 lookup、候选行估计、stage 顺序与结果 schema | — |
 | 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows、原子约束与增量持久维护 | #15 |
 | Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId、结构化 action 与增量持久维护 | #15 |
 | schema migration | `migration name` | 已实现显式 ADT schema 操作、typed conversion、全引用路径重写、版本化 runner/ledger 与原子索引维护 | #19 继续补声明式 diff 与更细 plan 报告 |
@@ -68,6 +69,7 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 
 ```text
 query             = "from" table pipeline-stage*
+explain           = "explain" query | "explain" newline indent query dedent
 pipeline-stage    = newline stage | "|" stage
 stage             = local-binding | value-filter | match-filter | derive-expression | derive-match | aggregate | group-aggregate | select | sort | take
 
@@ -246,6 +248,32 @@ from tasks | filter id > 1 | take 1
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
+## Explain 与类型化索引计划
+
+`explain` 在相同的 schema、字段、pattern、局部函数和参数绑定规则下准备查询，但不读取、复制或执行数据行：
+
+```text
+explain from tasks | filter id == 1 | select {id, state}
+```
+
+复杂查询也可缩进：
+
+```text
+explain
+  from tasks
+  let target int = 1
+  filter id == target
+  select {id, state}
+```
+
+成功响应的 `plan` 是结构化值，包含源表、访问方式、索引名、用于 lookup 的等值条件、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表，以及最终结果 schema。访问方式为 `full_scan`、`primary_key_lookup` 或 `secondary_index_lookup`。CLI 会把这些字段打印成可读的四行计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。
+
+当前只有第一个改变或观察行的 stage 是单纯 `field == literal` 或 `literal == field` 时才选择等值索引；前置 `let` 不改变行，可以跳过。planner 不会把 filter 越过 derive、aggregate、select、sort 或 take，也不会从复合布尔表达式中抽取条件，因为提前缩小候选集可能隐藏前序表达式错误或改变短路行为。索引 lookup 未命中时直接产生 0 个候选行。
+
+所有可存储的静态类型都使用与 `cmp_eq` 相同的稳定结构键，包括命名类型、record、tuple、sum、option 和 list。Option 的 `None` 与 sum 的不同 constructor 有不同键，不会按 null 或缺失值混合。索引从 row 派生，insert/update/delete、redb 恢复和 migration 后都会维护或重建；是否存在索引不能改变查询结果。
+
+`estimated_rows` 是当前快照中将进入 pipeline 的确切候选数量：full scan 等于表行数，lookup 等于 posting 长度。它用于验证访问路径和工作集上限，不是基于统计信息的长期基数预测，也不承诺固定性能倍数。测量时应在同一数据集上分别执行无索引与有索引查询，同时用 explain 确认访问路径；记录行数、候选数、构建模式和硬件环境。
+
 ## 查询局部 let 与纯函数
 
 `let` 给重复表达式命名。没有参数时定义表达式别名；一个参数可直接写在箭头前，多个参数用括号和逗号明确边界：
@@ -305,7 +333,7 @@ select {id, priority}
 - 优先级从高到低为括号／比较／函数、`not`、`and`、`or`。混用 `and` 与 `or` 的规范源码使用括号明确分组。`and` 和 `or` 在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。
 - 普通字段路径只能穿过 record。variant 和 option 的内容必须用显式模式处理。
 
-如果查询的第一个 stage 是单纯的 `field == literal` 或 `literal == field`，并且该字段有索引，引擎可以直接读取候选行。复合布尔表达式暂时扫描候选表。索引和扫描共用相同的类型化相等规则；是否存在索引不能改变结果。
+如果查询的第一个有效数据 stage 是单纯的有索引等值条件，引擎会按上述类型化计划直接读取候选行；前置 let 不阻止 lookup。复合布尔表达式暂时扫描候选表。具体选择可用 `explain` 检查。
 
 ## 模式过滤
 
@@ -468,7 +496,7 @@ take 20
 - `let`／`filter` 的表达式块、`filter match`／`derive ... match` 的分支，以及 `=>` 后的 condition 块通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
 - 括号和集合内允许换行。字符串里的 `|`、逗号和 `#` 都是文本，不参与分隔。
-- 同层出现新的 `from`、`type`、`table`、`insert`、`upsert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
+- 同层出现新的 `from`、`explain`、`type`、`table`、`insert`、`upsert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
 - REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分。
 
 布尔表达式可在 `filter`／`=>` 的缩进块或括号内跨行；`any/all` 的 predicate 括号也可跨行。标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；每条 pipeline 或 DML target 最多求值 100,000 个 list predicate 元素，超限返回受控错误。

@@ -48,6 +48,7 @@ pub enum Statement {
         parent: Option<String>,
         steps: Vec<SchemaMigration>,
     },
+    Explain(Pipeline),
     Pipeline(Pipeline),
 }
 
@@ -156,7 +157,7 @@ pub struct SetAssignment {
 
 impl Statement {
     pub fn is_mutating(&self) -> bool {
-        !matches!(self, Self::Pipeline(_))
+        !matches!(self, Self::Explain(_) | Self::Pipeline(_))
     }
 
     pub fn changes_schema(&self) -> bool {
