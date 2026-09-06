@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
-    CmpOp, LocatedStatement, MatchArm, MatchCondition, MatchPattern, MatchPredicate, Pipeline,
-    Predicate, Stage, Statement,
+    CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchCondition, MatchField, MatchPattern,
+    MatchPayload, MatchPredicate, MatchValue, MatchValueArm, Pipeline, Predicate, SortKey, Stage,
+    Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -741,6 +742,19 @@ impl Parser {
                         value: self.value(0)?,
                     })
                 }
+            } else if self.word("derive") {
+                self.bump();
+                let name = self.identifier()?;
+                self.expect(Kind::Op("=".into()))?;
+                let nested = *self.kind() == Kind::Newline;
+                if nested {
+                    self.block()?;
+                }
+                let expression = self.match_value_expression(name)?;
+                if nested {
+                    self.expect(Kind::Dedent)?;
+                }
+                Stage::DeriveMatch(expression)
             } else if self.word("select") {
                 self.bump();
                 let braced = self.eat(Kind::Open('{'));
@@ -772,22 +786,73 @@ impl Parser {
                 Stage::Select(fields)
             } else if self.word("sort") {
                 self.bump();
-                let descending = self.eat(Kind::Minus);
-                let column = self.path()?;
-                Stage::Sort { column, descending }
+                let braced = self.eat(Kind::Open('{'));
+                self.newlines();
+                let mut keys = Vec::new();
+                let mut seen = BTreeSet::new();
+                loop {
+                    let descending = self.eat(Kind::Minus);
+                    let column = self.path()?;
+                    if !seen.insert(column.clone()) {
+                        return Err(self.error(format!("duplicate sort field '{column}'")));
+                    }
+                    keys.push(SortKey { column, descending });
+                    if !braced {
+                        break;
+                    }
+                    self.newlines();
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                    self.newlines();
+                    if *self.kind() == Kind::Close('}') {
+                        break;
+                    }
+                }
+                if braced {
+                    self.expect(Kind::Close('}'))?;
+                }
+                Stage::Sort(keys)
             } else if self.word("take") || self.word("limit") {
                 self.bump();
                 let token = self.bump();
                 let Kind::Number(n) = token.kind else {
                     return Err(syntax("expected a nonnegative row count", token.span));
                 };
-                Stage::Limit(
-                    n.parse()
-                        .map_err(|_| syntax("invalid row count", token.span))?,
-                )
+                let normalized = n.replace('_', "");
+                if let Some((start, end)) = normalized.split_once("..") {
+                    let start = start
+                        .parse::<usize>()
+                        .map_err(|_| syntax("invalid take range start", token.span))?;
+                    let end = end
+                        .parse::<usize>()
+                        .map_err(|_| syntax("invalid take range end", token.span))?;
+                    if start == 0 {
+                        return Err(syntax("take ranges start at 1", token.span));
+                    }
+                    let limit = end
+                        .checked_sub(start)
+                        .and_then(|distance| distance.checked_add(1))
+                        .ok_or_else(|| {
+                            syntax("take range end must not precede its start", token.span)
+                        })?;
+                    Stage::Take {
+                        offset: start - 1,
+                        limit,
+                    }
+                } else {
+                    Stage::Take {
+                        offset: 0,
+                        limit: normalized
+                            .parse()
+                            .map_err(|_| syntax("invalid row count", token.span))?,
+                    }
+                }
             } else {
                 if piped {
-                    return Err(self.error("expected filter / select / sort / take after '|'"));
+                    return Err(
+                        self.error("expected filter / derive / select / sort / take after '|'")
+                    );
                 }
                 break;
             };
@@ -797,7 +862,7 @@ impl Parser {
     }
 
     fn is_pipeline_stage(&self) -> bool {
-        ["filter", "select", "sort", "take", "limit"]
+        ["filter", "derive", "select", "sort", "take", "limit"]
             .iter()
             .any(|word| self.word(word))
     }
@@ -857,10 +922,9 @@ impl Parser {
             name.push('.');
             name.push_str(&self.identifier()?);
         }
-        let mut fields = Vec::new();
-        let mut rest = false;
-        let record = self.eat(Kind::Open('{'));
-        if record {
+        let payload = if self.eat(Kind::Open('{')) {
+            let mut fields = Vec::new();
+            let mut rest = false;
             self.newlines();
             while *self.kind() != Kind::Close('}') {
                 if self.eat(Kind::Dot) {
@@ -870,7 +934,13 @@ impl Parser {
                     }
                     rest = true;
                 } else {
-                    fields.push(self.identifier()?);
+                    let field = self.identifier()?;
+                    let binding = if self.eat(Kind::Op("=".into())) {
+                        self.identifier()?
+                    } else {
+                        field.clone()
+                    };
+                    fields.push(MatchField { field, binding });
                 }
                 self.newlines();
                 if !self.eat(Kind::Comma) {
@@ -882,14 +952,66 @@ impl Parser {
                 }
             }
             self.expect(Kind::Close('}'))?;
-        }
-        Ok(MatchPattern::Variant {
+            MatchPayload::Record { fields, rest }
+        } else {
+            let mut bindings = Vec::new();
+            while matches!(self.kind(), Kind::Ident(_)) {
+                bindings.push(self.identifier()?);
+            }
+            if bindings.is_empty() {
+                MatchPayload::Unit
+            } else {
+                MatchPayload::Positional(bindings)
+            }
+        };
+        Ok(MatchPattern::Constructor {
             name,
-            fields,
-            record,
-            rest,
-            variant_id: None,
+            payload,
+            tag: None,
         })
+    }
+
+    fn match_value_expression(&mut self, name: String) -> Result<DeriveMatch> {
+        self.expect_word("match")?;
+        let source = self.path()?;
+        self.block()?;
+        let mut arms = Vec::new();
+        self.newlines();
+        while *self.kind() != Kind::Dedent {
+            let pattern = self.match_pattern()?;
+            match self.bump() {
+                Token {
+                    kind: Kind::Op(op), ..
+                } if op == "=>" => {}
+                token => return Err(syntax("expected '=>' after match pattern", token.span)),
+            }
+            let result = self.match_value()?;
+            arms.push(MatchValueArm { pattern, result });
+            if *self.kind() == Kind::Dedent {
+                break;
+            }
+            self.expect(Kind::Newline)?;
+            self.newlines();
+        }
+        self.expect(Kind::Dedent)?;
+        if arms.is_empty() {
+            return Err(self.error("match requires at least one branch"));
+        }
+        Ok(DeriveMatch {
+            name,
+            source,
+            arms,
+            output_type: None,
+        })
+    }
+
+    fn match_value(&mut self) -> Result<MatchValue> {
+        if matches!(self.kind(), Kind::Ident(name) if name.starts_with(|ch: char| ch.is_ascii_lowercase()) && name != "true" && name != "false")
+        {
+            Ok(MatchValue::Binding(self.path()?))
+        } else {
+            Ok(MatchValue::Literal(self.value(0)?))
+        }
     }
 
     fn match_condition(&mut self) -> Result<MatchCondition> {

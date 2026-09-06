@@ -59,9 +59,16 @@ pub struct Pipeline {
 pub enum Stage {
     Filter(Predicate),
     FilterMatch(MatchPredicate),
+    DeriveMatch(DeriveMatch),
     Select(Vec<String>),
-    Sort { column: String, descending: bool },
-    Limit(usize),
+    Sort(Vec<SortKey>),
+    Take { offset: usize, limit: usize },
+}
+
+#[derive(Debug, Clone)]
+pub struct SortKey {
+    pub column: String,
+    pub descending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,13 +86,51 @@ pub struct MatchArm {
 #[derive(Debug, Clone)]
 pub enum MatchPattern {
     Wildcard,
-    Variant {
+    Constructor {
         name: String,
-        fields: Vec<String>,
-        record: bool,
-        rest: bool,
-        variant_id: Option<u64>,
+        payload: MatchPayload,
+        tag: Option<MatchTag>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchPayload {
+    Unit,
+    Record { fields: Vec<MatchField>, rest: bool },
+    Positional(Vec<String>),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchField {
+    pub field: String,
+    pub binding: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MatchTag {
+    Variant(u64),
+    None,
+    Some,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeriveMatch {
+    pub name: String,
+    pub source: String,
+    pub arms: Vec<MatchValueArm>,
+    pub output_type: Option<ScalarType>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchValueArm {
+    pub pattern: MatchPattern,
+    pub result: MatchValue,
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchValue {
+    Binding(String),
+    Literal(Value),
 }
 
 #[derive(Debug, Clone)]

@@ -3,7 +3,7 @@
 一个基于 Rust、原生支持代数类型的轻量数据库语言预览：
 
 - 无分号的命名和类型、嵌套 record/tuple、`option` 与 `list`
-- PRQL 风格换行查询：`filter/filter match/select/sort/take`
+- PRQL 风格换行查询：`filter/filter match/derive/select/sort/take`
 - 共享 Rust 引擎、本地 CLI 与 TCP 服务
 - 严格类型检查、字段默认值、主键、等值索引及原子脚本
 - 稳定 catalog 身份、原子 schema revision 与可校验 hash
@@ -15,6 +15,7 @@
 
 ```bash
 cargo run -- run --file examples/tasks.uid
+cargo run -- run --file examples/job_queue.uid
 cargo run -- run --file examples/config.uid --format json
 cargo run -- run --file examples/events.uid
 cargo run --example embedded
@@ -38,7 +39,7 @@ cargo run -- cli --memory
 
 输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)。字段默认值使用 `field type = value`；sum 类型的 `filter match` 已支持 record 负载绑定和穷尽检查。通用 match 表达式、`let/derive/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record 和位置负载，`derive x = match ...` 可把分支 binding 或 typed literal 归一为新列。嵌套 pattern、通用表达式、`let/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
 
 ## 后续方向与计划
 
@@ -48,6 +49,7 @@ cargo run -- cli --memory
 
 - [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
 - [查询语言参考](docs/QUERY.md)：当前可执行的 pipeline grammar、stage 语义、模式和错误。
+- [实际场景与覆盖矩阵](docs/SCENARIOS.md)：任务队列、配置、事件、同步和 key/value 用法所需的 ADT 与查询缺口。
 - [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
 - [ADT value codec](docs/CODEC.md)：稳定 ID 驱动的持久值格式、限制与 schema evolution 边界。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。

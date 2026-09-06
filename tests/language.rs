@@ -50,6 +50,19 @@ fn executable_examples() {
         ["id", "event"]
     );
     assert!(r.rows[0]["id"].cmp_eq(&Value::Int(2)));
+
+    let mut jobs = Engine::memory();
+    let r = ok(&mut jobs, include_str!("../examples/job_queue.uid"));
+    assert_eq!(r.rows.len(), 2);
+    assert!(r.rows[0]["id"].cmp_eq(&Value::Text("job-c".into())));
+    assert!(r.rows[1]["id"].cmp_eq(&Value::Text("job-a".into())));
+    assert_eq!(
+        r.columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "state_label", "payload", "state"]
+    );
 }
 
 #[test]
@@ -326,6 +339,63 @@ fn stage_order_and_projection_paths_are_preserved() {
         .len(),
         1
     );
+}
+
+#[test]
+fn multi_key_sort_and_inclusive_take_ranges_compose() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Meta =\n  scheduled int\ntype Row =\n  id int\n  priority int\n  meta Meta\ntable rows Row\ninsert rows {id = 1, priority = 2, meta = {scheduled = 5}}\ninsert rows {id = 2, priority = 2, meta = {scheduled = 3}}\ninsert rows {id = 3, priority = 3, meta = {scheduled = 9}}\ninsert rows {id = 4, priority = 2, meta = {scheduled = 3}}\ninsert rows {id = 5, priority = 1, meta = {scheduled = 1}}",
+    );
+    let result = ok(
+        &mut e,
+        "from rows\nsort {\n  -priority,\n  meta.scheduled,\n  id,\n}\ntake 2..4\nselect {id}",
+    );
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .map(|row| match &row["id"] {
+                Value::Int(value) => *value,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>(),
+        [2, 4, 1]
+    );
+    assert_eq!(
+        ok(&mut e, "from rows | sort {id} | take 4..10").rows.len(),
+        2
+    );
+    assert!(ok(&mut e, "from rows | take 6..10").rows.is_empty());
+    assert_eq!(
+        rows(&mut e, "from rows | sort -id | take 2"),
+        rows(&mut e, "from rows | sort {-id} | take 1..2")
+    );
+}
+
+#[test]
+fn sort_keys_and_take_ranges_are_validated_before_scanning() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Ready | Done\ntype Row =\n  id int\n  state State\ntable rows Row",
+    );
+    for source in [
+        "from rows | sort id, -id",
+        "from rows | sort {id, id}",
+        "from rows | sort {id, missing}",
+        "from rows | sort {id, state}",
+        "from rows | take 0..1",
+        "from rows | take 3..2",
+        "from rows | take 1.5",
+        "from rows | take 1..2..3",
+        "from rows | take 1..18446744073709551616",
+    ] {
+        let result = e.execute(source);
+        assert!(!result.ok, "accepted {source}");
+        assert!(result.error.unwrap().span.is_some(), "{source}");
+    }
 }
 
 #[test]
@@ -617,8 +687,8 @@ fn match_rejects_unreachable_or_invalid_patterns_and_branch_scope() {
     for (query, expected) in [
         ("filter match count\n  _ => true", "must be a sum type"),
         (
-            "filter match pair\n  Pair => true\n  Empty => false",
-            "positional match patterns are not implemented yet",
+            "filter match pair\n  Pair only => true\n  Empty => false",
+            "expects 2 payload binding(s), got 1",
         ),
         (
             "filter match state\n  _ => false\n  Pending => true",
@@ -642,7 +712,7 @@ fn match_rejects_unreachable_or_invalid_patterns_and_branch_scope() {
         ),
         (
             "filter match state\n  Running => true\n  _ => false",
-            "requires a record pattern",
+            "expects 1 payload binding(s)",
         ),
         (
             "filter match state\n  Running {attempt} => attempt > 0\n  _ => false",
@@ -706,6 +776,137 @@ fn match_conditions_support_named_bools_and_nested_binding_paths() {
         .len(),
         1
     );
+}
+
+#[test]
+fn option_and_positional_payloads_can_be_matched_without_extra_punctuation() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Pair = Pair(int, text) | Empty\ntype R =\n  id int\n  retry_at option int\n  pair Pair\ntable rows R\ninsert rows {id = 1, retry_at = None, pair = Empty}\ninsert rows {id = 2, retry_at = Some 20, pair = Pair(2, \"two\")}\ninsert rows {id = 3, retry_at = Some 30, pair = Pair(3, \"three\")}",
+    );
+    assert_eq!(
+        ok(
+            &mut e,
+            "from rows\nfilter match retry_at\n  Some at => at >= 20\n  None => false"
+        )
+        .rows
+        .len(),
+        2
+    );
+    let result = ok(
+        &mut e,
+        "from rows\nfilter match pair\n  Pair number _ => number == 3\n  Empty => false\nselect {id}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(3)));
+    assert!(
+        !e.execute("from rows\nfilter match retry_at\n  Some _ => true")
+            .ok
+    );
+}
+
+#[test]
+fn derive_match_adds_a_typed_column_for_sum_and_option_values() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Queued {scheduled_at int} | Failed {retry_at option int, message text} | Done\ntype Meta =\n  owner option text\n  state State\ntype Job =\n  id int\n  meta Meta\ntable jobs Job\ninsert jobs {id = 1, meta = {owner = None, state = Queued {scheduled_at = 10}}}\ninsert jobs {id = 2, meta = {owner = Some \"alice\", state = Failed {retry_at = Some 30, message = \"network\"}}}\ninsert jobs {id = 3, meta = {owner = Some \"bob\", state = Done}}",
+    );
+    let result = ok(
+        &mut e,
+        "from jobs\nderive status =\n  match meta.state\n    Queued {..} => \"queued\"\n    Failed {..} => \"failed\"\n    Done => \"done\"\nderive retry_at =\n  match meta.state\n    Failed {retry_at = at, ..} => at\n    _ => None\nderive owner_name =\n  match meta.owner\n    Some name => name\n    None => \"unowned\"\nfilter retry_at == Some 30\nselect {id, status, retry_at, owner_name}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(result.rows[0]["status"].cmp_eq(&Value::Text("failed".into())));
+    assert!(result.rows[0]["retry_at"].cmp_eq(&Value::Option(Some(Box::new(Value::Int(30))))));
+    assert!(result.rows[0]["owner_name"].cmp_eq(&Value::Text("alice".into())));
+    assert_eq!(
+        result
+            .columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.ty.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("id", "int"),
+            ("status", "text"),
+            ("retry_at", "option int"),
+            ("owner_name", "text"),
+        ]
+    );
+}
+
+#[test]
+fn derive_match_supports_positional_bindings_and_inline_layout() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Pair = Pair(int, text) | Empty\ntype R =\n  id int\n  pair Pair\ntable rows R\ninsert rows {id = 1, pair = Pair(7, \"seven\")}\ninsert rows {id = 2, pair = Empty}",
+    );
+    let result = ok(
+        &mut e,
+        "from rows\nderive number = match pair\n  Pair value _ => value\n  Empty => 0\nsort id\nselect {id, number}",
+    );
+    assert!(result.rows[0]["number"].cmp_eq(&Value::Int(7)));
+    assert!(result.rows[1]["number"].cmp_eq(&Value::Int(0)));
+}
+
+#[test]
+fn derive_match_is_fully_checked_on_empty_tables() {
+    let setup = "type State = A {value int} | B\ntype R =\n  id int\n  optional option int\n  state State\ntable rows R";
+    for (query, expected) in [
+        (
+            "derive id =\n  match state\n    A {value} => value\n    B => 0",
+            "already exists",
+        ),
+        (
+            "derive value =\n  match state\n    A {value} => value\n    B => \"wrong\"",
+            "expected int",
+        ),
+        (
+            "derive value =\n  match state\n    A {missing, ..} => missing\n    B => 0",
+            "no payload field",
+        ),
+        (
+            "derive value =\n  match state\n    A {value} => value",
+            "non-exhaustive",
+        ),
+        (
+            "derive value =\n  match optional\n    None => None\n    Some _ => None",
+            "cannot infer type",
+        ),
+        (
+            "derive value =\n  match id\n    _ => 0",
+            "must be a sum type or option",
+        ),
+    ] {
+        let mut engine = Engine::memory();
+        ok(&mut engine, setup);
+        let result = engine.execute(&format!("from rows\n{query}"));
+        assert!(!result.ok, "accepted {query}");
+        assert!(
+            result.message.contains(expected),
+            "{}: {query}",
+            result.message
+        );
+    }
+}
+
+#[test]
+fn derive_match_preserves_nominal_result_types() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type First = text\ntype Second = text\ntype Choice = Left(First) | Right(Second)\ntype R =\n  choice Choice\ntable rows R",
+    );
+    let result = e.execute(
+        "from rows\nderive value =\n  match choice\n    Left value => value\n    Right value => value",
+    );
+    assert!(!result.ok);
+    assert_eq!(result.error.unwrap().code, "E_TYPE");
+    assert!(result.message.contains("Second"), "{}", result.message);
+    assert!(result.message.contains("First"), "{}", result.message);
 }
 
 #[test]

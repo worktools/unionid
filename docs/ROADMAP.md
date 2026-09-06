@@ -1,10 +1,10 @@
 # unionid 路线图
 
-规划日期：2026-09-06。已在 GitHub 创建 1 个总览、25 个具体任务和 5 个里程碑；第一轮语言预览已开始实施，见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
+规划日期：2026-09-06。已在 GitHub 创建 1 个总览、28 个具体任务和 5 个里程碑；第一轮语言预览已开始实施，见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
-[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
+[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，无分号、减少标点。本轮草案采用 `field type`、`option text`／`list text`、缩进式声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不再沿用 TypeScript 风格字段注解或逐行 `|>`。
 
@@ -45,6 +45,9 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 | [#10](https://github.com/worktools/unionid/issues/10) | [语言] 实现类型检查、表达式与穷尽模式匹配 | P0 | [#4](https://github.com/worktools/unionid/issues/4)、[#8](https://github.com/worktools/unionid/issues/8)、[#9](https://github.com/worktools/unionid/issues/9) |
 | [#11](https://github.com/worktools/unionid/issues/11) | [查询] 实现可组合 Pipeline、纯函数与基础汇总 | P0 | [#10](https://github.com/worktools/unionid/issues/10) |
 | [#12](https://github.com/worktools/unionid/issues/12) | [核心] 打通类型声明、建表与严格插入的内存切片 | P0 | [#9](https://github.com/worktools/unionid/issues/9)、[#10](https://github.com/worktools/unionid/issues/10)、[#11](https://github.com/worktools/unionid/issues/11) |
+| [#34](https://github.com/worktools/unionid/issues/34) | [查询] 实现复合排序与范围分页 | P0 | [#11](https://github.com/worktools/unionid/issues/11) 的可独立子任务 |
+| [#35](https://github.com/worktools/unionid/issues/35) | [查询] 实现 ADT 解构表达式与类型化派生 | P0 | [#10](https://github.com/worktools/unionid/issues/10)、[#11](https://github.com/worktools/unionid/issues/11) |
+| [#36](https://github.com/worktools/unionid/issues/36) | [查询] 实现布尔表达式与集合函数 | P0 | [#10](https://github.com/worktools/unionid/issues/10)、[#11](https://github.com/worktools/unionid/issues/11) |
 
 ### M2 · 可靠读写与持久化
 
@@ -83,7 +86,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 
 1. [#28](https://github.com/worktools/unionid/issues/28) 已完成；继续以当前可执行查询规范回写 [#2](https://github.com/worktools/unionid/issues/2)。
 2. 合并 [#6](https://github.com/worktools/unionid/issues/6) 的 redb 存储 ADR，再用 [#7](https://github.com/worktools/unionid/issues/7) 冻结类型身份、schema revision 和演进契约，并由 [#13](https://github.com/worktools/unionid/issues/13) 开始接入。
-3. 按 [#8](https://github.com/worktools/unionid/issues/8) → [#10](https://github.com/worktools/unionid/issues/10) → [#9](https://github.com/worktools/unionid/issues/9)/[#12](https://github.com/worktools/unionid/issues/12) → [#11](https://github.com/worktools/unionid/issues/11) 完成 M1。
+3. [#9](https://github.com/worktools/unionid/issues/9)/[#12](https://github.com/worktools/unionid/issues/12) 已完成；按 [#34](https://github.com/worktools/unionid/issues/34) → [#35](https://github.com/worktools/unionid/issues/35)/[#36](https://github.com/worktools/unionid/issues/36) 收敛实际读取体验，并回写 [#10](https://github.com/worktools/unionid/issues/10)/[#11](https://github.com/worktools/unionid/issues/11) 的完整验收。
 4. 按 M2→M3→M4 交付可靠写入、CRUD、长期演进和日常体验；CLI 基础与诊断随前面阶段逐步完善。
 
 类型演进规则刻意放在 M0，避免 migration 被当作事后附加；完整 migration 执行要等原子存储与 DML 成熟。
