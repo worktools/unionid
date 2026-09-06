@@ -368,6 +368,8 @@ impl Parser {
                 self.create()?
             } else if self.word("insert") {
                 self.insert()?
+            } else if self.word("upsert") {
+                self.upsert()?
             } else if self.word("update") {
                 self.update()?
             } else if self.word("delete") {
@@ -376,7 +378,7 @@ impl Parser {
                 self.pipeline()?
             } else {
                 return Err(self.error(
-                    "expected type / table / insert / update / delete / from (or legacy create table/index)",
+                    "expected type / table / insert / upsert / update / delete / from (or legacy create table/index)",
                 ));
             };
             out.push(LocatedStatement { statement, span });
@@ -621,13 +623,24 @@ impl Parser {
     fn insert(&mut self) -> Result<Statement> {
         self.expect_word("insert")?;
         let table = self.identifier()?;
-        let values = if *self.kind() == Kind::Newline {
-            self.block()?;
-            self.record(Kind::Dedent, 0)?
-        } else {
-            self.value(0)?
-        };
+        let values = self.row_value()?;
         Ok(Statement::Insert { table, values })
+    }
+
+    fn upsert(&mut self) -> Result<Statement> {
+        self.expect_word("upsert")?;
+        let table = self.identifier()?;
+        let values = self.row_value()?;
+        Ok(Statement::Upsert { table, values })
+    }
+
+    fn row_value(&mut self) -> Result<Value> {
+        if *self.kind() == Kind::Newline {
+            self.block()?;
+            self.record(Kind::Dedent, 0)
+        } else {
+            self.value(0)
+        }
     }
 
     fn update(&mut self) -> Result<Statement> {

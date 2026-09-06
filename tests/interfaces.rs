@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use unionid::{Engine, QueryResponse, Value, cli};
+use unionid::{Engine, QueryResponse, UpsertAction, Value, cli};
 
 #[test]
 fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
@@ -47,6 +47,28 @@ fn local_cli_reports_affected_rows_for_mutations() {
     );
     let response: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response.affected_rows, Some(1));
+}
+
+#[test]
+fn local_cli_reports_the_structured_upsert_action() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--query",
+            "type Item =\n  id int\ntable items Item\n  key id\nupsert items {id = 1}",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response.affected_rows, Some(1));
+    assert_eq!(response.upsert_action, Some(UpsertAction::Inserted));
 }
 
 #[test]
@@ -169,7 +191,7 @@ fn local_run_and_server_share_the_redb_database() {
             "--db",
             path.to_str().unwrap(),
             "--query",
-            "type Entry =\n  id int\n  value option text\ntable entries Entry\n  key id\ninsert entries {id = 1, value = Some \"saved\"}",
+            "type Entry =\n  id int\n  value option text\ntable entries Entry\n  key id\nupsert entries {id = 1, value = Some \"saved\"}",
             "--format",
             "json",
         ])
@@ -180,6 +202,8 @@ fn local_run_and_server_share_the_redb_database() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let inserted: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(inserted.upsert_action, Some(UpsertAction::Inserted));
     let server = Server::start(&["--db", path.to_str().unwrap()]);
     let blocked = Command::new(env!("CARGO_BIN_EXE_unionid"))
         .args([
@@ -193,12 +217,20 @@ fn local_run_and_server_share_the_redb_database() {
         .unwrap();
     assert!(!blocked.status.success());
     assert!(String::from_utf8_lossy(&blocked.stderr).contains("E_BUSY"));
+    let updated = cli::send_one(
+        &server.addr,
+        "upsert entries {id = 1, value = Some \"replaced\"}",
+    )
+    .unwrap();
+    assert!(updated.ok, "{}", updated.message);
+    assert_eq!(updated.upsert_action, Some(UpsertAction::Updated));
     let response = cli::send_one(&server.addr, "from entries | filter id == 1").unwrap();
     assert!(response.ok, "{}", response.message);
     assert_eq!(response.rows.len(), 1);
     assert!(
-        response.rows[0]["value"]
-            .cmp_eq(&Value::Option(Some(Box::new(Value::Text("saved".into())))))
+        response.rows[0]["value"].cmp_eq(&Value::Option(Some(Box::new(Value::Text(
+            "replaced".into()
+        )))))
     );
     drop(server);
     let check = Command::new(env!("CARGO_BIN_EXE_unionid"))

@@ -12,9 +12,15 @@ type Config =
 table config Config
   key name
 
-insert config
+upsert config
   name = "worker"
   endpoint = {host = "localhost", port = 8080}
+
+# The same business key replaces the complete typed value without adding a row.
+upsert config
+  name = "worker"
+  endpoint = {host = "worker.internal", port = 9000}
+  tags = ["sync", "durable"]
 
 from config
 filter endpoint.port >= 8000

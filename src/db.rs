@@ -79,6 +79,13 @@ pub struct ResponseColumn {
     pub ty: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsertAction {
+    Inserted,
+    Updated,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub ok: bool,
@@ -94,6 +101,8 @@ pub struct QueryResponse {
     pub schema: Option<SchemaInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affected_rows: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upsert_action: Option<UpsertAction>,
 }
 
 impl QueryResponse {
@@ -107,6 +116,7 @@ impl QueryResponse {
             warnings: Vec::new(),
             schema: None,
             affected_rows: None,
+            upsert_action: None,
         }
     }
 
@@ -120,6 +130,7 @@ impl QueryResponse {
             warnings: Vec::new(),
             schema: None,
             affected_rows: None,
+            upsert_action: None,
         }
     }
 
@@ -179,6 +190,7 @@ impl Database {
             }
             Statement::CreateIndex { table, column } => self.create_index(&table, &column),
             Statement::Insert { table, values } => self.insert(&table, values),
+            Statement::Upsert { table, values } => self.upsert(&table, values),
             Statement::Update {
                 mut target,
                 mut assignments,
@@ -290,16 +302,80 @@ impl Database {
     }
 
     fn insert(&mut self, name: &str, values: Value) -> Result<QueryResponse> {
+        let fields = self.coerce_row(name, &values, "insert")?;
+        self.insert_fields(name, fields)?;
+        let mut response = QueryResponse::ok_message(format!("inserted into '{name}'"));
+        response.affected_rows = Some(1);
+        Ok(response)
+    }
+
+    fn upsert(&mut self, name: &str, values: Value) -> Result<QueryResponse> {
+        let table = self.table(name)?;
+        let key = table.primary_key.clone().ok_or_else(|| {
+            Error::new(
+                "E_CONSTRAINT",
+                format!("upsert requires a primary key on table '{name}'"),
+            )
+        })?;
+        let fields = self.coerce_row(name, &values, "upsert")?;
+        let key_value = row_field(&fields, &key)
+            .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
+        let existing_id = self
+            .indexes
+            .get(name)
+            .and_then(|columns| columns.get(&key))
+            .and_then(|posting| posting.get(&key_value.index_key()))
+            .and_then(|ids| ids.first())
+            .copied();
+        let action = if let Some(id) = existing_id {
+            let mut rows = table.rows.clone();
+            let position = rows.binary_search_by_key(&id, |row| row.id).map_err(|_| {
+                Error::new(
+                    "E_INDEX",
+                    format!("primary-key index for '{name}.{key}' references a missing row"),
+                )
+            })?;
+            rows[position].fields = fields;
+            self.validate_primary_keys(name, &rows)?;
+            self.replace_rows_and_indexes(name, rows)?;
+            UpsertAction::Updated
+        } else {
+            self.insert_fields(name, fields)?;
+            UpsertAction::Inserted
+        };
+        let message = match action {
+            UpsertAction::Inserted => format!("inserted one row into '{name}'"),
+            UpsertAction::Updated => format!("updated one row in '{name}'"),
+        };
+        let mut response = QueryResponse::ok_message(message);
+        response.affected_rows = Some(1);
+        response.upsert_action = Some(action);
+        Ok(response)
+    }
+
+    fn coerce_row(
+        &self,
+        name: &str,
+        values: &Value,
+        operation: &str,
+    ) -> Result<BTreeMap<String, Value>> {
         let table = self.table(name)?;
         let ty = table
             .row_type
             .map(ScalarType::Ref)
             .unwrap_or_else(|| ScalarType::Record(table.schema.clone()));
-        let value = self.catalog.coerce(&values, &ty, name)?;
+        let value = self.catalog.coerce(values, &ty, name)?;
         let Value::Record(fields) = value.unwrapped() else {
-            return Err(Error::new("E_TYPE", "insert requires a complete record"));
+            return Err(Error::new(
+                "E_TYPE",
+                format!("{operation} requires a complete record"),
+            ));
         };
-        let fields = fields.clone();
+        Ok(fields.clone())
+    }
+
+    fn insert_fields(&mut self, name: &str, fields: BTreeMap<String, Value>) -> Result<RowId> {
+        let table = self.table(name)?;
         if let Some(key) = &table.primary_key {
             let value = row_field(&fields, key)
                 .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
@@ -331,9 +407,7 @@ impl Database {
         };
         table.rows.push(Row { id, fields });
         table.next_row_id = next_row_id;
-        let mut response = QueryResponse::ok_message(format!("inserted into '{name}'"));
-        response.affected_rows = Some(1);
-        Ok(response)
+        Ok(id)
     }
 
     fn update(
@@ -684,6 +758,7 @@ impl Database {
             warnings: Vec::new(),
             schema: None,
             affected_rows: None,
+            upsert_action: None,
         })
     }
 
