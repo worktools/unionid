@@ -4,10 +4,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::model::{Catalog, Column, DbObject, Row, ScalarType, Table, TypeDefinition, Value};
+use crate::model::{
+    Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
+};
 use crate::query::{Pipeline, Stage, Statement};
 
-type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<usize>>>>;
+type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<RowId>>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexDefinition {
@@ -32,6 +34,8 @@ pub(crate) struct DurableTable {
     pub schema: Vec<Column>,
     pub row_type: Option<u64>,
     pub primary_key: Option<String>,
+    #[serde(default)]
+    pub next_row_id: RowId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +225,7 @@ impl Database {
                 name: name.clone(),
                 schema: columns,
                 rows: Vec::new(),
+                next_row_id: 0,
                 row_type,
                 primary_key: key.clone(),
             }),
@@ -270,12 +275,12 @@ impl Database {
         )))
     }
 
-    fn build_index(&self, name: &str, column: &str) -> Result<BTreeMap<String, Vec<usize>>> {
+    fn build_index(&self, name: &str, column: &str) -> Result<BTreeMap<String, Vec<RowId>>> {
         let table = self.table(name)?;
-        let mut posting: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (id, row) in table.rows.iter().enumerate() {
+        let mut posting: BTreeMap<String, Vec<RowId>> = BTreeMap::new();
+        for row in &table.rows {
             if let Some(value) = row_field(&row.fields, column) {
-                posting.entry(value.index_key()).or_default().push(id);
+                posting.entry(value.index_key()).or_default().push(row.id);
             }
         }
         Ok(posting)
@@ -307,7 +312,10 @@ impl Database {
                 ));
             }
         }
-        let id = table.rows.len();
+        let id = table.next_row_id;
+        let next_row_id = id
+            .checked_add(1)
+            .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
         if let Some(cols) = self.indexes.get_mut(name) {
             for (column, posting) in cols {
                 if let Some(value) = row_field(&fields, column) {
@@ -318,7 +326,8 @@ impl Database {
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             unreachable!()
         };
-        table.rows.push(Row { fields });
+        table.rows.push(Row { id, fields });
+        table.next_row_id = next_row_id;
         Ok(QueryResponse::ok_message(format!("inserted into '{name}'")))
     }
 
@@ -379,7 +388,13 @@ impl Database {
         let mut rows = match candidates {
             Some(ids) => ids
                 .into_iter()
-                .filter_map(|id| table.rows.get(id).map(|r| r.fields.clone()))
+                .filter_map(|id| {
+                    table
+                        .rows
+                        .binary_search_by_key(&id, |row| row.id)
+                        .ok()
+                        .map(|position| table.rows[position].fields.clone())
+                })
                 .collect::<Vec<_>>(),
             None => table.rows.iter().map(|r| r.fields.clone()).collect(),
         };
@@ -492,6 +507,7 @@ impl Database {
             }
         }
         self.repair_catalog_ids()?;
+        self.repair_row_ids()?;
         self.indexes.clear();
         for (table, column) in keys {
             if !self
@@ -547,6 +563,33 @@ impl Database {
             // Old snapshots did not record revisions. Treat their complete
             // catalog as one imported baseline instead of pretending it is empty.
             self.schema_revision = 1;
+        }
+        Ok(())
+    }
+
+    fn repair_row_ids(&mut self) -> Result<()> {
+        for object in self.objects.values_mut() {
+            let DbObject::Table(table) = object;
+            if table.next_row_id == 0 && !table.rows.is_empty() {
+                // Transitional snapshots did not store row identities. Their
+                // vector order was also their durable row identity.
+                for (id, row) in table.rows.iter_mut().enumerate() {
+                    row.id = u64::try_from(id)
+                        .map_err(|_| Error::new("E_LIMIT", "row ID space exhausted"))?;
+                }
+                table.next_row_id = u64::try_from(table.rows.len())
+                    .map_err(|_| Error::new("E_LIMIT", "row ID space exhausted"))?;
+            }
+            let mut previous = None;
+            for row in &table.rows {
+                if previous.is_some_and(|id| row.id <= id) || row.id >= table.next_row_id {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        format!("table '{}' has invalid stable row IDs", table.name),
+                    ));
+                }
+                previous = Some(row.id);
+            }
         }
         Ok(())
     }
@@ -646,6 +689,7 @@ impl Database {
                 schema: table.schema.clone(),
                 row_type: table.row_type,
                 primary_key: table.primary_key.clone(),
+                next_row_id: table.next_row_id,
             }),
         }));
         entries.extend(
@@ -673,9 +717,7 @@ impl Database {
                 .row_type
                 .map(ScalarType::Ref)
                 .unwrap_or_else(|| ScalarType::Record(table.schema.clone()));
-            for (row_id, row) in table.rows.iter().enumerate() {
-                let row_id = u64::try_from(row_id)
-                    .map_err(|_| Error::new("E_LIMIT", "row ID space exhausted"))?;
+            for row in &table.rows {
                 let record = Value::Record(row.fields.clone());
                 let value = match table.row_type {
                     Some(type_id) => Value::Named {
@@ -686,7 +728,7 @@ impl Database {
                 };
                 encoded.push((
                     table.id,
-                    row_id,
+                    row.id,
                     crate::codec::encode_value(&self.catalog, &ty, &value)?,
                 ));
             }
@@ -710,12 +752,7 @@ impl Database {
                     })?;
                 for (value_key, row_ids) in posting {
                     for row_id in row_ids {
-                        entries.push((
-                            definition.id,
-                            value_key.clone(),
-                            u64::try_from(*row_id)
-                                .map_err(|_| Error::new("E_LIMIT", "row ID space exhausted"))?,
-                        ));
+                        entries.push((definition.id, value_key.clone(), *row_id));
                     }
                 }
             }
@@ -769,6 +806,7 @@ impl Database {
                             name: table.name,
                             schema: table.schema,
                             rows: Vec::new(),
+                            next_row_id: table.next_row_id,
                             row_type: table.row_type,
                             primary_key: table.primary_key,
                         }),
@@ -821,6 +859,7 @@ impl Database {
             })
             .collect::<BTreeMap<_, _>>();
         let mut decoded_rows: BTreeMap<String, Vec<Row>> = BTreeMap::new();
+        let mut previous_row_id: BTreeMap<u64, RowId> = BTreeMap::new();
         for (table_id, row_id, bytes) in rows {
             let table_name = table_names_by_id.get(&table_id).ok_or_else(|| {
                 Error::new(
@@ -828,11 +867,13 @@ impl Database {
                     format!("row references unknown table ID {table_id}"),
                 )
             })?;
-            let expected_id = decoded_rows.get(table_name).map_or(0, Vec::len);
-            if row_id != u64::try_from(expected_id).unwrap_or(u64::MAX) {
+            if previous_row_id
+                .insert(table_id, row_id)
+                .is_some_and(|previous| row_id <= previous)
+            {
                 return Err(Error::new(
                     "E_STORAGE",
-                    format!("table '{table_name}' has noncontiguous row IDs"),
+                    format!("table '{table_name}' has duplicate or unordered row IDs"),
                 ));
             }
             let Some(DbObject::Table(table)) = objects.get(table_name) else {
@@ -850,6 +891,7 @@ impl Database {
                 .entry(table_name.clone())
                 .or_default()
                 .push(Row {
+                    id: row_id,
                     fields: fields.clone(),
                 });
         }
@@ -858,6 +900,17 @@ impl Database {
                 unreachable!()
             };
             table.rows = rows;
+            let inferred_next = table.rows.last().map_or(0, |row| row.id.saturating_add(1));
+            if table.next_row_id == 0 {
+                // Catalogs written before stable RowIds did not persist an
+                // allocation cursor. Their row keys were contiguous from zero.
+                table.next_row_id = inferred_next;
+            } else if table.next_row_id < inferred_next {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!("table '{table_name}' has a row ID beyond its allocation cursor"),
+                ));
+            }
         }
         let mut database = Self {
             objects,
@@ -937,4 +990,93 @@ fn row_field<'a>(row: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a Val
     }
     let (head, tail) = path.split_once('.')?;
     row.get(head)?.field(tail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn execute(database: &mut Database, source: &str) {
+        for statement in crate::syntax::parse(source).unwrap() {
+            database.execute(statement.statement).unwrap();
+        }
+    }
+
+    fn table<'a>(database: &'a Database, name: &str) -> &'a Table {
+        let DbObject::Table(table) = database.objects.get(name).unwrap();
+        table
+    }
+
+    #[test]
+    fn row_ids_survive_gaps_indexes_and_durable_round_trips() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "create table entries (id int)\ncreate index entries (id)\ninsert entries {id = 1}\ninsert entries {id = 2}",
+        );
+        let Some(DbObject::Table(entries)) = database.objects.get_mut("entries") else {
+            unreachable!()
+        };
+        entries.rows.remove(0);
+        database.rebuild_indexes().unwrap();
+        execute(&mut database, "insert entries {id = 3}");
+
+        assert_eq!(
+            table(&database, "entries")
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(table(&database, "entries").next_row_id, 3);
+        let indexed = database
+            .execute(crate::query::parse_statement("from entries | filter id == 3").unwrap())
+            .unwrap();
+        assert_eq!(indexed.rows.len(), 1);
+
+        let restored = Database::from_durable(
+            database.durable_meta(),
+            database.durable_catalog_entries(),
+            database.durable_rows().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            table(&restored, "entries")
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(table(&restored, "entries").next_row_id, 3);
+    }
+
+    #[test]
+    fn transitional_snapshots_receive_ordered_row_ids() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "create table entries (id int)\ninsert entries {id = 1}\ninsert entries {id = 2}",
+        );
+        let mut json = serde_json::to_value(database).unwrap();
+        let table_json = json["objects"]["entries"].as_object_mut().unwrap();
+        table_json.remove("next_row_id");
+        for row in table_json["rows"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("id");
+        }
+        let mut restored: Database = serde_json::from_value(json).unwrap();
+        restored.rebuild_indexes().unwrap();
+        execute(&mut restored, "insert entries {id = 3}");
+
+        assert_eq!(
+            table(&restored, "entries")
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(table(&restored, "entries").next_row_id, 3);
+    }
 }
