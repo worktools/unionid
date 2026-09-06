@@ -9,6 +9,7 @@
 - 严格类型检查、字段默认值、主键、等值索引及原子脚本
 - 稳定 catalog 身份、原子 schema revision 与可校验 hash
 - 独立于 serde/Rust enum 布局的版本化 ADT value codec
+- redb 原子持久模式，可由本地命令、REPL 与 TCP 服务共同使用
 
 ## 先运行一个完整例子
 
@@ -31,7 +32,13 @@ id | title | owner.email | state
 1 row(s)
 ```
 
-`run` 每次创建一个新的内存库；一次文件或请求是一个原子批次，成功返回最后一条语句的结果，失败不保留该批次的任何写入。
+`run` 默认每次创建一个新的内存库；一次文件或请求是一个原子批次，成功返回最后一条语句的结果，失败不保留该批次的任何写入。需要保存数据时指定同一个 redb 文件：
+
+```bash
+cargo run -- run --db ./data/unionid.redb --file examples/tasks.uid
+cargo run -- run --db ./data/unionid.redb --query 'from tasks | filter id == 1'
+cargo run -- cli --db ./data/unionid.redb
+```
 
 开启保留会话状态的本地 REPL：
 
@@ -56,12 +63,13 @@ cargo run -- cli --memory
 - [实际场景与覆盖矩阵](docs/SCENARIOS.md)：任务队列、配置、事件、同步和 key/value 用法所需的 ADT 与查询缺口。
 - [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
 - [ADT value codec](docs/CODEC.md)：稳定 ID 驱动的持久值格式、限制与 schema evolution 边界。
+- [redb 持久模式](docs/STORAGE.md)：本地／服务入口、事务承诺、内部表与当前限制。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。
 - [存储 ADR](docs/adr/0001-redb-storage.md)：redb 选型、ADT 存储边界、实验和限制。
 - [原型基线与已知问题](docs/PROTOTYPE-AUDIT.md)：早期原型的验证结果和故障证据。
 - [第一轮开发记录](docs/DEVELOPMENT.md)：已实现能力、验证方法与尚未完成的范围。
 
-设计草案描述完整目标，部分语法已实现；整体能力边界以 LANGUAGE.md 为准，查询行为以 QUERY.md 为准。长期持久化后端已选定 redb，ADT value codec 已实现但尚未接入主 Engine；当前 WAL／snapshot 仍是过渡实现，不能作为正式长期格式。
+设计草案描述完整目标，部分语法已实现；整体能力边界以 LANGUAGE.md 为准，查询行为以 QUERY.md 为准。长期持久化入口使用 redb；当前 WAL／snapshot 仅为旧原型兼容入口，不与 redb 双写，也不能直接当作 redb 数据库打开。显式导入由 #20 跟踪。
 
 ## 运行
 
@@ -71,7 +79,13 @@ cargo run -- cli --memory
 cargo run -- server --addr 127.0.0.1:7878
 ```
 
-开启 WAL 持久化启动服务：
+使用 redb 持久化启动服务：
+
+```bash
+cargo run -- server --addr 127.0.0.1:7878 --db ./data/unionid.redb
+```
+
+过渡 WAL 兼容入口：
 
 ```bash
 cargo run -- server --addr 127.0.0.1:7878 --wal-path ./data/unionid.wal

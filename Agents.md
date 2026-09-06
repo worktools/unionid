@@ -45,8 +45,8 @@
 - 已实现命名 sum/record、tuple、option/list、严格插入、主键、filter/select、单键/多键 sort、前 N 行/范围 take，以及支持递归 pattern 与 option/sum/product/list 新值构造的 `filter match` 和 ADT derive。同一顶层 constructor 可由多个互补嵌套分支覆盖；有预算的 pattern matrix 在扫描前检查穷尽性、不可达分支和积类型相关性。普通 filter、match condition 和 derive result 共用有类型 scalar expression，支持 int/float 的 `+ - * /` 和一元负号；整数溢出、除零或非有限 float 返回 `E_ARITH`。filter 与 condition 还支持括号、`not/and/or`、字段／binding 间比较和 `contains/length`；通用函数、更新操作及 migration 尚未实现。
 - `docs/SCENARIOS.md` 用任务队列、配置、事件、同步和 key/value 工作流维护查询覆盖；#35/#36 跟踪 ADT 派生及布尔/集合表达式。
 - 字段可用 `field type = value` 声明默认值；默认值在 schema 阶段类型检查，insert 会对嵌套 record 和 sum record 负载逐层补齐。
-- 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，下一步接入 redb `rows` 表。
-- 已通过 `docs/adr/0001-redb-storage.md` 选定 redb 作为长期事务后端；主 Engine 尚未接入。现有 WAL/snapshot 仍是过渡实现。
+- 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，并已接入 redb `rows` 表。
+- 已通过 `docs/adr/0001-redb-storage.md` 选定 redb 作为长期事务后端；`Engine::open_redb`、`run/cli/server --db` 使用固定的 meta/catalog/rows/secondary_index/migration_ledger 表和同步 two-phase 原子提交。现有 WAL/snapshot 只保留为过渡兼容入口。
 - `docs/SCHEMA.md` 已定义类型演进契约；类型、字段、变体、表和索引使用统一稳定 ID，每次原子 schema 变更产生一个 revision 与 SHA-256 hash，Engine 响应携带版本信息。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 

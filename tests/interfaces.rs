@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use unionid::{Engine, QueryResponse, cli};
+use unionid::{Engine, QueryResponse, Value, cli};
 
 #[test]
 fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
@@ -136,6 +136,37 @@ fn server_restart_recovers_typed_data_and_index() {
     let response = cli::send_one(&server.addr, "from tasks | filter id == 1").unwrap();
     assert!(response.ok, "{}", response.message);
     assert_eq!(response.rows.len(), 1);
+}
+
+#[test]
+fn local_run_and_server_share_the_redb_database() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--db",
+            path.to_str().unwrap(),
+            "--query",
+            "type Entry =\n  id int\n  value option text\ntable entries Entry\n  key id\ninsert entries {id = 1, value = Some \"saved\"}",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let server = Server::start(&["--db", path.to_str().unwrap()]);
+    let response = cli::send_one(&server.addr, "from entries | filter id == 1").unwrap();
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 1);
+    assert!(
+        response.rows[0]["value"]
+            .cmp_eq(&Value::Option(Some(Box::new(Value::Text("saved".into())))))
+    );
 }
 
 #[test]

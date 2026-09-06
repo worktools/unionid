@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::db::{Database, QueryResponse};
 use crate::error::{Error, Result};
+use crate::redb_storage::RedbStore;
 use crate::snapshot::SnapshotStore;
 use crate::syntax;
 use crate::wal::Wal;
@@ -17,6 +18,7 @@ pub struct Engine {
     snapshot_every: usize,
     writes_since_snapshot: usize,
     write_failed: bool,
+    redb: Option<RedbStore>,
     _locks: Vec<File>,
 }
 
@@ -99,7 +101,19 @@ impl Engine {
             snapshot_every,
             writes_since_snapshot: 0,
             write_failed: false,
+            redb: None,
             _locks: locks,
+        })
+    }
+
+    /// Open the durable redb backend. Every mutating source request is
+    /// committed as one synchronous, two-phase redb transaction.
+    pub fn open_redb(path: impl Into<PathBuf>) -> Result<Self> {
+        let (redb, db) = RedbStore::open(path)?;
+        Ok(Self {
+            db,
+            redb: Some(redb),
+            ..Self::default()
         })
     }
 
@@ -141,7 +155,19 @@ impl Engine {
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
-            if let Some(wal) = &self.wal
+            if let Some(redb) = &self.redb {
+                if let Err(error) = redb.commit(&candidate) {
+                    self.redb = None;
+                    self.write_failed = true;
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        format!(
+                            "redb commit failed; state was not published in this process, but the disk commit may be uncertain: {}; reopen the database before retrying",
+                            error.message
+                        ),
+                    ));
+                }
+            } else if let Some(wal) = &self.wal
                 && let Err(error) = wal.append(candidate.sequence, source)
             {
                 self.write_failed = true;

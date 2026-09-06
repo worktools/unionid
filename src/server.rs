@@ -24,8 +24,24 @@ pub fn run_server(
     snapshot_path: Option<PathBuf>,
     snapshot_every: usize,
 ) -> Result<(), String> {
-    let engine =
-        Engine::open(wal_path, snapshot_path, snapshot_every).map_err(|e| e.to_string())?;
+    run_server_with_db(addr, None, wal_path, snapshot_path, snapshot_every)
+}
+
+pub fn run_server_with_db(
+    addr: &str,
+    db_path: Option<PathBuf>,
+    wal_path: Option<PathBuf>,
+    snapshot_path: Option<PathBuf>,
+    snapshot_every: usize,
+) -> Result<(), String> {
+    if db_path.is_some() && (wal_path.is_some() || snapshot_path.is_some() || snapshot_every > 0) {
+        return Err("E_CONFIG: --db cannot be combined with WAL or snapshot options".into());
+    }
+    let engine = match db_path {
+        Some(path) => Engine::open_redb(path),
+        None => Engine::open(wal_path, snapshot_path, snapshot_every),
+    }
+    .map_err(|e| e.to_string())?;
     let listener = TcpListener::bind(addr).map_err(|e| format!("bind {addr}: {e}"))?;
     println!(
         "unionid server listening on {}",
