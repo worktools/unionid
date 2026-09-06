@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
-    BoolExpression, CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchField, MatchPattern,
-    MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField, MatchValuePayload,
-    Pipeline, ScalarExpression, SortKey, Stage, Statement,
+    ArithmeticOp, BoolExpression, CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchField,
+    MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField,
+    MatchValuePayload, Pipeline, ScalarExpression, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -22,7 +22,10 @@ enum Kind {
     Colon,
     Dot,
     Pipe,
+    Plus,
     Minus,
+    Star,
+    Slash,
     Op(String),
     Newline,
     Indent,
@@ -206,9 +209,21 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                     pos += 1;
                     Kind::Pipe
                 }
+                '+' => {
+                    pos += 1;
+                    Kind::Plus
+                }
                 '-' => {
                     pos += 1;
                     Kind::Minus
+                }
+                '*' => {
+                    pos += 1;
+                    Kind::Star
+                }
+                '/' => {
+                    pos += 1;
+                    Kind::Slash
                 }
                 ';' => {
                     return Err(syntax(
@@ -1082,6 +1097,18 @@ impl Parser {
 
     fn match_value_expression_value(&mut self, depth: usize) -> Result<MatchValue> {
         self.depth(depth)?;
+        if matches!(
+            self.kind(),
+            Kind::Ident(_) | Kind::Number(_) | Kind::Text(_) | Kind::Minus | Kind::Open('(')
+        ) {
+            let checkpoint = self.pos;
+            if let Ok(expression) = self.scalar_expression(depth + 1, false)
+                && scalar_is_computed(&expression)
+            {
+                return Ok(MatchValue::Expression(expression));
+            }
+            self.pos = checkpoint;
+        }
         match self.kind().clone() {
             Kind::Text(_) | Kind::Number(_) => Ok(MatchValue::Literal(self.value(depth)?)),
             Kind::Ident(name) if matches!(name.as_str(), "true" | "false" | "null") => {
@@ -1253,40 +1280,137 @@ impl Parser {
 
     fn bool_primary(&mut self, depth: usize) -> Result<BoolExpression> {
         self.depth(depth)?;
-        if self.eat(Kind::Open('(')) {
+        if self.word("contains") {
+            self.bump();
+            return Ok(BoolExpression::Contains {
+                collection: self.scalar_expression(depth + 1, false)?,
+                item: self.scalar_expression(depth + 1, false)?,
+            });
+        }
+        if *self.kind() == Kind::Open('(') {
+            let checkpoint = self.pos;
+            if let Ok(left) = self.scalar_expression(depth, false) {
+                return self.finish_bool_scalar(left, depth);
+            }
+            self.pos = checkpoint;
+            self.expect(Kind::Open('('))?;
             self.newlines();
             let expression = self.bool_expression(depth + 1, true)?;
             self.newlines();
             self.expect(Kind::Close(')'))?;
             return Ok(expression);
         }
-        if self.word("contains") {
-            self.bump();
-            return Ok(BoolExpression::Contains {
-                collection: self.scalar_expression(depth + 1)?,
-                item: self.scalar_expression(depth + 1)?,
-            });
-        }
-        let left = self.scalar_expression(depth)?;
+        let left = self.scalar_expression(depth, false)?;
+        self.finish_bool_scalar(left, depth)
+    }
+
+    fn finish_bool_scalar(
+        &mut self,
+        left: ScalarExpression,
+        depth: usize,
+    ) -> Result<BoolExpression> {
         if matches!(self.kind(), Kind::Op(_)) {
             let op = self.comparison_operator()?;
             Ok(BoolExpression::Compare {
                 left,
                 op,
-                right: self.scalar_expression(depth)?,
+                right: self.scalar_expression(depth, false)?,
             })
         } else {
             Ok(BoolExpression::Value(left))
         }
     }
 
-    fn scalar_expression(&mut self, depth: usize) -> Result<ScalarExpression> {
+    fn scalar_expression(&mut self, depth: usize, multiline: bool) -> Result<ScalarExpression> {
+        self.scalar_additive(depth, multiline)
+    }
+
+    fn scalar_additive(&mut self, depth: usize, multiline: bool) -> Result<ScalarExpression> {
         self.depth(depth)?;
+        let mut expression = self.scalar_multiplicative(depth, multiline)?;
+        let mut expression_depth = depth;
+        self.expression_newlines(multiline);
+        loop {
+            let op = if self.eat(Kind::Plus) {
+                ArithmeticOp::Add
+            } else if self.eat(Kind::Minus) {
+                ArithmeticOp::Subtract
+            } else {
+                break;
+            };
+            self.expression_newlines(multiline);
+            expression_depth += 1;
+            self.depth(expression_depth)?;
+            expression = ScalarExpression::Arithmetic {
+                left: Box::new(expression),
+                op,
+                right: Box::new(self.scalar_multiplicative(expression_depth, multiline)?),
+                ty: None,
+            };
+            self.expression_newlines(multiline);
+        }
+        Ok(expression)
+    }
+
+    fn scalar_multiplicative(&mut self, depth: usize, multiline: bool) -> Result<ScalarExpression> {
+        self.depth(depth)?;
+        let mut expression = self.scalar_unary(depth, multiline)?;
+        let mut expression_depth = depth;
+        self.expression_newlines(multiline);
+        loop {
+            let op = if self.eat(Kind::Star) {
+                ArithmeticOp::Multiply
+            } else if self.eat(Kind::Slash) {
+                ArithmeticOp::Divide
+            } else {
+                break;
+            };
+            self.expression_newlines(multiline);
+            expression_depth += 1;
+            self.depth(expression_depth)?;
+            expression = ScalarExpression::Arithmetic {
+                left: Box::new(expression),
+                op,
+                right: Box::new(self.scalar_unary(expression_depth, multiline)?),
+                ty: None,
+            };
+            self.expression_newlines(multiline);
+        }
+        Ok(expression)
+    }
+
+    fn scalar_unary(&mut self, depth: usize, multiline: bool) -> Result<ScalarExpression> {
+        self.depth(depth)?;
+        if self.eat(Kind::Minus) {
+            self.expression_newlines(multiline);
+            return Ok(ScalarExpression::Negate {
+                value: Box::new(self.scalar_unary(depth + 1, multiline)?),
+                ty: None,
+            });
+        }
         if self.word("length") {
             self.bump();
             return Ok(ScalarExpression::Length(Box::new(
-                self.scalar_expression(depth + 1)?,
+                self.scalar_unary(depth + 1, multiline)?,
             )));
+        }
+        self.scalar_primary(depth, multiline)
+    }
+
+    fn scalar_primary(&mut self, depth: usize, _multiline: bool) -> Result<ScalarExpression> {
+        self.depth(depth)?;
+        if *self.kind() == Kind::Open('(') {
+            let checkpoint = self.pos;
+            self.bump();
+            self.newlines();
+            if let Ok(expression) = self.scalar_expression(depth + 1, true) {
+                self.newlines();
+                if self.eat(Kind::Close(')')) {
+                    return Ok(expression);
+                }
+            }
+            self.pos = checkpoint;
+            return Ok(ScalarExpression::Literal(self.value(depth + 1)?));
         }
         match self.kind().clone() {
             Kind::Ident(name)
@@ -1296,12 +1420,13 @@ impl Parser {
                 Ok(ScalarExpression::Literal(self.value(depth + 1)?))
             }
             Kind::Ident(_) => Ok(ScalarExpression::Reference(self.path()?)),
-            Kind::Text(_)
-            | Kind::Number(_)
-            | Kind::Open('{')
-            | Kind::Open('[')
-            | Kind::Open('(') => Ok(ScalarExpression::Literal(self.value(depth + 1)?)),
-            _ => Err(self.error("expected a field, binding, literal, or length expression")),
+            Kind::Text(_) | Kind::Number(_) | Kind::Open('{') | Kind::Open('[') => {
+                Ok(ScalarExpression::Literal(self.value(depth + 1)?))
+            }
+            _ => {
+                Err(self
+                    .error("expected a field, binding, literal, length, or arithmetic expression"))
+            }
         }
     }
 
@@ -1310,4 +1435,13 @@ impl Parser {
             self.newlines();
         }
     }
+}
+
+fn scalar_is_computed(expression: &ScalarExpression) -> bool {
+    matches!(
+        expression,
+        ScalarExpression::Length(_)
+            | ScalarExpression::Negate { .. }
+            | ScalarExpression::Arithmetic { .. }
+    )
 }

@@ -339,11 +339,25 @@ impl Database {
         };
         for stage in pipeline.stages {
             match stage {
-                Stage::Filter(expression) => rows.retain(|row| {
-                    crate::expression::evaluate(&expression, |path| row_field(row, path))
-                }),
+                Stage::Filter(expression) => {
+                    let mut filtered = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        if crate::expression::evaluate(&self.catalog, &expression, |path| {
+                            row_field(&row, path)
+                        })? {
+                            filtered.push(row);
+                        }
+                    }
+                    rows = filtered;
+                }
                 Stage::FilterMatch(pred) => {
-                    rows.retain(|row| crate::matching::evaluate(row, &pred))
+                    let mut filtered = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        if crate::matching::evaluate(&self.catalog, &row, &pred)? {
+                            filtered.push(row);
+                        }
+                    }
+                    rows = filtered;
                 }
                 Stage::DeriveMatch(derive) => {
                     for row in &mut rows {

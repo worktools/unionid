@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, ScalarType, Value};
-use crate::query::{BoolExpression, CmpOp, ScalarExpression};
+use crate::query::{ArithmeticOp, BoolExpression, CmpOp, ScalarExpression};
 
 pub(crate) fn bind(
     catalog: &Catalog,
@@ -39,10 +39,10 @@ fn bind_in_scope(
         BoolExpression::Compare { left, op, right } => {
             let inferred_left = infer_scalar(catalog, scope, left, reference_kind)?;
             let inferred_right = infer_scalar(catalog, scope, right, reference_kind)?;
-            let expected = match (&*left, &*right) {
-                (ScalarExpression::Literal(_), _) => inferred_right.or(inferred_left),
-                (_, ScalarExpression::Literal(_)) => inferred_left.or(inferred_right),
-                _ => inferred_left.or(inferred_right),
+            let expected = if is_constant(left) {
+                inferred_right.or(inferred_left)
+            } else {
+                inferred_left.or(inferred_right)
             }
             .ok_or_else(|| {
                 Error::new(
@@ -114,7 +114,7 @@ fn bind_in_scope(
     }
 }
 
-fn bind_scalar(
+pub(crate) fn bind_scalar(
     catalog: &Catalog,
     scope: &[Column],
     expression: &mut ScalarExpression,
@@ -154,6 +154,38 @@ fn bind_scalar(
             }
             ScalarType::Int
         }
+        ScalarExpression::Negate { value, ty } => {
+            let inferred = infer_scalar(catalog, scope, value, reference_kind)?;
+            let result = expected.cloned().or(inferred).ok_or_else(|| {
+                Error::new(
+                    "E_TYPE",
+                    "cannot infer unary '-' operand type; use an int or float value",
+                )
+            })?;
+            require_numeric(catalog, &result, "unary '-'")?;
+            bind_scalar(catalog, scope, value, Some(&result), reference_kind)?;
+            *ty = Some(result.clone());
+            result
+        }
+        ScalarExpression::Arithmetic {
+            left,
+            op: _,
+            right,
+            ty,
+        } => {
+            let inferred = infer_arithmetic_type(catalog, scope, left, right, reference_kind)?;
+            let result = expected.cloned().or(inferred).ok_or_else(|| {
+                Error::new(
+                    "E_TYPE",
+                    "cannot infer arithmetic operand type; use int or float values",
+                )
+            })?;
+            require_numeric(catalog, &result, "arithmetic")?;
+            bind_scalar(catalog, scope, left, Some(&result), reference_kind)?;
+            bind_scalar(catalog, scope, right, Some(&result), reference_kind)?;
+            *ty = Some(result.clone());
+            result
+        }
     };
     if let Some(expected) = expected
         && !same_type(&ty, expected)
@@ -170,7 +202,7 @@ fn bind_scalar(
     Ok(ty)
 }
 
-fn infer_scalar(
+pub(crate) fn infer_scalar(
     catalog: &Catalog,
     scope: &[Column],
     expression: &ScalarExpression,
@@ -198,6 +230,73 @@ fn infer_scalar(
             }
             Ok(Some(ScalarType::Int))
         }
+        ScalarExpression::Negate { value, .. } => {
+            let ty = infer_scalar(catalog, scope, value, reference_kind)?;
+            if let Some(ty) = &ty {
+                require_numeric(catalog, ty, "unary '-'")?;
+            }
+            Ok(ty)
+        }
+        ScalarExpression::Arithmetic { left, right, .. } => {
+            infer_arithmetic_type(catalog, scope, left, right, reference_kind)
+        }
+    }
+}
+
+fn infer_arithmetic_type(
+    catalog: &Catalog,
+    scope: &[Column],
+    left: &ScalarExpression,
+    right: &ScalarExpression,
+    reference_kind: &str,
+) -> Result<Option<ScalarType>> {
+    let left_ty = infer_scalar(catalog, scope, left, reference_kind)?;
+    let right_ty = infer_scalar(catalog, scope, right, reference_kind)?;
+    let result = match (left_ty, right_ty) {
+        (Some(left_ty), Some(right_ty)) if same_type(&left_ty, &right_ty) => Some(left_ty),
+        (_, Some(right_ty)) if is_constant(left) => Some(right_ty),
+        (Some(left_ty), _) if is_constant(right) => Some(left_ty),
+        (Some(left_ty), Some(right_ty)) => {
+            return Err(Error::new(
+                "E_TYPE",
+                format!(
+                    "arithmetic operands have different types: {} and {}",
+                    catalog.describe(&left_ty),
+                    catalog.describe(&right_ty)
+                ),
+            ));
+        }
+        (Some(ty), None) | (None, Some(ty)) => Some(ty),
+        (None, None) => None,
+    };
+    if let Some(ty) = &result {
+        require_numeric(catalog, ty, "arithmetic")?;
+    }
+    Ok(result)
+}
+
+fn is_constant(expression: &ScalarExpression) -> bool {
+    match expression {
+        ScalarExpression::Literal(_) => true,
+        ScalarExpression::Reference(_) => false,
+        ScalarExpression::Length(value) | ScalarExpression::Negate { value, .. } => {
+            is_constant(value)
+        }
+        ScalarExpression::Arithmetic { left, right, .. } => is_constant(left) && is_constant(right),
+    }
+}
+
+fn require_numeric(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<()> {
+    if matches!(catalog.underlying(ty)?, ScalarType::Int | ScalarType::Float) {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "E_TYPE",
+            format!(
+                "{context} expects int or float, got {}",
+                catalog.describe(ty)
+            ),
+        ))
     }
 }
 
@@ -312,59 +411,174 @@ fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
 }
 
 pub(crate) fn evaluate<'a>(
+    catalog: &Catalog,
     expression: &'a BoolExpression,
     values: impl Fn(&str) -> Option<&'a Value> + Copy,
-) -> bool {
+) -> Result<bool> {
     match expression {
         BoolExpression::Value(value) => {
-            let Some(value) = evaluate_scalar(value, values) else {
-                return false;
+            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+                return Ok(false);
             };
-            matches!(value.as_value().unwrapped(), Value::Bool(true))
+            Ok(matches!(value.as_value().unwrapped(), Value::Bool(true)))
         }
         BoolExpression::Compare { left, op, right } => {
-            let Some(left) = evaluate_scalar(left, values) else {
-                return false;
+            let Some(left) = evaluate_scalar(catalog, left, values)? else {
+                return Ok(false);
             };
-            let Some(right) = evaluate_scalar(right, values) else {
-                return false;
+            let Some(right) = evaluate_scalar(catalog, right, values)? else {
+                return Ok(false);
             };
-            compare(left.as_value(), *op, right.as_value())
+            Ok(compare(left.as_value(), *op, right.as_value()))
         }
         BoolExpression::Contains { collection, item } => {
-            let Some(collection) = evaluate_scalar(collection, values) else {
-                return false;
+            let Some(collection) = evaluate_scalar(catalog, collection, values)? else {
+                return Ok(false);
             };
-            let Some(item) = evaluate_scalar(item, values) else {
-                return false;
+            let Some(item) = evaluate_scalar(catalog, item, values)? else {
+                return Ok(false);
             };
-            matches!(collection.as_value().unwrapped(), Value::List(values) if values.iter().any(|value| value.cmp_eq(item.as_value())))
+            Ok(
+                matches!(collection.as_value().unwrapped(), Value::List(values) if values.iter().any(|value| value.cmp_eq(item.as_value()))),
+            )
         }
-        BoolExpression::Not(value) => !evaluate(value, values),
-        BoolExpression::And(left, right) => evaluate(left, values) && evaluate(right, values),
-        BoolExpression::Or(left, right) => evaluate(left, values) || evaluate(right, values),
+        BoolExpression::Not(value) => Ok(!evaluate(catalog, value, values)?),
+        BoolExpression::And(left, right) => {
+            if !evaluate(catalog, left, values)? {
+                return Ok(false);
+            }
+            evaluate(catalog, right, values)
+        }
+        BoolExpression::Or(left, right) => {
+            if evaluate(catalog, left, values)? {
+                return Ok(true);
+            }
+            evaluate(catalog, right, values)
+        }
     }
 }
 
 fn evaluate_scalar<'a>(
+    catalog: &Catalog,
     expression: &'a ScalarExpression,
     values: impl Fn(&str) -> Option<&'a Value> + Copy,
-) -> Option<Evaluated<'a>> {
+) -> Result<Option<Evaluated<'a>>> {
     match expression {
-        ScalarExpression::Reference(path) => values(path).map(Evaluated::Borrowed),
-        ScalarExpression::Literal(value) => Some(Evaluated::Borrowed(value)),
+        ScalarExpression::Reference(path) => Ok(values(path).map(Evaluated::Borrowed)),
+        ScalarExpression::Literal(value) => Ok(Some(Evaluated::Borrowed(value))),
         ScalarExpression::Length(value) => {
-            let value = evaluate_scalar(value, values)?;
+            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+                return Ok(None);
+            };
             let length = match value.as_value().unwrapped() {
                 Value::List(values) => values.len(),
                 Value::Text(value) => value.chars().count(),
-                _ => return None,
+                _ => return Ok(None),
             };
-            i64::try_from(length)
-                .ok()
-                .map(|value| Evaluated::Owned(Value::Int(value)))
+            let length = i64::try_from(length)
+                .map_err(|_| Error::new("E_LIMIT", "length exceeds i64 range"))?;
+            Ok(Some(Evaluated::Owned(Value::Int(length))))
+        }
+        ScalarExpression::Negate { value, ty } => {
+            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+                return Ok(None);
+            };
+            let raw = match value.as_value().unwrapped() {
+                Value::Int(value) => Value::Int(
+                    value
+                        .checked_neg()
+                        .ok_or_else(|| Error::new("E_ARITH", "integer overflow in unary '-'"))?,
+                ),
+                Value::Float(value) => finite_float(-value, "unary '-'")?,
+                _ => return Err(Error::new("E_TYPE", "non-numeric unary '-' operand")),
+            };
+            Ok(Some(Evaluated::Owned(coerce_arithmetic_result(
+                catalog, ty, raw,
+            )?)))
+        }
+        ScalarExpression::Arithmetic {
+            left,
+            op,
+            right,
+            ty,
+        } => {
+            let Some(left) = evaluate_scalar(catalog, left, values)? else {
+                return Ok(None);
+            };
+            let Some(right) = evaluate_scalar(catalog, right, values)? else {
+                return Ok(None);
+            };
+            let raw = evaluate_arithmetic(left.as_value(), *op, right.as_value())?;
+            Ok(Some(Evaluated::Owned(coerce_arithmetic_result(
+                catalog, ty, raw,
+            )?)))
         }
     }
+}
+
+pub(crate) fn evaluate_value<'a>(
+    catalog: &Catalog,
+    expression: &'a ScalarExpression,
+    values: impl Fn(&str) -> Option<&'a Value> + Copy,
+) -> Result<Value> {
+    evaluate_scalar(catalog, expression, values)?
+        .map(|value| value.as_value().clone())
+        .ok_or_else(|| Error::new("E_QUERY", "bound scalar expression has no runtime value"))
+}
+
+fn coerce_arithmetic_result(
+    catalog: &Catalog,
+    ty: &Option<ScalarType>,
+    value: Value,
+) -> Result<Value> {
+    let ty = ty
+        .as_ref()
+        .ok_or_else(|| Error::new("E_TYPE", "arithmetic expression was not bound"))?;
+    catalog.coerce(&value, ty, "arithmetic result")
+}
+
+fn evaluate_arithmetic(left: &Value, op: ArithmeticOp, right: &Value) -> Result<Value> {
+    match (left.unwrapped(), right.unwrapped()) {
+        (Value::Int(left), Value::Int(right)) => {
+            let value = match op {
+                ArithmeticOp::Add => left.checked_add(*right),
+                ArithmeticOp::Subtract => left.checked_sub(*right),
+                ArithmeticOp::Multiply => left.checked_mul(*right),
+                ArithmeticOp::Divide if *right == 0 => {
+                    return Err(Error::new("E_ARITH", "integer division by zero"));
+                }
+                ArithmeticOp::Divide => left.checked_div(*right),
+            }
+            .ok_or_else(|| Error::new("E_ARITH", "integer arithmetic overflow"))?;
+            Ok(Value::Int(value))
+        }
+        (Value::Float(left), Value::Float(right)) => {
+            if matches!(op, ArithmeticOp::Divide) && *right == 0.0 {
+                return Err(Error::new("E_ARITH", "float division by zero"));
+            }
+            let value = match op {
+                ArithmeticOp::Add => left + right,
+                ArithmeticOp::Subtract => left - right,
+                ArithmeticOp::Multiply => left * right,
+                ArithmeticOp::Divide => left / right,
+            };
+            finite_float(value, "float arithmetic")
+        }
+        _ => Err(Error::new(
+            "E_TYPE",
+            "arithmetic operands do not have the same numeric type",
+        )),
+    }
+}
+
+fn finite_float(value: f64, context: &str) -> Result<Value> {
+    if !value.is_finite() {
+        return Err(Error::new(
+            "E_ARITH",
+            format!("{context} produced a non-finite float"),
+        ));
+    }
+    Ok(Value::Float(if value == 0.0 { 0.0 } else { value }))
 }
 
 enum Evaluated<'a> {

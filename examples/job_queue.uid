@@ -84,6 +84,10 @@ derive state_label =
     Running {..} => "running"
     Succeeded {..} => "succeeded"
     Failed {..} => "failed"
+derive next_attempt =
+  match state
+    Queued {attempt, ..} => Some (attempt + 1)
+    _ => None
 sort {-priority, created_at, id}
 take 1..2
-select {id, state_label, payload, state}
+select {id, state_label, next_attempt, payload, state}

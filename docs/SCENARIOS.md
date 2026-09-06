@@ -169,7 +169,7 @@ type Session =
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
 | 固定 record 的嵌套路径过滤/投影 | 已实现 | option/sum 不能直接穿透 | 已满足基础 |
 | 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载、record/tuple/sum/option 嵌套 pattern，以及同 constructor 多分支的完整覆盖分析 | prepared plan 的 schema revision 重绑定 | #35，P0 |
-| 从 ADT 分支派生统一结果 | 已实现递归 pattern，以及从 binding 构造 option/sum/record/tuple/list | 派生结果中的算术/函数表达式 | #36，P0 |
+| 从 ADT 分支派生统一结果 | 已实现递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | 通用函数表达式 | #36，P0 |
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length | any/all 元素谓词与 option helper | #36，P0 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
 | 参数化 key/time/user 输入 | 未实现 | typed params、schema revision 重绑定 | #10/#22，P0/P1 |

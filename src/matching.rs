@@ -943,6 +943,9 @@ fn infer_result_type(
     match result {
         MatchValue::Binding(path) => Ok(Some(binding_type(catalog, bindings, path)?.clone())),
         MatchValue::Literal(value) => literal_type(catalog, value),
+        MatchValue::Expression(expression) => {
+            crate::expression::infer_scalar(catalog, bindings, expression, "match binding")
+        }
         MatchValue::Constructor { name, payload } => {
             if let Some(definition) = catalog.types.get(name)
                 && matches!(payload, MatchValuePayload::Record(_))
@@ -1099,6 +1102,16 @@ fn bind_result(
         }
         MatchValue::Literal(value) => {
             *value = catalog.coerce(value, expected, &format!("derive '{derive_name}' branch"))?;
+            Ok(())
+        }
+        MatchValue::Expression(expression) => {
+            crate::expression::bind_scalar(
+                catalog,
+                bindings,
+                expression,
+                Some(expected),
+                "match binding",
+            )?;
             Ok(())
         }
         MatchValue::Constructor { name, payload } => {
@@ -1365,18 +1378,22 @@ fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
     }
 }
 
-pub(crate) fn evaluate(row: &BTreeMap<String, Value>, pred: &MatchPredicate) -> bool {
+pub(crate) fn evaluate(
+    catalog: &Catalog,
+    row: &BTreeMap<String, Value>,
+    pred: &MatchPredicate,
+) -> Result<bool> {
     let Some(value) = row_field(row, &pred.column) else {
-        return false;
+        return Ok(false);
     };
     for arm in &pred.arms {
         if let Some(bindings) = match_bindings(value, &arm.pattern) {
-            return crate::expression::evaluate(&arm.condition, |path| {
+            return crate::expression::evaluate(catalog, &arm.condition, |path| {
                 binding_value(&bindings, path)
             });
         }
     }
-    false
+    Ok(false)
 }
 
 pub(crate) fn evaluate_derive(
@@ -1421,6 +1438,11 @@ fn evaluate_result(
             .cloned()
             .ok_or_else(|| Error::new("E_MATCH", format!("missing binding '{path}'"))),
         MatchValue::Literal(value) => Ok(value.clone()),
+        MatchValue::Expression(expression) => {
+            crate::expression::evaluate_value(catalog, expression, |path| {
+                binding_value(bindings, path)
+            })
+        }
         MatchValue::Constructor { name, payload } => {
             if let ScalarType::Ref(id) = expected {
                 let definition = catalog.definition(*id)?;
