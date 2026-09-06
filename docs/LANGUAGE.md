@@ -76,7 +76,7 @@ take 20
 
 支持 `==`、`!=`、`>`、`>=`、`<`、`<=`。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；跨请求分页应以唯一主键结束排序。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。
 
-模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。`derive` 当前只接受 match 分支返回 binding 或 typed literal，构造新值等完整表达式仍在 #35/#36。
+模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。`derive` 分支可返回 binding/literal，或用 binding 构造 `Some at`、`State.Done`、`Summary {label = message}`、tuple、record 和 list。布尔/算术/函数表达式仍在 #36。
 
 兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。`group/aggregate`、参数、完整表达式及写操作的当前状态统一记录在 [查询能力表](QUERY.md#能力状态)。
 

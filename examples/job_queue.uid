@@ -64,7 +64,11 @@ from jobs
 filter match state
   Failed {error = Network {message}, retry_at = Some at} => at >= 200
   _ => false
-select {id, state}
+derive retry_at =
+  match state
+    Failed {retry_at = Some at, ..} => Some at
+    _ => None
+select {id, state, retry_at}
 
 from jobs
 filter match state

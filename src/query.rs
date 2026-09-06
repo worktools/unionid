@@ -137,6 +137,26 @@ pub struct MatchValueArm {
 pub enum MatchValue {
     Binding(String),
     Literal(Value),
+    Constructor {
+        name: String,
+        payload: MatchValuePayload,
+    },
+    Record(Vec<MatchValueField>),
+    Tuple(Vec<MatchValue>),
+    List(Vec<MatchValue>),
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchValuePayload {
+    Unit,
+    Record(Vec<MatchValueField>),
+    Positional(Vec<MatchValue>),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchValueField {
+    pub name: String,
+    pub value: MatchValue,
 }
 
 #[derive(Debug, Clone)]
