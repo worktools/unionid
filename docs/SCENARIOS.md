@@ -44,6 +44,7 @@ type Job =
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行。
 - 原子 claim：按 id 和旧状态筛选，把 `Queued` 改成 `Running` 并返回新值，属于 #15；状态解构与新值表达式复用 #35。
 - 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter match state` 组合即可限定状态。
+- 复用业务判断：`let important = value -> value >= 10` 和 `let has_tag = (values list text, tag text) -> contains values tag` 可在当前 pipeline 后续的 filter、derive 与 aggregate 输入中重复调用，避免复制长条件。
 - 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
 - 按状态计数：`derive match` 把 sum 分支归一为状态名，再用 `group state_label` 与 `aggregate` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.uid](../examples/job_queue.uid)。
 
@@ -176,7 +177,8 @@ type Session =
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
 | 固定 record 的嵌套路径过滤/投影 | 已实现 | option/sum 不能直接穿透 | 已满足基础 |
 | 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载、record/tuple/sum/option 嵌套 pattern，以及同 constructor 多分支的完整覆盖分析 | — | #35，P0 |
-| 派生普通值或从 ADT 分支归一结果 | 已实现 scalar/bool 普通 derive、递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | 查询局部纯函数 | #61，P0 |
+| 派生普通值或从 ADT 分支归一结果 | 已实现 scalar/bool 普通 derive、递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | — | #59，已满足 |
+| 复用重复业务表达式 | 已实现查询局部常量、单/多参数非递归纯函数、有限推断、词法遮蔽和展开预算 | 泛型、高阶与递归函数延后 | #61，P0 |
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none | 通用高阶函数延后 | 已满足 v0.1 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec 与 schema-aware prepared query | option helper/元素谓词可继续扩展 | #10/#22/#36 |
@@ -194,4 +196,4 @@ type Session =
 5. 时间、随机数、网络和文件不是查询表达式的隐含副作用。当前时间由参数传入；外部 I/O 留在应用层。
 6. v0.1 不以 join、window、递归、高阶泛型换取表面覆盖率。若一个场景主要依赖大规模关联、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
 
-实现顺序按用户可完成的工作流安排：#34–#36、#59 和 #60 已补齐列表读取、ADT 表达式、普通派生与基础汇总；下一项 #61 收敛查询局部纯函数，再由 #11 汇总查询核心，并由 #24 用本页场景验收。
+实现顺序按用户可完成的工作流安排：#34–#36 与 #59–#61 已补齐列表读取、ADT 表达式、普通派生、基础汇总和查询局部纯函数；#11 汇总查询核心，下一阶段处理 #16 的索引计划与 explain，再由 #21/#24 收敛日常体验和 v0.1 验收。

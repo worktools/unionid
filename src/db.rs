@@ -51,6 +51,7 @@ impl GroupAccumulator {
 
     fn update(
         &mut self,
+        catalog: &Catalog,
         row: &BTreeMap<String, Value>,
         assignments: &[AggregateAssignment],
     ) -> Result<()> {
@@ -62,7 +63,7 @@ impl GroupAccumulator {
                         .ok_or_else(|| Error::new("E_ARITH", "count overflowed int"))?;
                 }
                 AggregateState::Sum(total) => {
-                    let value = aggregate_input(row, assignment)?;
+                    let value = aggregate_input(catalog, row, assignment)?;
                     *total = Some(match (total.take(), value.unwrapped()) {
                         (None, Value::Int(value)) => Value::Int(*value),
                         (None, Value::Float(value)) => Value::Float(*value),
@@ -90,10 +91,10 @@ impl GroupAccumulator {
                     });
                 }
                 AggregateState::Min(current) => {
-                    update_extreme(current, aggregate_input(row, assignment)?, true)?;
+                    update_extreme(current, &aggregate_input(catalog, row, assignment)?, true)?;
                 }
                 AggregateState::Max(current) => {
-                    update_extreme(current, aggregate_input(row, assignment)?, false)?;
+                    update_extreme(current, &aggregate_input(catalog, row, assignment)?, false)?;
                 }
             }
         }
@@ -139,20 +140,16 @@ impl GroupAccumulator {
     }
 }
 
-fn aggregate_input<'a>(
-    row: &'a BTreeMap<String, Value>,
+fn aggregate_input(
+    catalog: &Catalog,
+    row: &BTreeMap<String, Value>,
     assignment: &AggregateAssignment,
-) -> Result<&'a Value> {
+) -> Result<Value> {
     let input = assignment
         .input
-        .as_deref()
-        .ok_or_else(|| Error::new("E_QUERY", "aggregate input field is missing"))?;
-    row_field(row, input).ok_or_else(|| {
-        Error::new(
-            "E_FIELD",
-            format!("missing aggregate input '{input}' during execution"),
-        )
-    })
+        .as_ref()
+        .ok_or_else(|| Error::new("E_QUERY", "aggregate input expression is missing"))?;
+    crate::expression::evaluate_value(catalog, input, |path| row_field(row, path))
 }
 
 fn update_extreme(current: &mut Option<Value>, value: &Value, minimum: bool) -> Result<()> {
@@ -865,13 +862,21 @@ impl Database {
     pub(crate) fn prepare_pipeline(&self, pipeline: &mut Pipeline) -> Result<Vec<Column>> {
         let table = self.table(&pipeline.from)?;
         let mut schema = table.schema.clone();
+        let mut locals = crate::local::LocalScope::new();
         // Validate and bind every stage without touching rows, including for empty tables.
         for stage in &mut pipeline.stages {
             match stage {
+                Stage::Let(binding) => locals.define(&self.catalog, &schema, binding)?,
                 Stage::Filter(expression) => {
+                    locals.expand_bool(&self.catalog, &schema, expression)?;
                     crate::expression::bind(&self.catalog, &schema, expression)?
                 }
-                Stage::FilterMatch(pred) => crate::matching::bind(&self.catalog, &schema, pred)?,
+                Stage::FilterMatch(pred) => {
+                    for arm in &mut pred.arms {
+                        locals.expand_bool(&self.catalog, &schema, &mut arm.condition)?;
+                    }
+                    crate::matching::bind(&self.catalog, &schema, pred)?
+                }
                 Stage::Derive(derive) => {
                     if schema.iter().any(|column| column.name == derive.name) {
                         return Err(Error::new(
@@ -882,6 +887,7 @@ impl Database {
                             ),
                         ));
                     }
+                    locals.expand_bool(&self.catalog, &schema, &mut derive.expression)?;
                     let ty = crate::expression::bind_derive(
                         &self.catalog,
                         &schema,
@@ -896,6 +902,9 @@ impl Database {
                     });
                 }
                 Stage::DeriveMatch(derive) => {
+                    for arm in &mut derive.arms {
+                        locals.expand_match_value(&self.catalog, &schema, &mut arm.result)?;
+                    }
                     schema.push(crate::matching::bind_derive(
                         &self.catalog,
                         &schema,
@@ -903,6 +912,11 @@ impl Database {
                     )?);
                 }
                 Stage::Aggregate(aggregate) => {
+                    for assignment in &mut aggregate.assignments {
+                        if let Some(input) = &mut assignment.input {
+                            locals.expand_scalar(&self.catalog, &schema, input)?;
+                        }
+                    }
                     schema = self.bind_aggregate(&schema, aggregate)?;
                 }
                 Stage::Select(columns) => {
@@ -976,32 +990,32 @@ impl Database {
                 AggregateFunction::Sum => {
                     let ty = self.aggregate_input_type(schema, assignment)?;
                     if !matches!(
-                        self.catalog.underlying(ty)?,
+                        self.catalog.underlying(&ty)?,
                         ScalarType::Int | ScalarType::Float
                     ) {
                         return Err(Error::new(
                             "E_TYPE",
                             format!(
                                 "sum expects int or float, got {}",
-                                self.catalog.describe(ty)
+                                self.catalog.describe(&ty)
                             ),
                         ));
                     }
-                    ty.clone()
+                    ty
                 }
                 AggregateFunction::Min | AggregateFunction::Max => {
                     let ty = self.aggregate_input_type(schema, assignment)?;
-                    if !self.orderable(ty)? {
+                    if !self.orderable(&ty)? {
                         return Err(Error::new(
                             "E_TYPE",
                             format!(
                                 "{} expects an orderable int, float, or text value, got {}",
                                 aggregate_function_name(assignment.function),
-                                self.catalog.describe(ty)
+                                self.catalog.describe(&ty)
                             ),
                         ));
                     }
-                    ScalarType::Option(Box::new(ty.clone()))
+                    ScalarType::Option(Box::new(ty))
                 }
             };
             assignment.output_type = Some(ty.clone());
@@ -1015,21 +1029,21 @@ impl Database {
         Ok(output)
     }
 
-    fn aggregate_input_type<'a>(
-        &'a self,
-        schema: &'a [Column],
-        assignment: &AggregateAssignment,
-    ) -> Result<&'a ScalarType> {
-        let input = assignment.input.as_deref().ok_or_else(|| {
+    fn aggregate_input_type(
+        &self,
+        schema: &[Column],
+        assignment: &mut AggregateAssignment,
+    ) -> Result<ScalarType> {
+        let input = assignment.input.as_mut().ok_or_else(|| {
             Error::new(
                 "E_QUERY",
                 format!(
-                    "{} requires an input field",
+                    "{} requires an input expression",
                     aggregate_function_name(assignment.function)
                 ),
             )
         })?;
-        self.catalog.field_type(schema, input)
+        crate::expression::bind_scalar(&self.catalog, schema, input, None, "aggregate input")
     }
 
     fn aggregate_rows(
@@ -1076,7 +1090,7 @@ impl Database {
                 );
             }
             let group = groups.get_mut(&key).expect("group was initialized");
-            group.update(row, &aggregate.assignments)?;
+            group.update(&self.catalog, row, &aggregate.assignments)?;
         }
         let mut output = Vec::with_capacity(groups.len());
         for (position, (_, group)) in groups.into_iter().enumerate() {
@@ -1138,6 +1152,7 @@ impl Database {
         let mut evaluation_budget = crate::expression::EvaluationBudget::new();
         for stage in pipeline.stages {
             match stage {
+                Stage::Let(_) => {}
                 Stage::Filter(expression) => {
                     let mut filtered = Vec::with_capacity(rows.len());
                     for (position, row) in rows.into_iter().enumerate() {

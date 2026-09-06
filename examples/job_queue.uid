@@ -108,9 +108,11 @@ group state_label
 sort state_label
 
 from jobs
+let important = value -> value >= 10
+let has_tag = (values list text, tag text) -> contains values tag
 filter
-  priority >= 10
-  and contains tags "sync"
+  important priority
+  and has_tag tags "sync"
 filter match state
   Queued {scheduled_at, ..} => scheduled_at <= 200
   _ => false

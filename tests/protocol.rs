@@ -112,6 +112,24 @@ fn prepared_query_rejects_schema_changes_and_mutations() {
 }
 
 #[test]
+fn prepared_queries_infer_parameters_through_local_functions() {
+    let mut engine = setup();
+    let prepared = engine
+        .prepare(
+            "from tasks\nlet after = (value int) -> value >= $minimum\nfilter after id\nselect {id}",
+        )
+        .unwrap();
+    assert_eq!(prepared.parameters(), &["minimum"]);
+    assert_eq!(prepared.parameter_types()["minimum"], "int");
+    let response = engine.query(
+        &prepared,
+        BTreeMap::from([("minimum".into(), Value::Int(9_007_199_254_740_993))]),
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 1);
+}
+
+#[test]
 fn expired_execution_deadline_discards_an_atomic_batch() {
     let mut engine = Engine::memory();
     let response = engine.execute_with_params_until(

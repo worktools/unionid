@@ -191,6 +191,7 @@ fn parameters_value(visitor: &mut impl FnMut(&mut ScalarExpression), parameter: 
 fn visit_pipeline(pipeline: &Pipeline, visitor: &mut impl FnMut(&ScalarExpression)) {
     for stage in &pipeline.stages {
         match stage {
+            Stage::Let(binding) => visit_bool(&binding.expression, visitor),
             Stage::Filter(expression) => visit_bool(expression, visitor),
             Stage::FilterMatch(predicate) => {
                 for arm in &predicate.arms {
@@ -203,7 +204,14 @@ fn visit_pipeline(pipeline: &Pipeline, visitor: &mut impl FnMut(&ScalarExpressio
                     visit_match_value(&arm.result, visitor);
                 }
             }
-            Stage::Aggregate(_) | Stage::Select(_) | Stage::Sort(_) | Stage::Take { .. } => {}
+            Stage::Aggregate(aggregate) => {
+                for assignment in &aggregate.assignments {
+                    if let Some(input) = &assignment.input {
+                        visit_scalar(input, visitor);
+                    }
+                }
+            }
+            Stage::Select(_) | Stage::Sort(_) | Stage::Take { .. } => {}
         }
     }
 }
@@ -211,6 +219,7 @@ fn visit_pipeline(pipeline: &Pipeline, visitor: &mut impl FnMut(&ScalarExpressio
 fn visit_pipeline_mut(pipeline: &mut Pipeline, visitor: &mut impl FnMut(&mut ScalarExpression)) {
     for stage in &mut pipeline.stages {
         match stage {
+            Stage::Let(binding) => visit_bool_mut(&mut binding.expression, visitor),
             Stage::Filter(expression) => visit_bool_mut(expression, visitor),
             Stage::FilterMatch(predicate) => {
                 for arm in &mut predicate.arms {
@@ -223,7 +232,14 @@ fn visit_pipeline_mut(pipeline: &mut Pipeline, visitor: &mut impl FnMut(&mut Sca
                     visit_match_value_mut(&mut arm.result, visitor);
                 }
             }
-            Stage::Aggregate(_) | Stage::Select(_) | Stage::Sort(_) | Stage::Take { .. } => {}
+            Stage::Aggregate(aggregate) => {
+                for assignment in &mut aggregate.assignments {
+                    if let Some(input) = &mut assignment.input {
+                        visit_scalar_mut(input, visitor);
+                    }
+                }
+            }
+            Stage::Select(_) | Stage::Sort(_) | Stage::Take { .. } => {}
         }
     }
 }
@@ -304,12 +320,17 @@ fn visit_bool_mut(
 fn visit_scalar(expression: &ScalarExpression, visitor: &mut impl FnMut(&ScalarExpression)) {
     visitor(expression);
     match expression {
-        ScalarExpression::Length(value) | ScalarExpression::Negate { value, .. } => {
-            visit_scalar(value, visitor)
-        }
+        ScalarExpression::Ascribed { value, .. }
+        | ScalarExpression::Length(value)
+        | ScalarExpression::Negate { value, .. } => visit_scalar(value, visitor),
         ScalarExpression::Arithmetic { left, right, .. } => {
             visit_scalar(left, visitor);
             visit_scalar(right, visitor);
+        }
+        ScalarExpression::Call { arguments, .. } => {
+            for argument in arguments {
+                visit_scalar(argument, visitor);
+            }
         }
         ScalarExpression::Reference(_)
         | ScalarExpression::Parameter { .. }
@@ -323,12 +344,17 @@ fn visit_scalar_mut(
 ) {
     visitor(expression);
     match expression {
-        ScalarExpression::Length(value) | ScalarExpression::Negate { value, .. } => {
-            visit_scalar_mut(value, visitor)
-        }
+        ScalarExpression::Ascribed { value, .. }
+        | ScalarExpression::Length(value)
+        | ScalarExpression::Negate { value, .. } => visit_scalar_mut(value, visitor),
         ScalarExpression::Arithmetic { left, right, .. } => {
             visit_scalar_mut(left, visitor);
             visit_scalar_mut(right, visitor);
+        }
+        ScalarExpression::Call { arguments, .. } => {
+            for argument in arguments {
+                visit_scalar_mut(argument, visitor);
+            }
         }
         ScalarExpression::Reference(_)
         | ScalarExpression::Parameter { .. }

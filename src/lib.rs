@@ -8,6 +8,7 @@ pub mod db;
 pub mod engine;
 pub mod error;
 mod expression;
+mod local;
 mod matching;
 pub mod migration;
 pub mod model;
