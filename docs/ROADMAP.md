@@ -87,7 +87,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 1. [#6](https://github.com/worktools/unionid/issues/6)、[#7](https://github.com/worktools/unionid/issues/7) 与 [#28](https://github.com/worktools/unionid/issues/28) 已完成；继续用当前可执行规范、示例和实际反馈收敛 [#2](https://github.com/worktools/unionid/issues/2)。
 2. [#13](https://github.com/worktools/unionid/issues/13) 与 [#14](https://github.com/worktools/unionid/issues/14) 已交付 redb 原子提交、进程退出恢复、打开锁和格式校验子集，持久数据使用稳定 RowId；两项继续跟踪设备故障与恢复边界。
 3. [#9](https://github.com/worktools/unionid/issues/9)、[#12](https://github.com/worktools/unionid/issues/12) 与 [#34](https://github.com/worktools/unionid/issues/34) 已完成；[#35](https://github.com/worktools/unionid/issues/35) 与 [#36](https://github.com/worktools/unionid/issues/36) 已有可执行子集，继续跟踪 prepared plan、元素谓词与通用函数。
-4. [#15](https://github.com/worktools/unionid/issues/15) 的稳定 RowId、类型化 update/delete、主键 upsert 和 redb 增量稳定键提交已落地，完成最终验收后进入 [#17](https://github.com/worktools/unionid/issues/17) → [#18](https://github.com/worktools/unionid/issues/18) 的 schema/data migration 核心路径。[#16](https://github.com/worktools/unionid/issues/16) 的 Explain 与 M4 体验工作暂后置。
+4. [#15](https://github.com/worktools/unionid/issues/15) 已完成；[#17](https://github.com/worktools/unionid/issues/17) 已进入显式 schema/data migration 实现，完成稳定身份 rename、默认回填、typed conversion、嵌套引用扫描和约束/索引维护后，再接 [#18](https://github.com/worktools/unionid/issues/18) 的版本化 runner/ledger。[#16](https://github.com/worktools/unionid/issues/16) 的 Explain 与 M4 体验工作暂后置。
 
 类型演进规则刻意放在 M0，避免 migration 被当作事后附加；完整 migration 执行要等原子存储与 DML 成熟。
 

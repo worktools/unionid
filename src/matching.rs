@@ -1151,6 +1151,28 @@ fn bind_result(
     }
 }
 
+pub(crate) fn bind_migration_result(
+    catalog: &Catalog,
+    expected: &ScalarType,
+    result: &mut MatchValue,
+    binding: &str,
+    binding_type: ScalarType,
+) -> Result<()> {
+    if matches!(result, MatchValue::Binding(path) if path == binding)
+        && matches!(binding_type, ScalarType::Int)
+        && matches!(catalog.underlying(expected)?, ScalarType::Float)
+    {
+        return Ok(());
+    }
+    let bindings = [Column {
+        name: binding.into(),
+        ty: binding_type,
+        default: None,
+        id: 0,
+    }];
+    bind_result(catalog, "migration", expected, result, &bindings)
+}
+
 fn bind_constructor_result(
     catalog: &Catalog,
     derive_name: &str,
@@ -1520,6 +1542,18 @@ fn evaluate_result(
             ))
         }
     }
+}
+
+pub(crate) fn evaluate_migration_result(
+    catalog: &Catalog,
+    expected: &ScalarType,
+    result: &MatchValue,
+    binding: &str,
+    value: &Value,
+) -> Result<Value> {
+    let bindings = BTreeMap::from([(binding, value)]);
+    let raw = evaluate_result(catalog, expected, &bindings, result)?;
+    catalog.coerce(&raw, expected, "migration result")
 }
 
 fn evaluate_value_payload(

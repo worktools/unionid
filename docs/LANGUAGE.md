@@ -1,8 +1,8 @@
 # 当前可运行的语言预览
 
-本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)。
+本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)。
 
-当前包含类型与表声明、insert/upsert/update/delete、布尔 filter、sum/option 的 `filter match`、ADT `derive match`、select、sort 和 take。filter 与 match/derive/set 表达式支持有类型的 int/float 算术；filter 还支持 `not/and/or`、字段间比较及 `contains/length`。参数与 migration 尚未实现。
+当前包含类型与表声明、insert/upsert/update/delete、schema migration、布尔 filter、sum/option 的 `filter match`、ADT `derive match`、select、sort 和 take。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 还支持 `not/and/or`、字段间比较及 `contains/length`。参数与版本化 migration runner 尚未实现。
 
 ## 类型、表与值
 
@@ -124,11 +124,25 @@ upsert config
 - 成功响应的 `affected_rows` 为 1，`upsert_action` 明确返回 `inserted` 或 `updated`。重复提交同一主键仍走 `updated` 分支。
 - 主键和派生索引与 row 在同一请求中原子更新；后续语句失败时，新插入或替换也会一起回滚。
 
+## Schema migration
+
+`migration name` 使用缩进 block 执行显式 schema 操作和 typed 数据转换：
+
+```text
+migration task_state_v2
+  rename variant State.Failed to Rejected
+  add field Task.priority int = 0
+  change variant State.Rejected to {code int, message text}
+    using old -> {code = 0, message = old.message}
+```
+
+当前支持 type/field/variant 的 add/drop/rename、field/variant 类型或 payload 转换、默认值变更，以及 index/primary-key 变更。命名 ADT 在所有表的嵌套路径中统一转换，保留稳定身份和 RowId；任一行或约束失败会回滚整个请求。完整语法、删除保护和 runner 边界见 [Schema migration 语言](MIGRATIONS.md)。版本化文件、checksum、plan/apply/status 与持久 ledger 仍由 #18 跟踪。
+
 ## 脚本边界与错误
 
-同层的 `from` / `type` / `table` / `insert` / `upsert` / `update` / `delete` / `create` 开始新语句；查询中的同层 `filter/derive/select/sort/take/limit` 延续读取 pipeline，update 中的同层 `filter/set` 延续修改语句，delete 中的同层 `filter` 延续删除语句。声明体、insert/upsert 的多行 record、嵌套 record、变体负载、filter 条件和 match 分支通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
+同层的 `from` / `type` / `table` / `insert` / `upsert` / `update` / `delete` / `migration` / `create` 开始新语句；查询中的同层 `filter/derive/select/sort/take/limit` 延续读取 pipeline，update 中的同层 `filter/set` 延续修改语句，delete 中的同层 `filter` 延续删除语句。声明体、insert/upsert 的多行 record、migration、嵌套 record、变体负载、filter 条件和 match 分支通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
 
-空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意函数、list 元素 lambda、let/group、参数占位符或 migration 语句。
+空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意函数、list 元素 lambda、let/group、参数占位符或版本化 migration runner 命令。
 
 一次 `Engine.execute`、一次 `run` 或一个 TCP 请求是一个原子批次：先解析全部源码，再在候选状态中执行；任一步失败则不发布此次请求的任何修改。成功返回最后一条语句的结果，批次中的查询可以看到前面的写入。当前通过复制内存数据库实现写批次隔离，适合小工作集，尚未优化大批量写入的内存成本。
 

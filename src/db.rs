@@ -9,6 +9,8 @@ use crate::model::{
 };
 use crate::query::{Pipeline, SetAssignment, Stage, Statement};
 
+mod migration;
+
 type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<RowId>>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +198,7 @@ impl Database {
                 mut assignments,
             } => self.update(&mut target, &mut assignments),
             Statement::Delete { mut target } => self.delete(&mut target),
+            Statement::Migration { name, steps } => self.migrate(&name, steps),
             Statement::Pipeline(pipeline) => self.query(pipeline),
         }
     }

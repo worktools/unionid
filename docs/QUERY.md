@@ -1,6 +1,6 @@
 # 查询语言参考
 
-本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。类型、表和 insert/upsert 见 [LANGUAGE.md](LANGUAGE.md)；尚未实现的表达式、transform 和 migration 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
+本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。类型、表和 insert/upsert 见 [LANGUAGE.md](LANGUAGE.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)；尚未实现的表达式与 runner 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
 
 unionid 的查询从表开始，按书写顺序经过一组 transform：
 
@@ -40,7 +40,7 @@ take 20
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
 | 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows、原子约束与增量持久维护 | #15 |
 | Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId、结构化 action 与增量持久维护 | #15 |
-| migration 查询与转换 | `migration` | 未实现 | #17、#18 |
+| schema migration | `migration name` | 已实现显式 ADT schema 操作、typed conversion、全引用路径重写与原子索引维护 | #17 继续补 plan 报告；#18 实现文件 runner/ledger |
 | join、window、递归和高阶函数 | — | v0.1 延后 | #25 |
 
 “未实现”的词只在状态表和限制说明中出现。除明确标为反例的片段外，本页其余查询代码均可由当前 parser 执行。
