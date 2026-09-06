@@ -62,7 +62,12 @@ fn executable_examples() {
             .iter()
             .map(|column| column.name.as_str())
             .collect::<Vec<_>>(),
-        ["id", "state_label", "payload", "state"]
+        ["id", "state_label", "next_attempt", "payload", "state"]
+    );
+    assert!(
+        r.rows[0]["next_attempt"]
+            .unwrapped()
+            .cmp_eq(&Value::Option(Some(Box::new(Value::Int(2)))))
     );
 
     let mut sync = Engine::memory();
@@ -534,6 +539,125 @@ fn boolean_expressions_are_checked_before_scanning_empty_tables() {
     let too_deep = format!("from jobs | filter {}archived", "not ".repeat(64));
     let error = e.execute(&too_deep).error.unwrap();
     assert_eq!(error.code, "E_LIMIT");
+}
+
+#[test]
+fn typed_arithmetic_composes_filters_match_conditions_and_derives() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Attempts = int\ntype State = Ready {attempts Attempts, limit Attempts} | Done\ntype Job =\n  id int\n  priority int\n  bonus int\n  ratio float\n  state State\ntable jobs Job\ninsert jobs {id = 1, priority = 4, bonus = 3, ratio = 5.0, state = Ready {attempts = 2, limit = 3}}\ninsert jobs {id = 2, priority = 5, bonus = 1, ratio = 8.0, state = Ready {attempts = 4, limit = 8}}\ninsert jobs {id = 3, priority = 10, bonus = 0, ratio = 2.0, state = Done}",
+    );
+    let result = ok(
+        &mut engine,
+        "from jobs\nfilter (\n  priority\n  + bonus * 2\n) >= 10\nfilter ratio / 2.0 < 3.0\nfilter ratio == (2 + 3)\nfilter match state\n  Ready {attempts, limit} => attempts + 1 >= limit\n  Done => false\nderive next_attempt =\n  match state\n    Ready {attempts, ..} => attempts + 1\n    Done => 0\nselect {id, next_attempt}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(
+        result.rows[0]["next_attempt"]
+            .unwrapped()
+            .cmp_eq(&Value::Int(3))
+    );
+    assert!(matches!(
+        result.rows[0]["next_attempt"],
+        Value::Named { .. }
+    ));
+    assert_eq!(result.columns[1].ty, "Attempts");
+}
+
+#[test]
+fn arithmetic_precedence_grouping_and_integer_division_are_explicit() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type State = Value {a int, b int} | Empty\ntype Row =\n  id int\n  state State\ntable rows Row\ninsert rows {id = 1, state = Value {a = 5, b = 2}}",
+    );
+    let result = ok(
+        &mut engine,
+        "from rows\nderive precedence =\n  match state\n    Value {a, b} => a + b * 3\n    Empty => 0\nderive grouped =\n  match state\n    Value {a, b} => (a + b) * 3\n    Empty => 0\nderive subtracted =\n  match state\n    Value {a, b} => a - b\n    Empty => 0\nderive divided =\n  match state\n    Value {a, b} => a / b\n    Empty => 0\nderive negated =\n  match state\n    Value {a, ..} => -a\n    Empty => 0\nselect {precedence, grouped, subtracted, divided, negated}",
+    );
+    assert!(result.rows[0]["precedence"].cmp_eq(&Value::Int(11)));
+    assert!(result.rows[0]["grouped"].cmp_eq(&Value::Int(21)));
+    assert!(result.rows[0]["subtracted"].cmp_eq(&Value::Int(3)));
+    assert!(result.rows[0]["divided"].cmp_eq(&Value::Int(2)));
+    assert!(result.rows[0]["negated"].cmp_eq(&Value::Int(-5)));
+}
+
+#[test]
+fn arithmetic_type_and_runtime_failures_are_structured() {
+    let setup = "type State = Value {number int, ratio float, label text} | Empty\ntype Row =\n  state State\ntable rows Row";
+    for (expression, expected) in [
+        ("number + label", "different types"),
+        ("number + ratio", "different types"),
+        ("label - 1", "expects int or float"),
+    ] {
+        let mut engine = Engine::memory();
+        ok(&mut engine, setup);
+        let result = engine.execute(&format!(
+            "from rows\nderive output =\n  match state\n    Value {{number, ratio, label}} => {expression}\n    Empty => 0"
+        ));
+        assert!(!result.ok, "accepted {expression}");
+        assert_eq!(result.error.as_ref().unwrap().code, "E_TYPE");
+        assert!(result.message.contains(expected), "{}", result.message);
+    }
+
+    for (value, expression, expected) in [
+        ("1", "number / 0", "division by zero"),
+        ("9223372036854775807", "number + 1", "overflow"),
+        ("-9223372036854775808", "-number", "overflow"),
+    ] {
+        let mut engine = Engine::memory();
+        ok(
+            &mut engine,
+            &format!(
+                "type State = Value {{number int}} | Empty\ntype Row =\n  state State\ntable rows Row\ninsert rows {{state = Value {{number = {value}}}}}"
+            ),
+        );
+        let result = engine.execute(&format!(
+            "from rows\nderive output =\n  match state\n    Value {{number}} => {expression}\n    Empty => 0"
+        ));
+        assert!(!result.ok, "accepted {expression}");
+        assert_eq!(result.error.as_ref().unwrap().code, "E_ARITH");
+        assert!(result.message.contains(expected), "{}", result.message);
+    }
+
+    for (expression, expected) in [
+        ("ratio / 0.0", "division by zero"),
+        ("ratio * ratio", "non-finite"),
+    ] {
+        let mut engine = Engine::memory();
+        ok(
+            &mut engine,
+            "type State = Value {ratio float} | Empty\ntype Row =\n  state State\ntable rows Row\ninsert rows {state = Value {ratio = 1e308}}",
+        );
+        let result = engine.execute(&format!(
+            "from rows\nderive output =\n  match state\n    Value {{ratio}} => {expression}\n    Empty => 0.0"
+        ));
+        assert!(!result.ok, "accepted {expression}");
+        assert_eq!(result.error.as_ref().unwrap().code, "E_ARITH");
+        assert!(result.message.contains(expected), "{}", result.message);
+    }
+}
+
+#[test]
+fn boolean_short_circuit_skips_failing_arithmetic() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Row =\n  id int\ntable rows Row\ninsert rows {id = 1}",
+    );
+    assert!(
+        ok(&mut engine, "from rows | filter false and 1 / 0 == 0")
+            .rows
+            .is_empty()
+    );
+    assert_eq!(
+        ok(&mut engine, "from rows | filter true or 1 / 0 == 0")
+            .rows
+            .len(),
+        1
+    );
 }
 
 #[test]

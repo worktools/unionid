@@ -137,6 +137,7 @@ pub struct MatchValueArm {
 pub enum MatchValue {
     Binding(String),
     Literal(Value),
+    Expression(ScalarExpression),
     Constructor {
         name: String,
         payload: MatchValuePayload,
@@ -181,6 +182,24 @@ pub enum ScalarExpression {
     Reference(String),
     Literal(Value),
     Length(Box<ScalarExpression>),
+    Negate {
+        value: Box<ScalarExpression>,
+        ty: Option<ScalarType>,
+    },
+    Arithmetic {
+        left: Box<ScalarExpression>,
+        op: ArithmeticOp,
+        right: Box<ScalarExpression>,
+        ty: Option<ScalarType>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ArithmeticOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
 }
 
 #[derive(Debug, Clone, Copy)]

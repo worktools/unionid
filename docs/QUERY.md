@@ -27,14 +27,14 @@ take 20
 | 能力 | 当前形式 | 状态 | 后续任务 |
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
-| 布尔过滤 | `filter priority >= 10 and contains tags "sync"` | 已实现括号、`not/and/or`、字段间比较、`contains/length` | #36 扩展算术、option helper 与元素谓词 |
+| 布尔过滤 | `filter priority + bonus >= 10` | 已实现括号、`not/and/or`、有类型算术、字段间比较、`contains/length` | #36 扩展 option helper 与元素谓词 |
 | sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、递归 record/tuple/sum/option pattern，以及完整嵌套穷尽与不可达检查 | #35 跟踪 prepared plan 重绑定 |
 | 投影 | `select {field, nested.field}` | 已实现 | #11 与派生列组合 |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | #16 增加索引计划 |
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` | 未实现 | #10、#22 |
-| ADT 派生列 | `derive x = match ...` | 已实现递归 pattern、完整嵌套覆盖分析与 option/sum/product/list 值构造 | #35 跟踪 prepared plan 重绑定；#36 增加算术/函数表达式 |
+| ADT 派生列 | `derive x = match ...` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造 | #35 跟踪 prepared plan 重绑定；#36 扩展通用函数表达式 |
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 已实现于普通 filter 与 match condition | #36 扩展 `any/all` 等能力 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
@@ -104,7 +104,11 @@ and-expression    = not-expression ("and" not-expression)*
 not-expression    = "not" not-expression | bool-primary
 bool-primary      = "(" bool-expression ")" | contains-call | scalar-expression (comparison scalar-expression)?
 contains-call     = "contains" scalar-expression scalar-expression
-scalar-expression = field-path | literal | "length" scalar-expression
+scalar-expression = additive-expression
+additive-expression = multiplicative-expression (("+" | "-") multiplicative-expression)*
+multiplicative-expression = unary-expression (("*" | "/") unary-expression)*
+unary-expression  = "-" unary-expression | "length" unary-expression | scalar-primary
+scalar-primary    = field-path | literal | "(" scalar-expression ")"
 comparison        = "==" | "!=" | ">" | ">=" | "<" | "<="
 field-path        = identifier ("." identifier)*
 ```
@@ -143,6 +147,26 @@ filter (
 ```
 
 单个比较或很短的同类组合仍可写在 `filter` 同一行。括号用于说明分组，record/list/tuple 继续使用各自已有的必要标点；语言不会为了追求“零符号”而隐藏结构。
+
+## 数值表达式
+
+`+`、`-`、`*`、`/` 和一元 `-` 可用于普通 filter、match condition，以及 `derive match` 的分支结果和嵌套构造值。乘除优先于加减；需要改变顺序时使用括号。中缀运算符的规范格式在两侧留空格，复杂算术可在括号内换行：
+
+```text
+filter (
+  priority
+  + bonus * 2
+) >= threshold
+
+derive next_attempt =
+  match state
+    Queued {attempt, ..} => Some (attempt + 1)
+    _ => None
+```
+
+运算数必须归一为同一个 int 或 float 类型。字段和 binding 决定类型时，同类型的数字 literal 会在扫描前转换；两个不同类型的字段不会隐式混合。命名数值类型保留名义身份，例如 `Attempts + 1` 的结果仍是 `Attempts`。
+
+`int / int` 使用向零截断的整数除法。整数加减乘除和一元负号执行 checked 运算；溢出与除零返回 `E_ARITH`。float 运算拒绝除以正负零，也拒绝产生 NaN 或无限值；负零归一为正零。`and/or` 继续短路求值，因此未执行分支中的算术错误不会触发。
 
 ## 执行模型
 
@@ -311,8 +335,9 @@ take 20
 | 错误 | 例子 |
 | --- | --- |
 | `E_FIELD` | 未知字段，或 `select` 后访问已经移除的字段 |
-| `E_TYPE` | 对 sum 排序、比较类型不匹配、match 非 sum 字段 |
+| `E_TYPE` | 对 sum 排序、比较或算术类型不匹配、match 非 sum 字段 |
 | `E_MATCH` | 未知/重复构造器、非穷尽 match、错误负载字段或分支绑定 |
+| `E_ARITH` | 整数溢出、除零或产生非有限 float |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token 数或嵌套深度超过限制 |
 
@@ -341,13 +366,14 @@ filter match state
 | 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、`filter match`、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
 | 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
 | 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较、typed derive 和字符串中的 `|` | `tests/language.rs::executable_examples` |
-| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、布尔/集合 filter、嵌套 pattern、ADT derive、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
+| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、布尔/集合 filter、typed arithmetic、嵌套 pattern、ADT derive、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
 | 离线同步冲突 | [sync_conflicts.uid](../examples/sync_conflicts.uid) | 同一 `Conflict` constructor 的互补嵌套分支、typed derive 与 Option | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 嵌套穷尽性、不可达分支、积类型相关性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*`、`complementary_nested_*`、`nested_pattern_coverage_*` |
 | ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
 | 布尔与集合表达式 | 测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length` 和空表错误 | `boolean_filters_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
+| 数值表达式 | 测试内脚本 | int/float 类型、优先级、跨行括号、命名数值类型、整数除法、短路及运行时错误 | `typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。
