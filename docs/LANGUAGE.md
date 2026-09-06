@@ -51,7 +51,12 @@ from tasks
 filter match state
   Running {attempt, ..} => attempt >= 2
   _ => false
-select {id, owner.email, state}
+derive state_label =
+  match state
+    Pending => "pending"
+    Running {..} => "running"
+    Done {..} => "done"
+select {id, owner.email, state, state_label}
 sort id
 take 20
 ```
@@ -63,6 +68,7 @@ take 20
 | 数据源 | `from tasks` | 开始查询 |
 | 值过滤 | `filter id >= 1` | 比较字段路径与字面量 |
 | 模式过滤 | `filter match state` | 按 sum 变体及其 record 负载判断 |
+| ADT 派生 | `derive label = match state ...` | 穷尽解构 sum/option，追加统一类型的结果列 |
 | 投影 | `select {id, owner.email}` | 保留列，响应按声明的列顺序展示 |
 | 排序 | `sort id` / `sort {-priority, created_at, id}` | 单列或多列词典序；支持 int、float、text |
 | 截取 | `take 20` / `take 11..20` | 保留前 N 行或一基闭区间内的行 |
@@ -70,13 +76,15 @@ take 20
 
 支持 `==`、`!=`、`>`、`>=`、`<`、`<=`。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；跨请求分页应以唯一主键结束排序。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。
 
-兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。`derive`、`group/aggregate`、参数、通用 match 表达式及写操作的当前状态统一记录在 [查询能力表](QUERY.md#能力状态)。
+模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定。`derive` 当前只接受 match 分支返回 binding 或 typed literal，完整表达式和嵌套 pattern 仍在 #35/#36。
+
+兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。`group/aggregate`、参数、完整表达式及写操作的当前状态统一记录在 [查询能力表](QUERY.md#能力状态)。
 
 ## 脚本边界与错误
 
-同层的 `from` / `type` / `table` / `insert` / `create` 开始新语句；查询中的同层 `filter/select/sort/take/limit` 延续 pipeline。声明体、嵌套 record 与变体负载通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
+同层的 `from` / `type` / `table` / `insert` / `create` 开始新语句；查询中的同层 `filter/derive/select/sort/take/limit` 延续 pipeline。声明体、嵌套 record、变体负载和 match 分支通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
 
-空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意运算表达式跨行、通用 match 表达式、let/derive/group、参数占位符、update/delete/upsert 或 migration 语句。
+空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意运算表达式、嵌套 pattern、let/group、参数占位符、update/delete/upsert 或 migration 语句。
 
 一次 `Engine.execute`、一次 `run` 或一个 TCP 请求是一个原子批次：先解析全部源码，再在候选状态中执行；任一步失败则不发布此次请求的任何修改。成功返回最后一条语句的结果，批次中的查询可以看到前面的写入。当前通过复制内存数据库实现写批次隔离，适合小工作集，尚未优化大批量写入的内存成本。
 

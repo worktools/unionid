@@ -34,7 +34,7 @@ type Job =
 
 常见工作流：
 
-- 查找可运行任务：解构 `Queued`，比较 `scheduled_at`，按 priority、时间和 id 排序后取一页。当前完整示例见 [job_queue.uid](../examples/job_queue.uid)。
+- 查找可运行任务：解构 `Queued`，比较 `scheduled_at`，按 priority、时间和 id 排序后取一页，并把状态派生为统一的 text 标签。当前完整示例见 [job_queue.uid](../examples/job_queue.uid)。
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行。
 - 原子 claim：按 id 和旧状态筛选，把 `Queued` 改成 `Running` 并返回新值，属于 #15；状态解构与新值表达式复用 #35。
 - 查询带 `sync` 标签的失败任务：需要 #36 的布尔表达式与 `contains`。
@@ -168,8 +168,8 @@ type Session =
 | --- | --- | --- | --- |
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
 | 固定 record 的嵌套路径过滤/投影 | 已实现 | option/sum 不能直接穿透 | 已满足基础 |
-| 按 sum 变体筛选 | 已实现 unit 和单 record 负载 | tuple/option/嵌套 pattern | #35，P0 |
-| 从 ADT 分支派生统一结果 | 未实现 | typed match + derive/select | #35，P0 |
+| 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载和 Option | tuple 内部/嵌套 pattern | #35，P0 |
+| 从 ADT 分支派生统一结果 | 已实现 binding/typed literal 的 match derive | 通用结果表达式和嵌套 match | #35/#36，P0 |
 | 多条件、标签和集合判断 | 未实现 | bool expression、contains/length/any | #36，P0 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
 | 参数化 key/time/user 输入 | 未实现 | typed params、schema revision 重绑定 | #10/#22，P0/P1 |
