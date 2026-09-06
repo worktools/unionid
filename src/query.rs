@@ -24,6 +24,10 @@ pub enum Statement {
         table: String,
         values: Value,
     },
+    Upsert {
+        table: String,
+        values: Value,
+    },
     Update {
         target: Pipeline,
         assignments: Vec<SetAssignment>,

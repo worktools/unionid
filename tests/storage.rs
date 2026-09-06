@@ -4,7 +4,7 @@ use redb::{
     Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
 };
 use std::process::Command;
-use unionid::{Engine, Value};
+use unionid::{Engine, UpsertAction, Value};
 
 const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
@@ -219,6 +219,12 @@ fn redb_update_delete_preserve_row_ids_constraints_and_indexes() {
                 .execute("insert entries {id = 4, label = \"four\"}")
                 .ok
         );
+        let replaced = engine.execute("upsert entries {id = 30, label = \"upserted\"}");
+        assert!(replaced.ok, "{}", replaced.message);
+        assert_eq!(replaced.upsert_action, Some(UpsertAction::Updated));
+        let inserted = engine.execute("upsert entries {id = 5, label = \"five\"}");
+        assert!(inserted.ok, "{}", inserted.message);
+        assert_eq!(inserted.upsert_action, Some(UpsertAction::Inserted));
 
         let failed = engine.execute("update entries\nset id = 1");
         assert!(!failed.ok);
@@ -235,17 +241,18 @@ fn redb_update_delete_preserve_row_ids_constraints_and_indexes() {
         );
         assert_eq!(
             reopened
-                .execute("from entries | filter id == 30 | filter label == \"changed\"")
+                .execute("from entries | filter id == 30 | filter label == \"upserted\"")
                 .rows
                 .len(),
             1
         );
         let rows = reopened.execute("from entries | sort id");
         assert!(rows.ok, "{}", rows.message);
-        assert_eq!(rows.rows.len(), 3);
+        assert_eq!(rows.rows.len(), 4);
         assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
         assert!(rows.rows[1]["id"].cmp_eq(&Value::Int(4)));
-        assert!(rows.rows[2]["id"].cmp_eq(&Value::Int(30)));
+        assert!(rows.rows[2]["id"].cmp_eq(&Value::Int(5)));
+        assert!(rows.rows[3]["id"].cmp_eq(&Value::Int(30)));
     }
 
     let database = RedbDatabase::open(&path).unwrap();
@@ -259,7 +266,7 @@ fn redb_update_delete_preserve_row_ids_constraints_and_indexes() {
             u64::from_be_bytes(key.value()[8..].try_into().unwrap())
         })
         .collect::<Vec<_>>();
-    assert_eq!(row_ids, vec![0, 2, 3]);
+    assert_eq!(row_ids, vec![0, 2, 3, 4]);
     let catalog = transaction.open_table(REDB_CATALOG).unwrap();
     let cursor = catalog
         .iter()
@@ -270,7 +277,7 @@ fn redb_update_delete_preserve_row_ids_constraints_and_indexes() {
             (json["kind"] == "Table").then(|| json["value"]["next_row_id"].as_u64())?
         })
         .next();
-    assert_eq!(cursor, Some(4));
+    assert_eq!(cursor, Some(5));
 }
 
 #[test]

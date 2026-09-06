@@ -1,4 +1,4 @@
-use unionid::{Engine, QueryResponse, Value};
+use unionid::{Engine, QueryResponse, UpsertAction, Value};
 
 fn ok(engine: &mut Engine, source: &str) -> QueryResponse {
     let r = engine.execute(source);
@@ -38,6 +38,7 @@ fn executable_examples() {
         ["name", "endpoint.host", "mode"]
     );
     assert!(r.rows[0]["name"].cmp_eq(&Value::Text("worker".into())));
+    assert!(r.rows[0]["endpoint.host"].cmp_eq(&Value::Text("worker.internal".into())));
 
     let mut events = Engine::memory();
     let r = ok(&mut events, include_str!("../examples/events.uid"));
@@ -1516,4 +1517,101 @@ fn update_and_delete_validate_before_scanning_empty_tables() {
     }
     let deleted = ok(&mut engine, "delete rows");
     assert_eq!(deleted.affected_rows, Some(0));
+}
+
+#[test]
+fn upsert_inserts_then_replaces_complete_typed_rows() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Endpoint =\n  host text\n  port int = 80\ntype Config =\n  name text\n  endpoint Endpoint\n  mode text = \"development\"\n  owner option text = None\ntable configs Config\n  key name\ncreate index configs (endpoint.host)",
+    );
+
+    let inserted = ok(
+        &mut engine,
+        "upsert configs\n  name = \"worker\"\n  endpoint =\n    host = \"old\"\n  owner = Some \"alice\"",
+    );
+    assert_eq!(inserted.affected_rows, Some(1));
+    assert_eq!(inserted.upsert_action, Some(UpsertAction::Inserted));
+    assert_eq!(
+        ok(
+            &mut engine,
+            "from configs | filter endpoint.host == \"old\""
+        )
+        .rows
+        .len(),
+        1
+    );
+
+    let updated = ok(
+        &mut engine,
+        "upsert configs {name = \"worker\", endpoint = {host = \"new\"}}",
+    );
+    assert_eq!(updated.affected_rows, Some(1));
+    assert_eq!(updated.upsert_action, Some(UpsertAction::Updated));
+    assert!(
+        ok(
+            &mut engine,
+            "from configs | filter endpoint.host == \"old\""
+        )
+        .rows
+        .is_empty()
+    );
+    let rows = ok(
+        &mut engine,
+        "from configs | filter endpoint.host == \"new\"",
+    );
+    assert_eq!(rows.rows.len(), 1);
+    assert!(
+        rows.rows[0]["owner"]
+            .unwrapped()
+            .cmp_eq(&Value::Option(None))
+    );
+    assert!(rows.rows[0]["mode"].cmp_eq(&Value::Text("development".into())));
+    assert!(
+        rows.rows[0]["endpoint"]
+            .field("port")
+            .unwrap()
+            .cmp_eq(&Value::Int(80))
+    );
+
+    let repeated = ok(
+        &mut engine,
+        "upsert configs {name = \"worker\", endpoint = {host = \"new\"}}",
+    );
+    assert_eq!(repeated.upsert_action, Some(UpsertAction::Updated));
+    assert_eq!(ok(&mut engine, "from configs").rows.len(), 1);
+}
+
+#[test]
+fn upsert_requires_a_key_and_failed_batches_leave_no_partial_row() {
+    let mut engine = Engine::memory();
+    ok(&mut engine, "create table unkeyed (id int)");
+    let unkeyed = engine.execute("upsert unkeyed {id = 1}");
+    assert!(!unkeyed.ok);
+    assert_eq!(unkeyed.error.unwrap().code, "E_CONSTRAINT");
+
+    ok(
+        &mut engine,
+        "type Item =\n  id int\n  value text\ntable items Item\n  key id\ninsert items {id = 1, value = \"one\"}",
+    );
+    for source in [
+        "upsert items {value = \"missing key\"}",
+        "upsert items {id = 1, value = 2}",
+        "upsert items 1",
+    ] {
+        let result = engine.execute(source);
+        assert!(!result.ok, "accepted {source}");
+        assert_eq!(ok(&mut engine, "from items").rows.len(), 1);
+        assert!(ok(&mut engine, "from items").rows[0]["value"].cmp_eq(&Value::Text("one".into())));
+    }
+
+    let failed =
+        engine.execute("upsert items {id = 2, value = \"two\"}\nfrom items | select {missing}");
+    assert!(!failed.ok);
+    assert!(
+        ok(&mut engine, "from items | filter id == 2")
+            .rows
+            .is_empty()
+    );
 }

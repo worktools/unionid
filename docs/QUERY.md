@@ -1,6 +1,6 @@
 # 查询语言参考
 
-本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。类型、表和 insert 见 [LANGUAGE.md](LANGUAGE.md)；尚未实现的表达式、transform、upsert 和 migration 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
+本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。类型、表和 insert/upsert 见 [LANGUAGE.md](LANGUAGE.md)；尚未实现的表达式、transform 和 migration 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
 
 unionid 的查询从表开始，按书写顺序经过一组 transform：
 
@@ -38,8 +38,8 @@ take 20
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 已实现于普通 filter 与 match condition | #36 扩展 `any/all` 等能力 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
-| 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows 与原子约束维护 | #15 继续 upsert 与增量持久写 |
-| Upsert | `upsert table value` | 未实现 | #15 |
+| 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows 与原子约束维护 | #15 继续增量持久写 |
+| Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId 和结构化 action | #15 继续增量持久写 |
 | migration 查询与转换 | `migration` | 未实现 | #17、#18 |
 | join、window、递归和高阶函数 | — | v0.1 延后 | #25 |
 
@@ -77,6 +77,7 @@ set-stage         = newline "set" field-path "=" scalar-expression
 delete            = "delete" table delete-stage*
 delete-stage      = newline filter-stage | "|" filter-stage
 filter-stage      = value-filter | match-filter
+upsert            = "upsert" table record-value
 
 value-filter      = "filter" nested-bool-expression
 match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
@@ -198,7 +199,7 @@ set 的字段路径按表的完整 row schema 绑定，右侧接受当前 scalar
 
 同一 update 的多个 set 同时求值，右侧全部读取修改前的行。父路径与子路径不能同时赋值，例如 `set owner = {...}` 与 `set owner.email = ...` 会返回 `E_QUERY`。每行形成完整候选 record 后重新类型检查，全部候选形成后检查主键唯一性，再一起替换 rows 和 indexes。任何 filter、算术、类型或约束错误都会由 Engine 丢弃整个请求的候选状态；redb 模式在同一事务提交。
 
-insert/update/delete 成功时响应包含 `affected_rows`；未匹配 update/delete 返回 0。内部 RowId 保持不变，删除后的 RowId 不复用。当前执行器会重建该表的内存索引，redb 仍重写完整逻辑状态；#15 后续把持久提交收敛为 row/index delta，并增加 upsert。
+insert/upsert/update/delete 成功时响应包含 `affected_rows`；未匹配 update/delete 返回 0。upsert 还返回结构化 `upsert_action: inserted|updated`。upsert 输入是一份按 schema 默认值补齐的完整 row：命中主键时替换整个值并保留 RowId，未命中时分配新 RowId。局部修改仍使用 update。删除后的 RowId 不复用。当前执行器会重建该表的内存索引，redb 仍重写完整逻辑状态；#15 后续把持久提交收敛为 row/index delta。
 
 ## 执行模型
 
@@ -354,7 +355,7 @@ take 20
 - `filter` 条件块、`filter match`／`derive ... match` 的分支，以及 `=>` 后的 condition 块通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
 - 括号和集合内允许换行。字符串里的 `|`、逗号和 `#` 都是文本，不参与分隔。
-- 同层出现新的 `from`、`type`、`table`、`insert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
+- 同层出现新的 `from`、`type`、`table`、`insert`、`upsert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
 - REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分。
 
 布尔表达式可在 `filter`／`=>` 的缩进块或括号内跨行；标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；超限返回受控错误。
@@ -371,11 +372,11 @@ take 20
 | `E_TYPE` | 对 sum 排序、比较或算术类型不匹配、match 非 sum 字段 |
 | `E_MATCH` | 未知/重复构造器、非穷尽 match、错误负载字段或分支绑定 |
 | `E_ARITH` | 整数溢出、除零或产生非有限 float |
-| `E_CONSTRAINT` | update 后出现重复主键；整个请求回滚 |
+| `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token 数或嵌套深度超过限制 |
 
-查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。insert/update/delete 成功响应包含 `affected_rows`；DML 响应的 rows/columns 为空。
+查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。insert/upsert/update/delete 成功响应包含 `affected_rows`；upsert 还包含 `upsert_action`。DML 响应的 rows/columns 为空。
 
 以下片段是故意失败的反例：
 
@@ -410,5 +411,6 @@ filter match state
 | 数值表达式 | 测试内脚本 | int/float 类型、优先级、跨行括号、命名数值类型、整数除法、短路及运行时错误 | `typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 | 原子修改 | [task_mutations.uid](../examples/task_mutations.uid) 与测试内脚本 | typed/nested/simultaneous set、match target、主键冲突、运行时回滚、索引维护、稳定 RowId 和 redb 重开 | `update_*`、`failed_multi_row_updates_*`、`redb_update_delete_*` |
+| 主键 Upsert | [config.uid](../examples/config.uid) 与测试内脚本 | insert/replace action、完整 row 默认值、重复执行、回滚、索引更新、RowId/cursor 和 redb 重开 | `upsert_*`、`local_cli_reports_the_structured_upsert_action`、`redb_update_delete_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。

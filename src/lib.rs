@@ -17,7 +17,7 @@ pub mod snapshot;
 pub mod syntax;
 pub mod wal;
 
-pub use db::{QueryResponse, SchemaInfo};
+pub use db::{QueryResponse, SchemaInfo, UpsertAction};
 pub use engine::{Engine, StorageIntegrity};
 pub use error::{Error, Result, Span};
 pub use model::{RowId, Value};

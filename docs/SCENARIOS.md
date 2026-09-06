@@ -78,7 +78,7 @@ type ServiceConfig =
 - 按 environment、owner 和固定 record 路径筛选；普通 record 路径当前已支持，option 需要 #35 显式解构。
 - 只列出 HTTP 服务并投影 `base_url`；需要 #35 的 match expression，因为字段只存在于 `Http` 分支。
 - 判断某个完整 header 或 validation issue 是否存在可用 `contains`；按元素字段写谓词仍需要 #36 的 `any/all`。
-- 整体 upsert 一份配置并校验嵌套类型；严格 insert 已有，upsert 属于 #15。
+- 整体 upsert 一份配置并校验嵌套类型；当前按主键插入或完整替换，示例见 [`config.uid`](../examples/config.uid)。
 - 把 `Bearer` 改名或给 `Http` 增加字段；身份保留、回填和转换属于 #17–#19。
 
 密码值本身不应默认明文保存；`SecretRef` 表达引用来源。静态加密和访问控制不是 ADT 能自动解决的问题。
@@ -173,7 +173,7 @@ type Session =
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length | any/all 元素谓词与 option helper | #36，P0 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
 | 参数化 key/time/user 输入 | 未实现 | typed params、schema revision 重绑定 | #10/#22，P0/P1 |
-| 原子状态转换、upsert、delete | update/delete 已实现 filter/match target、typed simultaneous set、约束/索引维护和 affected rows | upsert、增量持久写 | #15，P0 |
+| 原子状态转换、upsert、delete | update/delete 已实现 filter/match target 与 typed simultaneous set；upsert 已实现按主键 insert/replace；三者维护约束、索引、affected rows 和稳定 RowId | 增量持久写 | #15，P0 |
 | count/sum/min/max 与分组 | 未实现 | aggregate/group | #11，P0 |
 | schema evolution 与数据转换 | 只有契约/ledger 校验器 | plan/apply/diff | #17–#19，P0/P1 |
 | 持久提交、恢复和备份 | redb Engine、原子提交、完整性检查和进程退出恢复已实现 | 设备故障矩阵与备份还原 | #13/#14/#20，P0 |
