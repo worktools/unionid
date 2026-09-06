@@ -32,7 +32,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 | [#3](https://github.com/worktools/unionid/issues/3) | [质量] 建立原型回归基线与 CI | P0 | 无 |
 | [#4](https://github.com/worktools/unionid/issues/4) | [修复] 统一数值比较与索引相等语义 | P0 | [#3](https://github.com/worktools/unionid/issues/3) |
 | [#5](https://github.com/worktools/unionid/issues/5) | [核心] 提取共享 Engine 库与本地执行入口 | P0 | [#2](https://github.com/worktools/unionid/issues/2)、[#3](https://github.com/worktools/unionid/issues/3) |
-| [#6](https://github.com/worktools/unionid/issues/6) | [设计] 验证并选定持久化后端 | P0 | [#3](https://github.com/worktools/unionid/issues/3)、[#5](https://github.com/worktools/unionid/issues/5) |
+| [#6](https://github.com/worktools/unionid/issues/6) | [设计] 验证并选定持久化后端；结论见 [ADR 0001](adr/0001-sqlite-storage.md) | P0 | [#3](https://github.com/worktools/unionid/issues/3)、[#5](https://github.com/worktools/unionid/issues/5) |
 | [#7](https://github.com/worktools/unionid/issues/7) | [设计] 定义类型身份、Schema 版本与演进规则 | P0 | [#2](https://github.com/worktools/unionid/issues/2) |
 | [#28](https://github.com/worktools/unionid/issues/28) | [文档] 整理 v0.1 查询语言规范与可执行示例 | P0 | [#2](https://github.com/worktools/unionid/issues/2) 的可执行规范子任务 |
 
@@ -81,8 +81,8 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 
 [#3](https://github.com/worktools/unionid/issues/3)、[#4](https://github.com/worktools/unionid/issues/4) 和 [#5](https://github.com/worktools/unionid/issues/5) 已完成；实时状态和证据仍以 GitHub 为准。当前执行顺序是：
 
-1. 完成 [#28](https://github.com/worktools/unionid/issues/28)，以当前可执行查询规范回写 [#2](https://github.com/worktools/unionid/issues/2)。
-2. 通过 [#6](https://github.com/worktools/unionid/issues/6) 只选一个长期持久化方案，再用 [#7](https://github.com/worktools/unionid/issues/7) 冻结类型身份、schema revision 和演进契约。
+1. [#28](https://github.com/worktools/unionid/issues/28) 已完成；继续以当前可执行查询规范回写 [#2](https://github.com/worktools/unionid/issues/2)。
+2. 合并 [#6](https://github.com/worktools/unionid/issues/6) 的 SQLite 存储 ADR，再用 [#7](https://github.com/worktools/unionid/issues/7) 冻结类型身份、schema revision 和演进契约，并由 [#13](https://github.com/worktools/unionid/issues/13) 开始接入。
 3. 按 [#8](https://github.com/worktools/unionid/issues/8) → [#10](https://github.com/worktools/unionid/issues/10) → [#9](https://github.com/worktools/unionid/issues/9)/[#12](https://github.com/worktools/unionid/issues/12) → [#11](https://github.com/worktools/unionid/issues/11) 完成 M1。
 4. 按 M2→M3→M4 交付可靠写入、CRUD、长期演进和日常体验；CLI 基础与诊断随前面阶段逐步完善。
 

@@ -153,16 +153,14 @@ flowchart TD
   Exec --> Tx[单写者原子提交]
   Migration --> Tx
   Tx --> Memory[内存模式]
-  Tx --> Durable[选定的持久化后端]
+  Tx --> Durable[SQLite 持久化后端]
 ```
 
 从当前 `main.rs` 拆出可测试的 `lib.rs`。模块逐步演进为 `model/types`、`catalog`、`syntax`、`query`、`db`、`storage`、`migration`、`server`、`cli`，不急于拆成多个 crate。保留清楚的错误字符串，同时内部使用带错误码、源码位置和字段路径的结构化错误。
 
-第一步做一个有退出条件的存储 ADR：比较维护当前 WAL／snapshot、采用 redb、采用 SQLite 作为事务存储层。优先验证 Rust 事务 KV 能否降低正确性负担；redb 官方描述提供事务、崩溃恢复和 savepoint 能力，但其在本项目中的边界仍需实测。[redb 官方 crate 文档](https://docs.rs/redb/latest/redb/)
+[ADR 0001](adr/0001-sqlite-storage.md) 比较了当前 WAL/snapshot、redb 与 SQLite，并选定 SQLite 作为长期事务后端。评价覆盖 schema＋数据＋索引＋migration ledger 的原子性、进程退出恢复、一致备份、macOS/Linux、格式生命周期、依赖和维护成本；可复现实验固定在 `tools/storage-eval`。原生性来自 unionid 对 catalog、逻辑编码、表达式和约束的一致理解，而不是自写页管理器。
 
-评价标准：schema＋数据＋索引＋migration ledger 的原子性、崩溃恢复、备份、macOS/Linux 支持、格式升级、依赖／构建成本和维护工作量。只选择一个持久化后端，不同时维护三套。不把“原生类型”与“必须自写页管理器”绑定：原生性来自 catalog、表达式和约束的一致理解。
-
-如果选择自有 WAL，必须增加版本化记录、校验与事务边界、持久化提交序号、快照覆盖水位、临时文件＋同步＋原子发布、损坏尾部策略及目录同步；不能继续以新版 parser 回放任意旧源码。若使用事务 KV，则复用后端提交／恢复原语，只自行维护逻辑编码与版本。两者均要验证成功响应的持久性、提交结果不确定时的错误语义，以及内存状态与持久化状态的一致性。可靠性设计参考 [SQLite 原子提交说明](https://www.sqlite.org/atomiccommit.html)。
+每个 Engine 写请求映射为一个 SQLite 事务，持久模式使用 WAL、同步提交和产品层独占锁。unionid 维护版本化逻辑 codec 和稳定 ID；SQLite 负责事务页、恢复与在线备份。当前源码回放 WAL/snapshot 只保留为过渡兼容输入，不进入长期双写路径。成功响应的持久性、提交结果不确定时的错误语义、完整性检查和备份还原继续由 #13/#14/#20 验收。
 
 查询先用易验证的行执行器。`filter/select/derive/take/sort/group/aggregate` 明确输入输出类型和顺序规则；`take` 与 `filter` 不可随意交换。未排序查询不承诺稳定顺序。先做单列／类型化字段路径等值索引、主键查询和 `explain`；不追求复杂优化器。
 
