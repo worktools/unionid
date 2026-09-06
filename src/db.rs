@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
 };
-use crate::query::{Pipeline, Stage, Statement};
+use crate::query::{Pipeline, SetAssignment, Stage, Statement};
 
 type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<RowId>>>>;
 
@@ -92,6 +92,8 @@ pub struct QueryResponse {
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<SchemaInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_rows: Option<usize>,
 }
 
 impl QueryResponse {
@@ -104,6 +106,7 @@ impl QueryResponse {
             error: None,
             warnings: Vec::new(),
             schema: None,
+            affected_rows: None,
         }
     }
 
@@ -116,6 +119,7 @@ impl QueryResponse {
             error: Some(error),
             warnings: Vec::new(),
             schema: None,
+            affected_rows: None,
         }
     }
 
@@ -175,6 +179,11 @@ impl Database {
             }
             Statement::CreateIndex { table, column } => self.create_index(&table, &column),
             Statement::Insert { table, values } => self.insert(&table, values),
+            Statement::Update {
+                mut target,
+                mut assignments,
+            } => self.update(&mut target, &mut assignments),
+            Statement::Delete { mut target } => self.delete(&mut target),
             Statement::Pipeline(pipeline) => self.query(pipeline),
         }
     }
@@ -277,13 +286,7 @@ impl Database {
 
     fn build_index(&self, name: &str, column: &str) -> Result<BTreeMap<String, Vec<RowId>>> {
         let table = self.table(name)?;
-        let mut posting: BTreeMap<String, Vec<RowId>> = BTreeMap::new();
-        for row in &table.rows {
-            if let Some(value) = row_field(&row.fields, column) {
-                posting.entry(value.index_key()).or_default().push(row.id);
-            }
-        }
-        Ok(posting)
+        Ok(build_posting(&table.rows, column))
     }
 
     fn insert(&mut self, name: &str, values: Value) -> Result<QueryResponse> {
@@ -328,7 +331,212 @@ impl Database {
         };
         table.rows.push(Row { id, fields });
         table.next_row_id = next_row_id;
-        Ok(QueryResponse::ok_message(format!("inserted into '{name}'")))
+        let mut response = QueryResponse::ok_message(format!("inserted into '{name}'"));
+        response.affected_rows = Some(1);
+        Ok(response)
+    }
+
+    fn update(
+        &mut self,
+        target: &mut Pipeline,
+        assignments: &mut [SetAssignment],
+    ) -> Result<QueryResponse> {
+        let table = self.table(&target.from)?;
+        let schema = table.schema.clone();
+        let row_type = table
+            .row_type
+            .map(ScalarType::Ref)
+            .unwrap_or_else(|| ScalarType::Record(schema.clone()));
+        self.bind_mutation_target(target, &schema)?;
+        let mut paths: Vec<String> = Vec::new();
+        for assignment in assignments.iter_mut() {
+            if let Some(earlier) = paths
+                .iter()
+                .find(|earlier| paths_overlap(earlier, &assignment.path))
+            {
+                return Err(Error::new(
+                    "E_QUERY",
+                    format!(
+                        "update fields '{}' and '{}' overlap",
+                        earlier, assignment.path
+                    ),
+                ));
+            }
+            paths.push(assignment.path.clone());
+            let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
+            crate::expression::bind_scalar(
+                &self.catalog,
+                &schema,
+                &mut assignment.value,
+                Some(&expected),
+                "field",
+            )?;
+        }
+        let target_ids = self.mutation_target_ids(target)?;
+        let mut rows = table.rows.clone();
+        let target_ids = target_ids.into_iter().collect::<BTreeSet<_>>();
+        for row in rows.iter_mut().filter(|row| target_ids.contains(&row.id)) {
+            let original = row.fields.clone();
+            let mut values = Vec::with_capacity(assignments.len());
+            for assignment in assignments.iter() {
+                let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
+                let value =
+                    crate::expression::evaluate_value(&self.catalog, &assignment.value, |path| {
+                        row_field(&original, path)
+                    })?;
+                values.push((
+                    assignment.path.as_str(),
+                    self.catalog.coerce(&value, &expected, "update value")?,
+                ));
+            }
+            for (path, value) in values {
+                set_row_field(&mut row.fields, path, value)?;
+            }
+            let checked = self.catalog.coerce(
+                &Value::Record(row.fields.clone()),
+                &row_type,
+                "updated row",
+            )?;
+            let Value::Record(fields) = checked.unwrapped() else {
+                unreachable!()
+            };
+            row.fields = fields.clone();
+        }
+        self.validate_primary_keys(&target.from, &rows)?;
+        self.replace_rows_and_indexes(&target.from, rows)?;
+        let affected = target_ids.len();
+        let mut response =
+            QueryResponse::ok_message(format!("updated {affected} row(s) in '{}'", target.from));
+        response.affected_rows = Some(affected);
+        Ok(response)
+    }
+
+    fn delete(&mut self, target: &mut Pipeline) -> Result<QueryResponse> {
+        let schema = self.table(&target.from)?.schema.clone();
+        self.bind_mutation_target(target, &schema)?;
+        let target_ids = self
+            .mutation_target_ids(target)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut rows = self.table(&target.from)?.rows.clone();
+        rows.retain(|row| !target_ids.contains(&row.id));
+        self.replace_rows_and_indexes(&target.from, rows)?;
+        let affected = target_ids.len();
+        let mut response =
+            QueryResponse::ok_message(format!("deleted {affected} row(s) from '{}'", target.from));
+        response.affected_rows = Some(affected);
+        Ok(response)
+    }
+
+    fn bind_mutation_target(&self, target: &mut Pipeline, schema: &[Column]) -> Result<()> {
+        for stage in &mut target.stages {
+            match stage {
+                Stage::Filter(expression) => {
+                    crate::expression::bind(&self.catalog, schema, expression)?
+                }
+                Stage::FilterMatch(predicate) => {
+                    crate::matching::bind(&self.catalog, schema, predicate)?
+                }
+                _ => {
+                    return Err(Error::new(
+                        "E_QUERY",
+                        "update and delete targets currently support only filter stages",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn mutation_target_ids(&self, target: &Pipeline) -> Result<Vec<RowId>> {
+        let table = self.table(&target.from)?;
+        let candidates = if let Some(Stage::Filter(expression)) = target.stages.first() {
+            crate::expression::simple_index_equality(expression).and_then(|(column, value)| {
+                self.indexes
+                    .get(&target.from)
+                    .and_then(|columns| columns.get(column))
+                    .map(|posting| posting.get(&value.index_key()).cloned().unwrap_or_default())
+            })
+        } else {
+            None
+        };
+        let mut rows = match candidates {
+            Some(ids) => ids
+                .into_iter()
+                .filter_map(|id| {
+                    table
+                        .rows
+                        .binary_search_by_key(&id, |row| row.id)
+                        .ok()
+                        .map(|position| &table.rows[position])
+                })
+                .collect::<Vec<_>>(),
+            None => table.rows.iter().collect(),
+        };
+        for stage in &target.stages {
+            let mut filtered = Vec::with_capacity(rows.len());
+            for row in rows {
+                let keep = match stage {
+                    Stage::Filter(expression) => {
+                        crate::expression::evaluate(&self.catalog, expression, |path| {
+                            row_field(&row.fields, path)
+                        })?
+                    }
+                    Stage::FilterMatch(predicate) => {
+                        crate::matching::evaluate(&self.catalog, &row.fields, predicate)?
+                    }
+                    _ => false,
+                };
+                if keep {
+                    filtered.push(row);
+                }
+            }
+            rows = filtered;
+        }
+        Ok(rows.into_iter().map(|row| row.id).collect())
+    }
+
+    fn validate_primary_keys(&self, name: &str, rows: &[Row]) -> Result<()> {
+        let table = self.table(name)?;
+        let Some(key) = &table.primary_key else {
+            return Ok(());
+        };
+        let mut seen = BTreeSet::new();
+        for row in rows {
+            let value = row_field(&row.fields, key).ok_or_else(|| {
+                Error::new("E_FIELD", format!("missing primary key '{name}.{key}'"))
+            })?;
+            if !seen.insert(value.index_key()) {
+                return Err(Error::new(
+                    "E_CONSTRAINT",
+                    format!("duplicate primary key '{name}.{key}'"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_rows_and_indexes(&mut self, name: &str, rows: Vec<Row>) -> Result<()> {
+        let columns = self
+            .indexes
+            .get(name)
+            .map(|columns| columns.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let indexes = columns
+            .into_iter()
+            .map(|column| {
+                let posting = build_posting(&rows, &column);
+                (column, posting)
+            })
+            .collect();
+        let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
+            return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
+        };
+        table.rows = rows;
+        if let Some(existing) = self.indexes.get_mut(name) {
+            *existing = indexes;
+        }
+        Ok(())
     }
 
     fn query(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
@@ -475,6 +683,7 @@ impl Database {
             error: None,
             warnings: Vec::new(),
             schema: None,
+            affected_rows: None,
         })
     }
 
@@ -990,6 +1199,61 @@ fn row_field<'a>(row: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a Val
     }
     let (head, tail) = path.split_once('.')?;
     row.get(head)?.field(tail)
+}
+
+fn build_posting(rows: &[Row], column: &str) -> BTreeMap<String, Vec<RowId>> {
+    let mut posting: BTreeMap<String, Vec<RowId>> = BTreeMap::new();
+    for row in rows {
+        if let Some(value) = row_field(&row.fields, column) {
+            posting.entry(value.index_key()).or_default().push(row.id);
+        }
+    }
+    posting
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+}
+
+fn set_row_field(row: &mut BTreeMap<String, Value>, path: &str, value: Value) -> Result<()> {
+    let mut components = path.split('.');
+    let head = components.next().unwrap_or_default();
+    let tail = components.collect::<Vec<_>>();
+    let field = row
+        .get_mut(head)
+        .ok_or_else(|| Error::new("E_FIELD", format!("unknown field '{path}'")))?;
+    set_nested_field(field, &tail, value, path)
+}
+
+fn set_nested_field(
+    current: &mut Value,
+    path: &[&str],
+    new_value: Value,
+    full_path: &str,
+) -> Result<()> {
+    if path.is_empty() {
+        *current = new_value;
+        return Ok(());
+    }
+    match current {
+        Value::Named { value, .. } => set_nested_field(value, path, new_value, full_path),
+        Value::Record(fields) => {
+            let next = fields
+                .get_mut(path[0])
+                .ok_or_else(|| Error::new("E_FIELD", format!("unknown field '{full_path}'")))?;
+            set_nested_field(next, &path[1..], new_value, full_path)
+        }
+        _ => Err(Error::new(
+            "E_FIELD",
+            format!("field path '{full_path}' does not pass through a record"),
+        )),
+    }
 }
 
 #[cfg(test)]

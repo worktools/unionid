@@ -6,7 +6,7 @@ use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, Scala
 use crate::query::{
     ArithmeticOp, BoolExpression, CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchField,
     MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField,
-    MatchValuePayload, Pipeline, ScalarExpression, SortKey, Stage, Statement,
+    MatchValuePayload, Pipeline, ScalarExpression, SetAssignment, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -368,11 +368,15 @@ impl Parser {
                 self.create()?
             } else if self.word("insert") {
                 self.insert()?
+            } else if self.word("update") {
+                self.update()?
+            } else if self.word("delete") {
+                self.delete()?
             } else if self.word("from") {
                 self.pipeline()?
             } else {
                 return Err(self.error(
-                    "expected type / table / insert / from (or legacy create table/index)",
+                    "expected type / table / insert / update / delete / from (or legacy create table/index)",
                 ));
             };
             out.push(LocatedStatement { statement, span });
@@ -626,6 +630,102 @@ impl Parser {
         Ok(Statement::Insert { table, values })
     }
 
+    fn update(&mut self) -> Result<Statement> {
+        self.expect_word("update")?;
+        let from = self.identifier()?;
+        let mut stages = Vec::new();
+        let mut assignments = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut setting = false;
+        loop {
+            let piped = self.eat(Kind::Pipe);
+            let newline = self.eat(Kind::Newline);
+            self.newlines();
+            let after_layout = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent
+                && self.is_update_stage();
+            if !piped && !newline && !after_layout {
+                break;
+            }
+            if self.word("filter") && !setting {
+                stages.push(self.filter_stage()?);
+            } else if self.word("set") {
+                setting = true;
+                self.bump();
+                let path = self.path()?;
+                if !seen.insert(path.clone()) {
+                    return Err(self.error(format!("duplicate update field '{path}'")));
+                }
+                self.expect(Kind::Op("=".into()))?;
+                assignments.push(SetAssignment {
+                    path,
+                    value: self.scalar_expression(0, false)?,
+                });
+            } else if self.word("filter") {
+                return Err(self.error("update filters must appear before set assignments"));
+            } else {
+                if piped {
+                    return Err(self.error("expected filter or set after '|' in update"));
+                }
+                break;
+            }
+        }
+        if assignments.is_empty() {
+            return Err(self.error("update requires at least one set assignment"));
+        }
+        Ok(Statement::Update {
+            target: Pipeline { from, stages },
+            assignments,
+        })
+    }
+
+    fn delete(&mut self) -> Result<Statement> {
+        self.expect_word("delete")?;
+        let from = self.identifier()?;
+        let mut stages = Vec::new();
+        loop {
+            let piped = self.eat(Kind::Pipe);
+            let newline = self.eat(Kind::Newline);
+            self.newlines();
+            let after_layout =
+                self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent && self.word("filter");
+            if !piped && !newline && !after_layout {
+                break;
+            }
+            if self.word("filter") {
+                stages.push(self.filter_stage()?);
+            } else {
+                if piped {
+                    return Err(self.error("expected filter after '|' in delete"));
+                }
+                break;
+            }
+        }
+        Ok(Statement::Delete {
+            target: Pipeline { from, stages },
+        })
+    }
+
+    fn filter_stage(&mut self) -> Result<Stage> {
+        self.expect_word("filter")?;
+        if self.word("match") {
+            Ok(Stage::FilterMatch(self.match_predicate()?))
+        } else {
+            let nested = *self.kind() == Kind::Newline;
+            if nested {
+                self.block()?;
+            }
+            let expression = self.bool_expression(0, nested)?;
+            if nested {
+                self.expect(Kind::Dedent)?;
+            }
+            Ok(Stage::Filter(expression))
+        }
+    }
+
+    fn is_update_stage(&self) -> bool {
+        self.word("filter") || self.word("set")
+    }
+
     fn record(&mut self, end: Kind, depth: usize) -> Result<Value> {
         self.depth(depth)?;
         let mut fields = BTreeMap::new();
@@ -742,20 +842,7 @@ impl Parser {
                 break;
             }
             let stage = if self.word("filter") {
-                self.bump();
-                if self.word("match") {
-                    Stage::FilterMatch(self.match_predicate()?)
-                } else {
-                    let nested = *self.kind() == Kind::Newline;
-                    if nested {
-                        self.block()?;
-                    }
-                    let expression = self.bool_expression(0, nested)?;
-                    if nested {
-                        self.expect(Kind::Dedent)?;
-                    }
-                    Stage::Filter(expression)
-                }
+                self.filter_stage()?
             } else if self.word("derive") {
                 self.bump();
                 let name = self.identifier()?;

@@ -1,6 +1,6 @@
 # 查询语言参考
 
-本页描述 **当前版本可以执行** 的查询语法与语义，是查询行为的规范入口。类型、表和写入语法见 [LANGUAGE.md](LANGUAGE.md)；尚未实现的表达式、transform、DML 和 migration 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
+本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。类型、表和 insert 见 [LANGUAGE.md](LANGUAGE.md)；尚未实现的表达式、transform、upsert 和 migration 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
 
 unionid 的查询从表开始，按书写顺序经过一组 transform：
 
@@ -38,7 +38,8 @@ take 20
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 已实现于普通 filter 与 match condition | #36 扩展 `any/all` 等能力 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
-| 更新与删除 | `update`、`delete`、`upsert` | 未实现 | #15 |
+| 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows 与原子约束维护 | #15 继续 upsert 与增量持久写 |
+| Upsert | `upsert table value` | 未实现 | #15 |
 | migration 查询与转换 | `migration` | 未实现 | #17、#18 |
 | join、window、递归和高阶函数 | — | v0.1 延后 | #25 |
 
@@ -68,6 +69,14 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 query             = "from" table pipeline-stage*
 pipeline-stage    = newline stage | "|" stage
 stage             = value-filter | match-filter | derive-match | select | sort | take
+
+update            = "update" table update-stage* set-stage+
+update-stage      = newline filter-stage | "|" filter-stage
+set-stage         = newline "set" field-path "=" scalar-expression
+                  | "|" "set" field-path "=" scalar-expression
+delete            = "delete" table delete-stage*
+delete-stage      = newline filter-stage | "|" filter-stage
+filter-stage      = value-filter | match-filter
 
 value-filter      = "filter" nested-bool-expression
 match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
@@ -167,6 +176,29 @@ derive next_attempt =
 运算数必须归一为同一个 int 或 float 类型。字段和 binding 决定类型时，同类型的数字 literal 会在扫描前转换；两个不同类型的字段不会隐式混合。命名数值类型保留名义身份，例如 `Attempts + 1` 的结果仍是 `Attempts`。
 
 `int / int` 使用向零截断的整数除法。整数加减乘除和一元负号执行 checked 运算；溢出与除零返回 `E_ARITH`。float 运算拒绝除以正负零，也拒绝产生 NaN 或无限值；负零归一为正零。`and/or` 继续短路求值，因此未执行分支中的算术错误不会触发。
+
+## Pipeline 更新与删除
+
+`update`/`delete` 以目标表开头，并复用查询的 `filter` 与 `filter match`：
+
+```text
+update jobs
+filter match state
+  Queued {..} => true
+  _ => false
+set attempts = attempts + 1
+set state = Running {worker = "local", attempt = 1}
+
+delete jobs | filter archived == true
+```
+
+不写 filter 时作用于整表。当前 mutation target 只接受 filter，不接受 derive/select/sort/take；update 的全部 filter 必须位于 set 之前。单行形式使用 `|`，例如 `update jobs | filter id == 1 | set attempts = attempts + 1`。多项 set 推荐逐行写，目标范围和赋值更容易检查。
+
+set 的字段路径按表的完整 row schema 绑定，右侧接受当前 scalar expression：字段引用、literal、ADT constructor、`length` 和 int/float 算术。嵌套路径只穿过 record；sum/option 需要替换完整值。每个 literal 在扫描前按目标字段类型转换，所以空表仍会拒绝未知路径、错误 constructor 和类型不匹配。
+
+同一 update 的多个 set 同时求值，右侧全部读取修改前的行。父路径与子路径不能同时赋值，例如 `set owner = {...}` 与 `set owner.email = ...` 会返回 `E_QUERY`。每行形成完整候选 record 后重新类型检查，全部候选形成后检查主键唯一性，再一起替换 rows 和 indexes。任何 filter、算术、类型或约束错误都会由 Engine 丢弃整个请求的候选状态；redb 模式在同一事务提交。
+
+insert/update/delete 成功时响应包含 `affected_rows`；未匹配 update/delete 返回 0。内部 RowId 保持不变，删除后的 RowId 不复用。当前执行器会重建该表的内存索引，redb 仍重写完整逻辑状态；#15 后续把持久提交收敛为 row/index delta，并增加 upsert。
 
 ## 执行模型
 
@@ -284,7 +316,7 @@ select {id, retry_at}
 
 引擎先从 binding、primitive literal、`Some value`、结构化 product 或限定 constructor 推导结果类型，再按该类型检查全部分支。`None`、空 list/record 和未限定的普通 sum constructor 不能单独确定类型，但可在其他分支已经给出类型时使用；需要主动确定命名 sum 时写 `Type.Variant`，命名 record 写 `TypeName {...}`。不同命名类型不会因结构相同而统一。
 
-分支必须穷尽且结果类型一致，constructor 归属、参数数量、嵌套覆盖关系和每个值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option，同一个顶层 constructor 可以由多个互补嵌套分支覆盖。派生结果尚未复用 filter 的布尔／函数节点，也不支持算术，这些由 #36 的通用 value expression 继续扩展；prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
+分支必须穷尽且结果类型一致，constructor 归属、参数数量、嵌套覆盖关系和每个值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option，同一个顶层 constructor 可以由多个互补嵌套分支覆盖。派生结果已经支持 scalar arithmetic，但尚未复用 filter 的完整布尔节点或通用函数；prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
 
 ## 投影、排序与截取
 
@@ -318,10 +350,11 @@ take 20
 ## 布局与语句边界
 
 - 顶层 `from` 开始一条查询。同层 `filter`、`derive`、`select`、`sort`、`take` 或兼容的 `limit` 延续当前 pipeline。
+- 顶层 `update table` 开始修改，后续同层 filter 和 set 延续当前语句；顶层 `delete table` 开始删除，后续同层 filter 延续当前语句。
 - `filter` 条件块、`filter match`／`derive ... match` 的分支，以及 `=>` 后的 condition 块通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
 - 括号和集合内允许换行。字符串里的 `|`、逗号和 `#` 都是文本，不参与分隔。
-- 同层出现新的 `from`、`type`、`table`、`insert` 或 `create` 时，前一条查询结束并开始新语句。
+- 同层出现新的 `from`、`type`、`table`、`insert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
 - REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分。
 
 布尔表达式可在 `filter`／`=>` 的缩进块或括号内跨行；标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；超限返回受控错误。
@@ -338,10 +371,11 @@ take 20
 | `E_TYPE` | 对 sum 排序、比较或算术类型不匹配、match 非 sum 字段 |
 | `E_MATCH` | 未知/重复构造器、非穷尽 match、错误负载字段或分支绑定 |
 | `E_ARITH` | 整数溢出、除零或产生非有限 float |
+| `E_CONSTRAINT` | update 后出现重复主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token 数或嵌套深度超过限制 |
 
-成功响应包含 `rows` 和有序的 `columns {name, ty}`。未命中任何行时仍返回推导后的 columns。
+查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。insert/update/delete 成功响应包含 `affected_rows`；DML 响应的 rows/columns 为空。
 
 以下片段是故意失败的反例：
 
@@ -375,5 +409,6 @@ filter match state
 | 布尔与集合表达式 | 测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length` 和空表错误 | `boolean_filters_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 数值表达式 | 测试内脚本 | int/float 类型、优先级、跨行括号、命名数值类型、整数除法、短路及运行时错误 | `typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
+| 原子修改 | [task_mutations.uid](../examples/task_mutations.uid) 与测试内脚本 | typed/nested/simultaneous set、match target、主键冲突、运行时回滚、索引维护、稳定 RowId 和 redb 重开 | `update_*`、`failed_multi_row_updates_*`、`redb_update_delete_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。
