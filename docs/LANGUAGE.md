@@ -9,7 +9,7 @@
 ```text
 type Contact =
   email text
-  nickname option text
+  nickname option text = None
 
 type State =
   Pending
@@ -19,7 +19,7 @@ type State =
 type Task =
   id int
   owner Contact
-  tags list text
+  tags list text = []
   state State
 
 table tasks Task
@@ -29,8 +29,6 @@ insert tasks
   id = 1
   owner =
     email = "alice@example.com"
-    nickname = Some "Alice"
-  tags = ["local", "sync"]
   state = Running {worker = "local", attempt = 2}
 ```
 
@@ -39,7 +37,8 @@ insert tasks
 - 支持命名 record/sum、嵌套积类型、tuple，以及内建 `option T`、`list T`，例如 `type Point = (float, float)`、`option (list Contact)`。
 - record 类型可内联为 `{email text, nickname option text}`；变体负载也可缩进：在 `| Running` 的下一层写 `worker text` 和 `attempt int`。
 - record 值使用 `field = value`，内联字段之间用逗号；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载与多个位置参数通过括号区分。
-- `None` 和 `Some value` 显式构造 option。全部字段必填，即使类型为 option 也必须写 `None`；默认值尚未实现。重复、缺失、未知字段及错误负载均报错。
+- 字段默认值写成 `field type = value`，例如 `nickname option text = None`、`tags list text = []`。默认值必须是可按字段类型检查的纯字面值，在 schema 声明时完成校验并存为完整 typed value；不能引用其他字段、参数、时钟或函数。
+- 没有默认值的字段全部必填，即使类型为 option 也必须显式写 `None`。缺失字段逐层使用它自身声明的默认值；显式值不会因为类型错误而退回默认值。重复、缺失、未知字段及错误负载均报错。
 - 命名类型保留身份；有歧义时可用 `State.Pending` 或 `State.Running {...}` 限定构造器。
 - `table tasks Task` 要求 Task 是 record；可选的缩进 `key id` 声明 int/text 主键，拒绝重复键。无 key 时允许重复行。
 

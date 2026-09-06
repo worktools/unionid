@@ -220,6 +220,73 @@ fn required_fields_and_nested_errors_are_strict() {
 }
 
 #[test]
+fn defaults_fill_omitted_fields_at_each_record_level() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Mode = Development | Production\ntype Endpoint =\n  host text = \"localhost\"\n  port int = 8080\ntype Config =\n  name text\n  endpoint Endpoint =\n    port = 9000\n  mode Mode = Development\n  tags list text = []\n  owner option text = None\ntable configs Config\n  key name\ninsert configs {name = \"implicit\"}\ninsert configs {name = \"explicit\", endpoint = {}}",
+    );
+
+    let implicit = ok(
+        &mut e,
+        "from configs | filter name == \"implicit\" | select {endpoint.host, endpoint.port, mode, tags, owner}",
+    );
+    assert!(implicit.rows[0]["endpoint.host"].cmp_eq(&Value::Text("localhost".into())));
+    assert!(implicit.rows[0]["endpoint.port"].cmp_eq(&Value::Int(9000)));
+    assert!(implicit.rows[0]["tags"].cmp_eq(&Value::List(Vec::new())));
+    assert!(implicit.rows[0]["owner"].cmp_eq(&Value::Option(None)));
+
+    let explicit = ok(
+        &mut e,
+        "from configs | filter name == \"explicit\" | select {endpoint.port}",
+    );
+    assert!(explicit.rows[0]["endpoint.port"].cmp_eq(&Value::Int(8080)));
+}
+
+#[test]
+fn variant_record_defaults_are_applied_and_explicit_values_are_checked() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Event = Failed {message text, retryable bool = false} | Done\ntype Row =\n  id int\n  event Event\ntable events Row\ninsert events {id = 1, event = Failed {message = \"network\"}}",
+    );
+    assert_eq!(
+        ok(
+            &mut e,
+            "from events\nfilter match event\n  Failed {retryable, ..} => retryable == false\n  Done => false"
+        )
+        .rows
+        .len(),
+        1
+    );
+    let error =
+        e.execute("insert events {id = 2, event = Failed {message = \"x\", retryable = 1}}");
+    assert!(!error.ok);
+    assert_eq!(error.error.unwrap().code, "E_TYPE");
+}
+
+#[test]
+fn invalid_defaults_reject_the_complete_schema_batch() {
+    for source in [
+        "type Bad =\n  count int = \"many\"",
+        "type Bad =\n  owner option text = null",
+        "type Bad =\n  state enum(Ready) = Missing",
+        "type Nested =\n  enabled bool\ntype Bad =\n  nested Nested = {enabled = 1}",
+        "type Nested =\n  enabled bool\ntype Bad =\n  nested Nested = {}",
+    ] {
+        let mut e = Engine::memory();
+        let error = e.execute(source);
+        assert!(!error.ok, "accepted {source}");
+        assert!(matches!(
+            error.error.as_ref().unwrap().code.as_str(),
+            "E_TYPE" | "E_FIELD"
+        ));
+        assert!(error.message.contains("default for field"), "{error:?}");
+        assert!(e.schema().is_empty());
+    }
+}
+
+#[test]
 fn errors_are_checked_before_scanning_empty_tables() {
     let mut e = Engine::memory();
     ok(
@@ -451,18 +518,38 @@ fn schema_display_is_reusable_for_named_and_legacy_types() {
     let mut original = Engine::memory();
     ok(
         &mut original,
-        "type Flag =\n  Enabled\ntype Pair =\n  Wrapped((int, text))\ntype R =\n  id int\n  flag Flag\n  pair Pair\n  note option text\ntable typed R\n  key id\ncreate table old (n int, kind enum(A, B(float)))",
+        "type Flag =\n  Enabled\ntype Pair =\n  Wrapped((int, text))\ntype R =\n  id int\n  flag Flag = Enabled\n  pair Pair\n  note option text = None\ntable typed R\n  key id\ncreate table old (n int = 1, kind enum(A, B(float)) = A)",
     );
     let schema = original.schema();
-    assert!(schema.contains("note option text"));
+    assert!(schema.contains("note option text = None"));
+    assert!(schema.contains("create table old (n int = 1, kind enum(A, B(float)) = A)"));
     let mut restored = Engine::memory();
     ok(&mut restored, &schema);
     assert_eq!(schema, restored.schema());
     ok(
         &mut restored,
-        "insert typed {id = 1, flag = Enabled, pair = Wrapped((2, \"x\")), note = None}",
+        "insert typed {id = 1, pair = Wrapped((2, \"x\"))}",
     );
     assert_eq!(ok(&mut restored, "from typed").rows.len(), 1);
+}
+
+#[test]
+fn every_default_literal_form_round_trips_through_schema_text() {
+    let mut original = Engine::memory();
+    ok(
+        &mut original,
+        "type Choice = A | B(int) | C {label text}\ntype Defaults =\n  integer int = 1\n  decimal float = 2\n  enabled bool = true\n  title text = \"line\\nnext\"\n  pair (int, text) = (3, \"three\")\n  numbers list int = [1, 2]\n  absent option text = None\n  present option text = Some \"value\"\n  choice Choice = B(4)\n  record_choice Choice = C {label = \"c\"}\n  nested {value int = 5} = {}\ntable defaults Defaults",
+    );
+    let schema = original.schema();
+    let mut restored = Engine::memory();
+    ok(&mut restored, &schema);
+    assert_eq!(restored.schema(), schema);
+    ok(&mut restored, "insert defaults {}");
+    let row = ok(&mut restored, "from defaults");
+    assert!(row.rows[0]["decimal"].cmp_eq(&Value::Float(2.0)));
+    assert!(
+        row.rows[0]["present"].cmp_eq(&Value::Option(Some(Box::new(Value::Text("value".into())))))
+    );
 }
 
 #[test]

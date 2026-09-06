@@ -63,6 +63,8 @@ typed plan、prepared query 和长期连接在绑定时记录 revision 与 hash�
 
 同一个命名类型可能被多个表直接或嵌套引用。改变该类型时，plan 必须遍历所有引用表、相关字段路径与索引；转换和 catalog 更新在同一写事务提交。
 
+字段默认值是 schema manifest 的一部分，因此会改变 schema hash。当前默认值在声明时检查并规范化为 typed value；insert、filter 等上下文构造 typed record 时逐层补齐，已经显式提供的值始终接受正常类型检查。未来新增字段的 migration 复用同一规则回填已有行，不在读取时临时伪造缺失字段。
+
 ## 4. 两个版本的例子
 
 v1 中两个表共享 `State`，它们存储的是相同的 type ID 与 variant ID：

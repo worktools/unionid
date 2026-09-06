@@ -181,6 +181,8 @@ fn equal_items(a: &[Value], b: &[Value]) -> bool {
 pub struct Column {
     pub name: String,
     pub ty: ScalarType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
     #[serde(default)]
     pub id: u64,
 }
@@ -271,7 +273,24 @@ impl Catalog {
                 let mut resolved = Vec::new();
                 for column in columns {
                     if !seen.insert(column.name.clone()) { return Err(Error::new("E_SCHEMA", format!("duplicate field '{}'", column.name))); }
-                    resolved.push(Column { name: column.name, ty: self.resolve(column.ty, depth + 1)?, id: self.allocate()? });
+                    let ty = self.resolve(column.ty, depth + 1)?;
+                    let default = column
+                        .default
+                        .map(|value| {
+                            self.coerce_inner(
+                                &value,
+                                &ty,
+                                &format!("default for field '{}'", column.name),
+                                depth + 1,
+                            )
+                        })
+                        .transpose()?;
+                    resolved.push(Column {
+                        name: column.name,
+                        ty,
+                        default,
+                        id: self.allocate()?,
+                    });
                 }
                 ScalarType::Record(resolved)
             }
@@ -398,11 +417,18 @@ impl Catalog {
                 let mut out = BTreeMap::new();
                 for column in columns {
                     let field_path = format!("{path}.{}", column.name);
-                    let v = fields.get(&column.name).ok_or_else(|| Error::new("E_FIELD", format!("missing required field '{field_path}'; use None explicitly for option fields")))?;
-                    out.insert(
-                        column.name.clone(),
-                        self.coerce_inner(v, &column.ty, &field_path, depth + 1)?,
-                    );
+                    let value = match fields.get(&column.name) {
+                        Some(value) => {
+                            self.coerce_inner(value, &column.ty, &field_path, depth + 1)?
+                        }
+                        None => column.default.clone().ok_or_else(|| {
+                            Error::new(
+                                "E_FIELD",
+                                format!("missing required field '{field_path}'; declare a default or provide the field explicitly"),
+                            )
+                        })?,
+                    };
+                    out.insert(column.name.clone(), value);
                 }
                 if let Some(extra) = fields
                     .keys()
@@ -522,7 +548,7 @@ impl Catalog {
             ScalarType::Record(cs) => format!(
                 "{{{}}}",
                 cs.iter()
-                    .map(|c| format!("{} {}", c.name, self.describe(&c.ty)))
+                    .map(|c| self.describe_column(c))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -571,6 +597,70 @@ impl Catalog {
                 variant.name,
                 args.iter()
                     .map(|t| self.describe(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    pub fn describe_column(&self, column: &Column) -> String {
+        let mut text = format!("{} {}", column.name, self.describe(&column.ty));
+        if let Some(default) = &column.default {
+            text.push_str(" = ");
+            text.push_str(&default.source_text());
+        }
+        text
+    }
+}
+
+impl Value {
+    pub fn source_text(&self) -> String {
+        match self {
+            Self::Int(value) => value.to_string(),
+            Self::Float(value) => format!("{value:?}"),
+            Self::Bool(value) => value.to_string(),
+            Self::Text(value) => serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
+            Self::Null => "null".into(),
+            Self::Named { value, .. } => value.source_text(),
+            Self::Record(fields) => format!(
+                "{{{}}}",
+                fields
+                    .iter()
+                    .map(|(name, value)| format!("{name} = {}", value.source_text()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Tuple(values) => format!(
+                "({})",
+                values
+                    .iter()
+                    .map(Self::source_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::List(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Self::source_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Option(None) => "None".into(),
+            Self::Option(Some(value)) => format!("Some ({})", value.source_text()),
+            Self::Enum(value) if value.args.is_empty() => value.variant.clone(),
+            Self::Enum(value)
+                if value.args.len() == 1 && matches!(value.args[0], Self::Record(_)) =>
+            {
+                format!("{} {}", value.variant, value.args[0].source_text())
+            }
+            Self::Enum(value) => format!(
+                "{}({})",
+                value.variant,
+                value
+                    .args
+                    .iter()
+                    .map(Self::source_text)
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
