@@ -1,12 +1,13 @@
 mod common;
 use common::{Server, TempDir, wait};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use unionid::{
-    Engine, MigrationApply, MigrationPlan, MigrationStatus, QueryResponse, SchemaCheck,
-    UpsertAction, Value, cli,
+    Engine, MigrationApply, MigrationPlan, MigrationStatus, ProtocolRequest, QueryResponse,
+    SchemaCheck, UpsertAction, Value, WireValue, cli,
 };
 
 #[test]
@@ -540,6 +541,87 @@ fn concurrent_requests_are_serialized_and_invalid_json_is_reported() {
             .unwrap()
             .code,
         "E_PROTOCOL"
+    );
+}
+
+#[test]
+fn versioned_tcp_protocol_echoes_ids_and_binds_lossless_parameters() {
+    let server = Server::start(&[]);
+    let setup = r#"type Item =
+  id int
+  note text
+table items Item
+  key id
+insert items
+  id = 9007199254740993
+  note = "quoted \"text\"\nwith | pipe""#;
+    assert!(cli::send_one(&server.addr, setup).unwrap().ok);
+
+    let request = ProtocolRequest {
+        version: unionid::protocol::VERSION,
+        request_id: "tcp-1".into(),
+        query: "from items\nfilter id == $id\nselect {id, note}".into(),
+        params: BTreeMap::from([(
+            "id".into(),
+            WireValue::Int {
+                value: "9007199254740993".into(),
+            },
+        )]),
+        schema: None,
+    };
+    let response = cli::send_request(&server.addr, &request).unwrap();
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.version, unionid::protocol::VERSION);
+    assert_eq!(response.request_id, "tcp-1");
+    assert!(matches!(
+        response.rows[0].get("id"),
+        Some(WireValue::Int { value }) if value == "9007199254740993"
+    ));
+    assert!(matches!(
+        response.rows[0].get("note"),
+        Some(WireValue::Text { value }) if value == "quoted \"text\"\nwith | pipe"
+    ));
+
+    let unsupported = ProtocolRequest {
+        version: 99,
+        request_id: "tcp-2".into(),
+        ..request
+    };
+    let response = cli::send_request(&server.addr, &unsupported).unwrap();
+    assert_eq!(response.request_id, "tcp-2");
+    assert_eq!(response.error.unwrap().code, "E_PROTOCOL_VERSION");
+
+    let missing = ProtocolRequest {
+        version: unionid::protocol::VERSION,
+        request_id: "tcp-3".into(),
+        query: "from items | filter id == $id".into(),
+        params: BTreeMap::new(),
+        schema: None,
+    };
+    assert_eq!(
+        cli::send_request(&server.addr, &missing)
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "E_PARAM_MISSING"
+    );
+    let wrong_schema = ProtocolRequest {
+        request_id: "tcp-4".into(),
+        params: BTreeMap::from([("id".into(), WireValue::Int { value: "1".into() })]),
+        schema: Some(unionid::SchemaInfo {
+            revision: 0,
+            hash: "stale".into(),
+        }),
+        ..missing
+    };
+    assert_eq!(
+        cli::send_request(&server.addr, &wrong_schema)
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "E_SCHEMA_CHANGED"
     );
 }
 

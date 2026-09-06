@@ -6,6 +6,7 @@
 - PRQL 风格换行查询与修改：`filter/filter match/derive/select/sort/take/set`
 - 可组合的有类型表达式：int/float 算术、`not/and/or`、字段间比较、`contains/length`
 - 共享 Rust 引擎、本地 CLI 与 TCP 服务
+- version 1 JSON Lines 协议、无损 ADT/i64 wire values、typed 参数与 schema-aware prepared query
 - 严格类型检查、字段默认值、主键、upsert/update/delete、等值索引及原子脚本
 - 稳定 catalog 身份、原子 schema revision 与可校验 hash
 - 独立于 serde/Rust enum 布局的版本化 ADT value codec
@@ -63,7 +64,7 @@ cargo run -- cli --memory
 
 输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)，声明式目标结构与草稿生成见 [SCHEMA-DIFF.md](docs/SCHEMA-DIFF.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较和 `contains/length`。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/diff/apply/status` 管理不可变迁移历史。通用函数、`let/group` 和参数绑定还在后续计划中。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，[version 1 协议与参数](docs/PROTOCOL.md)描述无损 ADT/i64 wire codec 和 Rust prepared query，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)，声明式目标结构与草稿生成见 [SCHEMA-DIFF.md](docs/SCHEMA-DIFF.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较和 `contains/length`。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/diff/apply/status` 管理不可变迁移历史。通用函数和 `let/group` 还在后续计划中。
 
 复杂条件推荐在 `filter` 或 match 分支的 `=>` 后换行并缩进；混用 `and` 与 `or` 时用括号写清分组。语言会减少无助于理解的标点，同时保留括号和集合边界等必要符号。
 

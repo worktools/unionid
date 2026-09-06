@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_directory};
-use crate::{Engine, QueryResponse, SchemaCheck, Value, backup};
+use crate::{Engine, ProtocolRequest, ProtocolResponse, QueryResponse, SchemaCheck, Value, backup};
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
     run_local_engine(Engine::memory(), source, json)
@@ -520,6 +520,35 @@ pub fn send_one(addr: &str, query: &str) -> Result<QueryResponse, String> {
         .map_err(|e| e.to_string())?;
     serde_json::to_writer(&mut stream, &serde_json::json!({"query": query}))
         .map_err(|e| e.to_string())?;
+    stream
+        .write_all(b"\n")
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .take(16 * 1024 * 1024 + 1)
+        .read_line(&mut line)
+        .map_err(|e| format!("read response: {e}"))?;
+    if line.len() > 16 * 1024 * 1024 {
+        return Err("response exceeds 16 MiB".into());
+    }
+    serde_json::from_str(line.trim()).map_err(|e| format!("decode response: {e}"))
+}
+
+/// Send one versioned request. The request and response are each one JSON line;
+/// embedded newlines in `query` remain part of the JSON string.
+pub fn send_request(addr: &str, request: &ProtocolRequest) -> Result<ProtocolResponse, String> {
+    if request.query.len() > crate::syntax::MAX_SOURCE_BYTES {
+        return Err("source exceeds 1 MiB".into());
+    }
+    let mut stream = TcpStream::connect(addr).map_err(|e| format!("connect {addr}: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut stream, request).map_err(|e| e.to_string())?;
     stream
         .write_all(b"\n")
         .and_then(|_| stream.flush())

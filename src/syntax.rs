@@ -27,6 +27,7 @@ enum Kind {
     Minus,
     Star,
     Slash,
+    Parameter(String),
     Op(String),
     Newline,
     Indent,
@@ -230,6 +231,26 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                 '/' => {
                     pos += 1;
                     Kind::Slash
+                }
+                '$' => {
+                    pos += 1;
+                    let name_start = pos;
+                    if !chars
+                        .get(pos)
+                        .is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == '_')
+                    {
+                        return Err(syntax(
+                            "parameter names must start with a letter or underscore",
+                            span,
+                        ));
+                    }
+                    pos += 1;
+                    while pos < chars.len()
+                        && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_')
+                    {
+                        pos += 1;
+                    }
+                    Kind::Parameter(chars[name_start..pos].iter().collect())
                 }
                 ';' => {
                     return Err(syntax(
@@ -911,6 +932,10 @@ impl Parser {
     fn insert(&mut self) -> Result<Statement> {
         self.expect_word("insert")?;
         let table = self.identifier()?;
+        if let Kind::Parameter(parameter) = self.kind().clone() {
+            self.bump();
+            return Ok(Statement::InsertParameter { table, parameter });
+        }
         let values = self.row_value()?;
         Ok(Statement::Insert { table, values })
     }
@@ -918,6 +943,10 @@ impl Parser {
     fn upsert(&mut self) -> Result<Statement> {
         self.expect_word("upsert")?;
         let table = self.identifier()?;
+        if let Kind::Parameter(parameter) = self.kind().clone() {
+            self.bump();
+            return Ok(Statement::UpsertParameter { table, parameter });
+        }
         let values = self.row_value()?;
         Ok(Statement::Upsert { table, values })
     }
@@ -1804,6 +1833,10 @@ impl Parser {
             return Ok(ScalarExpression::Literal(self.value(depth + 1)?));
         }
         match self.kind().clone() {
+            Kind::Parameter(name) => {
+                self.bump();
+                Ok(ScalarExpression::Parameter { name, ty: None })
+            }
             Kind::Ident(name)
                 if matches!(name.as_str(), "true" | "false" | "null")
                     || name.starts_with(|ch: char| ch.is_ascii_uppercase()) =>

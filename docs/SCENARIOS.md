@@ -168,11 +168,11 @@ type Session =
 | --- | --- | --- | --- |
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
 | 固定 record 的嵌套路径过滤/投影 | 已实现 | option/sum 不能直接穿透 | 已满足基础 |
-| 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载、record/tuple/sum/option 嵌套 pattern，以及同 constructor 多分支的完整覆盖分析 | prepared plan 的 schema revision 重绑定 | #35，P0 |
+| 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载、record/tuple/sum/option 嵌套 pattern，以及同 constructor 多分支的完整覆盖分析 | — | #35，P0 |
 | 从 ADT 分支派生统一结果 | 已实现递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | 通用函数表达式 | #36，P0 |
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length | any/all 元素谓词与 option helper | #36，P0 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
-| 参数化 key/time/user 输入 | 未实现 | typed params、schema revision 重绑定 | #10/#22，P0/P1 |
+| 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec 与 schema-aware prepared query | option helper/元素谓词可继续扩展 | #10/#22/#36 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match target 与 typed simultaneous set；upsert 已实现按主键 insert/replace；三者维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 扩大工作集时直接生成 mutation set | #15，P0 |
 | count/sum/min/max 与分组 | 未实现 | aggregate/group | #11，P0 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |

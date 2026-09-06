@@ -24,9 +24,17 @@ pub enum Statement {
         table: String,
         values: Value,
     },
+    InsertParameter {
+        table: String,
+        parameter: String,
+    },
     Upsert {
         table: String,
         values: Value,
+    },
+    UpsertParameter {
+        table: String,
+        parameter: String,
     },
     Update {
         target: Pipeline,
@@ -300,6 +308,10 @@ pub enum BoolExpression {
 #[derive(Debug, Clone)]
 pub enum ScalarExpression {
     Reference(String),
+    Parameter {
+        name: String,
+        ty: Option<ScalarType>,
+    },
     Literal(Value),
     Length(Box<ScalarExpression>),
     Negate {

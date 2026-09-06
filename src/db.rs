@@ -195,6 +195,11 @@ impl Database {
             }
             Statement::CreateIndex { table, column } => self.create_index(&table, &column),
             Statement::Insert { table, values } => self.insert(&table, values),
+            Statement::InsertParameter { parameter, .. }
+            | Statement::UpsertParameter { parameter, .. } => Err(Error::new(
+                "E_PARAM_MISSING",
+                format!("parameter '${parameter}' was not bound"),
+            )),
             Statement::Upsert { table, values } => self.upsert(&table, values),
             Statement::Update {
                 mut target,
@@ -623,10 +628,10 @@ impl Database {
         Ok(())
     }
 
-    fn query(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
+    pub(crate) fn prepare_pipeline(&self, pipeline: &mut Pipeline) -> Result<Vec<Column>> {
         let table = self.table(&pipeline.from)?;
         let mut schema = table.schema.clone();
-        // Validate and bind every stage before touching any rows, including empty tables.
+        // Validate and bind every stage without touching rows, including for empty tables.
         for stage in &mut pipeline.stages {
             match stage {
                 Stage::Filter(expression) => {
@@ -667,6 +672,12 @@ impl Database {
                 Stage::Take { .. } => {}
             }
         }
+        Ok(schema)
+    }
+
+    fn query(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
+        let schema = self.prepare_pipeline(&mut pipeline)?;
+        let table = self.table(&pipeline.from)?;
         let candidates = if let Some(Stage::Filter(expression)) = pipeline.stages.first() {
             crate::expression::simple_index_equality(expression).and_then(|(column, value)| {
                 self.indexes
