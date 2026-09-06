@@ -9,7 +9,7 @@
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。
 - `field type = value` 字段默认值在声明时完成递归类型检查，insert 对嵌套 record 和 sum record 负载逐层补齐；schema 展示、WAL/snapshot 恢复与 hash 均保留默认值。
 - 版本 1 ADT value codec 以 catalog 和期望类型驱动，用稳定 type/field/variant ID 编码命名类型、record、sum、tuple、option/list；不依赖 serde 或 Rust enum 布局，字段重排和显式 rename 保持字节可解释。
-- 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter 与 match condition 共用布尔表达式 binder/evaluator，支持括号、`not/and/or`、字段或 binding 间比较、list `contains` 及 list/text `length`。
+- 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter 与 match condition 共用布尔表达式 binder/evaluator，支持括号、`not/and/or`、字段或 binding 间比较、list `contains` 及 list/text `length`；复杂条件可使用 `filter`／`=>` 后的缩进块或跨行括号。
 - match 支持 sum 的 unit/record/位置负载、option 的 None/Some，以及 record/tuple/sum/option 的递归 pattern；record 字段可重命名绑定，分支可从 binding 递归构造 option/sum/record/tuple/list，并静态统一结果类型。命名 record 构造会补齐字段默认值；派生列可继续 filter/sort/select，空表也执行全部检查。
 - 以任务队列、嵌套配置、事件收件箱、离线同步和 session/cache 推演 ADT 与日常操作，形成 [实际场景与查询覆盖矩阵](SCENARIOS.md)；ADT 派生和集合查询分别拆为 #35/#36。
 - 查询参考明确记录当前 grammar、stage schema、执行顺序、match 规则、错误类别和已实现/计划边界；任务、配置、事件三个示例都由语言测试执行。

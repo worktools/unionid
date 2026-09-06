@@ -49,7 +49,9 @@ insert tasks
 ```text
 from tasks
 filter match state
-  Running {attempt, ..} => attempt >= 2
+  Running {attempt, ..} =>
+    attempt >= 2
+    and attempt < 5
   _ => false
 derive state_label =
   match state
@@ -74,7 +76,7 @@ take 20
 | 截取 | `take 20` / `take 11..20` | 保留前 N 行或一基闭区间内的行 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 与多行 pipeline 同语义 |
 
-支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；函数使用空格传参。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；跨请求分页应以唯一主键结束排序。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。
+支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；函数使用空格传参。复杂条件可放在 `filter` 或 match 分支 `=>` 后的缩进块中，括号内部也可跨行；混用 `and` 与 `or` 时规范写法加括号明确分组。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；跨请求分页应以唯一主键结束排序。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。
 
 模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。match condition 与普通 filter 共用布尔和集合表达式。`derive` 分支可返回 binding/literal，或用 binding 构造 `Some at`、`State.Done`、`Summary {label = message}`、tuple、record 和 list；派生结果中的算术和函数仍由 #36 跟踪。
 
@@ -82,7 +84,7 @@ take 20
 
 ## 脚本边界与错误
 
-同层的 `from` / `type` / `table` / `insert` / `create` 开始新语句；查询中的同层 `filter/derive/select/sort/take/limit` 延续 pipeline。声明体、嵌套 record、变体负载和 match 分支通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
+同层的 `from` / `type` / `table` / `insert` / `create` 开始新语句；查询中的同层 `filter/derive/select/sort/take/limit` 延续 pipeline。声明体、嵌套 record、变体负载、filter 条件和 match 分支通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
 
 空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持算术、任意函数、list 元素 lambda、let/group、参数占位符、update/delete/upsert 或 migration 语句。
 

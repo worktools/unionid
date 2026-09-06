@@ -448,6 +448,19 @@ fn boolean_filters_compose_fields_lists_and_length() {
     );
     assert_eq!(grouped.rows.len(), 1);
     assert!(grouped.rows[0]["id"].cmp_eq(&Value::Int(2)));
+
+    let block = ok(
+        &mut e,
+        "from jobs\nfilter\n  (archived or priority >= threshold)\n  and contains tags Sync\n  and not archived\nselect {id}",
+    );
+    assert_eq!(block.rows.len(), 1);
+    assert!(block.rows[0]["id"].cmp_eq(&Value::Int(2)));
+
+    let parenthesized = ok(
+        &mut e,
+        "from jobs\nfilter (\n  archived\n  or priority >= threshold\n)\nsort id\nselect {id}",
+    );
+    assert_eq!(parenthesized.rows.len(), 2);
     assert_eq!(
         ok(&mut e, "from jobs | filter 10 <= priority | sort id")
             .rows
@@ -476,7 +489,7 @@ fn match_conditions_share_boolean_and_collection_expressions() {
     );
     let result = ok(
         &mut e,
-        "from jobs\nfilter match state\n  Ready {urgent, attempts, max_attempts, tags} => urgent and attempts < max_attempts and contains tags \"sync\"\n  Done => false\nselect {id}",
+        "from jobs\nfilter match state\n  Ready {urgent, attempts, max_attempts, tags} =>\n    urgent\n    and attempts < max_attempts\n    and contains tags \"sync\"\n  Done => false\nselect {id}",
     );
     assert_eq!(result.rows.len(), 1);
     assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));

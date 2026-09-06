@@ -731,7 +731,15 @@ impl Parser {
                 if self.word("match") {
                     Stage::FilterMatch(self.match_predicate()?)
                 } else {
-                    Stage::Filter(self.bool_expression(0)?)
+                    let nested = *self.kind() == Kind::Newline;
+                    if nested {
+                        self.block()?;
+                    }
+                    let expression = self.bool_expression(0, nested)?;
+                    if nested {
+                        self.expect(Kind::Dedent)?;
+                    }
+                    Stage::Filter(expression)
                 }
             } else if self.word("derive") {
                 self.bump();
@@ -889,8 +897,21 @@ impl Parser {
                 } if op == "=>" => {}
                 token => return Err(syntax("expected '=>' after match pattern", token.span)),
             }
-            let condition = self.match_condition()?;
+            let nested_condition = *self.kind() == Kind::Newline;
+            if nested_condition {
+                self.block()?;
+            }
+            let condition = self.bool_expression(0, nested_condition)?;
+            if nested_condition {
+                self.expect(Kind::Dedent)?;
+            }
             arms.push(MatchArm { pattern, condition });
+            if nested_condition {
+                if *self.kind() == Kind::Dedent {
+                    break;
+                }
+                continue;
+            }
             if *self.kind() == Kind::Dedent {
                 break;
             }
@@ -1175,51 +1196,56 @@ impl Parser {
         Ok(fields)
     }
 
-    fn match_condition(&mut self) -> Result<BoolExpression> {
-        self.bool_expression(0)
+    fn bool_expression(&mut self, depth: usize, multiline: bool) -> Result<BoolExpression> {
+        self.bool_or(depth, multiline)
     }
 
-    fn bool_expression(&mut self, depth: usize) -> Result<BoolExpression> {
-        self.bool_or(depth)
-    }
-
-    fn bool_or(&mut self, depth: usize) -> Result<BoolExpression> {
+    fn bool_or(&mut self, depth: usize, multiline: bool) -> Result<BoolExpression> {
         self.depth(depth)?;
-        let mut expression = self.bool_and(depth)?;
+        let mut expression = self.bool_and(depth, multiline)?;
         let mut expression_depth = depth;
+        self.expression_newlines(multiline);
         while self.word("or") {
             self.bump();
+            self.expression_newlines(multiline);
             expression_depth += 1;
             self.depth(expression_depth)?;
             expression = BoolExpression::Or(
                 Box::new(expression),
-                Box::new(self.bool_and(expression_depth)?),
+                Box::new(self.bool_and(expression_depth, multiline)?),
             );
+            self.expression_newlines(multiline);
         }
         Ok(expression)
     }
 
-    fn bool_and(&mut self, depth: usize) -> Result<BoolExpression> {
+    fn bool_and(&mut self, depth: usize, multiline: bool) -> Result<BoolExpression> {
         self.depth(depth)?;
-        let mut expression = self.bool_not(depth)?;
+        let mut expression = self.bool_not(depth, multiline)?;
         let mut expression_depth = depth;
+        self.expression_newlines(multiline);
         while self.word("and") {
             self.bump();
+            self.expression_newlines(multiline);
             expression_depth += 1;
             self.depth(expression_depth)?;
             expression = BoolExpression::And(
                 Box::new(expression),
-                Box::new(self.bool_not(expression_depth)?),
+                Box::new(self.bool_not(expression_depth, multiline)?),
             );
+            self.expression_newlines(multiline);
         }
         Ok(expression)
     }
 
-    fn bool_not(&mut self, depth: usize) -> Result<BoolExpression> {
+    fn bool_not(&mut self, depth: usize, multiline: bool) -> Result<BoolExpression> {
         self.depth(depth)?;
         if self.word("not") {
             self.bump();
-            Ok(BoolExpression::Not(Box::new(self.bool_not(depth + 1)?)))
+            self.expression_newlines(multiline);
+            Ok(BoolExpression::Not(Box::new(
+                self.bool_not(depth + 1, multiline)?,
+            )))
         } else {
             self.bool_primary(depth)
         }
@@ -1228,7 +1254,9 @@ impl Parser {
     fn bool_primary(&mut self, depth: usize) -> Result<BoolExpression> {
         self.depth(depth)?;
         if self.eat(Kind::Open('(')) {
-            let expression = self.bool_expression(depth + 1)?;
+            self.newlines();
+            let expression = self.bool_expression(depth + 1, true)?;
+            self.newlines();
             self.expect(Kind::Close(')'))?;
             return Ok(expression);
         }
@@ -1274,6 +1302,12 @@ impl Parser {
             | Kind::Open('[')
             | Kind::Open('(') => Ok(ScalarExpression::Literal(self.value(depth + 1)?)),
             _ => Err(self.error("expected a field, binding, literal, or length expression")),
+        }
+    }
+
+    fn expression_newlines(&mut self, multiline: bool) {
+        if multiline {
+            self.newlines();
         }
     }
 }

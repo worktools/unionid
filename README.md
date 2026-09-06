@@ -42,6 +42,8 @@ cargo run -- cli --memory
 
 当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和嵌套 pattern，`derive x = match ...` 可从 binding 构造新的 option、sum、record、tuple 和 list。普通 filter 与 match condition 支持括号、`not/and/or`、字段间比较和 `contains/length`。算术、通用函数、`let/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
 
+复杂条件推荐在 `filter` 或 match 分支的 `=>` 后换行并缩进；混用 `and` 与 `or` 时用括号写清分组。语言会减少无助于理解的标点，同时保留括号和集合边界等必要符号。
+
 ## 后续方向与计划
 
 计划将原型演进为原生支持命名和类型、积类型、模式匹配及 schema migration 的轻量数据库。

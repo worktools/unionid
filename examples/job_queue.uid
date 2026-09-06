@@ -72,7 +72,9 @@ derive retry_at =
 select {id, state, retry_at}
 
 from jobs
-filter priority >= 10 and contains tags "sync"
+filter
+  priority >= 10
+  and contains tags "sync"
 filter match state
   Queued {scheduled_at, ..} => scheduled_at <= 200
   _ => false
