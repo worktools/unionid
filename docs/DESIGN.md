@@ -48,7 +48,7 @@ PRQL 本身使用空格调用函数，并允许换行连接 pipeline；我们借
 ```text
 type Contact =
   email text
-  nickname option text
+  nickname option text = None
 
 type State =
   Pending
@@ -71,7 +71,6 @@ insert tasks
   title = "同步目录"
   owner =
     email = "alice@example.com"
-    nickname = None
   tags = ["local", "sync"]
   state = Running {worker = "local", attempt = 2}
 ```
@@ -128,7 +127,7 @@ upsert tasks $task
 
 - 命名 ADT／record 采用名义身份，字段形状相同的两个命名类型不会自动互换；匿名查询结果 record 采用结构类型。
 - 构造器由预期类型解析；有歧义时使用限定名，如 `State.Pending`。非法构造器、参数数目或字段类型均为写入前错误。
-- 普通字段必填；缺值通过 `option T` 显式表达。遗漏字段只在有声明默认值时补齐；不把遗漏、`None`、空字符串和未知字段混为一谈。旧版 `null` 由兼容导入规则处理。
+- 普通字段必填；缺值通过 `option T` 显式表达。默认值采用 `field type = value`，在 schema 声明时类型检查并存成完整 typed value；遗漏字段只在有声明默认值时逐层补齐，不把遗漏、`None`、空字符串和未知字段混为一谈。首版默认值是纯字面量，不依赖其他字段、参数、时钟或函数。旧版 `null` 由兼容导入规则处理。
 - v1 原子类型先收敛到 `int`（i64）、`float`（有限 f64）、`bool`、`text`。时间、UUID、Decimal、Bytes 先评估真实样例再扩展；金额示例用整数最小单位，不暗示 Float 提供十进制定点精度。
 - Int 精确比较；混合 Int／Float 运算和转换使用明确规则，不能统一转 f64。建议 v1 默认要求显式转换，字面量可按上下文检查。
 - Float 不采用 epsilon 相等；拒绝 NaN／Infinity，统一 `-0.0` 与 `0.0` 的相等、索引键和分组语义。

@@ -5,9 +5,9 @@ type Endpoint =
 type Config =
   name text
   endpoint Endpoint
-  mode Mode
-  tags list text
-  owner option text
+  mode Mode = Development
+  tags list text = []
+  owner option text = None
 
 table config Config
   key name
@@ -15,9 +15,6 @@ table config Config
 insert config
   name = "worker"
   endpoint = {host = "localhost", port = 8080}
-  mode = Development
-  tags = ["local", "jobs"]
-  owner = None
 
 from config
 filter endpoint.port >= 8000

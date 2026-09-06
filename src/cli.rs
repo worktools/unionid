@@ -176,47 +176,5 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
 }
 
 pub fn display_value(value: &Value) -> String {
-    match value {
-        Value::Int(v) => v.to_string(),
-        Value::Float(v) => format!("{v:?}"),
-        Value::Bool(v) => v.to_string(),
-        Value::Text(v) => serde_json::to_string(v).unwrap_or_default(),
-        Value::Null => "null".into(),
-        Value::Named { value, .. } => display_value(value),
-        Value::Record(fields) => format!(
-            "{{{}}}",
-            fields
-                .iter()
-                .map(|(k, v)| format!("{k} = {}", display_value(v)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Value::Tuple(vs) => format!(
-            "({})",
-            vs.iter().map(display_value).collect::<Vec<_>>().join(", ")
-        ),
-        Value::List(vs) => format!(
-            "[{}]",
-            vs.iter().map(display_value).collect::<Vec<_>>().join(", ")
-        ),
-        Value::Option(None) => "None".into(),
-        Value::Option(Some(v)) => format!("Some ({})", display_value(v)),
-        Value::Enum(v) => {
-            if v.args.is_empty() {
-                v.variant.clone()
-            } else if v.args.len() == 1 && matches!(v.args[0], Value::Record(_)) {
-                format!("{} {}", v.variant, display_value(&v.args[0]))
-            } else {
-                format!(
-                    "{}({})",
-                    v.variant,
-                    v.args
-                        .iter()
-                        .map(display_value)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-        }
-    }
+    value.source_text()
 }

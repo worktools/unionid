@@ -50,6 +50,27 @@ fn schema_identity_survives_wal_and_snapshot_recovery() {
 }
 
 #[test]
+fn recovered_schema_keeps_defaults_for_future_inserts() {
+    let dir = TempDir::new();
+    let wal = dir.0.join("db.wal");
+    {
+        let mut e = Engine::open(Some(wal.clone()), None, 0).unwrap();
+        assert!(
+            e.execute(
+                "type Entry =\n  id int\n  label text = \"untitled\"\ntable entries Entry\n  key id"
+            )
+            .ok
+        );
+        assert!(e.execute("insert entries {id = 1}").ok);
+    }
+    let mut reopened = Engine::open(Some(wal), None, 0).unwrap();
+    assert!(reopened.execute("insert entries {id = 2}").ok);
+    let result = reopened.execute("from entries | filter id == 2 | select {label}");
+    assert!(result.ok, "{}", result.message);
+    assert!(result.rows[0]["label"].cmp_eq(&Value::Text("untitled".into())));
+}
+
+#[test]
 fn snapshot_watermark_skips_overlapping_commits_without_duplicate_rows() {
     let dir = TempDir::new();
     let wal = dir.0.join("db.wal");

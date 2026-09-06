@@ -422,11 +422,27 @@ impl Parser {
                 return Err(self.error(format!("duplicate field '{name}'")));
             }
             let ty = self.ty(depth + 1)?;
-            out.push(Column { name, ty, id: 0 });
+            let default = if self.eat(Kind::Op("=".into())) {
+                Some(if *self.kind() == Kind::Newline {
+                    self.block()?;
+                    self.record(Kind::Dedent, depth + 1)?
+                } else {
+                    self.value(depth + 1)?
+                })
+            } else {
+                None
+            };
+            out.push(Column {
+                name,
+                ty,
+                default,
+                id: 0,
+            });
             if *self.kind() == end {
                 break;
             }
-            if !self.eat(Kind::Comma) && !self.eat(Kind::Newline) {
+            let after_block = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
+            if !self.eat(Kind::Comma) && !self.eat(Kind::Newline) && !after_block {
                 return Err(self.error("expected a newline or comma between fields"));
             }
             self.newlines();

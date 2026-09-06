@@ -300,6 +300,7 @@ impl Database {
                             Ok(Column {
                                 name: name.clone(),
                                 ty: self.catalog.field_type(&schema, name)?.clone(),
+                                default: None,
                                 id: 0,
                             })
                         })
@@ -556,11 +557,7 @@ impl Database {
                 ScalarType::Record(fields) => {
                     lines.push(format!("type {} =", d.name));
                     for field in fields {
-                        lines.push(format!(
-                            "  {} {}",
-                            field.name,
-                            self.catalog.describe(&field.ty)
-                        ));
+                        lines.push(format!("  {}", self.catalog.describe_column(field)));
                     }
                 }
                 ScalarType::Enum(def) => {
@@ -591,7 +588,7 @@ impl Database {
                 let columns = t
                     .schema
                     .iter()
-                    .map(|c| format!("{} {}", c.name, self.catalog.describe(&c.ty)))
+                    .map(|c| self.catalog.describe_column(c))
                     .collect::<Vec<_>>()
                     .join(", ");
                 lines.push(format!("create table {name} ({columns})"));
