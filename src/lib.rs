@@ -18,6 +18,6 @@ pub mod syntax;
 pub mod wal;
 
 pub use db::{QueryResponse, SchemaInfo};
-pub use engine::Engine;
+pub use engine::{Engine, StorageIntegrity};
 pub use error::{Error, Result, Span};
 pub use model::Value;

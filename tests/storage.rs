@@ -1,6 +1,7 @@
 mod common;
 use common::TempDir;
 use redb::{Database as RedbDatabase, Durability, ReadableDatabase, TableDefinition};
+use std::process::Command;
 use unionid::{Engine, Value};
 
 const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
@@ -8,6 +9,90 @@ const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalo
 const REDB_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
 const REDB_SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("secondary_index");
 const REDB_MIGRATION_LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("migration_ledger");
+const CRASH_PATH_ENV: &str = "UNIONID_TEST_REDB_CRASH_PATH";
+const CRASH_MODE_ENV: &str = "UNIONID_TEST_REDB_CRASH_MODE";
+const CRASH_BEFORE_COMMIT: i32 = 91;
+const CRASH_AFTER_COMMIT: i32 = 92;
+
+#[test]
+fn redb_crash_transaction_child() {
+    let Ok(path) = std::env::var(CRASH_PATH_ENV) else {
+        return;
+    };
+    let mode = std::env::var(CRASH_MODE_ENV).unwrap();
+    if mode == "before" {
+        let database = RedbDatabase::open(path).unwrap();
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        transaction
+            .open_table(REDB_META)
+            .unwrap()
+            .insert("commit_sequence", 999_u64.to_be_bytes().as_slice())
+            .unwrap();
+        transaction
+            .open_table(REDB_CATALOG)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        transaction
+            .open_table(REDB_ROWS)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        transaction
+            .open_table(REDB_SECONDARY_INDEX)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        std::process::exit(CRASH_BEFORE_COMMIT);
+    }
+    if mode == "after" {
+        let mut engine = Engine::open_redb(path).unwrap();
+        let response = engine.execute("insert entries {id = 2, value = \"committed\"}");
+        assert!(response.ok, "{}", response.message);
+        std::process::exit(CRASH_AFTER_COMMIT);
+    }
+    panic!("unknown crash mode '{mode}'");
+}
+
+#[test]
+fn redb_recovers_complete_state_across_process_exit_boundaries() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        assert!(
+            engine
+                .execute("type Entry =\n  id int\n  value text\ntable entries Entry\n  key id\ninsert entries {id = 1, value = \"baseline\"}")
+                .ok
+        );
+    }
+    run_crash_child(&path, "before", CRASH_BEFORE_COMMIT);
+    {
+        let mut reopened = Engine::open_redb(path.clone()).unwrap();
+        let rows = reopened.execute("from entries");
+        assert!(rows.ok, "{}", rows.message);
+        assert_eq!(rows.rows.len(), 1);
+        assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    }
+    run_crash_child(&path, "after", CRASH_AFTER_COMMIT);
+    let mut reopened = Engine::open_redb(path).unwrap();
+    let rows = reopened.execute("from entries | sort id");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 2);
+    assert!(rows.rows[1]["id"].cmp_eq(&Value::Int(2)));
+}
+
+fn run_crash_child(path: &std::path::Path, mode: &str, expected_code: i32) {
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "redb_crash_transaction_child", "--nocapture"])
+        .env(CRASH_PATH_ENV, path)
+        .env(CRASH_MODE_ENV, mode)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(expected_code));
+}
 
 #[test]
 fn redb_atomic_adt_batches_survive_reopen() {
@@ -67,6 +152,47 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
     let error = Engine::open_redb(path).err().unwrap();
     assert_eq!(error.code, "E_STORAGE");
     assert!(error.message.contains("unsupported storage_format_version"));
+}
+
+#[test]
+fn redb_unknown_codec_versions_fail_closed() {
+    for (key, value) in [
+        ("catalog_codec_version", 99_u16.to_be_bytes()),
+        ("value_codec_version", 99_u16.to_be_bytes()),
+        ("index_key_version", 99_u16.to_be_bytes()),
+    ] {
+        let dir = TempDir::new();
+        let path = dir.0.join("state.redb");
+        drop(Engine::open_redb(path.clone()).unwrap());
+        let database = RedbDatabase::open(&path).unwrap();
+        {
+            let mut transaction = database.begin_write().unwrap();
+            transaction.set_durability(Durability::Immediate).unwrap();
+            transaction.set_two_phase_commit(true);
+            transaction
+                .open_table(REDB_META)
+                .unwrap()
+                .insert(key, value.as_slice())
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        drop(database);
+        let error = Engine::open_redb(path).err().unwrap();
+        assert_eq!(error.code, "E_STORAGE");
+        assert!(error.message.contains(&format!("unsupported {key}")));
+    }
+}
+
+#[test]
+fn invalid_redb_files_are_rejected_without_replacement() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    let contents = b"not a redb database";
+    std::fs::write(&path, contents).unwrap();
+    let error = Engine::open_redb(path.clone()).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("open redb database"));
+    assert_eq!(std::fs::read(path).unwrap(), contents);
 }
 
 #[test]

@@ -160,6 +160,18 @@ fn local_run_and_server_share_the_redb_database() {
         String::from_utf8_lossy(&output.stderr)
     );
     let server = Server::start(&["--db", path.to_str().unwrap()]);
+    let blocked = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--db",
+            path.to_str().unwrap(),
+            "--query",
+            "from entries",
+        ])
+        .output()
+        .unwrap();
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("E_BUSY"));
     let response = cli::send_one(&server.addr, "from entries | filter id == 1").unwrap();
     assert!(response.ok, "{}", response.message);
     assert_eq!(response.rows.len(), 1);
@@ -167,6 +179,20 @@ fn local_run_and_server_share_the_redb_database() {
         response.rows[0]["value"]
             .cmp_eq(&Value::Option(Some(Box::new(Value::Text("saved".into())))))
     );
+    drop(server);
+    let check = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["check", "--db", path.to_str().unwrap(), "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(report["backend"], "redb");
+    assert_eq!(report["backend_clean"], true);
+    assert_eq!(report["schema"]["revision"], 1);
 }
 
 #[test]

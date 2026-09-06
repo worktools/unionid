@@ -17,6 +17,31 @@ pub fn run_local_redb(
     run_local_engine(engine, source, json)
 }
 
+pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(), String> {
+    let mut engine = Engine::open_redb(path).map_err(|error| error.to_string())?;
+    let report = engine
+        .check_integrity()
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "redb integrity verified ({})\nschema revision {}\nschema hash {}",
+            if report.backend_clean {
+                "backend was clean"
+            } else {
+                "backend repair completed"
+            },
+            report.schema.revision,
+            report.schema.hash
+        );
+    }
+    Ok(())
+}
+
 fn run_local_engine(mut engine: Engine, source: Option<String>, json: bool) -> Result<(), String> {
     if let Some(source) = source {
         return print_response(&engine.execute(&source), json);
