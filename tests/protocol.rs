@@ -112,6 +112,22 @@ fn prepared_query_rejects_schema_changes_and_mutations() {
 }
 
 #[test]
+fn expired_execution_deadline_discards_an_atomic_batch() {
+    let mut engine = Engine::memory();
+    let response = engine.execute_with_params_until(
+        "create table discarded (id int)",
+        BTreeMap::new(),
+        None,
+        std::time::Instant::now(),
+    );
+    assert_eq!(response.error.unwrap().code, "E_TIMEOUT");
+    assert_eq!(
+        engine.execute("from discarded").error.unwrap().code,
+        "E_TABLE"
+    );
+}
+
+#[test]
 fn row_parameters_support_atomic_insert_and_upsert_batches() {
     let mut engine = Engine::memory();
     assert!(

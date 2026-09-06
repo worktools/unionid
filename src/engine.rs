@@ -185,7 +185,12 @@ impl Engine {
     }
 
     pub fn execute(&mut self, source: &str) -> QueryResponse {
-        self.execute_with_params(source, std::collections::BTreeMap::new())
+        self.execute_with_params_at_schema_and_deadline(
+            source,
+            std::collections::BTreeMap::new(),
+            None,
+            None,
+        )
     }
 
     pub fn execute_with_params(
@@ -193,7 +198,7 @@ impl Engine {
         source: &str,
         parameters: std::collections::BTreeMap<String, crate::Value>,
     ) -> QueryResponse {
-        self.execute_with_params_at_schema(source, parameters, None)
+        self.execute_with_params_at_schema_and_deadline(source, parameters, None, None)
     }
 
     pub fn execute_with_params_at_schema(
@@ -202,7 +207,32 @@ impl Engine {
         parameters: std::collections::BTreeMap<String, crate::Value>,
         expected_schema: Option<&crate::db::SchemaInfo>,
     ) -> QueryResponse {
-        match self.try_execute_with_params(source, parameters, expected_schema) {
+        self.execute_with_params_at_schema_and_deadline(source, parameters, expected_schema, None)
+    }
+
+    pub fn execute_with_params_until(
+        &mut self,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        deadline: std::time::Instant,
+    ) -> QueryResponse {
+        self.execute_with_params_at_schema_and_deadline(
+            source,
+            parameters,
+            expected_schema,
+            Some(deadline),
+        )
+    }
+
+    fn execute_with_params_at_schema_and_deadline(
+        &mut self,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        deadline: Option<std::time::Instant>,
+    ) -> QueryResponse {
+        match self.try_execute_with_params(source, parameters, expected_schema, deadline) {
             Ok(response) => response,
             Err(error) => self.with_schema(QueryResponse::failure(error)),
         }
@@ -259,7 +289,7 @@ impl Engine {
         }
         let mut statements = prepared.statements.clone();
         let result = crate::params::bind(&mut statements, &parameters)
-            .and_then(|()| self.try_execute_statements(statements, None));
+            .and_then(|()| self.try_execute_statements(statements, None, None));
         match result {
             Ok(response) => response,
             Err(error) => self.with_schema(QueryResponse::failure(error)),
@@ -279,6 +309,7 @@ impl Engine {
         source: &str,
         parameters: std::collections::BTreeMap<String, crate::Value>,
         expected_schema: Option<&crate::db::SchemaInfo>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<QueryResponse> {
         if let Some(expected) = expected_schema
             && expected != &self.db.schema_info()
@@ -306,13 +337,14 @@ impl Engine {
                 "parameterized writes require redb or memory mode; the transitional WAL stores source text",
             ));
         }
-        self.try_execute_statements(statements, Some(source))
+        self.try_execute_statements(statements, Some(source), deadline)
     }
 
     fn try_execute_statements(
         &mut self,
         statements: Vec<LocatedStatement>,
         wal_source: Option<&str>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<QueryResponse> {
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
         let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
@@ -336,10 +368,12 @@ impl Engine {
         let target = candidate.as_mut().unwrap_or(&mut self.db);
         let mut response = QueryResponse::ok_message("ok");
         for located in statements {
+            ensure_deadline(deadline)?;
             response = target
-                .execute(located.statement)
+                .execute_with_deadline(located.statement, deadline)
                 .map_err(|e| e.at(located.span))?;
         }
+        ensure_deadline(deadline)?;
         if let Some(mut candidate) = candidate {
             if schema_changing {
                 candidate.advance_schema_revision()?;
@@ -656,6 +690,17 @@ impl Engine {
     fn with_schema(&self, mut response: QueryResponse) -> QueryResponse {
         response.schema = Some(self.db.schema_info());
         response
+    }
+}
+
+fn ensure_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        Err(Error::new(
+            "E_TIMEOUT",
+            "request execution deadline exceeded",
+        ))
+    } else {
+        Ok(())
     }
 }
 

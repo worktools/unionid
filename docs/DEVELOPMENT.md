@@ -22,7 +22,8 @@
 - 原子脚本、可读 CLI 输出、JSON 输出、文件/stdin、多行 REPL、正确退出码及 EOF 处理。
 - 修复大整数、浮点零值与 enum 负载的索引/扫描一致性；深层索引键按结构编码，避免重复转义造成指数增长；未知字段在空表上也报错。
 - 用隔离的临时目录、动态 TCP 端口和子进程建立测试；增加 macOS/Linux 的 CI 配置。
-- 连接数达到上限时返回结构化 `E_BUSY`；先半关闭写端，再有界排空输入，避免未读请求导致 TCP reset 吞掉错误响应。拒绝过程不创建额外 worker，写入超时和排空期限各为 100 ms。
+- 服务使用 64 个活动连接的有界等待集合；达到上限时返回结构化 `E_BUSY`，拒绝过程不创建 worker。请求/源码/value/query working rows/result rows/response bytes 与 pattern analysis 都有明确上限，服务执行 deadline 返回 `E_TIMEOUT` 且不发布候选事务。response 通过限长 writer 直接编码，避免先创建无界 JSON byte buffer。
+- SIGINT/SIGTERM 停止 accept，关闭空闲连接，等待已进入 Engine 的请求完成或原子放弃，再释放 redb 锁；关闭时输出 accepted/rejected/requests/failed 统计。真实子进程测试验证 idle client 存在时仍能退出并立即 reopen。
 - JSON Lines version 1 请求包含 request ID、完整多行源码、typed params 与可选 schema 前置条件；响应回显 ID，并通过独立 wire codec 无损表示 i64、命名 sum/record、tuple、option/list。未知版本、缺少/多余/错误参数分别使用稳定错误码；旧 `{query}` 与纯文本入口保留兼容。
 - 查询语言支持 `$name` AST 参数，insert/upsert 可用完整 row 参数。Rust `prepare/query` 在准备时检查表、字段、stage 与参数上下文类型，记录 schema revision/hash；schema 改变后拒绝旧 plan，避免使用失效的字段或 constructor 位置。
 
@@ -55,7 +56,7 @@ cargo run -- run --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 149 项测试通过：lib 单元测试 5 项、`tests/language.rs` 60 项、`tests/storage.rs` 28 项、`tests/migration.rs` 16 项、`tests/schema.rs` 8 项、`tests/backup.rs` 3 项、`tests/interfaces.rs` 14 项、`tests/codec.rs` 8 项、`tests/protocol.rs` 7 项，分别验证 Engine 注入提交失败、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、版本化 migration 文件/ledger/断点续跑、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发请求、typed 参数/prepared query，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
+当前全部 154 项测试通过：lib 单元测试 6 项、`tests/language.rs` 60 项、`tests/storage.rs` 28 项、`tests/migration.rs` 16 项、`tests/schema.rs` 8 项、`tests/backup.rs` 3 项、`tests/interfaces.rs` 17 项、`tests/codec.rs` 8 项、`tests/protocol.rs` 8 项，分别验证 Engine 注入提交失败、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、版本化 migration 文件/ledger/断点续跑、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发与优雅关闭、typed 参数/prepared query/deadline，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
@@ -65,6 +66,6 @@ cargo run --example embedded
 - #8/#10/#11/#34–#36：在已实现的默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、typed arithmetic/value construction、多键 sort、范围 take、布尔组合、基础集合函数、typed 参数和 schema-aware prepared query 上继续完善 option/元素谓词与 group/aggregate。#9/#12/#34/#35 已完成。
 - #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出恢复矩阵和 `check --db` 已接入；继续补真实空间不足／同步故障、恢复时间边界、索引计划及 explain。
 - #17–#20：显式 schema/data migration、版本化 runner/ledger、声明式 schema diff、逻辑备份还原和显式旧原型导入已实现。
-- #21–#24：#22 的版本化协议与 Rust 参数 API 已实现；继续打磨 REPL 历史/补全/格式化、服务预算和正式发布。
+- #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；继续打磨 REPL 日常操作，并用 #24 的真实负载和故障矩阵形成发布证据。
 
 GitHub issues 保留各自的完整验收范围；实现了部分能力不等于对应里程碑全部完成。

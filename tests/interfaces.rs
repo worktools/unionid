@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use unionid::{
     Engine, MigrationApply, MigrationPlan, MigrationStatus, ProtocolRequest, QueryResponse,
@@ -701,4 +703,98 @@ fn connection_limit_returns_busy_and_recovers_after_a_client_leaves() {
     let mut line = String::new();
     existing.read_line(&mut line).unwrap();
     assert!(serde_json::from_str::<QueryResponse>(&line).unwrap().ok);
+}
+
+#[test]
+fn oversized_and_deep_requests_do_not_block_healthy_clients() {
+    let server = Server::start(&[]);
+    let mut stream = TcpStream::connect(&server.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(&vec![b'x'; unionid::server::MAX_FRAME_BYTES + 1])
+        .unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<QueryResponse>(&line)
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "E_LIMIT"
+    );
+
+    let mut value = r#"{"type":"int","value":"1"}"#.to_string();
+    for _ in 0..200 {
+        value = format!(r#"{{"type":"list","items":[{value}]}}"#);
+    }
+    let request = format!(
+        r#"{{"version":1,"request_id":"deep","query":"from absent | filter id == $id","params":{{"id":{value}}}}}"#
+    );
+    let mut stream = TcpStream::connect(&server.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut reader = BufReader::new(stream);
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let response: QueryResponse = serde_json::from_str(&line).unwrap();
+    assert_eq!(response.error.unwrap().code, "E_PROTOCOL");
+
+    assert_eq!(
+        cli::send_one(&server.addr, "from still_healthy")
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "E_TABLE"
+    );
+}
+
+#[test]
+fn sigterm_gracefully_closes_idle_clients_and_releases_redb() {
+    let temp = TempDir::new();
+    let db = temp.0.join("graceful.redb");
+    let db_arg = db.to_string_lossy().into_owned();
+    let mut server = Server::start(&["--db", &db_arg]);
+    assert!(
+        cli::send_one(
+            &server.addr,
+            "create table entries (id int)\ninsert entries {id = 1}"
+        )
+        .unwrap()
+        .ok
+    );
+    let idle = TcpStream::connect(&server.addr).unwrap();
+    server.shutdown();
+    drop(idle);
+
+    let mut reopened = Engine::open_redb(&db).unwrap();
+    let response = reopened.execute("from entries | filter id == 1");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 1);
+}
+
+#[test]
+fn embedded_server_shutdown_returns_request_statistics() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let signal = Arc::clone(&shutdown);
+    let server = std::thread::spawn(move || {
+        unionid::server::serve_until(listener, Engine::memory(), signal).unwrap()
+    });
+    let response = cli::send_one(&addr, "from absent").unwrap();
+    assert_eq!(response.error.unwrap().code, "E_TABLE");
+    shutdown.store(true, Ordering::Release);
+    let stats = server.join().unwrap();
+    assert_eq!(stats.accepted_connections, 1);
+    assert_eq!(stats.rejected_connections, 0);
+    assert_eq!(stats.requests, 1);
+    assert_eq!(stats.failed_requests, 1);
 }
