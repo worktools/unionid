@@ -14,6 +14,7 @@
 - `update table`/`delete table` 复用普通与 match filter；多个 typed `set` 从原 row 同时求值，可设置嵌套 record 路径。执行器先生成全部候选 row，再检查完整类型和主键唯一性并重建该表索引；失败请求不发布任何修改。DML 响应包含 `affected_rows`。
 - `upsert table value` 要求声明主键，输入按完整 row 与默认值规则检查；未命中时分配 RowId，命中时整行替换并保留 RowId。响应以 `upsert_action` 区分 inserted/updated，索引和 redb 状态服从同一请求级提交边界。
 - redb 提交错误按边界区分：transaction commit 前的确定失败回滚候选状态并保留句柄，commit 调用返回错误时标记结果不确定、关闭句柄并阻止后续写入。可注入 backend 单元测试验证两条 Engine 状态路径；真实子进程测试分别在未提交多表 transaction 与成功 Engine commit 后直接退出并重开。
+- macOS/Linux 子进程通过 OS `RLIMIT_FSIZE` 强制真实 redb 文件增长失败；Engine 按失败点返回确定中止或结果不确定，父进程重开并验证 typed row、索引、schema、ledger 与完整性只处于完整旧／新状态。
 - `check --db` 调用 redb `check_integrity`，再重新加载并验证 unionid 逻辑状态；无效数据库文件、未知 codec 版本、索引不一致和跨进程占用都有结构化诊断。
 - 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、普通 scalar/bool derive、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter、match condition 与 derive result 共用有类型的 scalar expression，支持带 checked 错误的 int/float 算术；filter/match condition 和普通 derive 还支持括号、`not/and/or`、字段或 binding 间比较、list `contains`、list/text `length`、Option helper 与有预算的嵌套 `any/all`。复杂条件可使用 `filter`／`=>` 后的缩进块或跨行括号。
 - 未分组 `aggregate` 与 `group ... aggregate` 支持 count/sum/min/max；绑定阶段确定输入与输出类型，sum 保留命名数值类型，min/max 返回 option。group key 使用完整 typed equality，可包含 ADT；后续 filter/select/sort/take 使用汇总后的 schema。group 数量、accumulator cell 与估算状态内存都有显式上限。
@@ -61,7 +62,7 @@ cargo run -- fmt --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 179 项测试通过：lib 单元测试 10 项、`tests/language.rs` 75 项、`tests/formatter.rs` 4 项、`tests/storage.rs` 28 项、`tests/migration.rs` 16 项、`tests/schema.rs` 8 项、`tests/backup.rs` 3 项、`tests/interfaces.rs` 18 项、`tests/codec.rs` 8 项、`tests/protocol.rs` 9 项，分别验证 Engine 注入提交失败、REPL complete/incomplete/invalid 状态与 EOF、formatter 全 AST 覆盖／幂等／语义 round-trip、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、基础汇总、局部纯函数及其预算、类型化索引计划/explain、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、版本化 migration 文件/ledger/断点续跑、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发与优雅关闭、typed 参数/prepared query/deadline，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
+当前全部 181 项测试通过：lib 单元测试 10 项、`tests/language.rs` 75 项、`tests/formatter.rs` 4 项、`tests/storage.rs` 30 项、`tests/migration.rs` 16 项、`tests/schema.rs` 8 项、`tests/backup.rs` 3 项、`tests/interfaces.rs` 18 项、`tests/codec.rs` 8 项、`tests/protocol.rs` 9 项，分别验证 Engine 注入提交失败、REPL complete/incomplete/invalid 状态与 EOF、formatter 全 AST 覆盖／幂等／语义 round-trip、真实磁盘增长失败分类与原子重开、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、基础汇总、局部纯函数及其预算、类型化索引计划/explain、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、版本化 migration 文件/ledger/断点续跑、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发与优雅关闭、typed 参数/prepared query/deadline，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
@@ -69,7 +70,7 @@ cargo run --example embedded
 
 - #2：以当前查询参考完善完整语言 RFC；更广泛的泛型/高阶函数与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
 - #8/#10/#11/#34–#36：已实现默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、普通 scalar/bool derive、typed arithmetic/value construction、多键 sort、范围 take、布尔组合、`contains/length/any/all`、Option helper、typed 参数、schema-aware prepared query、有界的 group/aggregate 与查询局部纯函数。#9/#11/#12/#34–#36 和 #59–#61 已完成。
-- #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出恢复矩阵、`check --db`、共享类型化索引访问计划与 explain 已接入；#13/#14 继续跟踪真实空间不足／同步故障与恢复时间边界。
+- #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出与真实文件增长失败矩阵、`check --db`、共享类型化索引访问计划与 explain 已接入；#14 继续跟踪恢复时间／峰值内存边界。
 - #17–#20：显式 schema/data migration、版本化 runner/ledger、声明式 schema diff、逻辑备份还原和显式旧原型导入已实现。
 - #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；#66 补齐 parser 驱动的 REPL 续写，#69 提供规范 formatter，#70 继续历史、补全和远程 introspection，再用 #24 的真实负载和故障矩阵形成发布证据。
 

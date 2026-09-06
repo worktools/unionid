@@ -275,7 +275,7 @@ from events | filter kind = Purchase(42,19.9) | select id,kind
 - `--snapshot-path` 要求同时配置 WAL；`--snapshot-every N` 表示每 `N` 个成功写批次保存一次快照。
 - 快照经临时文件、同步和原子替换发布后才清理 WAL；提交水位处理快照与旧 WAL 的重叠。
 - WAL 提交错误后禁用继续写入和 checkpoint，重新打开数据库以确认提交结果；已提交之后的快照维护失败以 warning 返回。
-- 当前有文件占用锁；数据库文件不应使用硬链接别名。源码回放、校验和、正式格式升级和完整掉电故障矩阵仍待完善，参见 [开发记录](docs/DEVELOPMENT.md)。
+- 当前有文件占用锁；数据库文件不应使用硬链接别名。正式 redb 路径已有版本化 codec、备份／还原、旧格式导入、进程退出与真实文件增长失败验证；机器掉电和恢复成本边界仍由 #14/#24 跟踪，参见 [开发记录](docs/DEVELOPMENT.md)。
 
 ## 开发验证
 

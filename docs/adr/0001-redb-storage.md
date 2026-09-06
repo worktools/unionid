@@ -4,7 +4,7 @@
 - 状态：已接受
 - 关联：[GitHub issue #6](https://github.com/worktools/unionid/issues/6)
 
-实现状态：主 Engine 已提供 `Engine::open_redb`，CLI 的 `run/cli/server --db` 已使用下述固定内部表、版本化 codec、`Durability::Immediate` 与 two-phase commit。提交按稳定 catalog ID、RowId 和 index key 计算差异，只修改变化的键，并在删除或覆盖前核对旧值。`check --db`、提交前／后进程退出矩阵、未知版本与独占打开诊断已经接入；真实设备故障、恢复时间、格式升级和备份仍由 #13/#14/#20 跟踪。
+实现状态：主 Engine 已提供 `Engine::open_redb`，CLI 的 `run/cli/server --db` 已使用下述固定内部表、版本化 codec、`Durability::Immediate` 与 two-phase commit。提交按稳定 catalog ID、RowId 和 index key 计算差异，只修改变化的键，并在删除或覆盖前核对旧值。`check --db`、提交前／后进程退出矩阵、未知版本、独占打开诊断和 OS 文件增长失败注入已经接入；恢复时间与峰值内存由 #14 跟踪，格式升级和备份已由 #20 完成。
 
 ## 背景
 
@@ -83,7 +83,7 @@ SQLite 即使使用 STRICT table，也只提供 `INT/INTEGER/REAL/TEXT/BLOB/ANY`
 
 两者的未提交退出、提交后立即退出和备份一致性验证均通过。数字只描述一台机器上的小型同步写工作负载，不能作为吞吐承诺；redb 的模型匹配优先级高于本次耗时。CI 在 macOS 与 Linux 上运行较小的相同验证。
 
-实验模拟的是应用进程在事务边界退出，没有切断机器电源，也没有注入文件系统、磁盘缓存或 `fsync` 故障。掉电保证依据后端文档和同步配置，后续 #14 仍需补充提交内部故障点、恢复耗时、完整性检查和损坏处理。
+原始后端对比实验模拟的是应用进程在事务边界退出，没有切断机器电源。正式 Engine 测试另用 `RLIMIT_FSIZE` 注入真实文件增长失败并验证错误分类与原子重开；它仍不等同于文件系统违反同步承诺、磁盘缓存故障或物理掉电。掉电保证依据后端文档和同步配置，后续 #14 继续记录恢复耗时、峰值内存和发布环境边界。
 
 运行完整实验：
 
