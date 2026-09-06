@@ -14,6 +14,31 @@ mod migration;
 
 type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<RowId>>>>;
 
+pub const MAX_QUERY_WORKING_ROWS: usize = 250_000;
+pub const MAX_RESULT_ROWS: usize = 100_000;
+
+fn check_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        Err(Error::new(
+            "E_TIMEOUT",
+            "request execution deadline exceeded",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_deadline_periodically(
+    deadline: Option<std::time::Instant>,
+    position: usize,
+) -> Result<()> {
+    if position.is_multiple_of(1024) {
+        check_deadline(deadline)
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexDefinition {
     pub id: u64,
@@ -161,6 +186,14 @@ pub struct Database {
 
 impl Database {
     pub fn execute(&mut self, stmt: Statement) -> Result<QueryResponse> {
+        self.execute_with_deadline(stmt, None)
+    }
+
+    pub(crate) fn execute_with_deadline(
+        &mut self,
+        stmt: Statement,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<QueryResponse> {
         match stmt {
             Statement::DefineType { name, ty } => {
                 if self.objects.contains_key(&name) {
@@ -211,7 +244,7 @@ impl Database {
                 parent: _,
                 steps,
             } => self.migrate(&name, steps),
-            Statement::Pipeline(pipeline) => self.query(pipeline),
+            Statement::Pipeline(pipeline) => self.query(pipeline, deadline),
         }
     }
 
@@ -675,7 +708,12 @@ impl Database {
         Ok(schema)
     }
 
-    fn query(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
+    fn query(
+        &self,
+        mut pipeline: Pipeline,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<QueryResponse> {
+        check_deadline(deadline)?;
         let schema = self.prepare_pipeline(&mut pipeline)?;
         let table = self.table(&pipeline.from)?;
         let candidates = if let Some(Stage::Filter(expression)) = pipeline.stages.first() {
@@ -688,24 +726,43 @@ impl Database {
         } else {
             None
         };
+        let working_rows = candidates
+            .as_ref()
+            .map_or(table.rows.len(), std::vec::Vec::len);
+        if working_rows > MAX_QUERY_WORKING_ROWS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "query needs {working_rows} working rows; limit is {MAX_QUERY_WORKING_ROWS}; add a selective indexed filter"
+                ),
+            ));
+        }
         let mut rows = match candidates {
-            Some(ids) => ids
-                .into_iter()
-                .filter_map(|id| {
-                    table
-                        .rows
-                        .binary_search_by_key(&id, |row| row.id)
-                        .ok()
-                        .map(|position| table.rows[position].fields.clone())
-                })
-                .collect::<Vec<_>>(),
-            None => table.rows.iter().map(|r| r.fields.clone()).collect(),
+            Some(ids) => {
+                let mut rows = Vec::with_capacity(ids.len());
+                for (position, id) in ids.into_iter().enumerate() {
+                    check_deadline_periodically(deadline, position)?;
+                    if let Ok(position) = table.rows.binary_search_by_key(&id, |row| row.id) {
+                        rows.push(table.rows[position].fields.clone());
+                    }
+                }
+                rows
+            }
+            None => {
+                let mut rows = Vec::with_capacity(table.rows.len());
+                for (position, row) in table.rows.iter().enumerate() {
+                    check_deadline_periodically(deadline, position)?;
+                    rows.push(row.fields.clone());
+                }
+                rows
+            }
         };
         for stage in pipeline.stages {
             match stage {
                 Stage::Filter(expression) => {
                     let mut filtered = Vec::with_capacity(rows.len());
-                    for row in rows {
+                    for (position, row) in rows.into_iter().enumerate() {
+                        check_deadline_periodically(deadline, position)?;
                         if crate::expression::evaluate(&self.catalog, &expression, |path| {
                             row_field(&row, path)
                         })? {
@@ -716,7 +773,8 @@ impl Database {
                 }
                 Stage::FilterMatch(pred) => {
                     let mut filtered = Vec::with_capacity(rows.len());
-                    for row in rows {
+                    for (position, row) in rows.into_iter().enumerate() {
+                        check_deadline_periodically(deadline, position)?;
                         if crate::matching::evaluate(&self.catalog, &row, &pred)? {
                             filtered.push(row);
                         }
@@ -724,7 +782,8 @@ impl Database {
                     rows = filtered;
                 }
                 Stage::DeriveMatch(derive) => {
-                    for row in &mut rows {
+                    for (position, row) in rows.iter_mut().enumerate() {
+                        check_deadline_periodically(deadline, position)?;
                         let value = crate::matching::evaluate_derive(&self.catalog, row, &derive)?;
                         row.insert(derive.name.clone(), value);
                     }
@@ -742,27 +801,41 @@ impl Database {
                         })
                         .collect();
                 }
-                Stage::Sort(keys) => rows.sort_by(|a, b| {
-                    for key in &keys {
-                        let order = row_field(a, &key.column)
-                            .zip(row_field(b, &key.column))
-                            .and_then(|(a, b)| a.cmp_ord(b))
-                            .unwrap_or(std::cmp::Ordering::Equal);
-                        let order = if key.descending {
-                            order.reverse()
-                        } else {
-                            order
-                        };
-                        if order != std::cmp::Ordering::Equal {
-                            return order;
+                Stage::Sort(keys) => {
+                    check_deadline(deadline)?;
+                    rows.sort_by(|a, b| {
+                        for key in &keys {
+                            let order = row_field(a, &key.column)
+                                .zip(row_field(b, &key.column))
+                                .and_then(|(a, b)| a.cmp_ord(b))
+                                .unwrap_or(std::cmp::Ordering::Equal);
+                            let order = if key.descending {
+                                order.reverse()
+                            } else {
+                                order
+                            };
+                            if order != std::cmp::Ordering::Equal {
+                                return order;
+                            }
                         }
-                    }
-                    std::cmp::Ordering::Equal
-                }),
+                        std::cmp::Ordering::Equal
+                    });
+                    check_deadline(deadline)?;
+                }
                 Stage::Take { offset, limit } => {
                     rows = rows.into_iter().skip(offset).take(limit).collect()
                 }
             }
+        }
+        check_deadline(deadline)?;
+        if rows.len() > MAX_RESULT_ROWS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "query returns {} rows; limit is {MAX_RESULT_ROWS}; add filter or take",
+                    rows.len()
+                ),
+            ));
         }
         Ok(QueryResponse {
             ok: true,

@@ -64,6 +64,16 @@ impl Server {
             .to_string();
         server
     }
+
+    pub fn shutdown(&mut self) {
+        let status = Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to send SIGTERM to server");
+        wait(&mut self.child);
+        assert!(self.child.wait().unwrap().success());
+    }
 }
 impl Drop for Server {
     fn drop(&mut self) {
