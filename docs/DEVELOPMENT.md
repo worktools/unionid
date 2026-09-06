@@ -43,13 +43,13 @@ cargo run -- run --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 47 项测试通过：`tests/language.rs` 26 项、`tests/storage.rs` 13 项、`tests/interfaces.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复，以及真实 CLI/TCP/并发请求。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
+当前全部 55 项测试通过：`tests/language.rs` 29 项、`tests/storage.rs` 14 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 8 项，分别验证语言/类型/查询、失败原子性/恢复、migration 历史约束，以及真实 CLI/TCP/并发请求。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
 ## 后续工作
 
-- #2/#7：以当前查询参考完善完整语言 RFC 与类型演进契约；默认值、类型兼容矩阵和完整版本策略尚未冻结。
+- #2：以当前查询参考完善完整语言 RFC；默认值、类型推断、更新与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
 - #8/#9/#10/#11/#12：在已实现的 `filter match` 子集上继续完善 typed IR、通用 match 表达式、tuple/嵌套模式、参数、let/derive/group/aggregate，完成完整 M1 验收。
 - #13/#14/#15/#16：按 redb ADR 接入持久事务，补齐故障模型、CRUD/upsert、索引计划及 explain。
 - #17–#20：实现 schema/data migration、ledger、diff、备份还原与显式旧数据转换。

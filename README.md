@@ -6,6 +6,7 @@
 - PRQL 风格换行查询：`filter/filter match/select/sort/take`
 - 共享 Rust 引擎、本地 CLI 与 TCP 服务
 - 严格类型检查、主键、等值索引及原子脚本
+- 稳定 catalog 身份、原子 schema revision 与可校验 hash
 
 ## 先运行一个完整例子
 
@@ -46,6 +47,7 @@ cargo run -- cli --memory
 
 - [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
 - [查询语言参考](docs/QUERY.md)：当前可执行的 pipeline grammar、stage 语义、模式和错误。
+- [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。
 - [存储 ADR](docs/adr/0001-redb-storage.md)：redb 选型、ADT 存储边界、实验和限制。
 - [原型基线与已知问题](docs/PROTOTYPE-AUDIT.md)：早期原型的验证结果和故障证据。

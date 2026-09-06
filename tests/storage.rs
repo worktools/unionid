@@ -21,6 +21,35 @@ fn typed_atomic_batches_survive_reopen() {
 }
 
 #[test]
+fn schema_identity_survives_wal_and_snapshot_recovery() {
+    let dir = TempDir::new();
+    let wal = dir.0.join("db.wal");
+    let snapshot = dir.0.join("db.snapshot");
+    let expected;
+    {
+        let mut e = Engine::open(Some(wal.clone()), Some(snapshot.clone()), 0).unwrap();
+        assert!(
+            e.execute("type Entry =\n  id int\n  value text\ntable entries Entry\n  key id")
+                .ok
+        );
+        assert!(e.execute("insert entries {id = 1, value = \"one\"}").ok);
+        expected = e.schema_info();
+    }
+    {
+        let mut from_wal = Engine::open(Some(wal.clone()), Some(snapshot.clone()), 0).unwrap();
+        assert_eq!(from_wal.schema_info(), expected);
+        assert_eq!(
+            from_wal.execute("from entries").schema,
+            Some(expected.clone())
+        );
+        from_wal.checkpoint().unwrap();
+    }
+    let mut reopened = Engine::open(Some(wal), Some(snapshot), 0).unwrap();
+    assert_eq!(reopened.schema_info(), expected);
+    assert_eq!(reopened.execute("from entries").schema, Some(expected));
+}
+
+#[test]
 fn snapshot_watermark_skips_overlapping_commits_without_duplicate_rows() {
     let dir = TempDir::new();
     let wal = dir.0.join("db.wal");

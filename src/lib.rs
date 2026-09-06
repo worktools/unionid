@@ -6,6 +6,7 @@ pub mod db;
 pub mod engine;
 pub mod error;
 mod matching;
+pub mod migration;
 pub mod model;
 pub mod query;
 pub mod server;
@@ -13,7 +14,7 @@ pub mod snapshot;
 pub mod syntax;
 pub mod wal;
 
-pub use db::QueryResponse;
+pub use db::{QueryResponse, SchemaInfo};
 pub use engine::Engine;
 pub use error::{Error, Result, Span};
 pub use model::Value;

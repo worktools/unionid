@@ -151,10 +151,16 @@ pub fn replay_from_path(path: &Path, db: &mut Database) -> Result<usize, String>
         if !statements.iter().any(|s| s.statement.is_mutating()) {
             return Err(format!("WAL line {line_number}: no mutation"));
         }
+        let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
         let mut candidate = db.clone();
         for statement in statements {
             candidate
                 .execute(statement.statement)
+                .map_err(|e| format!("WAL line {line_number}: {e}"))?;
+        }
+        if schema_changing {
+            candidate
+                .advance_schema_revision()
                 .map_err(|e| format!("WAL line {line_number}: {e}"))?;
         }
         candidate.sequence = sequence;
