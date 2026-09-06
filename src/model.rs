@@ -187,8 +187,14 @@ pub struct Column {
     pub id: u64,
 }
 
+pub type RowId = u64;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Row {
+    /// Stable identity inside a table. Deleting a row never permits this ID to
+    /// identify a later row.
+    #[serde(default)]
+    pub id: RowId,
     pub fields: BTreeMap<String, Value>,
 }
 
@@ -200,6 +206,10 @@ pub struct Table {
     pub name: String,
     pub schema: Vec<Column>,
     pub rows: Vec<Row>,
+    /// The next stable row identity. This is persisted even when the row with
+    /// the greatest allocated ID has been deleted.
+    #[serde(default)]
+    pub next_row_id: RowId,
     #[serde(default)]
     pub row_type: Option<u64>,
     #[serde(default)]

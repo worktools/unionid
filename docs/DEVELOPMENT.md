@@ -9,7 +9,8 @@
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。
 - `field type = value` 字段默认值在声明时完成递归类型检查，insert 对嵌套 record 和 sum record 负载逐层补齐；schema 展示、WAL/snapshot 恢复与 hash 均保留默认值。
 - 版本 1 ADT value codec 以 catalog 和期望类型驱动，用稳定 type/field/variant ID 编码命名类型、record、sum、tuple、option/list；不依赖 serde 或 Rust enum 布局，字段重排和显式 rename 保持字节可解释。
-- redb 4.1 已接入共享 Engine：`run --db`、`cli --db` 与 `server --db` 使用同一个持久文件；每个写脚本把 meta、catalog、ADT rows 和 secondary index 置于一个 `Immediate`、two-phase write transaction 中，固定 migration ledger 表也在初始化时创建。打开时校验存储／catalog／value／索引键版本、schema hash、RowId 连续性和派生索引一致性。
+- redb 4.1 已接入共享 Engine：`run --db`、`cli --db` 与 `server --db` 使用同一个持久文件；每个写脚本把 meta、catalog、ADT rows 和 secondary index 置于一个 `Immediate`、two-phase write transaction 中，固定 migration ledger 表也在初始化时创建。打开时校验存储／catalog／value／索引键版本、schema hash、RowId 水位和派生索引一致性。
+- 每条 row 带表内稳定 `u64` RowId，每表持久化单调分配游标；索引 posting 不再保存 `Vec` 下标。删除形成的 ID 缺口可安全恢复，后续插入不会复用旧身份；旧 redb 和 snapshot 会从原有连续顺序升级。
 - redb 提交错误按边界区分：transaction commit 前的确定失败回滚候选状态并保留句柄，commit 调用返回错误时标记结果不确定、关闭句柄并阻止后续写入。可注入 backend 单元测试验证两条 Engine 状态路径；真实子进程测试分别在未提交多表 transaction 与成功 Engine commit 后直接退出并重开。
 - `check --db` 调用 redb `check_integrity`，再重新加载并验证 unionid 逻辑状态；无效数据库文件、未知 codec 版本、索引不一致和跨进程占用都有结构化诊断。
 - 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter、match condition 与 derive result 共用有类型的 scalar expression，支持带 checked 错误的 int/float 算术；filter/match condition 还支持括号、`not/and/or`、字段或 binding 间比较、list `contains` 及 list/text `length`。复杂条件可使用 `filter`／`=>` 后的缩进块或跨行括号。
@@ -50,7 +51,7 @@ cargo run -- run --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 100 项测试通过：lib 单元测试 2 项、`tests/language.rs` 54 项、`tests/storage.rs` 23 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 9 项、`tests/codec.rs` 8 项，分别验证 Engine 注入提交失败、语言/类型/查询、WAL 与 redb 的失败原子性/恢复、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
+当前全部 103 项测试通过：lib 单元测试 4 项、`tests/language.rs` 54 项、`tests/storage.rs` 24 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 9 项、`tests/codec.rs` 8 项，分别验证 Engine 注入提交失败、稳定 RowId 与过渡 snapshot 升级、语言/类型/查询、WAL 与 redb 的失败原子性/恢复、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
@@ -58,7 +59,7 @@ cargo run --example embedded
 
 - #2：以当前查询参考完善完整语言 RFC；类型推断、更新与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
 - #8/#10/#11/#34–#36：在已实现的默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、typed arithmetic/value construction、多键 sort、范围 take、布尔组合和基础集合函数上继续完善 option/元素谓词、参数和 group/aggregate。#9/#12/#34 已完成；#35 的查询侧只剩 prepared plan 在 schema revision 变化后的重绑定。
-- #13/#14/#15/#16：redb 固定内部表、版本化 codec、单写事务、明确／不确定提交错误、进程退出恢复矩阵和 `check --db` 已接入；继续补真实空间不足／同步故障、恢复时间边界、CRUD/upsert、增量持久写、索引计划及 explain。
+- #13/#14/#15/#16：redb 固定内部表、版本化 codec、单写事务、稳定 RowId、明确／不确定提交错误、进程退出恢复矩阵和 `check --db` 已接入；继续补真实空间不足／同步故障、恢复时间边界、update/delete/upsert、增量持久写、索引计划及 explain。
 - #17–#20：实现 schema/data migration、ledger、diff、备份还原与显式旧数据转换。
 - #21–#24：继续打磨 REPL 历史/补全/格式化、协议、服务预算和正式发布。
 

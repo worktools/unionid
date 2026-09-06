@@ -48,6 +48,7 @@
 - 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，并已接入 redb `rows` 表。
 - 已通过 `docs/adr/0001-redb-storage.md` 选定 redb 作为长期事务后端；`Engine::open_redb`、`run/cli/server --db` 使用固定的 meta/catalog/rows/secondary_index/migration_ledger 表和同步 two-phase 原子提交。现有 WAL/snapshot 只保留为过渡兼容入口。
 - redb transaction commit 前的失败视为明确回滚并允许重试；commit 返回错误视为结果不确定，Engine 关闭句柄并阻止继续写。`check --db` 运行 redb 完整性检查后重新验证 unionid 逻辑状态；子进程测试覆盖提交前/成功提交后直接退出、未知版本、无效文件、索引不一致与跨进程 `E_BUSY`。
+- row 使用表内单调 `u64` 稳定 RowId，索引 posting 不再依赖 `Vec` 位置；每表持久化下一分配值，删除形成的缺口合法且 ID 不复用。旧 redb/snapshot 可从原连续顺序升级。
 - `docs/SCHEMA.md` 已定义类型演进契约；类型、字段、变体、表和索引使用统一稳定 ID，每次原子 schema 变更产生一个 revision 与 SHA-256 hash，Engine 响应携带版本信息。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 

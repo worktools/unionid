@@ -1,6 +1,8 @@
 mod common;
 use common::TempDir;
-use redb::{Database as RedbDatabase, Durability, ReadableDatabase, TableDefinition};
+use redb::{
+    Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
+};
 use std::process::Command;
 use unionid::{Engine, Value};
 
@@ -117,6 +119,79 @@ fn redb_atomic_adt_batches_survive_reopen() {
     assert!(response.ok, "{}", response.message);
     assert_eq!(response.rows.len(), 1);
     assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
+fn redb_upgrades_and_persists_the_per_table_row_id_cursor() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "create table entries (id int)\ninsert entries {id = 1}\ninsert entries {id = 2}",
+                )
+                .ok
+        );
+    }
+
+    // Simulate a catalog written by the first redb release, before the table
+    // allocation cursor was persisted.
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        let mut catalog = transaction.open_table(REDB_CATALOG).unwrap();
+        let mut legacy_entry = None;
+        for entry in catalog.iter().unwrap() {
+            let (key, value) = entry.unwrap();
+            let mut json: serde_json::Value = serde_json::from_slice(&value.value()[6..]).unwrap();
+            if json["kind"] == "Table" {
+                json["value"].as_object_mut().unwrap().remove("next_row_id");
+                let mut encoded = b"UIDC".to_vec();
+                encoded.extend_from_slice(&1_u16.to_be_bytes());
+                encoded.extend(serde_json::to_vec(&json).unwrap());
+                legacy_entry = Some((key.value().to_vec(), encoded));
+                break;
+            }
+        }
+        let (key, value) = legacy_entry.unwrap();
+        catalog.insert(key.as_slice(), value.as_slice()).unwrap();
+        drop(catalog);
+        transaction.commit().unwrap();
+    }
+    drop(database);
+
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        assert!(engine.execute("insert entries {id = 3}").ok);
+    }
+
+    let database = RedbDatabase::open(&path).unwrap();
+    let transaction = database.begin_read().unwrap();
+    let catalog = transaction.open_table(REDB_CATALOG).unwrap();
+    let cursor = catalog
+        .iter()
+        .unwrap()
+        .filter_map(|entry| {
+            let (_, value) = entry.ok()?;
+            let json: serde_json::Value = serde_json::from_slice(&value.value()[6..]).ok()?;
+            (json["kind"] == "Table").then(|| json["value"]["next_row_id"].as_u64())?
+        })
+        .next();
+    assert_eq!(cursor, Some(3));
+    let rows = transaction.open_table(REDB_ROWS).unwrap();
+    let row_ids = rows
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (key, _) = entry.unwrap();
+            u64::from_be_bytes(key.value()[8..].try_into().unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(row_ids, vec![0, 1, 2]);
 }
 
 #[test]
