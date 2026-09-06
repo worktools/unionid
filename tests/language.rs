@@ -392,6 +392,153 @@ fn boolean_literals_do_not_shadow_user_defined_constructors() {
     );
     assert_eq!(ok(&mut e, "from t | filter choice == True").rows.len(), 1);
 }
+
+#[test]
+fn match_filters_sum_variants_and_record_payloads() {
+    let mut e = Engine::memory();
+    ok(&mut e, include_str!("../examples/tasks.uid"));
+    let result = ok(
+        &mut e,
+        "from tasks\nfilter match state\n  State.Pending => false\n  State.Running {worker, attempt} => worker == \"local\"\n  State.Done {result} => result == \"ok\"\n  State.Failed {retryable, ..} => retryable\nselect {id}\nsort id",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
+fn match_is_checked_for_exhaustiveness_before_scanning() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Pending | Running {attempt int} | Done\ntype R =\n  state State\ntable tasks R",
+    );
+    let error = e.execute(
+        "from tasks\nfilter match state\n  Pending => false\n  Running {attempt} => attempt > 0",
+    );
+    assert!(!error.ok);
+    assert_eq!(error.error.as_ref().unwrap().code, "E_MATCH");
+    assert!(error.message.contains("missing Done"), "{}", error.message);
+    assert!(
+        ok(
+            &mut e,
+            "from tasks\nfilter match state\n  Pending => false\n  Running {attempt} => attempt > 0\n  Done => true"
+        )
+        .rows
+        .is_empty()
+    );
+}
+
+#[test]
+fn match_rejects_unreachable_or_invalid_patterns_and_branch_scope() {
+    let setup = "type State = Pending | Running {worker text, attempt int}\ntype Other = Pending | Running {worker text, attempt int}\ntype Pair = Pair(int, text) | Empty\ntype R =\n  state State\n  count int\n  pair Pair\ntable tasks R";
+    for (query, expected) in [
+        ("filter match count\n  _ => true", "must be a sum type"),
+        (
+            "filter match pair\n  Pair => true\n  Empty => false",
+            "positional match patterns are not implemented yet",
+        ),
+        (
+            "filter match state\n  _ => false\n  Pending => true",
+            "wildcard match branch must be last",
+        ),
+        (
+            "filter match state\n  Pending => true\n  Pending => false\n  _ => false",
+            "matched more than once",
+        ),
+        (
+            "filter match state\n  Other.Pending => true\n  _ => false",
+            "belongs to a different type",
+        ),
+        (
+            "filter match state\n  Missing => true\n  _ => false",
+            "unknown variant",
+        ),
+        (
+            "filter match state\n  Pending {} => true\n  _ => false",
+            "has no record payload",
+        ),
+        (
+            "filter match state\n  Running => true\n  _ => false",
+            "requires a record pattern",
+        ),
+        (
+            "filter match state\n  Running {attempt} => attempt > 0\n  _ => false",
+            "add '..' to ignore",
+        ),
+        (
+            "filter match state\n  Running {missing, ..} => true\n  _ => false",
+            "has no payload field",
+        ),
+        (
+            "filter match state\n  Running {attempt, attempt, ..} => true\n  _ => false",
+            "bound more than once",
+        ),
+        (
+            "filter match state\n  Running {.., attempt} => true\n  _ => false",
+            "'..' must be the last item",
+        ),
+        (
+            "filter match state\n  Pending => attempt > 0\n  _ => false",
+            "unknown match binding",
+        ),
+        (
+            "filter match state\n  Running {worker, ..} => worker\n  _ => false",
+            "must be bool",
+        ),
+    ] {
+        let mut e = Engine::memory();
+        ok(&mut e, setup);
+        let result = e.execute(&format!("from tasks\n{query}"));
+        assert!(!result.ok, "accepted {query}");
+        assert!(
+            result.message.contains(expected),
+            "{}: {query}",
+            result.message
+        );
+    }
+}
+
+#[test]
+fn match_conditions_support_named_bools_and_nested_binding_paths() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Enabled = bool\ntype Meta =\n  attempts int\ntype State = Active {enabled Enabled, meta Meta} | Idle\ntype R =\n  state State\ntable rows R\ninsert rows {state = Active {enabled = true, meta = {attempts = 3}}}",
+    );
+    assert_eq!(
+        ok(
+            &mut e,
+            "from rows\nfilter match state\n  Active {enabled, meta} => enabled\n  Idle => false"
+        )
+        .rows
+        .len(),
+        1
+    );
+    assert_eq!(
+        ok(
+            &mut e,
+            "from rows\nfilter match state\n  Active {enabled, meta} => meta.attempts >= 3\n  _ => false"
+        )
+        .rows
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn match_obeys_pipeline_scope_and_layout_boundaries() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = A | B {active bool}\ntype R =\n  id int\n  state State\ntable rows R\ninsert rows {id = 1, state = B {active = true}}",
+    );
+    let query = "from rows | filter match state\n  A => false\n  B {active} => active\nselect {id}\ntake 1\nfrom rows\nfilter match state\n  A => false\n  _ => true";
+    assert_eq!(ok(&mut e, query).rows.len(), 1);
+    let result = e.execute("from rows\nselect {id}\nfilter match state\n  A => true\n  _ => false");
+    assert!(!result.ok);
+    assert!(result.message.contains("unknown field 'state'"));
+}
+
 #[test]
 fn deeply_nested_index_keys_grow_with_the_value_size() {
     let mut a = Value::Float(-0.0);

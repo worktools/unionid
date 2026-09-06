@@ -1,6 +1,8 @@
 # 当前可运行的语言预览
 
-本页描述已实现子集。更完整的表达式、match、函数、更新与 migration 仍在 [路线图](ROADMAP.md) 中。可运行示例：[任务](../examples/tasks.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)。
+本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)。
+
+当前包含类型与表声明、insert、普通 filter、sum 类型的 `filter match`、select、sort 和 take。`derive`、函数、参数、更新与 migration 尚未实现。
 
 ## 类型、表与值
 
@@ -43,9 +45,13 @@ insert tasks
 
 ## 查询
 
+### Pipeline
+
 ```text
 from tasks
-filter state == Running {worker = "local", attempt = 2}
+filter match state
+  Running {attempt, ..} => attempt >= 2
+  _ => false
 select {id, owner.email, state}
 sort id
 take 20
@@ -56,7 +62,8 @@ take 20
 | 操作 | 形式 | 语义 |
 | --- | --- | --- |
 | 数据源 | `from tasks` | 开始查询 |
-| 过滤 | `filter id >= 1` | 当前为字段路径与字面量比较 |
+| 值过滤 | `filter id >= 1` | 比较字段路径与字面量 |
+| 模式过滤 | `filter match state` | 按 sum 变体及其 record 负载判断 |
 | 投影 | `select {id, owner.email}` | 保留列，响应按声明的列顺序展示 |
 | 排序 | `sort id` / `sort -id` | 单列升序／降序；支持 int、float、text |
 | 截取 | `take 20` | 保留当前结果前 20 行 |
@@ -64,7 +71,42 @@ take 20
 
 支持 `==`、`!=`、`>`、`>=`、`<`、`<=`；旧式 `=`、`limit`、无花括号 `select id,name` 仍可用。所有 stage 从左到右执行，`take` 和 `filter` 不可交换。未排序查询不承诺稳定行序。
 
-字段和谓词类型在扫描之前校验，空表也会报未知字段；投影之后不能访问已移除列。选择嵌套字段时结果列名是完整路径，如 `owner.email`。和类型、option 和容器可做完整值相等比较，不能排序或直接穿过 variant/option 提取负载；模式匹配仍待实现。
+字段和谓词类型在扫描之前校验，空表也会报未知字段；投影之后不能访问已移除列。选择嵌套字段时结果列名是完整路径，如 `owner.email`。sum、option 和容器可做完整值相等比较，不能排序或通过普通字段路径直接穿过 variant/option。
+
+### 模式过滤
+
+`filter match` 用于检查 sum 类型的一个字段，并安全读取当前变体携带的 record 字段：
+
+```text
+from tasks
+filter match state
+  Pending => false
+  Running {worker, attempt} => worker == "local"
+  Done {result} => result == "ok"
+  Failed {retryable, ..} => retryable
+select {id, title}
+```
+
+当前模式规则：
+
+- 分支写成 `pattern => condition`，必须缩进在 `filter match <field>` 下面。match 结束后，后续 pipeline stage 回到原缩进。
+- unit 变体直接写 `Pending`。record 负载写 `Running {worker, attempt}`；字段名同时成为该分支的局部绑定。
+- `{attempt, ..}` 表示绑定 `attempt` 并忽略其余负载字段。不写 `..` 时必须列出全部字段，避免 schema 新增字段后被静默忽略。
+- `_` 覆盖尚未匹配的所有变体，必须是最后一项。没有 `_` 时必须逐项覆盖 sum 的全部变体；遗漏、重复和不可达分支在扫描前报 `E_MATCH`。
+- 构造器由被匹配字段的类型确定，也可写限定名 `State.Running`。其他命名 sum 的同名构造器会被拒绝。
+- condition 当前支持 `true`、`false`、一个 bool 绑定，或 `binding <op> literal`；binding 可以继续访问嵌套 record 路径。绑定只在其分支内有效。
+- 当前只支持 unit 和单个 record 负载的模式。tuple/位置负载、字段重命名、嵌套模式、通用 match 表达式和 match 结果投影尚未实现。
+
+对应的紧凑语法轮廓是：
+
+```text
+query           = from table (stage)*
+stage           = filter | filter-match | select | sort | take
+filter-match    = "filter match" field-path newline indented-arm+
+indented-arm    = pattern "=>" condition
+pattern         = "_" | [Type "."] Variant ["{" bindings ["," ".."] "}"]
+condition       = bool | binding | binding comparison literal
+```
 
 Int 精确比较，Float 使用精确数值相等而非 epsilon，统一两种浮点零值；拒绝非有限 Float 和超出 i64 的整数字面量。Float 位置可以接受能够精确表示的整数常量；Int 位置不接受浮点字面量，也不会把数字静默变成文本。
 
@@ -74,7 +116,7 @@ Int 精确比较，Float 使用精确数值相等而非 epsilon，统一两种�
 
 同层的 `from` / `type` / `table` / `insert` / `create` 开始新语句；查询中的同层 `filter/select/sort/take/limit` 延续 pipeline。声明体、嵌套 record 与变体负载通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
 
-空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意运算表达式跨行、match/let/derive、参数占位符、update/delete/upsert 或 migration 语句，不能把设计文档的完整示例当作当前语法。
+空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意运算表达式跨行、通用 match 表达式、let/derive/group、参数占位符、update/delete/upsert 或 migration 语句。
 
 一次 `Engine.execute`、一次 `run` 或一个 TCP 请求是一个原子批次：先解析全部源码，再在候选状态中执行；任一步失败则不发布此次请求的任何修改。成功返回最后一条语句的结果，批次中的查询可以看到前面的写入。当前通过复制内存数据库实现写批次隔离，适合小工作集，尚未优化大批量写入的内存成本。
 

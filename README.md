@@ -3,7 +3,7 @@
 一个基于 Rust、原生支持代数类型的轻量数据库语言预览：
 
 - 无分号的命名和类型、嵌套 record/tuple、`option` 与 `list`
-- PRQL 风格换行查询：`filter/select/sort/take`
+- PRQL 风格换行查询：`filter/filter match/select/sort/take`
 - 共享 Rust 引擎、本地 CLI 与 TCP 服务
 - 严格类型检查、主键、等值索引及原子脚本
 
@@ -36,7 +36,7 @@ cargo run -- cli --memory
 
 输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)。`match`、`let/derive/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)。sum 类型的 `filter match` 已支持 record 负载绑定和穷尽检查；通用 match 表达式、`let/derive/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
 
 ## 后续方向与计划
 

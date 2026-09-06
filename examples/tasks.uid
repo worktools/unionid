@@ -36,7 +36,9 @@ insert tasks
   state = Pending
 
 from tasks
-filter state == Running {worker = "local", attempt = 2}
+filter match state
+  Running {attempt, ..} => attempt >= 2
+  _ => false
 select {id, title, owner.email, state}
 sort id
 take 20

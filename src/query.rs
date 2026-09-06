@@ -48,9 +48,45 @@ pub struct Pipeline {
 #[derive(Debug, Clone)]
 pub enum Stage {
     Filter(Predicate),
+    FilterMatch(MatchPredicate),
     Select(Vec<String>),
     Sort { column: String, descending: bool },
     Limit(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchPredicate {
+    pub column: String,
+    pub arms: Vec<MatchArm>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: MatchPattern,
+    pub condition: MatchCondition,
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchPattern {
+    Wildcard,
+    Variant {
+        name: String,
+        fields: Vec<String>,
+        record: bool,
+        rest: bool,
+        variant_id: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchCondition {
+    Bool(bool),
+    Binding(String),
+    Compare {
+        binding: String,
+        op: CmpOp,
+        value: Value,
+    },
 }
 
 #[derive(Debug, Clone)]
