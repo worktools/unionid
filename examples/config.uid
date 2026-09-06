@@ -1,0 +1,24 @@
+type Mode = Development | Production
+type Endpoint =
+  host text
+  port int
+type Config =
+  name text
+  endpoint Endpoint
+  mode Mode
+  tags list text
+  owner option text
+
+table config Config
+  key name
+
+insert config
+  name = "worker"
+  endpoint = {host = "localhost", port = 8080}
+  mode = Development
+  tags = ["local", "jobs"]
+  owner = None
+
+from config
+filter endpoint.port >= 8000
+select {name, endpoint.host, mode}

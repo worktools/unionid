@@ -1,11 +1,55 @@
 # unionid
 
-一个基于 Rust 的最小数据库原型：
+一个基于 Rust、原生支持代数类型的轻量数据库语言预览：
 
-- 存储结构使用 `enum`（sum type）+ `struct`（product type）
-- PRQL 风格 pipeline 查询
-- 独立 TCP 服务
-- 命令行客户端
+- 无分号的命名和类型、嵌套 record/tuple、`option` 与 `list`
+- PRQL 风格换行查询：`filter/select/sort/take`
+- 共享 Rust 引擎、本地 CLI 与 TCP 服务
+- 严格类型检查、主键、等值索引及原子脚本
+
+## 先运行一个完整例子
+
+需要 Rust 1.94 或更高版本（Cargo 已声明 `rust-version`，CI 使用 1.94.0）：
+
+```bash
+cargo run -- run --file examples/tasks.uid
+cargo run -- run --file examples/config.uid --format json
+cargo run -- run --file examples/events.uid
+cargo run --example embedded
+```
+
+[tasks.uid](examples/tasks.uid) 包含类型定义、建表、插入与查询，最后返回：
+
+```text
+id | title | owner.email | state
+1 | "同步目录" | "alice@example.com" | Running {attempt = 2, worker = "local"}
+1 row(s)
+```
+
+`run` 每次创建一个新的内存库；一次文件或请求是一个原子批次，成功返回最后一条语句的结果，失败不保留该批次的任何写入。
+
+开启保留会话状态的本地 REPL：
+
+```bash
+cargo run -- cli --memory
+```
+
+输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
+
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)。`match`、`let/derive/group`、参数绑定、update/delete/upsert 和 migration 还在后续计划中。
+
+## 后续方向与计划
+
+计划将原型演进为原生支持命名和类型、积类型、模式匹配及 schema migration 的轻量数据库。
+
+新语言的类型声明与查询都朝 PRQL 风格收敛：无分号、少标点，优先用空格、换行和清晰的布局表达结构。
+
+- [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
+- [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。
+- [原型基线与已知问题](docs/PROTOTYPE-AUDIT.md)：早期原型的验证结果和故障证据。
+- [第一轮开发记录](docs/DEVELOPMENT.md)：已实现能力、验证方法与尚未完成的范围。
+
+设计草案描述完整目标，部分语法已实现，能力边界以 LANGUAGE.md 为准。WAL／snapshot 是过渡实现，存储选型与长期格式尚未冻结。
 
 ## 运行
 
@@ -46,7 +90,9 @@ cargo run -- cli --addr 127.0.0.1:7878 --query 'from users | filter age >= 25 | 
 cargo run -- cli --addr 127.0.0.1:7878
 ```
 
-## Query 语言参考
+## 兼容的原型语法
+
+以下入口仍可运行；新项目优先使用 [当前语言文档](docs/LANGUAGE.md) 的无分号命名类型和换行查询。
 
 ### 1) DDL / DML
 
@@ -66,8 +112,8 @@ create table users (id int, name text, age int, active bool)
 
 ```text
 create table events (
-	id int,
-	kind enum(Login, Logout, Purchase(int,float), Error(text))
+  id int,
+  kind enum(Login, Logout, Purchase(int,float), Error(text))
 )
 ```
 
@@ -116,7 +162,7 @@ from <table> | filter <col> <op> <value> | select <col,...> | limit <n>
 
 - `from` 必须是第一个 stage。
 - stage 从左到右执行。
-- 当前支持 stage：`filter` / `select` / `limit`。
+- 当前支持 stage：`filter` / `select` / `sort` / `take`，保留 `limit` 别名。
 
 示例：
 
@@ -141,7 +187,7 @@ from events | filter kind = Purchase(42,19.9) | select id,kind
 - 浮点：`3.14`
 - 布尔：`true` / `false`
 - 文本：`"alice"`
-- 空值：`null`
+- 可选值：使用 `option` 类型与显式 `None` / `Some value`；普通类型不接受 `null`。
 
 ### 4) 运算符
 
@@ -155,13 +201,13 @@ from events | filter kind = Purchase(42,19.9) | select id,kind
 ### 5) 索引加速规则（当前实现）
 
 - 索引是单列倒排映射（内存结构）。
-- 仅当 `filter` 是等值匹配（`=` 或 `==`）且命中已建索引列时走索引加速。
+- 仅当查询开头的 `filter` 是等值匹配（`=` 或 `==`）且命中已建索引列时走索引加速。
 - 其他过滤条件仍走全表扫描。
 
 ### 6) Enum 约束规则（当前实现）
 
 - Enum 类型写法：`enum(VariantA, VariantB(type1,type2), ...)`。
-- 变体名必须是标识符（字母/数字/下划线，首字符不能是数字）。
+- 变体名必须以大写字母开头，其余字符为 ASCII 字母、数字或下划线。
 - 插入或过滤时，值写法为 `Variant` 或 `Variant(arg1,arg2)`。
 - 参数个数和参数类型必须与建表定义一致，否则写入会报错。
 - `filter kind = SomeVariant(...)` 支持等值比较；`>`/`<` 不适用于 enum 值。
@@ -169,8 +215,20 @@ from events | filter kind = Purchase(42,19.9) | select id,kind
 ## 持久化说明
 
 - 默认不持久化（纯内存）。
-- 当提供 `--wal-path` 后，服务会把 `create table` / `insert` 追加到 WAL。
-- 服务重启时会自动回放 WAL 并恢复数据。
-- 当同时提供 `--snapshot-path` 与 `--snapshot-every N`（`N>0`）时，服务每 `N` 次成功写操作保存一次快照。
-- 保存快照后会清空 WAL，后续只保留新的增量语句，减少下次启动回放成本。
-- `create index` 也属于写操作，会被写入 WAL，并在恢复时回放。
+- 提供 `--wal-path` 后，每个成功的写批次以一条带版本与提交序号的 JSON 记录追加到 WAL；源码中的换行转义保存，同步后才发布内存状态。
+- 服务重启先加载 snapshot，再回放尚未包含的 WAL 提交；索引从数据重建。
+- `--snapshot-path` 要求同时配置 WAL；`--snapshot-every N` 表示每 `N` 个成功写批次保存一次快照。
+- 快照经临时文件、同步和原子替换发布后才清理 WAL；提交水位处理快照与旧 WAL 的重叠。
+- WAL 提交错误后禁用继续写入和 checkpoint，重新打开数据库以确认提交结果；已提交之后的快照维护失败以 warning 返回。
+- 当前有文件占用锁；数据库文件不应使用硬链接别名。源码回放、校验和、正式格式升级和完整掉电故障矩阵仍待完善，参见 [开发记录](docs/DEVELOPMENT.md)。
+
+## 开发验证
+
+```bash
+cargo fmt --check
+cargo check --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
+
+测试覆盖语言、索引一致性、原子性、恢复及真实 CLI/TCP。CI 配置包含 macOS/Linux；本轮本机实际验证为 macOS。
