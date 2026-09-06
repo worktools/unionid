@@ -15,4 +15,9 @@ insert events {id = 3, event = Failure {message = "network | timeout"}}
 
 from events
 filter event == Purchase {item = 42, amount_cents = 1990}
-select {id, event}
+derive event_kind =
+  match event
+    Login {..} => "login"
+    Purchase {..} => "purchase"
+    Failure {..} => "failure"
+select {id, event_kind, event}

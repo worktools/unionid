@@ -28,13 +28,13 @@ take 20
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
 | 布尔过滤 | `filter priority >= 10 and contains tags "sync"` | 已实现括号、`not/and/or`、字段间比较、`contains/length` | #36 扩展算术、option helper 与元素谓词 |
-| sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、递归 record/tuple/sum/option pattern 和穷尽检查 | #35 完善嵌套穷尽分析 |
+| sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、递归 record/tuple/sum/option pattern，以及完整嵌套穷尽与不可达检查 | #35 跟踪 prepared plan 重绑定 |
 | 投影 | `select {field, nested.field}` | 已实现 | #11 与派生列组合 |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | #16 增加索引计划 |
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` | 未实现 | #10、#22 |
-| ADT 派生列 | `derive x = match ...` | 已实现递归 pattern 与 option/sum/product/list 值构造 | #35 完善穷尽分析；#36 增加布尔/算术/函数表达式 |
+| ADT 派生列 | `derive x = match ...` | 已实现递归 pattern、完整嵌套覆盖分析与 option/sum/product/list 值构造 | #35 跟踪 prepared plan 重绑定；#36 增加算术/函数表达式 |
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 已实现于普通 filter 与 match condition | #36 扩展 `any/all` 等能力 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
@@ -233,10 +233,10 @@ take 1
 - record 字段名默认也是局部绑定；`{retry_at = at, ..}` 把字段重命名为 `at`。等号右侧也可递归使用 constructor、record 或 tuple pattern，例如 `{error = Network {message}, retry_at = Some at}`。绑定可以继续访问嵌套 record，例如 `meta.attempts >= 3`。
 - tuple 用自身的积类型标点分解，例如 `Some (at, reason)`；`_` 可出现在任意嵌套位置并忽略该值。位置 constructor 的参数仍用空格，例如 `Pair left right`。一个位置参数本身又是 constructor 时用括号明确边界，例如 `Outer (Some value) other`。
 - `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
-- 顶层 `_` 覆盖尚未出现的变体，必须位于最后。没有 `_` 时必须覆盖全部变体。包含嵌套 constructor 的分支只覆盖满足该嵌套模式的值，因此当前需要最后的 `_` 处理其余值；不会把 `Failed {retry_at = Some at, ..}` 误认为覆盖了所有 `Failed`。
+- 顶层 `_` 覆盖尚未出现的值，必须位于最后。没有 `_` 时，多个同名顶层 constructor 分支可以用互补的嵌套 pattern 覆盖完整值域。例如 `Failed {retry_at = Some at, ..}` 与 `Failed {retry_at = None, ..}` 可以共同覆盖 `Failed`；只写其中一个仍然是非穷尽 match。
 - 构造器由被匹配字段的命名类型确定，也可写成 `State.Running`。其他命名 sum 的同名构造器不会混用。
 - condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`not/and/or`、`contains/length`。复杂 condition 可在 `=>` 后换行并缩进一层；绑定只在所属分支内有效。
-- 每个顶层 constructor 当前最多出现一次。需要为同一个 constructor 写多个嵌套分支的完整穷尽分析仍由 #35 跟踪；现阶段用一个嵌套分支加最终 `_` 表达优先匹配和兜底。
+- 分支按源码顺序选择第一个匹配项。检查器使用有预算的 pattern matrix 分析 sum、option、record 与 tuple 的组合关系，允许可到达的重叠分支，拒绝被先前分支完全覆盖的分支。非穷尽错误会同时列出仍未完全覆盖的顶层 constructor，并给出一个具体嵌套值样例。覆盖分析最多执行 100,000 步，超限返回 `E_LIMIT`。
 
 未知构造器、重复分支、通配分支后的不可达分支、遗漏 constructor、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum/option 来源或非 bool 条件返回类型错误。
 
@@ -260,7 +260,7 @@ select {id, retry_at}
 
 引擎先从 binding、primitive literal、`Some value`、结构化 product 或限定 constructor 推导结果类型，再按该类型检查全部分支。`None`、空 list/record 和未限定的普通 sum constructor 不能单独确定类型，但可在其他分支已经给出类型时使用；需要主动确定命名 sum 时写 `Type.Variant`，命名 record 写 `TypeName {...}`。不同命名类型不会因结构相同而统一。
 
-分支必须穷尽且结果类型一致，constructor 归属、参数数量和每个嵌套值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option；派生结果尚未复用 filter 的布尔／函数节点，也不支持算术，这些由 #36 的通用 value expression 继续扩展。为同一顶层 constructor 写多个互补嵌套分支和 prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
+分支必须穷尽且结果类型一致，constructor 归属、参数数量、嵌套覆盖关系和每个值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option，同一个顶层 constructor 可以由多个互补嵌套分支覆盖。派生结果尚未复用 filter 的布尔／函数节点，也不支持算术，这些由 #36 的通用 value expression 继续扩展；prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
 
 ## 投影、排序与截取
 
@@ -340,11 +340,12 @@ filter match state
 | --- | --- | --- | --- |
 | 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、`filter match`、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
 | 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
-| 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较和字符串中的 `|` | `tests/language.rs::executable_examples` |
+| 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较、typed derive 和字符串中的 `|` | `tests/language.rs::executable_examples` |
 | 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、布尔/集合 filter、嵌套 pattern、ADT derive、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
+| 离线同步冲突 | [sync_conflicts.uid](../examples/sync_conflicts.uid) | 同一 `Conflict` constructor 的互补嵌套分支、typed derive 与 Option | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
-| 模式检查 | 测试内脚本 | 穷尽性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*` |
+| 模式检查 | 测试内脚本 | 嵌套穷尽性、不可达分支、积类型相关性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*`、`complementary_nested_*`、`nested_pattern_coverage_*` |
 | ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
 | 布尔与集合表达式 | 测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length` 和空表错误 | `boolean_filters_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
