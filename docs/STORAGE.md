@@ -59,7 +59,9 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 打开数据库时会拒绝未知的存储、catalog、ADT value、索引键或 migration codec，并验证 schema hash、ledger 单链及其 head、RowId 唯一性／顺序／分配水位以及索引是否与 catalog/rows 一致。RowId 可以有删除形成的缺口。差异计划测试检查 update/delete/insert 只生成预期的 catalog/row/index 键变化；migration 测试确认 schema、数据、索引和 ledger 一起提交，普通数据提交保留 ledger。集成测试还会在一个未提交 redb transaction 修改多个内部表后直接退出子进程，确认重开只看到完整旧状态；也会在 Engine commit 成功后不执行析构直接退出，确认重开看到完整新状态。无效 redb 文件会返回 `E_STORAGE` 并保留原文件，跨进程第二个打开者返回 `E_BUSY`。
 
-这些测试覆盖应用进程退出和库级一致性检查，没有模拟机器掉电、文件系统违反同步承诺、真实设备损坏或所有空间不足位置。`Immediate` 与 two-phase commit 的掉电保证来自 redb 的事务契约；设备与文件系统仍必须正确实现持久同步。更完整的真实 I/O 故障和恢复时间矩阵继续由 #13/#14 跟踪。
+macOS/Linux 测试还在隔离子进程中用操作系统 `RLIMIT_FSIZE` 把 redb 文件上限固定在已提交基线大小，再写入 900,000 字节 typed text 强制触发真实文件增长失败。子进程忽略 `SIGXFSZ`，使底层写入以错误返回 Engine：若失败发生在 `commit` 前，响应明确中止且句柄允许再次尝试；若 `commit` 返回错误，响应标记结果不确定并禁用后续写。父进程重开并运行完整性检查，接受完整旧状态或完整新状态，再核对 typed row、主键索引、schema 和 migration ledger，不接受部分内部表。
+
+这些测试覆盖应用进程退出、真实文件增长失败和库级一致性检查，没有模拟机器掉电、文件系统违反同步承诺、物理设备损坏或每一个空间不足位置。`Immediate` 与 two-phase commit 的掉电保证来自 redb 的事务契约；设备与文件系统仍必须正确实现持久同步。恢复耗时、峰值内存和更广的发布环境矩阵继续由 #14/#24 跟踪。
 
 ## 与旧原型格式的关系
 

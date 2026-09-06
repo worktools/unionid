@@ -13,8 +13,11 @@ const REDB_SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("s
 const REDB_MIGRATION_LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("migration_ledger");
 const CRASH_PATH_ENV: &str = "UNIONID_TEST_REDB_CRASH_PATH";
 const CRASH_MODE_ENV: &str = "UNIONID_TEST_REDB_CRASH_MODE";
+const DISK_LIMIT_PATH_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_PATH";
+const DISK_LIMIT_RESULT_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_RESULT";
 const CRASH_BEFORE_COMMIT: i32 = 91;
 const CRASH_AFTER_COMMIT: i32 = 92;
+const DISK_LIMIT_FAILURE: i32 = 93;
 
 #[test]
 fn redb_crash_transaction_child() {
@@ -61,6 +64,99 @@ fn redb_crash_transaction_child() {
         std::process::exit(CRASH_AFTER_COMMIT);
     }
     panic!("unknown crash mode '{mode}'");
+}
+
+#[test]
+fn redb_disk_limit_child() {
+    let Ok(path) = std::env::var(DISK_LIMIT_PATH_ENV) else {
+        return;
+    };
+    let result_path = std::env::var(DISK_LIMIT_RESULT_ENV).unwrap();
+    let mut engine = Engine::open_redb(path).unwrap();
+    let payload = "x".repeat(900_000);
+    let failed = engine.execute(&format!(
+        "insert entries {{id = 2, value = {}}}",
+        serde_json::to_string(&payload).unwrap()
+    ));
+    assert!(!failed.ok, "the OS file-size limit must reject the write");
+    assert_eq!(failed.error.as_ref().unwrap().code, "E_STORAGE");
+    let retry = engine.execute("insert entries {id = 3, value = \"retry\"}");
+    std::fs::write(
+        result_path,
+        serde_json::to_vec(&serde_json::json!({
+            "failure": failed.message,
+            "retry": retry.message,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::process::exit(DISK_LIMIT_FAILURE);
+}
+
+#[test]
+fn redb_real_disk_growth_failure_is_classified_and_recovers_atomically() {
+    let dir = TempDir::new();
+    let path = dir.0.join("limited.redb");
+    let result_path = dir.0.join("result.json");
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        engine
+            .apply_migrations(std::slice::from_ref(&crash_migration()))
+            .unwrap();
+        assert!(
+            engine
+                .execute("insert entries {id = 1, value = \"baseline\"}")
+                .ok
+        );
+    }
+
+    let blocks = std::fs::metadata(&path).unwrap().len().div_ceil(512);
+    let status = Command::new("sh")
+        .args([
+            "-c",
+            "trap '' XFSZ; ulimit -f \"$1\"; exec \"$2\" --exact redb_disk_limit_child --nocapture",
+            "unionid-disk-limit",
+            &blocks.to_string(),
+            std::env::current_exe().unwrap().to_str().unwrap(),
+        ])
+        .env(DISK_LIMIT_PATH_ENV, &path)
+        .env(DISK_LIMIT_RESULT_ENV, &result_path)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(DISK_LIMIT_FAILURE));
+
+    let classification: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
+    let failure = classification["failure"].as_str().unwrap();
+    let retry = classification["retry"].as_str().unwrap();
+    if failure.contains("result is uncertain") {
+        assert!(retry.contains("writes are disabled"), "{retry}");
+    } else {
+        assert!(failure.contains("aborted before commit"), "{failure}");
+        assert!(!retry.contains("writes are disabled"), "{retry}");
+    }
+
+    let mut reopened = Engine::open_redb(path).unwrap();
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+    let rows = reopened.execute("from entries | sort id");
+    assert!(rows.ok, "{}", rows.message);
+    assert!(matches!(rows.rows.len(), 1 | 2));
+    assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    if rows.rows.len() == 2 {
+        assert!(rows.rows[1]["id"].cmp_eq(&Value::Int(2)));
+        let Value::Text(payload) = rows.rows[1]["value"].unwrapped() else {
+            panic!("committed payload must remain typed text");
+        };
+        assert_eq!(payload.len(), 900_000);
+    }
+    assert_eq!(
+        reopened
+            .migration_status(std::slice::from_ref(&crash_migration()))
+            .unwrap()
+            .applied
+            .len(),
+        1
+    );
 }
 
 #[test]
