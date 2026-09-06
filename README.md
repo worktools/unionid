@@ -38,6 +38,7 @@ id | title | owner.email | state
 cargo run -- run --db ./data/unionid.redb --file examples/tasks.uid
 cargo run -- run --db ./data/unionid.redb --query 'from tasks | filter id == 1'
 cargo run -- cli --db ./data/unionid.redb
+cargo run -- check --db ./data/unionid.redb
 ```
 
 开启保留会话状态的本地 REPL：

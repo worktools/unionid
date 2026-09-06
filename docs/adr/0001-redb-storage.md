@@ -4,7 +4,7 @@
 - 状态：已接受
 - 关联：[GitHub issue #6](https://github.com/worktools/unionid/issues/6)
 
-实现状态：主 Engine 已提供 `Engine::open_redb`，CLI 的 `run/cli/server --db` 已使用下述固定内部表、版本化 codec、`Durability::Immediate` 与 two-phase commit。故障恢复矩阵、格式升级和备份仍由 #14/#20 跟踪。
+实现状态：主 Engine 已提供 `Engine::open_redb`，CLI 的 `run/cli/server --db` 已使用下述固定内部表、版本化 codec、`Durability::Immediate` 与 two-phase commit。`check --db`、提交前／后进程退出矩阵、未知版本与独占打开诊断已经接入；真实设备故障、恢复时间、格式升级和备份仍由 #13/#14/#20 跟踪。
 
 ## 背景
 

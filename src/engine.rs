@@ -1,9 +1,11 @@
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 use crate::db::{Database, QueryResponse};
 use crate::error::{Error, Result};
-use crate::redb_storage::RedbStore;
+use crate::redb_storage::{CommitFailure, RedbStore};
 use crate::snapshot::SnapshotStore;
 use crate::syntax;
 use crate::wal::Wal;
@@ -18,8 +20,30 @@ pub struct Engine {
     snapshot_every: usize,
     writes_since_snapshot: usize,
     write_failed: bool,
-    redb: Option<RedbStore>,
+    durable: Option<Box<dyn DurableBackend>>,
     _locks: Vec<File>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StorageIntegrity {
+    pub backend: &'static str,
+    pub backend_clean: bool,
+    pub schema: crate::db::SchemaInfo,
+}
+
+trait DurableBackend: Send {
+    fn commit(&mut self, database: &Database) -> std::result::Result<(), CommitFailure>;
+    fn check_integrity(&mut self) -> Result<(bool, Database)>;
+}
+
+impl DurableBackend for RedbStore {
+    fn commit(&mut self, database: &Database) -> std::result::Result<(), CommitFailure> {
+        RedbStore::commit(self, database)
+    }
+
+    fn check_integrity(&mut self) -> Result<(bool, Database)> {
+        RedbStore::check_integrity(self)
+    }
 }
 
 impl Engine {
@@ -101,7 +125,7 @@ impl Engine {
             snapshot_every,
             writes_since_snapshot: 0,
             write_failed: false,
-            redb: None,
+            durable: None,
             _locks: locks,
         })
     }
@@ -112,7 +136,7 @@ impl Engine {
         let (redb, db) = RedbStore::open(path)?;
         Ok(Self {
             db,
-            redb: Some(redb),
+            durable: Some(Box::new(redb)),
             ..Self::default()
         })
     }
@@ -155,17 +179,29 @@ impl Engine {
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
-            if let Some(redb) = &self.redb {
-                if let Err(error) = redb.commit(&candidate) {
-                    self.redb = None;
-                    self.write_failed = true;
-                    return Err(Error::new(
-                        "E_STORAGE",
-                        format!(
-                            "redb commit failed; state was not published in this process, but the disk commit may be uncertain: {}; reopen the database before retrying",
-                            error.message
-                        ),
-                    ));
+            if let Some(durable) = &mut self.durable {
+                match durable.commit(&candidate) {
+                    Ok(()) => {}
+                    Err(CommitFailure::Definite(error)) => {
+                        return Err(Error::new(
+                            "E_STORAGE",
+                            format!(
+                                "durable transaction aborted before commit; state was not changed: {}",
+                                error.message
+                            ),
+                        ));
+                    }
+                    Err(CommitFailure::Uncertain(error)) => {
+                        self.durable = None;
+                        self.write_failed = true;
+                        return Err(Error::new(
+                            "E_STORAGE",
+                            format!(
+                                "redb commit result is uncertain; state was not published in this process: {}; reopen the database before retrying",
+                                error.message
+                            ),
+                        ));
+                    }
                 }
             } else if let Some(wal) = &self.wal
                 && let Err(error) = wal.append(candidate.sequence, source)
@@ -210,6 +246,28 @@ impl Engine {
         Ok(())
     }
 
+    pub fn check_integrity(&mut self) -> Result<StorageIntegrity> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "integrity check requires reopening after an uncertain commit",
+            ));
+        }
+        let durable = self.durable.as_mut().ok_or_else(|| {
+            Error::new(
+                "E_CONFIG",
+                "integrity check requires a database opened with Engine::open_redb",
+            )
+        })?;
+        let (backend_clean, database) = durable.check_integrity()?;
+        self.db = database;
+        Ok(StorageIntegrity {
+            backend: "redb",
+            backend_clean,
+            schema: self.db.schema_info(),
+        })
+    }
+
     pub fn schema(&self) -> String {
         self.db.schema_text()
     }
@@ -244,5 +302,74 @@ fn canonical_existing_path(path: PathBuf) -> Result<PathBuf> {
             "E_IO",
             format!("resolve database path: {error}"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailOnce {
+        uncertain: Option<bool>,
+    }
+
+    impl DurableBackend for FailOnce {
+        fn commit(&mut self, _: &Database) -> std::result::Result<(), CommitFailure> {
+            match self.uncertain.take() {
+                Some(false) => Err(CommitFailure::Definite(Error::new(
+                    "E_STORAGE",
+                    "injected pre-commit failure",
+                ))),
+                Some(true) => Err(CommitFailure::Uncertain(Error::new(
+                    "E_STORAGE",
+                    "injected commit failure",
+                ))),
+                None => Ok(()),
+            }
+        }
+
+        fn check_integrity(&mut self) -> Result<(bool, Database)> {
+            unreachable!()
+        }
+    }
+
+    fn engine_with_failure(uncertain: bool) -> Engine {
+        Engine {
+            durable: Some(Box::new(FailOnce {
+                uncertain: Some(uncertain),
+            })),
+            ..Engine::default()
+        }
+    }
+
+    #[test]
+    fn definite_pre_commit_failure_keeps_old_state_and_allows_retry() {
+        let mut engine = engine_with_failure(false);
+        let failed = engine.execute("create table entries (id int)");
+        assert!(!failed.ok);
+        assert_eq!(failed.error.unwrap().code, "E_STORAGE");
+        assert!(failed.message.contains("aborted before commit"));
+        assert_eq!(
+            engine.execute("from entries").error.unwrap().code,
+            "E_TABLE"
+        );
+        assert!(engine.execute("create table entries (id int)").ok);
+        assert!(engine.execute("from entries").ok);
+    }
+
+    #[test]
+    fn uncertain_commit_failure_requires_reopen_before_another_write() {
+        let mut engine = engine_with_failure(true);
+        let failed = engine.execute("create table entries (id int)");
+        assert!(!failed.ok);
+        assert_eq!(failed.error.unwrap().code, "E_STORAGE");
+        assert!(failed.message.contains("result is uncertain"));
+        assert_eq!(
+            engine.execute("from entries").error.unwrap().code,
+            "E_TABLE"
+        );
+        let blocked = engine.execute("create table later (id int)");
+        assert!(!blocked.ok);
+        assert!(blocked.message.contains("writes are disabled"));
     }
 }

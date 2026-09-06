@@ -63,6 +63,13 @@ enum Command {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Verify redb and unionid logical storage integrity.
+    Check {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
 }
 
 fn source(query: Option<String>, file: Option<PathBuf>) -> Result<Option<String>, String> {
@@ -118,6 +125,7 @@ fn run() -> Result<(), String> {
                 cli::run_cli(&addr, source, matches!(format, Format::Json))
             }
         }
+        Command::Check { db, format } => cli::check_redb(db, matches!(format, Format::Json)),
     }
 }
 

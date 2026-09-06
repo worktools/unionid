@@ -35,6 +35,27 @@ pub(crate) struct RedbStore {
     database: RedbDatabase,
 }
 
+pub(crate) enum CommitFailure {
+    Definite(Error),
+    Uncertain(Error),
+}
+
+impl CommitFailure {
+    fn definite(context: &str, error: impl std::fmt::Display) -> Self {
+        Self::Definite(storage_error(context, error))
+    }
+
+    fn uncertain(context: &str, error: impl std::fmt::Display) -> Self {
+        Self::Uncertain(storage_error(context, error))
+    }
+
+    fn into_error(self) -> Error {
+        match self {
+            Self::Definite(error) | Self::Uncertain(error) => error,
+        }
+    }
+}
+
 impl RedbStore {
     pub(crate) fn open(path: impl Into<PathBuf>) -> Result<(Self, Database)> {
         let path = resolve_path(path.into())?;
@@ -47,76 +68,87 @@ impl RedbStore {
         let database = RedbDatabase::create(&path).map_err(open_error)?;
         let store = Self { database };
         if fresh {
-            store.commit(&Database::default())?;
+            store
+                .commit(&Database::default())
+                .map_err(CommitFailure::into_error)?;
         }
         let loaded = store.load()?;
         Ok((store, loaded))
     }
 
-    pub(crate) fn commit(&self, database: &Database) -> Result<()> {
-        let prepared = PreparedCommit::new(database)?;
+    pub(crate) fn commit(&self, database: &Database) -> std::result::Result<(), CommitFailure> {
+        let prepared = PreparedCommit::new(database).map_err(CommitFailure::Definite)?;
         let mut transaction = self
             .database
             .begin_write()
-            .map_err(|error| storage_error("begin redb write transaction", error))?;
+            .map_err(|error| CommitFailure::definite("begin redb write transaction", error))?;
         transaction
             .set_durability(Durability::Immediate)
-            .map_err(|error| storage_error("configure redb durability", error))?;
+            .map_err(|error| CommitFailure::definite("configure redb durability", error))?;
         transaction.set_two_phase_commit(true);
         {
             let mut table = transaction
                 .open_table(META)
-                .map_err(|error| storage_error("open meta table", error))?;
+                .map_err(|error| CommitFailure::definite("open meta table", error))?;
             table
                 .retain(|_, _| false)
-                .map_err(|error| storage_error("clear meta table", error))?;
-            write_meta(&mut table, &prepared.meta)?;
+                .map_err(|error| CommitFailure::definite("clear meta table", error))?;
+            write_meta(&mut table, &prepared.meta).map_err(CommitFailure::Definite)?;
         }
         {
             let mut table = transaction
                 .open_table(CATALOG)
-                .map_err(|error| storage_error("open catalog table", error))?;
+                .map_err(|error| CommitFailure::definite("open catalog table", error))?;
             table
                 .retain(|_, _| false)
-                .map_err(|error| storage_error("clear catalog table", error))?;
+                .map_err(|error| CommitFailure::definite("clear catalog table", error))?;
             for (key, value) in &prepared.catalog {
                 table
                     .insert(key.as_slice(), value.as_slice())
-                    .map_err(|error| storage_error("write catalog entry", error))?;
+                    .map_err(|error| CommitFailure::definite("write catalog entry", error))?;
             }
         }
         {
             let mut table = transaction
                 .open_table(ROWS)
-                .map_err(|error| storage_error("open rows table", error))?;
+                .map_err(|error| CommitFailure::definite("open rows table", error))?;
             table
                 .retain(|_, _| false)
-                .map_err(|error| storage_error("clear rows table", error))?;
+                .map_err(|error| CommitFailure::definite("clear rows table", error))?;
             for (key, value) in &prepared.rows {
                 table
                     .insert(key.as_slice(), value.as_slice())
-                    .map_err(|error| storage_error("write row", error))?;
+                    .map_err(|error| CommitFailure::definite("write row", error))?;
             }
         }
         {
             let mut table = transaction
                 .open_table(SECONDARY_INDEX)
-                .map_err(|error| storage_error("open secondary index table", error))?;
+                .map_err(|error| CommitFailure::definite("open secondary index table", error))?;
             table
                 .retain(|_, _| false)
-                .map_err(|error| storage_error("clear secondary index table", error))?;
+                .map_err(|error| CommitFailure::definite("clear secondary index table", error))?;
             for key in &prepared.secondary_indexes {
-                table
-                    .insert(key.as_slice(), 0)
-                    .map_err(|error| storage_error("write secondary index entry", error))?;
+                table.insert(key.as_slice(), 0).map_err(|error| {
+                    CommitFailure::definite("write secondary index entry", error)
+                })?;
             }
         }
         transaction
             .open_table(MIGRATION_LEDGER)
-            .map_err(|error| storage_error("open migration ledger table", error))?;
+            .map_err(|error| CommitFailure::definite("open migration ledger table", error))?;
         transaction
             .commit()
-            .map_err(|error| storage_error("commit redb transaction", error))
+            .map_err(|error| CommitFailure::uncertain("commit redb transaction", error))
+    }
+
+    pub(crate) fn check_integrity(&mut self) -> Result<(bool, Database)> {
+        let backend_clean = self
+            .database
+            .check_integrity()
+            .map_err(|error| storage_error("check redb integrity", error))?;
+        let database = self.load()?;
+        Ok((backend_clean, database))
     }
 
     fn load(&self) -> Result<Database> {
