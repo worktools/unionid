@@ -453,6 +453,43 @@ impl Engine {
         self.db.migration_history()
     }
 
+    pub(crate) fn database_snapshot(&self) -> Database {
+        self.db.clone()
+    }
+
+    pub(crate) fn restore_redb(path: PathBuf, database: Database) -> Result<Self> {
+        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| Error::new("E_IO", error.to_string()))?;
+        }
+        let reservation = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| {
+                Error::new(
+                    "E_BACKUP",
+                    format!("reserve restore target '{}': {error}", path.display()),
+                )
+            })?;
+        if let Err(error) = reservation.sync_all() {
+            drop(reservation);
+            let _ = std::fs::remove_file(&path);
+            return Err(Error::new("E_IO", error.to_string()));
+        }
+        drop(reservation);
+        let result = (|| {
+            let mut engine = Self::open_redb(path.clone())?;
+            let mut response = QueryResponse::ok_message("backup restored");
+            engine.commit_candidate(database, None, &mut response)?;
+            Ok(engine)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+        result
+    }
+
     pub fn check_schema(source: &str) -> Result<crate::schema::SchemaCheck> {
         crate::schema::check(source)
     }

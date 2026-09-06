@@ -1121,6 +1121,16 @@ impl Database {
         &self.migration_history
     }
 
+    pub(crate) fn validate_logical_backup(mut self) -> Result<Self> {
+        self.rebuild_indexes()?;
+        Self::from_durable(
+            self.durable_meta(),
+            self.durable_catalog_entries(),
+            self.durable_rows()?,
+            self.migration_history.clone(),
+        )
+    }
+
     pub(crate) fn from_durable(
         meta: DurableMeta,
         entries: Vec<DurableCatalogEntry>,

@@ -1,0 +1,97 @@
+mod common;
+
+use common::TempDir;
+use unionid::backup;
+use unionid::migration::load_directory;
+use unionid::{Engine, Value};
+
+#[test]
+fn backup_restore_preserves_typed_data_schema_indexes_and_history() {
+    let dir = TempDir::new();
+    let source = dir.0.join("source.redb");
+    let archive = dir.0.join("backup.json");
+    let restored = dir.0.join("restored.redb");
+    let files = load_directory("examples/migrations").unwrap();
+    let expected_schema;
+    {
+        let mut engine = Engine::open_redb(&source).unwrap();
+        engine.apply_migrations(&files).unwrap();
+        assert!(
+            engine
+                .execute("insert tasks {id = 1, title = \"saved\", state = Running}")
+                .ok
+        );
+        expected_schema = engine.schema_info();
+    }
+    let created = backup::create(&source, &archive).unwrap();
+    let recovered = backup::restore(&archive, &restored).unwrap();
+    assert_eq!(created, recovered);
+    assert_eq!(recovered.schema, expected_schema);
+    assert_eq!(recovered.migration_count, 2);
+
+    let mut engine = Engine::open_redb(&restored).unwrap();
+    assert_eq!(engine.migration_status(&files).unwrap().applied.len(), 2);
+    let rows = engine.execute("from tasks | filter priority == 0");
+    assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
+fn corrupt_or_unknown_backups_do_not_create_or_replace_a_target() {
+    let dir = TempDir::new();
+    let source = dir.0.join("source.redb");
+    let archive = dir.0.join("backup.json");
+    let corrupt = dir.0.join("corrupt.json");
+    let target = dir.0.join("target.redb");
+    {
+        let mut engine = Engine::open_redb(&source).unwrap();
+        assert!(engine.execute("create table values (id int)").ok);
+    }
+    backup::create(&source, &archive).unwrap();
+    let text = std::fs::read_to_string(&archive).unwrap();
+    std::fs::write(
+        &corrupt,
+        text.replacen("\"format_version\":1", "\"format_version\":99", 1),
+    )
+    .unwrap();
+    assert!(backup::restore(&corrupt, &target).is_err());
+    assert!(!target.exists());
+
+    let tampered = dir.0.join("tampered.json");
+    let text = std::fs::read_to_string(&archive).unwrap();
+    std::fs::write(
+        &tampered,
+        text.replacen("\"checksum\":\"sha256:", "\"checksum\":\"sha256:0", 1),
+    )
+    .unwrap();
+    assert!(backup::restore(&tampered, &target).is_err());
+    assert!(!target.exists());
+
+    let mut existing = Engine::open_redb(&target).unwrap();
+    assert!(existing.execute("create table keep (id int)").ok);
+    drop(existing);
+    assert!(backup::restore(&archive, &target).is_err());
+    let mut existing = Engine::open_redb(&target).unwrap();
+    assert!(existing.execute("from keep").ok);
+}
+
+#[test]
+fn explicit_legacy_import_preserves_inputs_and_converts_supported_wal_snapshot() {
+    let dir = TempDir::new();
+    let snapshot = dir.0.join("legacy.snapshot");
+    let wal = dir.0.join("legacy.wal");
+    let target = dir.0.join("imported.redb");
+    {
+        let mut engine = Engine::open(Some(wal.clone()), Some(snapshot.clone()), 1).unwrap();
+        assert!(engine
+            .execute("create table legacy (id int, label text)\ninsert legacy {id = 1, label = \"old\"}")
+            .ok);
+    }
+    let snapshot_before = std::fs::read(&snapshot).unwrap();
+    let wal_before = std::fs::read(&wal).unwrap();
+    backup::import_legacy(Some(snapshot.clone()), Some(wal.clone()), &target).unwrap();
+    assert_eq!(std::fs::read(snapshot).unwrap(), snapshot_before);
+    assert_eq!(std::fs::read(wal).unwrap(), wal_before);
+    let mut imported = Engine::open_redb(target).unwrap();
+    assert_eq!(imported.execute("from legacy").rows.len(), 1);
+}

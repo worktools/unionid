@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_directory};
-use crate::{Engine, QueryResponse, SchemaCheck, Value};
+use crate::{Engine, QueryResponse, SchemaCheck, Value, backup};
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
     run_local_engine(Engine::memory(), source, json)
@@ -40,6 +40,45 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
             },
             report.schema.revision,
             report.schema.hash
+        );
+    }
+    Ok(())
+}
+
+pub fn backup_create(db: PathBuf, output: PathBuf, json: bool) -> Result<(), String> {
+    let info = backup::create(db, output).map_err(|error| error.to_string())?;
+    print_lifecycle(&info, "backup created", json)
+}
+
+pub fn backup_restore(backup_path: PathBuf, db: PathBuf, json: bool) -> Result<(), String> {
+    let info = backup::restore(backup_path, db).map_err(|error| error.to_string())?;
+    print_lifecycle(&info, "backup restored", json)
+}
+
+pub fn import_legacy(
+    snapshot: Option<PathBuf>,
+    wal: Option<PathBuf>,
+    db: PathBuf,
+    json: bool,
+) -> Result<(), String> {
+    let info = backup::import_legacy(snapshot, wal, db).map_err(|error| error.to_string())?;
+    print_lifecycle(&info, "legacy database imported", json)
+}
+
+fn print_lifecycle(info: &crate::BackupInfo, message: &str, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(info).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{message}\nformat {}\nchecksum {}\nschema revision {}\nschema hash {}\n{} migration(s)",
+            info.format_version,
+            info.checksum,
+            info.schema.revision,
+            info.schema.hash,
+            info.migration_count
         );
     }
     Ok(())
