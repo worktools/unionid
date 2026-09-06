@@ -14,6 +14,19 @@ pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
     run_local_engine(Engine::memory(), source, json)
 }
 
+pub fn format_source(source: &str, check: bool) -> Result<(), String> {
+    let formatted = crate::format_source(source).map_err(|error| error.to_string())?;
+    if check {
+        if source == formatted {
+            return Ok(());
+        }
+        return Err("input is not canonically formatted".into());
+    }
+    io::stdout()
+        .write_all(formatted.as_bytes())
+        .map_err(|error| format!("write formatted source: {error}"))
+}
+
 pub fn run_local_redb(
     path: impl Into<std::path::PathBuf>,
     source: Option<String>,

@@ -8,6 +8,7 @@ pub mod db;
 pub mod engine;
 pub mod error;
 mod expression;
+pub mod formatter;
 mod local;
 mod matching;
 pub mod migration;
@@ -29,6 +30,7 @@ pub use db::{
 };
 pub use engine::{Engine, PreparedQuery, StorageIntegrity};
 pub use error::{Error, Result, Span};
+pub use formatter::format_source;
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};
 pub use protocol::{Request as ProtocolRequest, Response as ProtocolResponse, WireValue};

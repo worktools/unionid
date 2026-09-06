@@ -35,6 +35,77 @@ fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
 }
 
 #[test]
+fn fmt_cli_formats_file_and_stdin_and_checks_canonical_input() {
+    let dir = TempDir::new();
+    let source_path = dir.0.join("input.uid");
+    std::fs::write(
+        &source_path,
+        "type Task={id int,title text}\nfrom tasks|take 1",
+    )
+    .unwrap();
+
+    let formatted = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["fmt", "--file", source_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        formatted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&formatted.stderr)
+    );
+    let canonical = String::from_utf8(formatted.stdout).unwrap();
+    assert_eq!(
+        canonical,
+        "type Task =\n  id int\n  title text\n\nfrom tasks\ntake 1\n"
+    );
+
+    let mut stdin = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["fmt"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    stdin
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"from tasks|select id,title")
+        .unwrap();
+    let stdin = stdin.wait_with_output().unwrap();
+    assert!(stdin.status.success());
+    assert_eq!(
+        String::from_utf8(stdin.stdout).unwrap(),
+        "from tasks\nselect {id, title}\n"
+    );
+
+    let noncanonical = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["fmt", "--file", source_path.to_str().unwrap(), "--check"])
+        .output()
+        .unwrap();
+    assert!(!noncanonical.status.success());
+    assert!(String::from_utf8_lossy(&noncanonical.stderr).contains("not canonically formatted"));
+
+    std::fs::write(&source_path, &canonical).unwrap();
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args(["fmt", "--file", source_path.to_str().unwrap(), "--check"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    std::fs::write(&source_path, "from tasks | unknown\n").unwrap();
+    let invalid = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["fmt", "--file", source_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    let error = String::from_utf8_lossy(&invalid.stderr);
+    assert!(error.contains("E_SYNTAX"), "{error}");
+    assert!(error.contains("line 1, column"), "{error}");
+}
+
+#[test]
 fn migration_cli_creates_plans_applies_and_reports_status() {
     let dir = TempDir::new();
     let migrations = dir.0.join("migrations");
