@@ -595,18 +595,23 @@ impl Database {
                 .collect::<Vec<_>>(),
             None => table.rows.iter().collect(),
         };
+        let mut evaluation_budget = crate::expression::EvaluationBudget::new();
         for stage in &target.stages {
             let mut filtered = Vec::with_capacity(rows.len());
             for row in rows {
                 let keep = match stage {
-                    Stage::Filter(expression) => {
-                        crate::expression::evaluate(&self.catalog, expression, |path| {
-                            row_field(&row.fields, path)
-                        })?
-                    }
-                    Stage::FilterMatch(predicate) => {
-                        crate::matching::evaluate(&self.catalog, &row.fields, predicate)?
-                    }
+                    Stage::Filter(expression) => crate::expression::evaluate(
+                        &self.catalog,
+                        expression,
+                        |path| row_field(&row.fields, path),
+                        &mut evaluation_budget,
+                    )?,
+                    Stage::FilterMatch(predicate) => crate::matching::evaluate(
+                        &self.catalog,
+                        &row.fields,
+                        predicate,
+                        &mut evaluation_budget,
+                    )?,
                     _ => false,
                 };
                 if keep {
@@ -757,15 +762,19 @@ impl Database {
                 rows
             }
         };
+        let mut evaluation_budget = crate::expression::EvaluationBudget::new();
         for stage in pipeline.stages {
             match stage {
                 Stage::Filter(expression) => {
                     let mut filtered = Vec::with_capacity(rows.len());
                     for (position, row) in rows.into_iter().enumerate() {
                         check_deadline_periodically(deadline, position)?;
-                        if crate::expression::evaluate(&self.catalog, &expression, |path| {
-                            row_field(&row, path)
-                        })? {
+                        if crate::expression::evaluate(
+                            &self.catalog,
+                            &expression,
+                            |path| row_field(&row, path),
+                            &mut evaluation_budget,
+                        )? {
                             filtered.push(row);
                         }
                     }
@@ -775,7 +784,12 @@ impl Database {
                     let mut filtered = Vec::with_capacity(rows.len());
                     for (position, row) in rows.into_iter().enumerate() {
                         check_deadline_periodically(deadline, position)?;
-                        if crate::matching::evaluate(&self.catalog, &row, &pred)? {
+                        if crate::matching::evaluate(
+                            &self.catalog,
+                            &row,
+                            &pred,
+                            &mut evaluation_budget,
+                        )? {
                             filtered.push(row);
                         }
                     }

@@ -27,7 +27,7 @@ take 20
 | 能力 | 当前形式 | 状态 | 后续任务 |
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
-| 布尔过滤 | `filter priority + bonus >= 10` | 已实现括号、`not/and/or`、有类型算术、字段间比较、`contains/length` | #36 扩展 option helper 与元素谓词 |
+| 布尔过滤 | `filter priority + bonus >= 10` | 已实现括号、`not/and/or`、有类型算术、字段间比较、Option 辅助函数与集合谓词 | — |
 | sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、递归 record/tuple/sum/option pattern，以及完整嵌套穷尽与不可达检查 | — |
 | 投影 | `select {field, nested.field}` | 已实现 | #11 与派生列组合 |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | #16 增加索引计划 |
@@ -35,7 +35,7 @@ take 20
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol 与 schema-aware prepared query | #22 |
 | ADT 派生列 | `derive x = match ...` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造 | #36 扩展通用函数表达式 |
-| 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 已实现于普通 filter 与 match condition | #36 扩展 `any/all` 等能力 |
+| 布尔表达式与集合函数 | `and/or/not`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于普通 filter 与 match condition | — |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
 | 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows、原子约束与增量持久维护 | #15 |
@@ -112,8 +112,10 @@ bool-expression   = or-expression
 or-expression     = and-expression ("or" and-expression)*
 and-expression    = not-expression ("and" not-expression)*
 not-expression    = "not" not-expression | bool-primary
-bool-primary      = "(" bool-expression ")" | contains-call | scalar-expression (comparison scalar-expression)?
+bool-primary      = "(" bool-expression ")" | contains-call | list-predicate | option-predicate | scalar-expression (comparison scalar-expression)?
 contains-call     = "contains" scalar-expression scalar-expression
+list-predicate    = ("any" | "all") scalar-expression "(" binding "->" bool-expression ")"
+option-predicate  = ("is_some" | "is_none") scalar-expression
 scalar-expression = additive-expression
 additive-expression = multiplicative-expression (("+" | "-") multiplicative-expression)*
 multiplicative-expression = unary-expression (("*" | "/") unary-expression)*
@@ -250,7 +252,10 @@ select {id, priority}
 - Int 使用精确 i64 比较。Float 使用精确数值相等，`-0.0` 与 `0.0` 相等；拒绝 NaN、Infinity 和超出 i64 的整数。
 - Float 字段可接受能够精确表示的整数字面量；Int 字段不接受浮点字面量。数字不会自动转换成 text。
 - `contains collection item` 只接受 list，并按 list 元素的完整类型化相等语义判断；元素可以是命名 ADT。`length` 接受 list 或 text，分别返回元素数或 Unicode scalar 数。
-- bool 字段可以直接作为条件。其他类型不隐式转换为 bool；option 也不提供 truthiness，必须显式 match。
+- `any items (item -> condition)` 与 `all items (item -> condition)` 对 list 元素建立有类型的词法绑定。绑定可访问 record 字段，predicate 也可引用外层行字段或 match binding，并可继续嵌套 `any/all`。局部绑定遮蔽同名外层字段。
+- `any` 从左到右执行并在首个 true 处短路，空 list 为 false；`all` 在首个 false 处短路，空 list 为 true。每条 pipeline 或 DML target 最多执行 100,000 次 list 元素 predicate，嵌套调用共享预算，超限返回 `E_LIMIT`。
+- `is_some value` 与 `is_none value` 只接受静态类型为 `option T` 的值。二者不提取 payload；需要读取 payload 时仍使用显式 match。孤立的 `None` 没有元素类型，必须从字段、binding 或 typed 参数获得类型。
+- bool 字段可以直接作为条件。其他类型不隐式转换为 bool；option 也不提供 truthiness，必须用 `is_some/is_none` 或显式 match。
 - 优先级从高到低为括号／比较／函数、`not`、`and`、`or`。混用 `and` 与 `or` 的规范源码使用括号明确分组。`and` 和 `or` 在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。
 - 普通字段路径只能穿过 record。variant 和 option 的内容必须用显式模式处理。
 
@@ -292,7 +297,7 @@ take 1
 - `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
 - 顶层 `_` 覆盖尚未出现的值，必须位于最后。没有 `_` 时，多个同名顶层 constructor 分支可以用互补的嵌套 pattern 覆盖完整值域。例如 `Failed {retry_at = Some at, ..}` 与 `Failed {retry_at = None, ..}` 可以共同覆盖 `Failed`；只写其中一个仍然是非穷尽 match。
 - 构造器由被匹配字段的命名类型确定，也可写成 `State.Running`。其他命名 sum 的同名构造器不会混用。
-- condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`not/and/or`、`contains/length`。复杂 condition 可在 `=>` 后换行并缩进一层；绑定只在所属分支内有效。
+- condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`not/and/or`、`contains/length`、`any/all` 与 `is_some/is_none`。复杂 condition 可在 `=>` 后换行并缩进一层；match binding 和 list predicate binding 都按词法作用域解析。
 - 分支按源码顺序选择第一个匹配项。检查器使用有预算的 pattern matrix 分析 sum、option、record 与 tuple 的组合关系，允许可到达的重叠分支，拒绝被先前分支完全覆盖的分支。非穷尽错误会同时列出仍未完全覆盖的顶层 constructor，并给出一个具体嵌套值样例。覆盖分析最多执行 100,000 步，超限返回 `E_LIMIT`。
 
 未知构造器、重复分支、通配分支后的不可达分支、遗漏 constructor、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum/option 来源或非 bool 条件返回类型错误。
@@ -358,7 +363,7 @@ take 20
 - 同层出现新的 `from`、`type`、`table`、`insert`、`upsert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
 - REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分。
 
-布尔表达式可在 `filter`／`=>` 的缩进块或括号内跨行；标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；超限返回受控错误。
+布尔表达式可在 `filter`／`=>` 的缩进块或括号内跨行；`any/all` 的 predicate 括号也可跨行。标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；每条 pipeline 或 DML target 最多求值 100,000 个 list predicate 元素，超限返回受控错误。
 
 ## 错误与响应
 
@@ -407,7 +412,7 @@ filter match state
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 嵌套穷尽性、不可达分支、积类型相关性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*`、`complementary_nested_*`、`nested_pattern_coverage_*` |
 | ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
-| 布尔与集合表达式 | 测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length` 和空表错误 | `boolean_filters_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
+| 布尔与集合表达式 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 数值表达式 | 测试内脚本 | int/float 类型、优先级、跨行括号、命名数值类型、整数除法、短路及运行时错误 | `typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 | 原子修改 | [task_mutations.uid](../examples/task_mutations.uid) 与测试内脚本 | typed/nested/simultaneous set、match target、主键冲突、运行时回滚、索引维护、稳定 RowId 和 redb 重开 | `update_*`、`failed_multi_row_updates_*`、`redb_update_delete_*` |

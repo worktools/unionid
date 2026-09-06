@@ -17,6 +17,11 @@ type Payload =
   Sync {source text, target text}
   | Webhook {url text, body text}
 
+type AttemptLog =
+  worker text
+  checkpoints list int
+  note option text = None
+
 type JobState =
   Queued {scheduled_at int, attempt int = 0}
   | Running {worker text, started_at int}
@@ -28,6 +33,7 @@ type Job =
   priority int = 0
   created_at int
   tags list text = []
+  history list AttemptLog = []
   payload Payload
   state JobState
 ```
@@ -38,6 +44,7 @@ type Job =
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行。
 - 原子 claim：按 id 和旧状态筛选，把 `Queued` 改成 `Running` 并返回新值，属于 #15；状态解构与新值表达式复用 #35。
 - 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter match state` 组合即可限定状态。
+- 检查嵌套执行历史：`any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素，同时读取外层行字段；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
 - 按状态计数：需要 #11 的 group/aggregate；sum 分支归一为状态名需要 #35。
 
 列表查询必须提供唯一的最终排序键，例如 `sort {-priority, created_at, id}`。只按 priority 分页会让相同优先级的跨请求边界不稳定。
@@ -77,7 +84,7 @@ type ServiceConfig =
 
 - 按 environment、owner 和固定 record 路径筛选；普通 record 路径当前已支持，option 需要 #35 显式解构。
 - 只列出 HTTP 服务并投影 `base_url`；需要 #35 的 match expression，因为字段只存在于 `Http` 分支。
-- 判断某个完整 header 或 validation issue 是否存在可用 `contains`；按元素字段写谓词仍需要 #36 的 `any/all`。
+- 判断某个完整 header 或 validation issue 是否存在可用 `contains`；按元素字段筛选可用 `any headers (header -> header.name == "authorization")`。若 `headers` 位于 sum payload 中，先用 `filter match` 建立 list binding，再在 condition 中使用 `any/all`。
 - 整体 upsert 一份配置并校验嵌套类型；当前按主键插入或完整替换，示例见 [`config.uid`](../examples/config.uid)。
 - 把 `Bearer` 改名或给 `Http` 增加字段；身份保留、回填和转换属于 #17–#19。
 
@@ -111,7 +118,7 @@ type Event =
   delivery DeliveryState = Pending
 ```
 
-常见工作流包括筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。当前 `filter match` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；派生摘要与嵌套模式由 #35 承接，失败集合的元素谓词由 #36 承接，状态更新与保留期删除由 #15 承接，统计由 #11 承接。
+常见工作流包括筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。当前 `filter match` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，统计继续由 #11 承接。
 
 ## 4. 离线同步与冲突状态
 
@@ -139,7 +146,7 @@ type Workspace =
   last_sync option int = None
 ```
 
-常见查询是列出全部 Conflict 并提取双方 change、查找 changes 中触及某路径的 Dirty workspace、按 `last_sync` 找未同步项，以及原子提交一次冲突解决。[sync_conflicts.uid](../examples/sync_conflicts.uid) 已用同一个 `Conflict` constructor 的三个互补嵌套分支完整覆盖 local change 并派生类型化标签；list `any` 和 option helper 仍由 #36 跟踪，条件更新由 #15 跟踪。
+常见查询是列出全部 Conflict 并提取双方 change、查找 changes 中触及某路径的 Dirty workspace、按 `last_sync` 找未同步项，以及原子提交一次冲突解决。[sync_conflicts.uid](../examples/sync_conflicts.uid) 已用同一个 `Conflict` constructor 的三个互补嵌套分支完整覆盖 local change 并派生类型化标签；`Dirty {changes}` 的 condition 可用 `any changes (change -> change == Added {path = $path, hash = $hash})`，`is_none last_sync` 可检查未同步状态。条件 update 已复用同一表达式。
 
 ## 5. Session、缓存与功能开关
 
@@ -160,7 +167,7 @@ type Session =
 
 高频操作是按 key get、原子替换、到期扫描和批量删除。主键读取已有语义，更新/删除和返回值归 #15，`At` 分支与当前时间参数归 #35/#22。unionid v0.1 不内置后台 TTL 时钟；调用方以显式参数发起清理，保证查询仍是确定的。
 
-功能开关可以把规则声明为 list of sum，例如 `User text | Group text | Percentage int`。按 key 读取整个 typed flag 很合适；跨所有 flag 搜索任意嵌套规则依赖 #36，复杂规则求值更适合在应用代码完成。
+功能开关可以把规则声明为 list of sum，例如 `User text | Group text | Percentage int`。按 key 读取整个 typed flag 很合适；固定规则值可用 `contains`，元素 predicate 可用 `any/all`，需要按不同 constructor 提取 payload 的复杂规则求值仍更适合在应用代码完成。
 
 ## 功能覆盖与优先级
 
@@ -169,8 +176,8 @@ type Session =
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
 | 固定 record 的嵌套路径过滤/投影 | 已实现 | option/sum 不能直接穿透 | 已满足基础 |
 | 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载、record/tuple/sum/option 嵌套 pattern，以及同 constructor 多分支的完整覆盖分析 | — | #35，P0 |
-| 从 ADT 分支派生统一结果 | 已实现递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | 通用函数表达式 | #36，P0 |
-| 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length | any/all 元素谓词与 option helper | #36，P0 |
+| 从 ADT 分支派生统一结果 | 已实现递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | 普通非 match derive 与通用纯函数 | #11，P0 |
+| 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none | 通用高阶函数延后 | 已满足 v0.1 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take 已实现 | 索引辅助与大结果预算 | #34 → #16 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec 与 schema-aware prepared query | option helper/元素谓词可继续扩展 | #10/#22/#36 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match target 与 typed simultaneous set；upsert 已实现按主键 insert/replace；三者维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 扩大工作集时直接生成 mutation set | #15，P0 |

@@ -7,6 +7,16 @@ type Payload =
   Sync {source text, target text}
   | Webhook {url text, body text}
 
+type AttemptOutcome =
+  Accepted
+  | Rejected {code int}
+
+type AttemptLog =
+  worker text
+  outcome AttemptOutcome
+  checkpoints list int
+  note option text = None
+
 type JobState =
   Queued {scheduled_at int, attempt int = 0}
   | Running {worker text, started_at int}
@@ -18,6 +28,7 @@ type Job =
   priority int = 0
   created_at int
   tags list text = []
+  history list AttemptLog = []
   payload Payload
   state JobState
 
@@ -29,6 +40,7 @@ insert jobs
   priority = 10
   created_at = 100
   tags = ["sync", "local"]
+  history = [{worker = "worker-0", outcome = Rejected {code = 503}, checkpoints = [1, 3], note = Some "retry"}]
   payload = Sync {source = "inbox", target = "archive"}
   state = Queued {scheduled_at = 180}
 
@@ -60,6 +72,14 @@ insert jobs
   created_at = 130
   payload = Webhook {url = "https://example.test/retry", body = "{}"}
   state = Failed {error = Network {message = "timeout"}, retry_at = Some 240}
+
+from jobs
+filter any history (attempt ->
+  attempt.outcome == AttemptOutcome.Rejected {code = 503}
+  and any attempt.checkpoints (checkpoint -> checkpoint >= 3)
+  and is_some attempt.note
+)
+select {id}
 
 from jobs
 filter match state

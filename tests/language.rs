@@ -520,6 +520,122 @@ fn match_conditions_share_boolean_and_collection_expressions() {
 }
 
 #[test]
+fn list_predicates_cover_nested_adt_fields_scopes_and_empty_lists() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Outcome = Passed | Failed {code int}\ntype Attempt =\n  worker text\n  outcome Outcome\n  checks list int\n  note option text\ntype Job =\n  id int\n  minimum int\n  attempt int\n  attempts list Attempt\ntable jobs Job\ninsert jobs {id = 1, minimum = 3, attempt = 99, attempts = [{worker = \"local\", outcome = Failed {code = 500}, checks = [1, 3], note = Some \"retry\"}, {worker = \"remote\", outcome = Passed, checks = [4], note = None}]}\ninsert jobs {id = 2, minimum = 3, attempt = 99, attempts = [{worker = \"remote\", outcome = Passed, checks = [1, 2], note = None}]}\ninsert jobs {id = 3, minimum = 3, attempt = 99, attempts = []}",
+    );
+
+    let nested = ok(
+        &mut e,
+        "from jobs\nfilter any attempts (attempt ->\n  attempt.worker == \"local\"\n  and attempt.outcome == Outcome.Failed {code = 500}\n  and any attempt.checks (check -> check >= minimum)\n)\nselect {id}",
+    );
+    assert_eq!(nested.rows.len(), 1);
+    assert!(nested.rows[0]["id"].cmp_eq(&Value::Int(1)));
+
+    let all = ok(
+        &mut e,
+        "from jobs\nfilter all attempts (attempt -> length attempt.checks >= 1)\nsort id\nselect {id}",
+    );
+    assert_eq!(all.rows.len(), 3);
+
+    let all_notes = ok(
+        &mut e,
+        "from jobs\nfilter all attempts (attempt -> is_some attempt.note)\nselect {id}",
+    );
+    assert_eq!(all_notes.rows.len(), 1);
+    assert!(all_notes.rows[0]["id"].cmp_eq(&Value::Int(3)));
+
+    let option = ok(
+        &mut e,
+        "from jobs\nfilter any attempts (attempt -> is_some attempt.note)\nselect {id}",
+    );
+    assert_eq!(option.rows.len(), 1);
+    assert!(option.rows[0]["id"].cmp_eq(&Value::Int(1)));
+
+    assert_eq!(
+        ok(
+            &mut e,
+            "from jobs | filter any attempts (attempt -> is_none attempt.note)"
+        )
+        .rows
+        .len(),
+        2
+    );
+
+    assert!(
+        ok(&mut e, "from jobs | filter any attempts (attempt -> true)")
+            .rows
+            .iter()
+            .all(|row| !row["id"].cmp_eq(&Value::Int(3)))
+    );
+
+    let updated = ok(
+        &mut e,
+        "update jobs\nfilter any attempts (attempt -> attempt.worker == \"local\")\nset minimum = minimum + 1",
+    );
+    assert_eq!(updated.affected_rows, Some(1));
+    let row = ok(&mut e, "from jobs | filter id == 1 | select {minimum}");
+    assert!(row.rows[0]["minimum"].cmp_eq(&Value::Int(4)));
+}
+
+#[test]
+fn list_predicates_work_in_match_conditions_and_with_parameters() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Ready {scores list int} | Done\ntype Job =\n  id int\n  state State\ntable jobs Job\ninsert jobs {id = 1, state = Ready {scores = [1, 5]}}\ninsert jobs {id = 2, state = Ready {scores = [1, 2]}}\ninsert jobs {id = 3, state = Done}",
+    );
+    let prepared = e
+        .prepare(
+            "from jobs\nfilter match state\n  Ready {scores} => any scores (score -> score >= $minimum)\n  Done => false\nselect {id}",
+        )
+        .unwrap();
+    assert_eq!(prepared.parameter_types()["minimum"], "int");
+    let result = e.query(
+        &prepared,
+        [("minimum".into(), Value::Int(4))].into_iter().collect(),
+    );
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
+fn list_and_option_predicates_are_checked_before_scanning() {
+    let setup = "type Item = {enabled bool}\ntype Row =\n  count int\n  items list Item\n  maybe option int\ntable rows Row";
+    for (query, code, message) in [
+        (
+            "filter any count (item -> true)",
+            "E_TYPE",
+            "expects a list",
+        ),
+        ("filter any items (item -> item)", "E_TYPE", "must be bool"),
+        (
+            "filter any items (item -> item.missing == true)",
+            "E_FIELD",
+            "unknown field",
+        ),
+        ("filter is_some count", "E_TYPE", "expects an option"),
+        ("filter is_none None", "E_TYPE", "cannot infer"),
+    ] {
+        let mut e = Engine::memory();
+        ok(&mut e, setup);
+        let result = e.execute(&format!("from rows\n{query}"));
+        assert!(!result.ok, "accepted {query}");
+        let error = result.error.unwrap();
+        assert_eq!(error.code, code, "{query}: {error}");
+        assert!(error.message.contains(message), "{query}: {error}");
+    }
+
+    let mut e = Engine::memory();
+    ok(&mut e, setup);
+    let syntax = e.execute("from rows | filter any items (Item -> true)");
+    assert_eq!(syntax.error.unwrap().code, "E_SYNTAX");
+}
+
+#[test]
 fn boolean_expressions_are_checked_before_scanning_empty_tables() {
     let setup = "type State = Ready {urgent bool, attempts int} | Done\ntype Job =\n  priority int\n  archived bool\n  maybe option bool\n  tags list text\n  state State\ntable jobs Job";
     for (query, code, message) in [
