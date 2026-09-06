@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, EnumType, ScalarType, Value};
 use crate::query::{
     CmpOp, DeriveMatch, MatchCondition, MatchPattern, MatchPayload, MatchPredicate, MatchTag,
-    MatchValue,
+    MatchValue, MatchValueField, MatchValuePayload,
 };
 
 /// Bind a parsed match predicate to catalog identities and payload types.
@@ -502,7 +502,92 @@ fn infer_result_type(
     match result {
         MatchValue::Binding(path) => Ok(Some(binding_type(catalog, bindings, path)?.clone())),
         MatchValue::Literal(value) => literal_type(catalog, value),
+        MatchValue::Constructor { name, payload } => {
+            if let Some(definition) = catalog.types.get(name)
+                && matches!(payload, MatchValuePayload::Record(_))
+                && matches!(catalog.underlying(&definition.ty)?, ScalarType::Record(_))
+            {
+                return Ok(Some(ScalarType::Ref(definition.id)));
+            }
+            if let Some((qualifier, _)) = name.rsplit_once('.') {
+                return Ok(catalog
+                    .types
+                    .get(qualifier)
+                    .map(|definition| ScalarType::Ref(definition.id)));
+            }
+            if name == "Some" {
+                return infer_single_payload(catalog, payload, bindings)
+                    .map(|ty| ty.map(|ty| ScalarType::Option(Box::new(ty))));
+            }
+            Ok(None)
+        }
+        MatchValue::Record(fields) => infer_record_type(catalog, fields, bindings),
+        MatchValue::Tuple(values) => {
+            let types = values
+                .iter()
+                .map(|value| infer_result_type(catalog, value, bindings))
+                .collect::<Result<Option<Vec<_>>>>()?;
+            Ok(types.map(ScalarType::Tuple))
+        }
+        MatchValue::List(values) if !values.is_empty() => {
+            let Some(first) = infer_result_type(catalog, &values[0], bindings)? else {
+                return Ok(None);
+            };
+            let rest = values
+                .iter()
+                .skip(1)
+                .map(|value| infer_result_type(catalog, value, bindings))
+                .collect::<Result<Vec<_>>>()?;
+            if rest
+                .iter()
+                .all(|ty| ty.as_ref().is_some_and(|ty| same_type(&first, ty)))
+            {
+                Ok(Some(ScalarType::List(Box::new(first))))
+            } else {
+                Ok(None)
+            }
+        }
+        MatchValue::List(_) => Ok(None),
     }
+}
+
+fn infer_single_payload(
+    catalog: &Catalog,
+    payload: &MatchValuePayload,
+    bindings: &[Column],
+) -> Result<Option<ScalarType>> {
+    match payload {
+        MatchValuePayload::Unit => Ok(None),
+        MatchValuePayload::Record(fields) => infer_record_type(catalog, fields, bindings),
+        MatchValuePayload::Positional(values) if values.len() == 1 => {
+            infer_result_type(catalog, &values[0], bindings)
+        }
+        MatchValuePayload::Positional(_) => Ok(None),
+    }
+}
+
+fn infer_record_type(
+    catalog: &Catalog,
+    fields: &[MatchValueField],
+    bindings: &[Column],
+) -> Result<Option<ScalarType>> {
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    let columns = fields
+        .iter()
+        .map(|field| {
+            Ok(
+                infer_result_type(catalog, &field.value, bindings)?.map(|ty| Column {
+                    name: field.name.clone(),
+                    ty,
+                    default: None,
+                    id: 0,
+                }),
+            )
+        })
+        .collect::<Result<Option<Vec<_>>>>()?;
+    Ok(columns.map(ScalarType::Record))
 }
 
 fn literal_type(catalog: &Catalog, value: &Value) -> Result<Option<ScalarType>> {
@@ -575,7 +660,219 @@ fn bind_result(
             *value = catalog.coerce(value, expected, &format!("derive '{derive_name}' branch"))?;
             Ok(())
         }
+        MatchValue::Constructor { name, payload } => {
+            bind_constructor_result(catalog, derive_name, expected, name, payload, bindings)
+        }
+        MatchValue::Record(fields) => {
+            bind_record_result(catalog, derive_name, expected, fields, bindings)
+        }
+        MatchValue::Tuple(values) => {
+            let ScalarType::Tuple(items) = catalog.underlying(expected)? else {
+                return Err(result_type_error(catalog, derive_name, expected, "tuple"));
+            };
+            if values.len() != items.len() {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!(
+                        "derive '{derive_name}' branch constructs a tuple with {} item(s), expected {}",
+                        values.len(),
+                        items.len()
+                    ),
+                ));
+            }
+            for (value, ty) in values.iter_mut().zip(items) {
+                bind_result(catalog, derive_name, ty, value, bindings)?;
+            }
+            Ok(())
+        }
+        MatchValue::List(values) => {
+            let ScalarType::List(item) = catalog.underlying(expected)? else {
+                return Err(result_type_error(catalog, derive_name, expected, "list"));
+            };
+            for value in values {
+                bind_result(catalog, derive_name, item, value, bindings)?;
+            }
+            Ok(())
+        }
     }
+}
+
+fn bind_constructor_result(
+    catalog: &Catalog,
+    derive_name: &str,
+    expected: &ScalarType,
+    name: &str,
+    payload: &mut MatchValuePayload,
+    bindings: &[Column],
+) -> Result<()> {
+    if let ScalarType::Ref(id) = expected {
+        let definition = catalog.definition(*id)?;
+        if definition.name == name
+            && matches!(catalog.underlying(&definition.ty)?, ScalarType::Record(_))
+        {
+            let MatchValuePayload::Record(fields) = payload else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!("named record '{name}' requires a record value"),
+                ));
+            };
+            return bind_record_result(catalog, derive_name, expected, fields, bindings);
+        }
+    }
+
+    match catalog.underlying(expected)? {
+        ScalarType::Option(item) => match name {
+            "None" => bind_value_payload(catalog, derive_name, &[], payload, "None", bindings),
+            "Some" => bind_value_payload(
+                catalog,
+                derive_name,
+                std::slice::from_ref(item.as_ref()),
+                payload,
+                "Some",
+                bindings,
+            ),
+            _ => Err(Error::new(
+                "E_TYPE",
+                format!(
+                    "derive '{derive_name}' branch constructs '{name}', expected {}",
+                    catalog.describe(expected)
+                ),
+            )),
+        },
+        ScalarType::Enum(enum_type) => {
+            let source = MatchSource::Enum(enum_type.clone());
+            let (_, argument_types, display_name) =
+                resolve_constructor(catalog, &source, derive_name, name)?;
+            bind_value_payload(
+                catalog,
+                derive_name,
+                &argument_types,
+                payload,
+                &display_name,
+                bindings,
+            )
+        }
+        _ => Err(result_type_error(
+            catalog,
+            derive_name,
+            expected,
+            &format!("constructor '{name}'"),
+        )),
+    }
+}
+
+fn bind_value_payload(
+    catalog: &Catalog,
+    derive_name: &str,
+    argument_types: &[ScalarType],
+    payload: &mut MatchValuePayload,
+    constructor: &str,
+    bindings: &[Column],
+) -> Result<()> {
+    match payload {
+        MatchValuePayload::Unit if argument_types.is_empty() => Ok(()),
+        MatchValuePayload::Unit => Err(Error::new(
+            "E_TYPE",
+            format!(
+                "constructor '{constructor}' expects {} argument(s), got 0",
+                argument_types.len()
+            ),
+        )),
+        MatchValuePayload::Record(fields) => {
+            let [record_type] = argument_types else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!("constructor '{constructor}' does not have one record argument"),
+                ));
+            };
+            bind_record_result(catalog, derive_name, record_type, fields, bindings)
+        }
+        MatchValuePayload::Positional(values) => {
+            if values.len() != argument_types.len() {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!(
+                        "constructor '{constructor}' expects {} argument(s), got {}",
+                        argument_types.len(),
+                        values.len()
+                    ),
+                ));
+            }
+            for (value, ty) in values.iter_mut().zip(argument_types) {
+                bind_result(catalog, derive_name, ty, value, bindings)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn bind_record_result(
+    catalog: &Catalog,
+    derive_name: &str,
+    expected: &ScalarType,
+    fields: &mut Vec<MatchValueField>,
+    bindings: &[Column],
+) -> Result<()> {
+    let ScalarType::Record(definitions) = catalog.underlying(expected)? else {
+        return Err(result_type_error(catalog, derive_name, expected, "record"));
+    };
+    let mut supplied = std::mem::take(fields);
+    let mut ordered = Vec::with_capacity(definitions.len());
+    for definition in definitions {
+        if let Some(index) = supplied
+            .iter()
+            .position(|field| field.name == definition.name)
+        {
+            let mut field = supplied.remove(index);
+            bind_result(
+                catalog,
+                derive_name,
+                &definition.ty,
+                &mut field.value,
+                bindings,
+            )?;
+            ordered.push(field);
+        } else if let Some(default) = &definition.default {
+            ordered.push(MatchValueField {
+                name: definition.name.clone(),
+                value: MatchValue::Literal(default.clone()),
+            });
+        } else {
+            return Err(Error::new(
+                "E_FIELD",
+                format!(
+                    "derive '{derive_name}' branch is missing required field '{}'",
+                    definition.name
+                ),
+            ));
+        }
+    }
+    if let Some(field) = supplied.first() {
+        return Err(Error::new(
+            "E_FIELD",
+            format!(
+                "derive '{derive_name}' branch contains unknown field '{}'",
+                field.name
+            ),
+        ));
+    }
+    *fields = ordered;
+    Ok(())
+}
+
+fn result_type_error(
+    catalog: &Catalog,
+    derive_name: &str,
+    expected: &ScalarType,
+    actual: &str,
+) -> Error {
+    Error::new(
+        "E_TYPE",
+        format!(
+            "derive '{derive_name}' branch constructs {actual}, expected {}",
+            catalog.describe(expected)
+        ),
+    )
 }
 
 fn binding_type<'a>(
@@ -647,6 +944,7 @@ pub(crate) fn evaluate(row: &BTreeMap<String, Value>, pred: &MatchPredicate) -> 
 }
 
 pub(crate) fn evaluate_derive(
+    catalog: &Catalog,
     row: &BTreeMap<String, Value>,
     derive: &DeriveMatch,
 ) -> Result<Value> {
@@ -658,18 +956,175 @@ pub(crate) fn evaluate_derive(
     })?;
     for arm in &derive.arms {
         if let Some(bindings) = match_bindings(value, &arm.pattern) {
-            return match &arm.result {
-                MatchValue::Binding(path) => binding_value(&bindings, path)
-                    .cloned()
-                    .ok_or_else(|| Error::new("E_MATCH", format!("missing binding '{path}'"))),
-                MatchValue::Literal(value) => Ok(value.clone()),
-            };
+            let output_type = derive
+                .output_type
+                .as_ref()
+                .ok_or_else(|| Error::new("E_TYPE", "derived match has no bound output type"))?;
+            let raw = evaluate_result(catalog, output_type, &bindings, &arm.result)?;
+            return catalog.coerce(
+                &raw,
+                output_type,
+                &format!("derive '{}' result", derive.name),
+            );
         }
     }
     Err(Error::new(
         "E_MATCH",
         "exhaustive match did not select a branch",
     ))
+}
+
+fn evaluate_result(
+    catalog: &Catalog,
+    expected: &ScalarType,
+    bindings: &BTreeMap<&str, &Value>,
+    result: &MatchValue,
+) -> Result<Value> {
+    match result {
+        MatchValue::Binding(path) => binding_value(bindings, path)
+            .cloned()
+            .ok_or_else(|| Error::new("E_MATCH", format!("missing binding '{path}'"))),
+        MatchValue::Literal(value) => Ok(value.clone()),
+        MatchValue::Constructor { name, payload } => {
+            if let ScalarType::Ref(id) = expected {
+                let definition = catalog.definition(*id)?;
+                if definition.name == *name
+                    && matches!(catalog.underlying(&definition.ty)?, ScalarType::Record(_))
+                {
+                    let MatchValuePayload::Record(fields) = payload else {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!("named record '{name}' requires a record value"),
+                        ));
+                    };
+                    return evaluate_record(catalog, expected, bindings, fields);
+                }
+            }
+            match catalog.underlying(expected)? {
+                ScalarType::Option(item) => {
+                    let argument_types = if name == "None" {
+                        Vec::new()
+                    } else if name == "Some" {
+                        vec![item.as_ref().clone()]
+                    } else {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!("invalid option constructor '{name}' during execution"),
+                        ));
+                    };
+                    Ok(Value::Enum(crate::model::EnumValue {
+                        variant: name.clone(),
+                        args: evaluate_value_payload(catalog, &argument_types, bindings, payload)?,
+                        id: 0,
+                    }))
+                }
+                ScalarType::Enum(enum_type) => {
+                    let source = MatchSource::Enum(enum_type.clone());
+                    let (_, argument_types, _) =
+                        resolve_constructor(catalog, &source, "derive result", name)?;
+                    Ok(Value::Enum(crate::model::EnumValue {
+                        variant: name.clone(),
+                        args: evaluate_value_payload(catalog, &argument_types, bindings, payload)?,
+                        id: 0,
+                    }))
+                }
+                _ => Err(Error::new(
+                    "E_TYPE",
+                    format!("invalid constructor '{name}' during execution"),
+                )),
+            }
+        }
+        MatchValue::Record(fields) => evaluate_record(catalog, expected, bindings, fields),
+        MatchValue::Tuple(values) => {
+            let ScalarType::Tuple(items) = catalog.underlying(expected)? else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    "invalid tuple result during execution",
+                ));
+            };
+            Ok(Value::Tuple(
+                values
+                    .iter()
+                    .zip(items)
+                    .map(|(value, ty)| evaluate_result(catalog, ty, bindings, value))
+                    .collect::<Result<_>>()?,
+            ))
+        }
+        MatchValue::List(values) => {
+            let ScalarType::List(item) = catalog.underlying(expected)? else {
+                return Err(Error::new("E_TYPE", "invalid list result during execution"));
+            };
+            Ok(Value::List(
+                values
+                    .iter()
+                    .map(|value| evaluate_result(catalog, item, bindings, value))
+                    .collect::<Result<_>>()?,
+            ))
+        }
+    }
+}
+
+fn evaluate_value_payload(
+    catalog: &Catalog,
+    argument_types: &[ScalarType],
+    bindings: &BTreeMap<&str, &Value>,
+    payload: &MatchValuePayload,
+) -> Result<Vec<Value>> {
+    match payload {
+        MatchValuePayload::Unit => Ok(Vec::new()),
+        MatchValuePayload::Record(fields) => {
+            let [record_type] = argument_types else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    "invalid record constructor result during execution",
+                ));
+            };
+            Ok(vec![evaluate_record(
+                catalog,
+                record_type,
+                bindings,
+                fields,
+            )?])
+        }
+        MatchValuePayload::Positional(values) => values
+            .iter()
+            .zip(argument_types)
+            .map(|(value, ty)| evaluate_result(catalog, ty, bindings, value))
+            .collect(),
+    }
+}
+
+fn evaluate_record(
+    catalog: &Catalog,
+    expected: &ScalarType,
+    bindings: &BTreeMap<&str, &Value>,
+    fields: &[MatchValueField],
+) -> Result<Value> {
+    let ScalarType::Record(definitions) = catalog.underlying(expected)? else {
+        return Err(Error::new(
+            "E_TYPE",
+            "invalid record result during execution",
+        ));
+    };
+    let values = fields
+        .iter()
+        .map(|field| {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == field.name)
+                .ok_or_else(|| {
+                    Error::new(
+                        "E_FIELD",
+                        format!("invalid result field '{}' during execution", field.name),
+                    )
+                })?;
+            Ok((
+                field.name.clone(),
+                evaluate_result(catalog, &definition.ty, bindings, &field.value)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    Ok(Value::Record(values))
 }
 
 fn match_bindings<'p, 'v>(

@@ -5,8 +5,8 @@ use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
     CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchCondition, MatchField, MatchPattern,
-    MatchPayload, MatchPredicate, MatchValue, MatchValueArm, Pipeline, Predicate, SortKey, Stage,
-    Statement,
+    MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField, MatchValuePayload,
+    Pipeline, Predicate, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -1065,12 +1065,123 @@ impl Parser {
     }
 
     fn match_value(&mut self) -> Result<MatchValue> {
-        if matches!(self.kind(), Kind::Ident(name) if name.starts_with(|ch: char| ch.is_ascii_lowercase()) && name != "true" && name != "false")
-        {
-            Ok(MatchValue::Binding(self.path()?))
-        } else {
-            Ok(MatchValue::Literal(self.value(0)?))
+        self.match_value_expression_value(0)
+    }
+
+    fn match_value_expression_value(&mut self, depth: usize) -> Result<MatchValue> {
+        self.depth(depth)?;
+        match self.kind().clone() {
+            Kind::Text(_) | Kind::Number(_) => Ok(MatchValue::Literal(self.value(depth)?)),
+            Kind::Ident(name) if matches!(name.as_str(), "true" | "false" | "null") => {
+                Ok(MatchValue::Literal(self.value(depth)?))
+            }
+            Kind::Ident(name) => {
+                self.bump();
+                if name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+                    self.match_value_constructor(name, depth + 1)
+                } else {
+                    let mut path = name;
+                    while self.eat(Kind::Dot) {
+                        path.push('.');
+                        path.push_str(&self.identifier()?);
+                    }
+                    Ok(MatchValue::Binding(path))
+                }
+            }
+            Kind::Open('{') => {
+                self.bump();
+                Ok(MatchValue::Record(self.match_value_fields(depth + 1)?))
+            }
+            Kind::Open('[') => {
+                self.bump();
+                let mut values = Vec::new();
+                self.newlines();
+                while *self.kind() != Kind::Close(']') {
+                    values.push(self.match_value_expression_value(depth + 1)?);
+                    self.newlines();
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                    self.newlines();
+                }
+                self.expect(Kind::Close(']'))?;
+                Ok(MatchValue::List(values))
+            }
+            Kind::Open('(') => {
+                self.bump();
+                self.newlines();
+                let first = self.match_value_expression_value(depth + 1)?;
+                self.newlines();
+                if !self.eat(Kind::Comma) {
+                    self.expect(Kind::Close(')'))?;
+                    return Ok(first);
+                }
+                let mut values = vec![first];
+                self.newlines();
+                while *self.kind() != Kind::Close(')') {
+                    values.push(self.match_value_expression_value(depth + 1)?);
+                    self.newlines();
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                    self.newlines();
+                }
+                self.expect(Kind::Close(')'))?;
+                Ok(MatchValue::Tuple(values))
+            }
+            _ => Err(self.error("expected a binding or value expression")),
         }
+    }
+
+    fn match_value_constructor(&mut self, mut name: String, depth: usize) -> Result<MatchValue> {
+        while self.eat(Kind::Dot) {
+            name.push('.');
+            name.push_str(&self.identifier()?);
+        }
+        let payload = if self.eat(Kind::Open('{')) {
+            MatchValuePayload::Record(self.match_value_fields(depth + 1)?)
+        } else {
+            let mut values = Vec::new();
+            while matches!(
+                self.kind(),
+                Kind::Ident(_)
+                    | Kind::Number(_)
+                    | Kind::Text(_)
+                    | Kind::Open('(')
+                    | Kind::Open('[')
+            ) {
+                values.push(self.match_value_expression_value(depth + 1)?);
+            }
+            if values.is_empty() {
+                MatchValuePayload::Unit
+            } else {
+                MatchValuePayload::Positional(values)
+            }
+        };
+        Ok(MatchValue::Constructor { name, payload })
+    }
+
+    fn match_value_fields(&mut self, depth: usize) -> Result<Vec<MatchValueField>> {
+        self.depth(depth)?;
+        let mut fields = Vec::new();
+        let mut seen = BTreeSet::new();
+        self.newlines();
+        while *self.kind() != Kind::Close('}') {
+            let name = self.identifier()?;
+            if !seen.insert(name.clone()) {
+                return Err(self.error(format!("duplicate value field '{name}'")));
+            }
+            self.expect(Kind::Op("=".into()))?;
+            let value = self.match_value_expression_value(depth + 1)?;
+            fields.push(MatchValueField { name, value });
+            self.newlines();
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+            self.newlines();
+        }
+        self.expect(Kind::Close('}'))?;
+        Ok(fields)
     }
 
     fn match_condition(&mut self) -> Result<MatchCondition> {

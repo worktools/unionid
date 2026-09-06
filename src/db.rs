@@ -359,7 +359,7 @@ impl Database {
                 }
                 Stage::DeriveMatch(derive) => {
                     for row in &mut rows {
-                        let value = crate::matching::evaluate_derive(row, &derive)?;
+                        let value = crate::matching::evaluate_derive(&self.catalog, row, &derive)?;
                         row.insert(derive.name.clone(), value);
                     }
                 }

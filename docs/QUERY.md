@@ -32,7 +32,7 @@ take 20
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` | 未实现 | #10、#22 |
-| ADT 派生列 | `derive x = match ...` | 已实现递归 pattern，分支返回 binding 或 typed literal | #35/#36 增加新值构造和通用表达式 |
+| ADT 派生列 | `derive x = match ...` | 已实现递归 pattern 与 option/sum/product/list 值构造 | #35 完善穷尽分析；#36 增加布尔/算术/函数表达式 |
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 未实现 | #36 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
@@ -74,7 +74,13 @@ derive-match      = "derive" identifier "=" nested-match-expression
 nested-match-expression = match-expression | newline indent match-expression dedent
 match-expression  = "match" field-path newline indent match-value-arm+ dedent
 match-value-arm   = arm-pattern "=>" match-value newline?
-match-value       = binding-path | literal
+match-value       = binding-path | literal | constructor-value | record-value | tuple-value | list-value
+constructor-value = qualified-variant (record-value | value-argument*)?
+value-argument    = binding-path | literal | "(" match-value ")" | tuple-value | list-value
+record-value      = "{" value-field ("," value-field)* ","? "}"
+value-field       = identifier "=" match-value
+tuple-value       = "(" match-value "," (match-value ("," match-value)*)? ")"
+list-value        = "[" (match-value ("," match-value)* ","?)? "]"
 select            = "select" "{" field-path ("," field-path)* ","? "}"
 sort              = "sort" sort-key | "sort" "{" sort-key ("," sort-key)* ","? "}"
 sort-key          = "-"? field-path
@@ -183,13 +189,13 @@ take 1
 
 ## ADT 派生列
 
-`derive name = match ...` 解构一个 sum/option，并把所有分支归一成一个有静态类型的新字段：
+`derive name = match ...` 解构一个 sum/option，并把所有分支归一成一个有静态类型的新字段。分支可以直接从 binding 构造新值：
 
 ```text
 from jobs
 derive retry_at =
   match state
-    Failed {retry_at, ..} => retry_at
+    Failed {retry_at = Some at, ..} => Some at
     _ => None
 filter retry_at == Some 30
 select {id, retry_at}
@@ -197,9 +203,11 @@ select {id, retry_at}
 
 `match` 可以与 `=` 写在同一行，也可像上例多缩进一层。派生字段追加到当前 schema，后续 filter、derive、select 和 sort 都可以引用它；名称与已有字段冲突时拒绝。
 
-当前分支结果可以是一个局部 binding（含嵌套 record 路径）或完整 literal。引擎先从 binding、primitive literal 或限定 constructor 推导一个结果类型，再按该类型检查全部分支；`None`、空 list/record 等不能单独确定类型，但可在其他分支已经给出类型时使用。不同命名类型不会因结构相同而统一。
+当前分支结果可以是局部 binding（含嵌套 record 路径）、literal，或递归的 constructor/record/tuple/list 值。空格表示 constructor 应用，例如 `Some at`；位置参数本身是复合值时用括号划定边界，例如 `Display.Retrying (Summary {label = message})`。命名 record 可写成 `Summary {label = message}`，省略字段会使用其 schema 默认值；缺少必填字段和未知字段仍报错。
 
-分支必须穷尽且结果类型一致，这些检查在扫描前完成。pattern 可以递归解构 record、tuple、sum 和 option；当前不能在结果中进行算术/函数调用，也不能用 binding 构造新的 record/sum，例如返回 `Some at` 会等 #36 的统一表达式 IR。为同一顶层 constructor 写多个互补嵌套分支和 prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
+引擎先从 binding、primitive literal、`Some value`、结构化 product 或限定 constructor 推导结果类型，再按该类型检查全部分支。`None`、空 list/record 和未限定的普通 sum constructor 不能单独确定类型，但可在其他分支已经给出类型时使用；需要主动确定命名 sum 时写 `Type.Variant`，命名 record 写 `TypeName {...}`。不同命名类型不会因结构相同而统一。
+
+分支必须穷尽且结果类型一致，constructor 归属、参数数量和每个嵌套值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option；结果当前不支持比较、布尔组合、算术或函数调用，这些由 #36 的通用表达式继续扩展。为同一顶层 constructor 写多个互补嵌套分支和 prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
 
 ## 投影、排序与截取
 
@@ -284,7 +292,7 @@ filter match state
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 穷尽性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*` |
-| ADT 派生 | 测试内脚本 | 递归 sum/option/record/tuple pattern、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*` |
+| ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。

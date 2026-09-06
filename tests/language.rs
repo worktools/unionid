@@ -961,6 +961,100 @@ fn nested_patterns_are_typed_and_refutable_on_empty_tables() {
 }
 
 #[test]
+fn derive_match_constructs_named_adt_values_from_bindings() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Failed {message text, retry_at option int} | Done\ntype Summary =\n  label text\n  retry_at option int = None\ntype Display = Retrying(Summary) | Complete\ntype Job =\n  id int\n  state State\ntable jobs Job\ninsert jobs {id = 1, state = Failed {message = \"network\", retry_at = Some 30}}\ninsert jobs {id = 2, state = Done}",
+    );
+    let result = ok(
+        &mut e,
+        "from jobs\nderive retry_at =\n  match state\n    Failed {retry_at = Some at, ..} => Some at\n    _ => None\nderive summary =\n  match state\n    Failed {message, retry_at} => Summary {label = message, retry_at = retry_at}\n    Done => Summary {label = \"done\"}\nderive display =\n  match state\n    Failed {message, retry_at} => Display.Retrying (Summary {label = message, retry_at = retry_at})\n    Done => Complete\nfilter retry_at == Some 30\nfilter summary == {label = \"network\", retry_at = Some 30}\nfilter display == Display.Retrying({label = \"network\", retry_at = Some 30})\nselect {id, retry_at, summary, display}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert_eq!(
+        result
+            .columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.ty.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("id", "int"),
+            ("retry_at", "option int"),
+            ("summary", "Summary"),
+            ("display", "Display"),
+        ]
+    );
+}
+
+#[test]
+fn derive_match_constructs_structural_product_and_list_values() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Failed {message text, retry_at option int} | Done\ntype Job =\n  id int\n  state State\ntable jobs Job\ninsert jobs {id = 1, state = Failed {message = \"network\", retry_at = Some 30}}\ninsert jobs {id = 2, state = Done}",
+    );
+    let result = ok(
+        &mut e,
+        "from jobs\nderive detail =\n  match state\n    Failed {message, retry_at = Some at} => {label = message, attempts = [at], pair = (at, message)}\n    _ => {label = \"done\", attempts = [], pair = (0, \"done\")}\nsort id\nselect {id, detail}",
+    );
+    let Value::Record(first) = result.rows[0]["detail"].unwrapped() else {
+        panic!("detail should be a record");
+    };
+    assert!(first["label"].cmp_eq(&Value::Text("network".into())));
+    assert!(first["attempts"].cmp_eq(&Value::List(vec![Value::Int(30)])));
+    assert!(first["pair"].cmp_eq(&Value::Tuple(vec![
+        Value::Int(30),
+        Value::Text("network".into())
+    ])));
+    let Value::Record(second) = result.rows[1]["detail"].unwrapped() else {
+        panic!("detail should be a record");
+    };
+    assert!(second["attempts"].cmp_eq(&Value::List(Vec::new())));
+}
+
+#[test]
+fn constructed_match_results_are_checked_on_empty_tables() {
+    let setup = "type State = Failed {message text, retry_at option int} | Done\ntype Summary =\n  label text\n  retry_at option int = None\ntype Other =\n  label text\n  retry_at option int = None\ntype Display = Retrying(Summary) | Complete\ntype Job =\n  state State\ntable jobs Job";
+    for (query, expected) in [
+        (
+            "Failed {retry_at, ..} => retry_at\n    Done => Some \"wrong\"",
+            "expected int",
+        ),
+        (
+            "Failed {message, ..} => Summary {retry_at = None}\n    Done => Summary {label = \"done\"}",
+            "missing required field 'label'",
+        ),
+        (
+            "Failed {message, ..} => Display.Retrying\n    Done => Display.Complete",
+            "expects 1 argument(s), got 0",
+        ),
+        (
+            "Failed {message, ..} => Some missing\n    Done => None",
+            "unknown match binding 'missing'",
+        ),
+        ("Failed {..} => {}\n    Done => {}", "cannot infer type"),
+        (
+            "Failed {message, ..} => Summary {label = message}\n    Done => Other {label = \"done\"}",
+            "expected Summary",
+        ),
+    ] {
+        let mut engine = Engine::memory();
+        ok(&mut engine, setup);
+        let result = engine.execute(&format!(
+            "from jobs\nderive value =\n  match state\n    {query}"
+        ));
+        assert!(!result.ok, "accepted {query}");
+        assert!(
+            result.message.contains(expected),
+            "{}: {query}",
+            result.message
+        );
+    }
+}
+
+#[test]
 fn match_obeys_pipeline_scope_and_layout_boundaries() {
     let mut e = Engine::memory();
     ok(
