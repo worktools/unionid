@@ -2,7 +2,7 @@
 
 本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)。
 
-当前包含类型与表声明、insert/upsert/update/delete、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、普通与 ADT `derive`、group/aggregate、select、sort 和 take。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、insert/upsert/update/delete、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort 和 take。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
 ## 类型、表与值
 
@@ -72,6 +72,7 @@ take 20
 | 模式过滤 | `filter match state` | 按 sum 变体及其 record 负载判断 |
 | 普通派生 | `derive score = priority + bonus` | 产生 scalar 或 bool typed 列并加入后续 stage 作用域 |
 | ADT 派生 | `derive label = match state ...` | 穷尽解构 sum/option，追加统一类型的结果列 |
+| 局部定义 | `let retryable = attempt -> attempt < 3` | 定义常量或有类型、非递归纯函数，供后续 stage 展开复用 |
 | 汇总 | `aggregate` / `group state` | count/sum/min/max；分组键保留完整 ADT 类型和值 |
 | 投影 | `select {id, owner.email}` | 保留列，响应按声明的列顺序展示 |
 | 排序 | `sort id` / `sort {-priority, created_at, id}` | 单列或多列词典序；支持 int、float、text |
@@ -80,7 +81,9 @@ take 20
 
 支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减，复杂算术可在括号内换行。运算数必须归一为同一个 int 或 float 类型；整数除法向零截断，溢出、除零或非有限 float 返回 `E_ARITH`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 提供有类型、可嵌套且有预算的元素字段谓词，`is_some`/`is_none` 显式检查 Option。函数使用空格传参。复杂条件可放在 `filter` 或 match 分支 `=>` 后的缩进块中，括号内部也可跨行；混用 `and` 与 `or` 时规范写法加括号明确分组。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；跨请求分页应以唯一主键结束排序。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。
 
-模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。match condition 与普通 filter 共用布尔、集合和数值表达式。`derive name = expression` 直接追加 scalar 或 bool 列；结果保留命名类型，typed 参数在扫描前推导，后续 filter/derive/select/sort 可立即引用。`derive match` 分支还可返回 binding/literal/算术表达式，或用 binding 和算术结果构造 `Some (attempt + 1)`、`State.Done`、`Summary {label = message}`、tuple、record 和 list。查询局部纯函数由 #61 跟踪。
+模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。match condition 与普通 filter 共用布尔、集合和数值表达式。`derive name = expression` 直接追加 scalar 或 bool 列；结果保留命名类型，typed 参数在扫描前推导，后续 filter/derive/select/sort 可立即引用。`derive match` 分支还可返回 binding/literal/算术表达式，或用 binding 和算术结果构造 `Some (attempt + 1)`、`State.Done`、`Summary {label = message}`、tuple、record 和 list。
+
+查询局部定义使用 `let name = expression` 或 `let name = argument -> expression`。多个参数写成 `(left, right) ->`；通常从调用字段推断类型，歧义时使用 `let missing option int = None`、`let present = (value option int) -> is_some value` 这样的字段式注解。调用使用空格，嵌套调用加括号。定义只作用于当前 pipeline 的后续 stage，只能调用更早定义的函数，不支持递归、泛型或函数值；详见[查询局部 let 与纯函数](QUERY.md#查询局部-let-与纯函数)。
 
 未分组 `aggregate` 在空输入上返回一行：count 为 0、sum 为输入数值类型的零、min/max 为 `None`；分组空输入返回零行。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
 
@@ -144,9 +147,9 @@ migration task_state_v2
 
 ## 脚本边界与错误
 
-同层的 `from` / `type` / `table` / `insert` / `upsert` / `update` / `delete` / `migration` / `create` 开始新语句；查询中的同层 `filter/derive/aggregate/group/select/sort/take/limit` 延续读取 pipeline，update 中的同层 `filter/set` 延续修改语句，delete 中的同层 `filter` 延续删除语句。声明体、insert/upsert 的多行 record、migration、嵌套 record、变体负载、filter 条件、match 分支和 group/aggregate block 通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
+同层的 `from` / `type` / `table` / `insert` / `upsert` / `update` / `delete` / `migration` / `create` 开始新语句；查询中的同层 `let/filter/derive/aggregate/group/select/sort/take/limit` 延续读取 pipeline，update 中的同层 `filter/set` 延续修改语句，delete 中的同层 `filter` 延续删除语句。声明体、insert/upsert 的多行 record、migration、嵌套 record、变体负载、filter 条件、match 分支和 group/aggregate block 通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
 
-空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意函数或查询局部 let；`any/all` 只接受内联、非递归、无副作用的元素 predicate，不产生可存储的函数值。
+空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。局部函数只复用当前纯 expression IR；当前不支持全局函数、递归、泛型、高阶函数或持久化闭包。`any/all` 的元素 predicate 与 let 函数都不产生可存储的函数值。
 
 一次 `Engine.execute`、一次 `run` 或一个 TCP 请求是一个原子批次：先解析全部源码，再在候选状态中执行；任一步失败则不发布此次请求的任何修改。成功返回最后一条语句的结果，批次中的查询可以看到前面的写入。当前通过复制内存数据库实现写批次隔离，适合小工作集，尚未优化大批量写入的内存成本。
 

@@ -5,10 +5,10 @@ use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
     Aggregate, AggregateAssignment, AggregateFunction, ArithmeticOp, BoolExpression, CmpOp,
-    DeriveExpression, DeriveMatch, LocatedStatement, MatchArm, MatchField, MatchPattern,
-    MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField, MatchValuePayload,
-    MigrationTransform, Pipeline, ScalarExpression, SchemaMigration, SetAssignment, SortKey, Stage,
-    Statement,
+    DeriveExpression, DeriveMatch, LocalBinding, LocalParameter, LocatedStatement, MatchArm,
+    MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
+    MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
+    SchemaMigration, SetAssignment, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -1172,7 +1172,9 @@ impl Parser {
             if !piped && !newline && !after_layout {
                 break;
             }
-            let stage = if self.word("filter") {
+            let stage = if self.word("let") {
+                Stage::Let(self.local_binding()?)
+            } else if self.word("filter") {
                 self.filter_stage()?
             } else if self.word("derive") {
                 self.bump();
@@ -1304,7 +1306,7 @@ impl Parser {
             } else {
                 if piped {
                     return Err(self.error(
-                        "expected filter / derive / aggregate / group / select / sort / take after '|'",
+                        "expected let / filter / derive / aggregate / group / select / sort / take after '|'",
                     ));
                 }
                 break;
@@ -1317,6 +1319,7 @@ impl Parser {
     fn is_pipeline_stage(&self) -> bool {
         [
             "filter",
+            "let",
             "derive",
             "aggregate",
             "group",
@@ -1376,9 +1379,18 @@ impl Parser {
             let function_name = self.identifier()?;
             let (function, input) = match function_name.as_str() {
                 "count" => (AggregateFunction::Count, None),
-                "sum" => (AggregateFunction::Sum, Some(self.path()?)),
-                "min" => (AggregateFunction::Min, Some(self.path()?)),
-                "max" => (AggregateFunction::Max, Some(self.path()?)),
+                "sum" => (
+                    AggregateFunction::Sum,
+                    Some(self.scalar_expression(0, false)?),
+                ),
+                "min" => (
+                    AggregateFunction::Min,
+                    Some(self.scalar_expression(0, false)?),
+                ),
+                "max" => (
+                    AggregateFunction::Max,
+                    Some(self.scalar_expression(0, false)?),
+                ),
                 _ => {
                     return Err(self.error(format!(
                         "unknown aggregate function '{function_name}'; expected count, sum, min, or max"
@@ -1405,6 +1417,111 @@ impl Parser {
             group_by,
             assignments,
         })
+    }
+
+    fn local_binding(&mut self) -> Result<LocalBinding> {
+        self.expect_word("let")?;
+        let span = self.token().span;
+        let name = self.identifier()?;
+        if !name.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+            return Err(self.error("local binding names must start with a lowercase letter"));
+        }
+        let annotation = if matches!(self.kind(), Kind::Op(operator) if operator == "=") {
+            None
+        } else {
+            Some(self.ty(0)?)
+        };
+        self.expect(Kind::Op("=".into()))?;
+        let parameters = self.local_parameters()?;
+        let nested = *self.kind() == Kind::Newline;
+        if nested {
+            self.block()?;
+        }
+        let expression = self.bool_expression(0, nested)?;
+        if nested {
+            self.expect(Kind::Dedent)?;
+        }
+        Ok(LocalBinding {
+            name,
+            span,
+            annotation,
+            parameters,
+            expression,
+        })
+    }
+
+    fn local_parameters(&mut self) -> Result<Vec<LocalParameter>> {
+        if matches!(self.kind(), Kind::Ident(_))
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| token.kind == Kind::Op("->".into()))
+        {
+            let name = self.local_parameter_name()?;
+            self.expect(Kind::Op("->".into()))?;
+            return Ok(vec![LocalParameter {
+                name,
+                annotation: None,
+            }]);
+        }
+        if *self.kind() != Kind::Open('(') || !self.parenthesized_parameters_have_arrow() {
+            return Ok(Vec::new());
+        }
+        self.bump();
+        self.newlines();
+        let mut parameters = Vec::new();
+        let mut seen = BTreeSet::new();
+        while *self.kind() != Kind::Close(')') {
+            let name = self.local_parameter_name()?;
+            if !seen.insert(name.clone()) {
+                return Err(self.error(format!("duplicate local parameter '{name}'")));
+            }
+            let annotation = if matches!(self.kind(), Kind::Comma | Kind::Close(')')) {
+                None
+            } else {
+                Some(self.ty(0)?)
+            };
+            parameters.push(LocalParameter { name, annotation });
+            self.newlines();
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+            self.newlines();
+        }
+        self.expect(Kind::Close(')'))?;
+        self.expect(Kind::Op("->".into()))?;
+        if parameters.is_empty() {
+            return Err(self.error("local functions require at least one parameter"));
+        }
+        Ok(parameters)
+    }
+
+    fn local_parameter_name(&mut self) -> Result<String> {
+        let name = self.identifier()?;
+        if !name.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+            return Err(self.error("local parameter names must start with a lowercase letter"));
+        }
+        Ok(name)
+    }
+
+    fn parenthesized_parameters_have_arrow(&self) -> bool {
+        let mut depth = 0usize;
+        for position in self.pos..self.tokens.len() {
+            match self.tokens[position].kind {
+                Kind::Open('(') => depth += 1,
+                Kind::Close(')') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self
+                            .tokens
+                            .get(position + 1)
+                            .is_some_and(|token| token.kind == Kind::Op("->".into()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn comparison_operator(&mut self) -> Result<CmpOp> {
@@ -1812,14 +1929,14 @@ impl Parser {
         if self.word("contains") {
             self.bump();
             return Ok(BoolExpression::Contains {
-                collection: self.scalar_expression(depth + 1, false)?,
-                item: self.scalar_expression(depth + 1, false)?,
+                collection: self.scalar_argument(depth + 1, false)?,
+                item: self.scalar_argument(depth + 1, false)?,
             });
         }
         if self.word("any") || self.word("all") {
             let all = self.word("all");
             self.bump();
-            let collection = self.scalar_expression(depth + 1, false)?;
+            let collection = self.scalar_argument(depth + 1, false)?;
             self.expect(Kind::Open('('))?;
             self.newlines();
             let binding = self.identifier()?;
@@ -1964,7 +2081,71 @@ impl Parser {
                 self.scalar_unary(depth + 1, multiline)?,
             )));
         }
+        self.scalar_application(depth, multiline)
+    }
+
+    fn scalar_application(&mut self, depth: usize, multiline: bool) -> Result<ScalarExpression> {
+        let span = self.token().span;
+        let expression = self.scalar_primary(depth, multiline)?;
+        let ScalarExpression::Reference(name) = &expression else {
+            return Ok(expression);
+        };
+        if name.contains('.') || !self.scalar_argument_starts() {
+            return Ok(expression);
+        }
+        let name = name.clone();
+        let mut arguments = Vec::new();
+        while self.scalar_argument_starts() {
+            arguments.push(self.scalar_argument(depth + 1, multiline)?);
+        }
+        Ok(ScalarExpression::Call {
+            name,
+            arguments,
+            span,
+        })
+    }
+
+    fn scalar_argument(&mut self, depth: usize, multiline: bool) -> Result<ScalarExpression> {
+        self.depth(depth)?;
+        if self.eat(Kind::Minus) {
+            return Ok(ScalarExpression::Negate {
+                value: Box::new(self.scalar_argument(depth + 1, multiline)?),
+                ty: None,
+            });
+        }
+        if self.word("length") {
+            self.bump();
+            return Ok(ScalarExpression::Length(Box::new(
+                self.scalar_argument(depth + 1, multiline)?,
+            )));
+        }
         self.scalar_primary(depth, multiline)
+    }
+
+    fn scalar_argument_starts(&self) -> bool {
+        match self.kind() {
+            Kind::Parameter(_)
+            | Kind::Text(_)
+            | Kind::Number(_)
+            | Kind::Open('{')
+            | Kind::Open('[')
+            | Kind::Open('(') => true,
+            Kind::Ident(word) => !matches!(
+                word.as_str(),
+                "and"
+                    | "or"
+                    | "filter"
+                    | "let"
+                    | "derive"
+                    | "aggregate"
+                    | "group"
+                    | "select"
+                    | "sort"
+                    | "take"
+                    | "limit"
+            ),
+            _ => false,
+        }
     }
 
     fn scalar_primary(&mut self, depth: usize, _multiline: bool) -> Result<ScalarExpression> {
@@ -2014,7 +2195,8 @@ impl Parser {
 fn scalar_is_computed(expression: &ScalarExpression) -> bool {
     matches!(
         expression,
-        ScalarExpression::Length(_)
+        ScalarExpression::Call { .. }
+            | ScalarExpression::Length(_)
             | ScalarExpression::Negate { .. }
             | ScalarExpression::Arithmetic { .. }
     )

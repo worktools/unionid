@@ -244,6 +244,16 @@ pub(crate) fn bind_scalar(
                 })?
             }
         }
+        ScalarExpression::Ascribed { value, ty } => {
+            bind_scalar(catalog, scope, value, Some(ty), reference_kind)?;
+            ty.clone()
+        }
+        ScalarExpression::Call { name, .. } => {
+            return Err(Error::new(
+                "E_QUERY",
+                format!("local function '{name}' was not expanded before type checking"),
+            ));
+        }
         ScalarExpression::Length(value) => {
             let ty = bind_scalar(catalog, scope, value, None, reference_kind)?;
             if !matches!(
@@ -320,6 +330,11 @@ pub(crate) fn infer_scalar(
         )),
         ScalarExpression::Parameter { ty, .. } => Ok(ty.clone()),
         ScalarExpression::Literal(value) => infer_literal(value),
+        ScalarExpression::Ascribed { ty, .. } => Ok(Some(ty.clone())),
+        ScalarExpression::Call { name, .. } => Err(Error::new(
+            "E_QUERY",
+            format!("local function '{name}' was not expanded before type inference"),
+        )),
         ScalarExpression::Length(value) => {
             if let Some(ty) = infer_scalar(catalog, scope, value, reference_kind)?
                 && !matches!(
@@ -387,9 +402,10 @@ fn is_constant(expression: &ScalarExpression) -> bool {
         ScalarExpression::Literal(_) => true,
         ScalarExpression::Parameter { .. } => true,
         ScalarExpression::Reference(_) => false,
-        ScalarExpression::Length(value) | ScalarExpression::Negate { value, .. } => {
-            is_constant(value)
-        }
+        ScalarExpression::Call { .. } => false,
+        ScalarExpression::Ascribed { value, .. }
+        | ScalarExpression::Length(value)
+        | ScalarExpression::Negate { value, .. } => is_constant(value),
         ScalarExpression::Arithmetic { left, right, .. } => is_constant(left) && is_constant(right),
     }
 }
@@ -694,6 +710,20 @@ fn evaluate_scalar<'expression, 'values>(
             format!("parameter '${name}' was not bound"),
         )),
         ScalarExpression::Literal(value) => Ok(Some(Evaluated::Expression(value))),
+        ScalarExpression::Ascribed { value, ty } => {
+            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+                return Ok(None);
+            };
+            Ok(Some(Evaluated::Owned(catalog.coerce(
+                value.as_value(),
+                ty,
+                "local function argument",
+            )?)))
+        }
+        ScalarExpression::Call { name, .. } => Err(Error::new(
+            "E_QUERY",
+            format!("local function '{name}' was not expanded before execution"),
+        )),
         ScalarExpression::Length(value) => {
             let Some(value) = evaluate_scalar(catalog, value, values)? else {
                 return Ok(None);

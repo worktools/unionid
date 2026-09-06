@@ -890,6 +890,154 @@ fn grouped_aggregates_support_adt_keys_and_later_stages() {
 }
 
 #[test]
+fn query_local_constants_and_functions_compose_across_core_stages() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Amount = int\ntype Meta = {attempts int}\ntype Row =\n  id int\n  attempts int\n  archived bool\n  amount Amount\n  meta Meta\ntable rows Row\ninsert rows {id = 1, attempts = 1, archived = false, amount = 10, meta = {attempts = 1}}\ninsert rows {id = 2, attempts = 4, archived = false, amount = 20, meta = {attempts = 4}}\ninsert rows {id = 3, attempts = 2, archived = true, amount = 30, meta = {attempts = 2}}",
+    );
+    let result = ok(
+        &mut e,
+        "from rows\nlet max_attempts = 3\nlet visible = not archived\nlet current_meta Meta = meta\nlet retryable = attempt -> attempt < max_attempts\nlet add = (value Amount, bonus Amount) -> value + bonus\nderive can_retry = retryable current_meta.attempts\nderive adjusted = add amount 1\nfilter can_retry and visible\naggregate\n  jobs = count\n  total = sum add adjusted 1",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["jobs"].cmp_eq(&Value::Int(1)));
+    assert!(result.rows[0]["total"].unwrapped().cmp_eq(&Value::Int(12)));
+    assert_eq!(result.columns[1].ty, "Amount");
+}
+
+#[test]
+fn local_functions_capture_lexically_shadow_and_do_not_escape_a_pipeline() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Row = {id int, threshold int}\ntable rows Row\ninsert rows {id = 1, threshold = 9}",
+    );
+    let result = ok(
+        &mut e,
+        "from rows\nlet threshold = 2\nlet uses_old = value -> value + threshold\nlet threshold = 4\nderive old = uses_old id\nderive current = id + threshold\nselect {old, current}\n\nfrom rows\nderive outside = id + threshold\nselect {outside}",
+    );
+    assert!(result.rows[0]["outside"].cmp_eq(&Value::Int(10)));
+
+    let first = ok(
+        &mut e,
+        "from rows\nlet threshold = 2\nlet uses_old = value -> value + threshold\nlet threshold = 4\nlet step = value -> value + 1\nlet captured_step = value -> step value\nlet step = value -> captured_step value + 1\nderive old = uses_old id\nderive current = id + threshold\nderive chain = step id\nselect {old, current, chain}",
+    );
+    assert!(first.rows[0]["old"].cmp_eq(&Value::Int(3)));
+    assert!(first.rows[0]["current"].cmp_eq(&Value::Int(5)));
+    assert!(first.rows[0]["chain"].cmp_eq(&Value::Int(3)));
+}
+
+#[test]
+fn local_functions_use_match_bindings_without_losing_adt_checks() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Waiting | Running {attempt int}\ntype Job = {id int, state State}\ntable jobs Job\ninsert jobs {id = 1, state = Running {attempt = 2}}\ninsert jobs {id = 2, state = Running {attempt = 4}}\ninsert jobs {id = 3, state = Waiting}",
+    );
+    let result = ok(
+        &mut e,
+        "from jobs\nlet retryable = attempt -> attempt < 3\nlet add_one = attempt -> attempt + 1\nfilter match state\n  Running {attempt} => retryable attempt\n  Waiting => false\nderive next =\n  match state\n    Running {attempt} => add_one attempt\n    Waiting => 0\nselect {id, next}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(result.rows[0]["next"].cmp_eq(&Value::Int(3)));
+}
+
+#[test]
+fn local_function_inference_annotations_and_calls_are_bounded() {
+    let setup =
+        "type Row = {id int, label text}\ntable rows Row\ninsert rows {id = 1, label = \"one\"}";
+
+    let mut typed = Engine::memory();
+    ok(&mut typed, setup);
+    let result = ok(
+        &mut typed,
+        "from rows\nlet missing option int = None\nlet present = (value option int) -> is_some value\nlet no_value option int = value -> None\nlet add_one = value -> value + 1\nlet add_two = value -> add_one (add_one value)\nderive inferred = add_two id\nderive absent = present missing\nderive still_missing = no_value id\nselect {inferred, absent, still_missing}",
+    );
+    assert!(result.rows[0]["inferred"].cmp_eq(&Value::Int(3)));
+    assert!(result.rows[0]["absent"].cmp_eq(&Value::Bool(false)));
+    assert!(matches!(
+        result.rows[0]["still_missing"],
+        Value::Option(None)
+    ));
+
+    for (pipeline, code, message) in [
+        (
+            "let later = value -> missing value\nlet missing = value -> value\ntake 0",
+            "E_QUERY",
+            "only earlier definitions",
+        ),
+        (
+            "let recurse = value -> recurse value\ntake 0",
+            "E_QUERY",
+            "cannot call itself",
+        ),
+        (
+            "let pair = (left, right) -> left + right\nderive bad = pair id",
+            "E_QUERY",
+            "expects 2 argument",
+        ),
+        (
+            "let present = value -> is_some value\nderive bad = present None",
+            "E_TYPE",
+            "add a parameter type",
+        ),
+        (
+            "let identity = value -> value\nderive number = identity id\nderive bad = identity label",
+            "E_TYPE",
+            "expected int",
+        ),
+    ] {
+        let mut engine = Engine::memory();
+        ok(&mut engine, setup);
+        let error = engine
+            .execute(&format!("from rows\n{pipeline}"))
+            .error
+            .unwrap();
+        assert_eq!(error.code, code, "{pipeline}: {error}");
+        assert!(error.message.contains(message), "{pipeline}: {error}");
+    }
+
+    let mut deep_source = String::from("from rows\nlet f0 = value -> value");
+    for index in 1..=33 {
+        deep_source.push_str(&format!("\nlet f{index} = value -> f{} value", index - 1));
+    }
+    deep_source.push_str("\nderive result = f33 id");
+    let mut deep = Engine::memory();
+    ok(&mut deep, setup);
+    let error = deep.execute(&deep_source).error.unwrap();
+    assert_eq!(error.code, "E_LIMIT");
+    assert!(error.message.contains("call depth"));
+
+    let mut wide_source = String::from("from rows\nlet f0 = value -> value + 1");
+    for index in 1..=17 {
+        wide_source.push_str(&format!(
+            "\nlet f{index} = value -> f{} value + f{} value",
+            index - 1,
+            index - 1
+        ));
+    }
+    wide_source.push_str("\nderive result = f17 id");
+    let mut wide = Engine::memory();
+    ok(&mut wide, setup);
+    let error = wide.execute(&wide_source).error.unwrap();
+    assert_eq!(error.code, "E_LIMIT");
+    assert!(error.message.contains("expansion"));
+
+    let mut bindings_source = String::from("from rows");
+    for index in 0..=256 {
+        bindings_source.push_str(&format!("\nlet value{index} = {index}"));
+    }
+    bindings_source.push_str("\ntake 0");
+    let mut bindings = Engine::memory();
+    ok(&mut bindings, setup);
+    let error = bindings.execute(&bindings_source).error.unwrap();
+    assert_eq!(error.code, "E_LIMIT");
+    assert!(error.message.contains("local bindings"));
+}
+
+#[test]
 fn aggregates_reject_invalid_types_layout_and_runtime_overflow() {
     let setup = "type Row =\n  id int\n  label text\n  active bool\ntable rows Row";
     for (pipeline, code, message) in [

@@ -185,6 +185,7 @@ pub struct Pipeline {
 
 #[derive(Debug, Clone)]
 pub enum Stage {
+    Let(LocalBinding),
     Filter(BoolExpression),
     FilterMatch(MatchPredicate),
     Derive(DeriveExpression),
@@ -205,7 +206,7 @@ pub struct Aggregate {
 pub struct AggregateAssignment {
     pub name: String,
     pub function: AggregateFunction,
-    pub input: Option<String>,
+    pub input: Option<ScalarExpression>,
     pub output_type: Option<ScalarType>,
 }
 
@@ -215,6 +216,21 @@ pub enum AggregateFunction {
     Sum,
     Min,
     Max,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalBinding {
+    pub name: String,
+    pub span: Span,
+    pub annotation: Option<ScalarType>,
+    pub parameters: Vec<LocalParameter>,
+    pub expression: BoolExpression,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalParameter {
+    pub name: String,
+    pub annotation: Option<ScalarType>,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +372,15 @@ pub enum ScalarExpression {
         ty: Option<ScalarType>,
     },
     Literal(Value),
+    Ascribed {
+        value: Box<ScalarExpression>,
+        ty: ScalarType,
+    },
+    Call {
+        name: String,
+        arguments: Vec<ScalarExpression>,
+        span: Span,
+    },
     Length(Box<ScalarExpression>),
     Negate {
         value: Box<ScalarExpression>,
