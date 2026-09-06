@@ -7,7 +7,9 @@ unionid 的查询从表开始，按书写顺序经过一组 transform：
 ```text
 from tasks
 filter match state
-  Running {attempt, ..} => attempt >= 2
+  Running {attempt, ..} =>
+    attempt >= 2
+    and attempt < 5
   _ => false
 derive state_label =
   match state
@@ -67,9 +69,9 @@ query             = "from" table pipeline-stage*
 pipeline-stage    = newline stage | "|" stage
 stage             = value-filter | match-filter | derive-match | select | sort | take
 
-value-filter      = "filter" bool-expression
+value-filter      = "filter" nested-bool-expression
 match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
-match-arm         = arm-pattern "=>" condition newline?
+match-arm         = arm-pattern "=>" nested-bool-expression newline?
 derive-match      = "derive" identifier "=" nested-match-expression
 nested-match-expression = match-expression | newline indent match-expression dedent
 match-expression  = "match" field-path newline indent match-value-arm+ dedent
@@ -95,7 +97,7 @@ record-pattern    = "{" (field-pattern ("," field-pattern)* ("," "..")? | "..")?
 field-pattern     = identifier ("=" pattern)?
 tuple-pattern     = "(" pattern "," (pattern ("," pattern)*)? ")"
 binding           = lowercase-identifier
-condition         = bool-expression
+nested-bool-expression = bool-expression | newline indent bool-expression dedent
 bool-expression   = or-expression
 or-expression     = and-expression ("or" and-expression)*
 and-expression    = not-expression ("and" not-expression)*
@@ -108,6 +110,39 @@ field-path        = identifier ("." identifier)*
 ```
 
 `=`、`limit` 和不带花括号的 `select id,name` 是兼容入口。新文档和格式化输出应使用 `==`、`take` 与 `select {id, name}`。
+
+复杂条件的规范格式是 `filter` 后缩进一层，每行写一个逻辑项并把 `and` 或 `or` 放在续行开头：
+
+```text
+from jobs
+filter
+  priority >= 10
+  and contains tags "sync"
+  and not archived
+select {id}
+```
+
+混用 `and` 与 `or` 时应加括号直接表达分组，不要求读者仅凭优先级判断：
+
+```text
+filter
+  (urgent or priority >= 50)
+  and contains tags "sync"
+```
+
+括号内部可以跨行，因此更深的组合也能保持一个条件一行：
+
+```text
+filter (
+  urgent
+  or (
+    priority >= 50
+    and not archived
+  )
+)
+```
+
+单个比较或很短的同类组合仍可写在 `filter` 同一行。括号用于说明分组，record/list/tuple 继续使用各自已有的必要标点；语言不会为了追求“零符号”而隐藏结构。
 
 ## 执行模型
 
@@ -143,8 +178,12 @@ from tasks | filter id > 1 | take 1
 
 ```text
 from jobs
-filter not archived and priority >= threshold
-filter contains tags "sync" or length tags == 0
+filter
+  not archived
+  and priority >= threshold
+filter
+  contains tags "sync"
+  or length tags == 0
 select {id, priority}
 ```
 
@@ -155,7 +194,7 @@ select {id, priority}
 - Float 字段可接受能够精确表示的整数字面量；Int 字段不接受浮点字面量。数字不会自动转换成 text。
 - `contains collection item` 只接受 list，并按 list 元素的完整类型化相等语义判断；元素可以是命名 ADT。`length` 接受 list 或 text，分别返回元素数或 Unicode scalar 数。
 - bool 字段可以直接作为条件。其他类型不隐式转换为 bool；option 也不提供 truthiness，必须显式 match。
-- 优先级从高到低为括号／比较／函数、`not`、`and`、`or`。`and` 和 `or` 在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。
+- 优先级从高到低为括号／比较／函数、`not`、`and`、`or`。混用 `and` 与 `or` 的规范源码使用括号明确分组。`and` 和 `or` 在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。
 - 普通字段路径只能穿过 record。variant 和 option 的内容必须用显式模式处理。
 
 如果查询的第一个 stage 是单纯的 `field == literal` 或 `literal == field`，并且该字段有索引，引擎可以直接读取候选行。复合布尔表达式暂时扫描候选表。索引和扫描共用相同的类型化相等规则；是否存在索引不能改变结果。
@@ -179,7 +218,9 @@ select {id, title}
 ```text
 from tasks
 filter match state
-  Running {attempt, ..} => attempt >= 2
+  Running {attempt, ..} =>
+    attempt >= 2
+    and attempt < 5
   _ => false
 select {id}
 take 1
@@ -194,7 +235,7 @@ take 1
 - `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
 - 顶层 `_` 覆盖尚未出现的变体，必须位于最后。没有 `_` 时必须覆盖全部变体。包含嵌套 constructor 的分支只覆盖满足该嵌套模式的值，因此当前需要最后的 `_` 处理其余值；不会把 `Failed {retry_at = Some at, ..}` 误认为覆盖了所有 `Failed`。
 - 构造器由被匹配字段的命名类型确定，也可写成 `State.Running`。其他命名 sum 的同名构造器不会混用。
-- condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`not/and/or`、`contains/length`。绑定只在所属分支内有效。
+- condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`not/and/or`、`contains/length`。复杂 condition 可在 `=>` 后换行并缩进一层；绑定只在所属分支内有效。
 - 每个顶层 constructor 当前最多出现一次。需要为同一个 constructor 写多个嵌套分支的完整穷尽分析仍由 #35 跟踪；现阶段用一个嵌套分支加最终 `_` 表达优先匹配和兜底。
 
 未知构造器、重复分支、通配分支后的不可达分支、遗漏 constructor、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum/option 来源或非 bool 条件返回类型错误。
@@ -253,13 +294,13 @@ take 20
 ## 布局与语句边界
 
 - 顶层 `from` 开始一条查询。同层 `filter`、`derive`、`select`、`sort`、`take` 或兼容的 `limit` 延续当前 pipeline。
-- `filter match` 与 `derive ... match` 的分支通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
+- `filter` 条件块、`filter match`／`derive ... match` 的分支，以及 `=>` 后的 condition 块通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
 - 括号和集合内允许换行。字符串里的 `|`、逗号和 `#` 都是文本，不参与分隔。
 - 同层出现新的 `from`、`type`、`table`、`insert` 或 `create` 时，前一条查询结束并开始新语句。
 - REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分。
 
-当前不支持任意表达式跨行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值或布局嵌套；超限返回受控错误。
+布尔表达式可在 `filter`／`=>` 的缩进块或括号内跨行；标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；超限返回受控错误。
 
 ## 错误与响应
 
