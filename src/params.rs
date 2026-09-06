@@ -108,7 +108,7 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
                 visit_scalar(&assignment.value, visitor);
             }
         }
-        Statement::Delete { target } | Statement::Pipeline(target) => {
+        Statement::Delete { target } | Statement::Explain(target) | Statement::Pipeline(target) => {
             visit_pipeline(target, visitor)
         }
         Statement::Migration { steps, .. } => {
@@ -143,7 +143,7 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
                 visit_scalar_mut(&mut assignment.value, visitor);
             }
         }
-        Statement::Delete { target } | Statement::Pipeline(target) => {
+        Statement::Delete { target } | Statement::Explain(target) | Statement::Pipeline(target) => {
             visit_pipeline_mut(target, visitor)
         }
         Statement::Migration { steps, .. } => {

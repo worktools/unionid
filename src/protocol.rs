@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{QueryResponse, ResponseColumn, SchemaInfo, UpsertAction};
+use crate::db::{QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, UpsertAction};
 use crate::error::Error;
 use crate::model::{EnumValue, Value};
 
@@ -203,6 +203,8 @@ pub struct Response {
     pub affected_rows: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upsert_action: Option<UpsertAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<QueryPlan>,
 }
 
 impl Response {
@@ -227,6 +229,7 @@ impl Response {
             schema: response.schema,
             affected_rows: response.affected_rows,
             upsert_action: response.upsert_action,
+            plan: response.plan,
         }
     }
 

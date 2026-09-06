@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use common::TempDir;
 use unionid::protocol::{Request, Response, VERSION, WireValue};
-use unionid::{Engine, Value};
+use unionid::{Engine, QueryAccessKind, Value};
 
 fn setup() -> Engine {
     let mut engine = Engine::memory();
@@ -100,6 +100,20 @@ fn prepared_query_rejects_schema_changes_and_mutations() {
     let mut params = BTreeMap::new();
     params.insert("id".into(), Value::Int(9_007_199_254_740_993));
     assert!(engine.query(&prepared, params.clone()).ok);
+    let prepared_explain = engine
+        .prepare("explain from tasks | filter id == $id")
+        .unwrap();
+    assert_eq!(prepared_explain.parameter_types()["id"], "int");
+    let explained = engine.query(&prepared_explain, params.clone());
+    assert_eq!(
+        explained.plan.as_ref().unwrap().access.kind,
+        QueryAccessKind::PrimaryKeyLookup
+    );
+    let wire = Response::from_query("explain-1", explained);
+    assert_eq!(
+        wire.plan.as_ref().unwrap().access.kind,
+        QueryAccessKind::PrimaryKeyLookup
+    );
     assert_eq!(
         engine.prepare("delete tasks").unwrap_err().code,
         "E_PREPARE"

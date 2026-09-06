@@ -1,4 +1,4 @@
-use unionid::{Engine, QueryResponse, UpsertAction, Value};
+use unionid::{Engine, QueryAccessKind, QueryResponse, QueryStageKind, UpsertAction, Value};
 
 fn ok(engine: &mut Engine, source: &str) -> QueryResponse {
     let r = engine.execute(source);
@@ -1290,6 +1290,99 @@ fn indexes_on_nested_records_preserve_results() {
         ok(&mut e, "from tasks | filter owner.email == \"absent\"")
             .rows
             .is_empty()
+    );
+}
+
+#[test]
+fn explain_reports_typed_access_without_reordering_pipeline_stages() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type State = Pending | Running {attempt int}\ntype Meta = {owner text}\ntype Task =\n  id int\n  state State\n  meta Meta\n  retry option int\ntable tasks Task\n  key id\ncreate index tasks (meta.owner)\ncreate index tasks (state)\ncreate index tasks (retry)\ninsert tasks {id = 1, state = Pending, meta = {owner = \"alice\"}, retry = None}\ninsert tasks {id = 2, state = Running {attempt = 1}, meta = {owner = \"bob\"}, retry = Some 3}",
+    );
+
+    let primary = ok(
+        &mut engine,
+        "explain\n  from tasks\n  let target int = 2\n  filter id == target\n  select {id, state}",
+    );
+    assert!(primary.rows.is_empty());
+    assert!(primary.columns.is_empty());
+    let plan = primary.plan.unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::PrimaryKeyLookup);
+    assert_eq!(plan.access.index.as_deref(), Some("tasks.id"));
+    assert_eq!(plan.access.condition.as_deref(), Some("id == 2"));
+    assert_eq!(plan.access.estimated_rows, 1);
+    assert_eq!(plan.access.table_rows, 2);
+    assert_eq!(
+        plan.stages
+            .iter()
+            .map(|stage| stage.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            QueryStageKind::Let,
+            QueryStageKind::Filter,
+            QueryStageKind::Select
+        ]
+    );
+    assert_eq!(plan.result_schema[0].name, "id");
+    assert_eq!(plan.result_schema[0].ty, "int");
+    assert_eq!(plan.result_schema[1].name, "state");
+    assert_eq!(plan.result_schema[1].ty, "State");
+
+    let secondary = ok(
+        &mut engine,
+        "explain from tasks | filter meta.owner == \"alice\" | take 1",
+    );
+    let plan = secondary.plan.unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::SecondaryIndexLookup);
+    assert_eq!(plan.access.index.as_deref(), Some("tasks.meta.owner"));
+    assert_eq!(plan.access.estimated_rows, 1);
+
+    let missing = ok(&mut engine, "explain from tasks | filter id == 99");
+    assert_eq!(missing.plan.unwrap().access.estimated_rows, 0);
+
+    let ordered = ok(&mut engine, "explain from tasks | take 1 | filter id == 1");
+    let plan = ordered.plan.unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::FullScan);
+    assert_eq!(plan.access.estimated_rows, 2);
+    assert_eq!(plan.stages[0].kind, QueryStageKind::Take);
+    assert_eq!(plan.stages[1].kind, QueryStageKind::Filter);
+    let projected = ok(
+        &mut engine,
+        "explain from tasks | select {id} | filter id == 1",
+    );
+    assert_eq!(
+        projected.plan.unwrap().access.kind,
+        QueryAccessKind::FullScan
+    );
+
+    let variant = ok(
+        &mut engine,
+        "explain from tasks | filter state == Running {attempt = 1}",
+    );
+    assert_eq!(
+        variant.plan.unwrap().access.kind,
+        QueryAccessKind::SecondaryIndexLookup
+    );
+    assert_eq!(
+        ok(
+            &mut engine,
+            "from tasks | filter state == Running {attempt = 1}"
+        )
+        .rows
+        .len(),
+        1
+    );
+    let option = ok(&mut engine, "explain from tasks | filter retry == None");
+    assert_eq!(
+        option.plan.unwrap().access.kind,
+        QueryAccessKind::SecondaryIndexLookup
+    );
+    assert_eq!(
+        ok(&mut engine, "from tasks | filter retry == None")
+            .rows
+            .len(),
+        1
     );
 }
 

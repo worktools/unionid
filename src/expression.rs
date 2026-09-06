@@ -885,7 +885,13 @@ pub(crate) fn simple_index_equality(expression: &BoolExpression) -> Option<(&str
     else {
         return None;
     };
-    match (left, right) {
+    fn unwrapped(expression: &ScalarExpression) -> &ScalarExpression {
+        match expression {
+            ScalarExpression::Ascribed { value, .. } => unwrapped(value),
+            expression => expression,
+        }
+    }
+    match (unwrapped(left), unwrapped(right)) {
         (ScalarExpression::Reference(path), ScalarExpression::Literal(value))
         | (ScalarExpression::Literal(value), ScalarExpression::Reference(path)) => {
             Some((path, value))
