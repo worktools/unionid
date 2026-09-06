@@ -6,7 +6,8 @@ use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, Scala
 use crate::query::{
     ArithmeticOp, BoolExpression, CmpOp, DeriveMatch, LocatedStatement, MatchArm, MatchField,
     MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm, MatchValueField,
-    MatchValuePayload, Pipeline, ScalarExpression, SetAssignment, SortKey, Stage, Statement,
+    MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression, SchemaMigration,
+    SetAssignment, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -215,7 +216,12 @@ fn lex(source: &str) -> Result<Vec<Token>> {
                 }
                 '-' => {
                     pos += 1;
-                    Kind::Minus
+                    if chars.get(pos) == Some(&'>') {
+                        pos += 1;
+                        Kind::Op("->".into())
+                    } else {
+                        Kind::Minus
+                    }
                 }
                 '*' => {
                     pos += 1;
@@ -374,11 +380,13 @@ impl Parser {
                 self.update()?
             } else if self.word("delete") {
                 self.delete()?
+            } else if self.word("migration") {
+                self.migration()?
             } else if self.word("from") {
                 self.pipeline()?
             } else {
                 return Err(self.error(
-                    "expected type / table / insert / upsert / update / delete / from (or legacy create table/index)",
+                    "expected type / table / insert / upsert / update / delete / migration / from (or legacy create table/index)",
                 ));
             };
             out.push(LocatedStatement { statement, span });
@@ -618,6 +626,246 @@ impl Parser {
             self.expect(Kind::Close(')'))?;
             Ok(Statement::CreateIndex { table, column })
         }
+    }
+
+    fn migration(&mut self) -> Result<Statement> {
+        self.expect_word("migration")?;
+        let name = self.identifier()?;
+        self.block()?;
+        let mut steps = Vec::new();
+        self.newlines();
+        while *self.kind() != Kind::Dedent {
+            steps.push(self.migration_step()?);
+            if *self.kind() == Kind::Dedent {
+                break;
+            }
+            let after_block = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
+            if !after_block {
+                self.expect(Kind::Newline)?;
+            }
+            self.newlines();
+        }
+        self.expect(Kind::Dedent)?;
+        if steps.is_empty() {
+            return Err(self.error("migration requires at least one schema operation"));
+        }
+        Ok(Statement::Migration { name, steps })
+    }
+
+    fn migration_step(&mut self) -> Result<SchemaMigration> {
+        if self.word("add") {
+            self.bump();
+            if self.word("type") {
+                let Statement::DefineType { name, ty } = self.define_type()? else {
+                    unreachable!()
+                };
+                Ok(SchemaMigration::AddType { name, ty })
+            } else if self.word("field") {
+                self.bump();
+                let (owner, name) = self.migration_member("field")?;
+                let ty = self.ty(0)?;
+                self.expect(Kind::Op("=".into()))?;
+                let default = self.value(0)?;
+                Ok(SchemaMigration::AddField {
+                    owner,
+                    column: Column {
+                        name,
+                        ty,
+                        default: Some(default),
+                        id: 0,
+                    },
+                })
+            } else if self.word("index") {
+                self.bump();
+                let (table, column) = self.migration_table_path()?;
+                Ok(SchemaMigration::AddIndex { table, column })
+            } else {
+                self.expect_word("variant")?;
+                let (owner, name) = self.migration_member("variant")?;
+                let args = self.migration_variant_args()?;
+                Ok(SchemaMigration::AddVariant { owner, name, args })
+            }
+        } else if self.word("drop") {
+            self.bump();
+            if self.word("type") {
+                self.bump();
+                Ok(SchemaMigration::DropType {
+                    name: self.identifier()?,
+                })
+            } else if self.word("field") {
+                self.bump();
+                let (owner, field) = self.migration_member("field")?;
+                Ok(SchemaMigration::DropField { owner, field })
+            } else if self.word("default") {
+                self.bump();
+                let (owner, field) = self.migration_member("default")?;
+                Ok(SchemaMigration::DropDefault { owner, field })
+            } else if self.word("index") {
+                self.bump();
+                let (table, column) = self.migration_table_path()?;
+                Ok(SchemaMigration::DropIndex { table, column })
+            } else if self.word("key") {
+                self.bump();
+                Ok(SchemaMigration::DropKey {
+                    table: self.identifier()?,
+                })
+            } else {
+                self.expect_word("variant")?;
+                let (owner, variant) = self.migration_member("variant")?;
+                let transform = self.optional_migration_transform()?;
+                Ok(SchemaMigration::DropVariant {
+                    owner,
+                    variant,
+                    transform,
+                })
+            }
+        } else if self.word("rename") {
+            self.bump();
+            if self.word("type") {
+                self.bump();
+                let from = self.identifier()?;
+                self.expect_word("to")?;
+                Ok(SchemaMigration::RenameType {
+                    from,
+                    to: self.identifier()?,
+                })
+            } else if self.word("field") {
+                self.bump();
+                let (owner, from) = self.migration_member("field")?;
+                self.expect_word("to")?;
+                Ok(SchemaMigration::RenameField {
+                    owner,
+                    from,
+                    to: self.identifier()?,
+                })
+            } else {
+                self.expect_word("variant")?;
+                let (owner, from) = self.migration_member("variant")?;
+                self.expect_word("to")?;
+                Ok(SchemaMigration::RenameVariant {
+                    owner,
+                    from,
+                    to: self.identifier()?,
+                })
+            }
+        } else if self.word("change") {
+            self.bump();
+            if self.word("default") {
+                self.bump();
+                let (owner, field) = self.migration_member("default")?;
+                self.expect_word("to")?;
+                Ok(SchemaMigration::ChangeDefault {
+                    owner,
+                    field,
+                    value: self.value(0)?,
+                })
+            } else if self.word("field") {
+                self.bump();
+                let (owner, field) = self.migration_member("field")?;
+                self.expect_word("to")?;
+                let ty = self.ty(0)?;
+                let transform = self.required_migration_transform()?;
+                Ok(SchemaMigration::ChangeField {
+                    owner,
+                    field,
+                    ty,
+                    transform,
+                })
+            } else {
+                self.expect_word("variant")?;
+                let (owner, variant) = self.migration_member("variant")?;
+                self.expect_word("to")?;
+                let args = self.migration_variant_args()?;
+                let transform = self.required_migration_transform()?;
+                Ok(SchemaMigration::ChangeVariant {
+                    owner,
+                    variant,
+                    args,
+                    transform,
+                })
+            }
+        } else if self.word("set") {
+            self.bump();
+            self.expect_word("key")?;
+            let (table, column) = self.migration_member("key")?;
+            Ok(SchemaMigration::SetKey { table, column })
+        } else {
+            Err(self.error("expected add / drop / rename / change / set in migration"))
+        }
+    }
+
+    fn migration_member(&mut self, kind: &str) -> Result<(String, String)> {
+        let owner = self.identifier()?;
+        self.expect(Kind::Dot)?;
+        let member = self.identifier()?;
+        if self.eat(Kind::Dot) {
+            return Err(self.error(format!(
+                "migration {kind} operations target a direct member of a named type"
+            )));
+        }
+        Ok((owner, member))
+    }
+
+    fn migration_table_path(&mut self) -> Result<(String, String)> {
+        let table = self.identifier()?;
+        self.expect(Kind::Dot)?;
+        Ok((table, self.path()?))
+    }
+
+    fn migration_variant_args(&mut self) -> Result<Vec<ScalarType>> {
+        if self.eat(Kind::Open('{')) {
+            return Ok(vec![ScalarType::Record(self.fields(Kind::Close('}'), 0)?)]);
+        }
+        if self.eat(Kind::Open('(')) {
+            self.newlines();
+            let mut args = Vec::new();
+            while *self.kind() != Kind::Close(')') {
+                args.push(self.ty(0)?);
+                self.newlines();
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+                self.newlines();
+            }
+            self.expect(Kind::Close(')'))?;
+            return Ok(args);
+        }
+        if matches!(self.kind(), Kind::Ident(_) | Kind::Open('(')) && !self.word("using") {
+            return Ok(vec![self.ty(0)?]);
+        }
+        Ok(Vec::new())
+    }
+
+    fn optional_migration_transform(&mut self) -> Result<Option<MigrationTransform>> {
+        let nested_using = *self.kind() == Kind::Newline
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| token.kind == Kind::Indent);
+        if self.word("using") || nested_using {
+            self.required_migration_transform().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn required_migration_transform(&mut self) -> Result<MigrationTransform> {
+        let nested = *self.kind() == Kind::Newline;
+        if nested {
+            self.block()?;
+        }
+        self.expect_word("using")?;
+        let binding = self.identifier()?;
+        if binding != "_" && !binding.starts_with(|ch: char| ch.is_ascii_lowercase()) {
+            return Err(self.error("migration bindings must start with a lowercase letter"));
+        }
+        self.expect(Kind::Op("->".into()))?;
+        let value = self.match_value()?;
+        if nested {
+            self.newlines();
+            self.expect(Kind::Dedent)?;
+        }
+        Ok(MigrationTransform { binding, value })
     }
 
     fn insert(&mut self) -> Result<Statement> {
@@ -1313,9 +1561,12 @@ impl Parser {
             self.expect(Kind::Op("=".into()))?;
             let value = self.match_value_expression_value(depth + 1)?;
             fields.push(MatchValueField { name, value });
-            self.newlines();
-            if !self.eat(Kind::Comma) {
+            if *self.kind() == Kind::Close('}') {
                 break;
+            }
+            let after_block = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
+            if !self.eat(Kind::Comma) && !self.eat(Kind::Newline) && !after_block {
+                return Err(self.error("expected a newline or comma between value fields"));
             }
             self.newlines();
         }

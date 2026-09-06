@@ -53,7 +53,7 @@ cargo run -- run --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 114 项测试通过：lib 单元测试 5 项、`tests/language.rs` 60 项、`tests/storage.rs` 26 项、`tests/migration.rs` 4 项、`tests/interfaces.rs` 11 项、`tests/codec.rs` 8 项，分别验证 Engine 注入提交失败、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、WAL 与 redb 的失败原子性/恢复、多表 schema+DML 与 ledger 保留、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
+当前全部 122 项测试通过：lib 单元测试 5 项、`tests/language.rs` 60 项、`tests/storage.rs` 27 项、`tests/migration.rs` 11 项、`tests/interfaces.rs` 11 项、`tests/codec.rs` 8 项，分别验证 Engine 注入提交失败、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion 与 ledger 保留、migration 历史约束、真实 CLI/TCP/并发请求，以及 ADT 值的稳定编码与损坏拒绝。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
@@ -62,7 +62,7 @@ cargo run --example embedded
 - #2：以当前查询参考完善完整语言 RFC；类型推断、通用函数与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
 - #8/#10/#11/#34–#36：在已实现的默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、typed arithmetic/value construction、多键 sort、范围 take、布尔组合和基础集合函数上继续完善 option/元素谓词、参数和 group/aggregate。#9/#12/#34 已完成；#35 的查询侧只剩 prepared plan 在 schema revision 变化后的重绑定。
 - #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出恢复矩阵和 `check --db` 已接入；继续补真实空间不足／同步故障、恢复时间边界、索引计划及 explain。
-- #17–#20：实现 schema/data migration、ledger、diff、备份还原与显式旧数据转换。
+- #17–#20：显式 schema/data migration 已支持稳定身份 rename、默认回填、typed conversion、嵌套引用扫描和约束/索引重建；继续实现 plan、版本化 ledger runner、diff、备份还原与显式旧数据导入。
 - #21–#24：继续打磨 REPL 历史/补全/格式化、协议、服务预算和正式发布。
 
 GitHub issues 保留各自的完整验收范围；实现了部分能力不等于对应里程碑全部完成。

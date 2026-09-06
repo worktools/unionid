@@ -175,7 +175,7 @@ type Session =
 | 参数化 key/time/user 输入 | 未实现 | typed params、schema revision 重绑定 | #10/#22，P0/P1 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match target 与 typed simultaneous set；upsert 已实现按主键 insert/replace；三者维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 扩大工作集时直接生成 mutation set | #15，P0 |
 | count/sum/min/max 与分组 | 未实现 | aggregate/group | #11，P0 |
-| schema evolution 与数据转换 | 只有契约/ledger 校验器 | plan/apply/diff | #17–#19，P0/P1 |
+| schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |
 | 持久提交、恢复和备份 | redb Engine、原子提交、完整性检查和进程退出恢复已实现 | 设备故障矩阵与备份还原 | #13/#14/#20，P0 |
 
 ## 对查询语言的约束

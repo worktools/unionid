@@ -35,7 +35,96 @@ pub enum Statement {
     Delete {
         target: Pipeline,
     },
+    Migration {
+        name: String,
+        steps: Vec<SchemaMigration>,
+    },
     Pipeline(Pipeline),
+}
+
+#[derive(Debug, Clone)]
+pub enum SchemaMigration {
+    AddType {
+        name: String,
+        ty: ScalarType,
+    },
+    DropType {
+        name: String,
+    },
+    RenameType {
+        from: String,
+        to: String,
+    },
+    AddField {
+        owner: String,
+        column: Column,
+    },
+    DropField {
+        owner: String,
+        field: String,
+    },
+    ChangeDefault {
+        owner: String,
+        field: String,
+        value: Value,
+    },
+    DropDefault {
+        owner: String,
+        field: String,
+    },
+    RenameField {
+        owner: String,
+        from: String,
+        to: String,
+    },
+    ChangeField {
+        owner: String,
+        field: String,
+        ty: ScalarType,
+        transform: MigrationTransform,
+    },
+    AddVariant {
+        owner: String,
+        name: String,
+        args: Vec<ScalarType>,
+    },
+    DropVariant {
+        owner: String,
+        variant: String,
+        transform: Option<MigrationTransform>,
+    },
+    RenameVariant {
+        owner: String,
+        from: String,
+        to: String,
+    },
+    ChangeVariant {
+        owner: String,
+        variant: String,
+        args: Vec<ScalarType>,
+        transform: MigrationTransform,
+    },
+    AddIndex {
+        table: String,
+        column: String,
+    },
+    DropIndex {
+        table: String,
+        column: String,
+    },
+    SetKey {
+        table: String,
+        column: String,
+    },
+    DropKey {
+        table: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct MigrationTransform {
+    pub binding: String,
+    pub value: MatchValue,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +145,7 @@ impl Statement {
                 | Self::CreateTable { .. }
                 | Self::TypedTable { .. }
                 | Self::CreateIndex { .. }
+                | Self::Migration { .. }
         )
     }
 }

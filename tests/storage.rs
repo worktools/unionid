@@ -122,6 +122,47 @@ fn redb_atomic_adt_batches_survive_reopen() {
 }
 
 #[test]
+fn redb_schema_migration_persists_catalog_rows_and_rebuilt_indexes() {
+    let dir = TempDir::new();
+    let path = dir.0.join("migration.redb");
+    let migrated_schema;
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        let created = engine.execute(
+            r#"type State = Pending | Failed {message text}
+type Task =
+  id int
+  state State
+table tasks Task
+  key id
+create index tasks (state)
+insert tasks {id = 1, state = Failed {message = "broken"}}"#,
+        );
+        assert!(created.ok, "{}", created.message);
+        let migrated = engine.execute(
+            "migration task_state_v2\n  rename field Task.id to task_id\n  add field Task.priority int = 0\n  rename variant State.Failed to Rejected\n  change variant State.Rejected to {code int, message text}\n    using old -> {code = 500, message = old.message}",
+        );
+        assert!(migrated.ok, "{}", migrated.message);
+        migrated_schema = engine.schema_info();
+        assert!(engine.check_integrity().unwrap().backend_clean);
+    }
+
+    let mut reopened = Engine::open_redb(path).unwrap();
+    assert_eq!(reopened.schema_info(), migrated_schema);
+    let response = reopened.execute(
+        "from tasks | filter task_id == 1 | filter match state\n  Rejected {code, ..} => code == 500\n  Pending => false",
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 1);
+    assert!(response.rows[0]["priority"].cmp_eq(&Value::Int(0)));
+    assert!(
+        response.rows[0]["state"]
+            .source_text()
+            .contains("code = 500")
+    );
+}
+
+#[test]
 fn redb_incremental_commit_handles_schema_and_multi_table_batches() {
     let dir = TempDir::new();
     let path = dir.0.join("state.redb");

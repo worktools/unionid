@@ -1,6 +1,6 @@
 # Schema 身份、版本与演进契约
 
-状态：v0.1 契约，2026-09-06。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现的部分是稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据和[版本化 ADT value codec](CODEC.md)；rename 与 migration 语法由 #17–#19 实现。
+状态：v0.1 契约，2026-09-07。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据、[版本化 ADT value codec](CODEC.md)和[显式 schema migration](MIGRATIONS.md)；版本化 runner 与 schema diff 由 #18–#19 实现。
 
 存储格式版本、语言／协议版本与应用 schema revision 是三个独立概念：升级 unionid 二进制不自动修改应用 schema，读取目标 schema 文件也不会隐式迁移已有数据。
 
@@ -20,7 +20,7 @@ RowId 属于单张表的内部行身份，使用独立、从 0 开始的单调 `
 
 命名类型采用名义类型：形状相同但 type ID 不同的两个类型不能互换。字段与变体的运行时含义同样以 ID 为准；名称用于源码、诊断和显示。表引用命名 record 的 type ID，多个表可以安全共享同一个 row type。索引绑定 table ID 和逐层 field ID，不把点分隔名称当作长期身份。
 
-当前仅支持创建对象。未来 migration 的显式 `rename` 保留 ID；`drop` 后创建同名对象得到新 ID。不得通过修改名称或调整声明顺序重新解释已有值。v1 不支持递归类型，直接或间接的未声明／循环引用均以 `E_SCHEMA` 拒绝，并提示先声明依赖类型。
+普通 DDL 负责创建对象；migration 的显式 `rename` 保留 ID，`drop` 后创建同名对象得到新 ID。不得通过修改名称或调整声明顺序重新解释已有值。v1 不支持递归类型，直接或间接的未声明／循环引用均以 `E_SCHEMA` 拒绝，并提示先声明依赖类型。
 
 ## 2. Revision 与 hash
 
@@ -87,7 +87,7 @@ table archive Task
   key id
 ```
 
-目标 v2 把 `Failed` 改名为 `Rejected`，并增加 `code`。下面表达的是 #17 的目标 migration 语义，当前 parser 尚不执行：
+目标 v2 把 `Failed` 改名为 `Rejected`，并增加 `code`。下面语法当前可以直接执行：
 
 ```text
 migration task_state_v2
