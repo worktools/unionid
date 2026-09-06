@@ -115,6 +115,78 @@ fn failed_batch_rolls_back_catalog_rows_and_indexes() {
 }
 
 #[test]
+fn schema_revision_tracks_atomic_catalog_changes() {
+    let mut e = Engine::memory();
+    let empty = e.schema_info();
+    assert_eq!(empty.revision, 0);
+    assert!(empty.hash.starts_with("sha256:"));
+
+    let created = ok(
+        &mut e,
+        "type State = Pending | Done\ntype Task =\n  id int\n  state State\ntable tasks Task\n  key id",
+    );
+    let v1 = created.schema.unwrap();
+    assert_eq!(v1.revision, 1, "one atomic script creates one revision");
+    assert_ne!(v1.hash, empty.hash);
+    assert_eq!(e.schema_info(), v1);
+
+    let inserted = ok(&mut e, "insert tasks {id = 1, state = Pending}");
+    assert_eq!(inserted.schema.as_ref(), Some(&v1));
+    assert_eq!(e.schema_info(), v1, "row writes do not change the schema");
+
+    let failed = e.execute("type Later = text\ntable tasks Later");
+    assert!(!failed.ok);
+    assert_eq!(failed.schema.as_ref(), Some(&v1));
+    assert_eq!(e.schema_info(), v1, "a failed script publishes no revision");
+
+    let changed = ok(&mut e, "create index tasks (state)");
+    let v2 = changed.schema.unwrap();
+    assert_eq!(v2.revision, 2);
+    assert_ne!(v2.hash, v1.hash);
+    assert_eq!(ok(&mut e, "from tasks").schema.as_ref(), Some(&v2));
+}
+
+#[test]
+fn type_and_table_names_share_one_schema_namespace() {
+    let mut type_first = Engine::memory();
+    ok(&mut type_first, "type Item = text");
+    let error = type_first.execute("create table Item (id int)");
+    assert!(!error.ok);
+    assert_eq!(error.error.unwrap().code, "E_SCHEMA");
+
+    let mut table_first = Engine::memory();
+    ok(&mut table_first, "create table Item (id int)");
+    let error = table_first.execute("type Item = text");
+    assert!(!error.ok);
+    assert_eq!(error.error.unwrap().code, "E_SCHEMA");
+}
+
+#[test]
+fn tables_sharing_an_adt_use_the_same_nominal_identity() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Pending | Done\ntype Task =\n  id int\n  state State\ntable active Task\ntable archive Task\ninsert active {id = 1, state = Pending}\ninsert archive {id = 2, state = Done}",
+    );
+    let active = ok(&mut e, "from active");
+    let archive = ok(&mut e, "from archive");
+    let Value::Named {
+        type_id: active_id, ..
+    } = &active.rows[0]["state"]
+    else {
+        panic!("State should preserve its nominal identity")
+    };
+    let Value::Named {
+        type_id: archive_id,
+        ..
+    } = &archive.rows[0]["state"]
+    else {
+        panic!("State should preserve its nominal identity")
+    };
+    assert_eq!(active_id, archive_id);
+}
+
+#[test]
 fn failure_in_final_query_rolls_back_prior_writes() {
     let mut e = Engine::memory();
     let r =

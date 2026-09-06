@@ -31,6 +31,16 @@ impl Statement {
     pub fn is_mutating(&self) -> bool {
         !matches!(self, Self::Pipeline(_))
     }
+
+    pub fn changes_schema(&self) -> bool {
+        matches!(
+            self,
+            Self::DefineType { .. }
+                | Self::CreateTable { .. }
+                | Self::TypedTable { .. }
+                | Self::CreateIndex { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone)]

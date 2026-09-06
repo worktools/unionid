@@ -106,13 +106,14 @@ impl Engine {
     pub fn execute(&mut self, source: &str) -> QueryResponse {
         match self.try_execute(source) {
             Ok(response) => response,
-            Err(error) => QueryResponse::failure(error),
+            Err(error) => self.with_schema(QueryResponse::failure(error)),
         }
     }
 
     fn try_execute(&mut self, source: &str) -> Result<QueryResponse> {
         let statements = syntax::parse(source)?;
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
+        let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
         if mutating && self.write_failed {
             return Err(Error::new(
                 "E_STORAGE",
@@ -132,6 +133,9 @@ impl Engine {
                 .map_err(|e| e.at(located.span))?;
         }
         if let Some(mut candidate) = candidate {
+            if schema_changing {
+                candidate.advance_schema_revision()?;
+            }
             candidate.sequence = self
                 .db
                 .sequence
@@ -158,7 +162,7 @@ impl Engine {
                 }
             }
         }
-        Ok(response)
+        Ok(self.with_schema(response))
     }
 
     pub fn checkpoint(&mut self) -> Result<()> {
@@ -185,6 +189,15 @@ impl Engine {
     }
     pub fn tables(&self) -> Vec<String> {
         self.db.table_names()
+    }
+
+    pub fn schema_info(&self) -> crate::db::SchemaInfo {
+        self.db.schema_info()
+    }
+
+    fn with_schema(&self, mut response: QueryResponse) -> QueryResponse {
+        response.schema = Some(self.db.schema_info());
+        response
     }
 }
 

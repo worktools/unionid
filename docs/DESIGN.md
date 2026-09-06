@@ -133,7 +133,7 @@ upsert tasks $task
 - Int 精确比较；混合 Int／Float 运算和转换使用明确规则，不能统一转 f64。建议 v1 默认要求显式转换，字面量可按上下文检查。
 - Float 不采用 epsilon 相等；拒绝 NaN／Infinity，统一 `-0.0` 与 `0.0` 的相等、索引键和分组语义。
 - record／tuple／sum／Option／List 提供结构相等，sum 相等包括类型身份、变体身份和负载。排序仅对已定义顺序的类型开放，暂不按声明顺序给 enum 排序。
-- 字段、变体、类型具有稳定 catalog ID；名称与顺序变化不能静默改写旧数据含义。嵌套值有深度／大小限制，类型引用循环在 v1 明确拒绝。
+- 字段、变体、类型、表和索引具有稳定 catalog ID；名称与顺序变化不能静默改写旧数据含义。revision、hash、兼容矩阵和 migration 历史约束见 [Schema 身份与演进契约](SCHEMA.md)。嵌套值有深度／大小限制，类型引用循环在 v1 明确拒绝。
 
 这些取舍借鉴 ADT 的构造与分解方式，不照搬完整语言。[OCaml 类型与模式匹配](https://ocaml.org/docs/basic-data-types)、[Haskell 数据类型声明](https://www.haskell.org/onlinereport/haskell2010/haskellch4.html)
 

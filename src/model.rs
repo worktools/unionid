@@ -192,6 +192,9 @@ pub struct Row {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
+    /// Stable catalog identity. Names may change in a later schema revision.
+    #[serde(default)]
+    pub id: u64,
     pub name: String,
     pub schema: Vec<Column>,
     pub rows: Vec<Row>,
@@ -230,7 +233,7 @@ impl Default for Catalog {
 }
 
 impl Catalog {
-    fn allocate(&mut self) -> Result<u64> {
+    pub(crate) fn allocate(&mut self) -> Result<u64> {
         let id = self.next_id;
         self.next_id = id
             .checked_add(1)
@@ -325,6 +328,31 @@ impl Catalog {
                 .ty;
         }
         Ok(ty)
+    }
+
+    pub fn field_path_ids(&self, fields: &[Column], path: &str) -> Result<Vec<u64>> {
+        let mut columns = fields;
+        let mut ids = Vec::new();
+        let mut parts = path.split('.').peekable();
+        while let Some(part) = parts.next() {
+            let field = columns
+                .iter()
+                .find(|field| field.name == part)
+                .ok_or_else(|| Error::new("E_FIELD", format!("unknown field '{path}'")))?;
+            ids.push(field.id);
+            if parts.peek().is_some() {
+                let ScalarType::Record(nested) = self.underlying(&field.ty)? else {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        format!(
+                            "'{path}' traverses a non-record value; optional and variant values require explicit handling"
+                        ),
+                    ));
+                };
+                columns = nested;
+            }
+        }
+        Ok(ids)
     }
 
     pub fn coerce(&self, value: &Value, ty: &ScalarType, path: &str) -> Result<Value> {
