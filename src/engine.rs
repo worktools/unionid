@@ -10,7 +10,7 @@ use crate::migration::{
     MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
     MigrationStatus, describe_step, validate_files_against_history,
 };
-use crate::query::Statement;
+use crate::query::{LocatedStatement, Statement};
 use crate::redb_storage::{CommitFailure, RedbStore};
 use crate::snapshot::SnapshotStore;
 use crate::syntax;
@@ -35,6 +35,35 @@ pub struct StorageIntegrity {
     pub backend: &'static str,
     pub backend_clean: bool,
     pub schema: crate::db::SchemaInfo,
+}
+
+/// A parsed, read-only query bound to one schema identity. Parameter values are
+/// supplied for each execution and type checked before rows are scanned.
+#[derive(Debug, Clone)]
+pub struct PreparedQuery {
+    source: String,
+    statements: Vec<LocatedStatement>,
+    schema: crate::db::SchemaInfo,
+    parameters: Vec<String>,
+    parameter_types: std::collections::BTreeMap<String, String>,
+}
+
+impl PreparedQuery {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn schema(&self) -> &crate::db::SchemaInfo {
+        &self.schema
+    }
+
+    pub fn parameters(&self) -> &[String] {
+        &self.parameters
+    }
+
+    pub fn parameter_types(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.parameter_types
+    }
 }
 
 trait DurableBackend: Send {
@@ -156,14 +185,135 @@ impl Engine {
     }
 
     pub fn execute(&mut self, source: &str) -> QueryResponse {
-        match self.try_execute(source) {
+        self.execute_with_params(source, std::collections::BTreeMap::new())
+    }
+
+    pub fn execute_with_params(
+        &mut self,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+    ) -> QueryResponse {
+        self.execute_with_params_at_schema(source, parameters, None)
+    }
+
+    pub fn execute_with_params_at_schema(
+        &mut self,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+    ) -> QueryResponse {
+        match self.try_execute_with_params(source, parameters, expected_schema) {
             Ok(response) => response,
             Err(error) => self.with_schema(QueryResponse::failure(error)),
         }
     }
 
-    fn try_execute(&mut self, source: &str) -> Result<QueryResponse> {
-        let statements = syntax::parse(source)?;
+    pub fn prepare(&self, source: &str) -> Result<PreparedQuery> {
+        let mut statements = syntax::parse(source)?;
+        if statements
+            .iter()
+            .any(|statement| statement.statement.is_mutating())
+        {
+            return Err(Error::new(
+                "E_PREPARE",
+                "prepared queries must contain only from pipelines",
+            ));
+        }
+        for located in &mut statements {
+            let Statement::Pipeline(pipeline) = &mut located.statement else {
+                unreachable!("mutating statements were rejected")
+            };
+            self.db
+                .prepare_pipeline(pipeline)
+                .map_err(|error| error.at(located.span))?;
+        }
+        let parameter_types = crate::params::types(&statements)?
+            .into_iter()
+            .map(|(name, ty)| (name, self.db.catalog.describe(&ty)))
+            .collect();
+        Ok(PreparedQuery {
+            source: source.into(),
+            parameters: crate::params::names(&statements).into_iter().collect(),
+            parameter_types,
+            statements,
+            schema: self.db.schema_info(),
+        })
+    }
+
+    pub fn query(
+        &mut self,
+        prepared: &PreparedQuery,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+    ) -> QueryResponse {
+        if prepared.schema != self.db.schema_info() {
+            return self.with_schema(QueryResponse::failure(Error::new(
+                "E_SCHEMA_CHANGED",
+                format!(
+                    "prepared query uses schema revision {} ({}) but the database is at revision {} ({})",
+                    prepared.schema.revision,
+                    prepared.schema.hash,
+                    self.db.schema_info().revision,
+                    self.db.schema_info().hash
+                ),
+            )));
+        }
+        let mut statements = prepared.statements.clone();
+        let result = crate::params::bind(&mut statements, &parameters)
+            .and_then(|()| self.try_execute_statements(statements, None));
+        match result {
+            Ok(response) => response,
+            Err(error) => self.with_schema(QueryResponse::failure(error)),
+        }
+    }
+
+    pub fn execute_prepared(
+        &mut self,
+        prepared: &PreparedQuery,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+    ) -> QueryResponse {
+        self.query(prepared, parameters)
+    }
+
+    fn try_execute_with_params(
+        &mut self,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+    ) -> Result<QueryResponse> {
+        if let Some(expected) = expected_schema
+            && expected != &self.db.schema_info()
+        {
+            return Err(Error::new(
+                "E_SCHEMA_CHANGED",
+                format!(
+                    "request expects schema revision {} ({}) but the database is at revision {} ({})",
+                    expected.revision,
+                    expected.hash,
+                    self.db.schema_info().revision,
+                    self.db.schema_info().hash
+                ),
+            ));
+        }
+        let mut statements = syntax::parse(source)?;
+        crate::params::bind(&mut statements, &parameters)?;
+        let contains_parameters = !parameters.is_empty();
+        let mutating = statements
+            .iter()
+            .any(|statement| statement.statement.is_mutating());
+        if contains_parameters && mutating && self.wal.is_some() {
+            return Err(Error::new(
+                "E_CONFIG",
+                "parameterized writes require redb or memory mode; the transitional WAL stores source text",
+            ));
+        }
+        self.try_execute_statements(statements, Some(source))
+    }
+
+    fn try_execute_statements(
+        &mut self,
+        statements: Vec<LocatedStatement>,
+        wal_source: Option<&str>,
+    ) -> Result<QueryResponse> {
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
         let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
         if schema_changing && !self.db.migration_history().is_empty() {
@@ -199,7 +349,7 @@ impl Engine {
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
-            self.commit_candidate(candidate, Some(source), &mut response)?;
+            self.commit_candidate(candidate, wal_source, &mut response)?;
         }
         Ok(self.with_schema(response))
     }

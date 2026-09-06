@@ -125,6 +125,22 @@ pub(crate) fn bind_scalar(
         ScalarExpression::Reference(path) => {
             reference_type(catalog, scope, path, reference_kind)?.clone()
         }
+        ScalarExpression::Parameter { name, ty } => {
+            match expected.cloned().or_else(|| ty.clone()) {
+                Some(expected) => {
+                    *ty = Some(expected.clone());
+                    expected
+                }
+                None => {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        format!(
+                            "cannot infer parameter '${name}' type; compare it with a typed field or value"
+                        ),
+                    ));
+                }
+            }
+        }
         ScalarExpression::Literal(value) => {
             if let Some(expected) = expected {
                 *value = catalog.coerce(value, expected, "expression literal")?;
@@ -212,6 +228,7 @@ pub(crate) fn infer_scalar(
         ScalarExpression::Reference(path) => Ok(Some(
             reference_type(catalog, scope, path, reference_kind)?.clone(),
         )),
+        ScalarExpression::Parameter { ty, .. } => Ok(ty.clone()),
         ScalarExpression::Literal(value) => infer_literal(value),
         ScalarExpression::Length(value) => {
             if let Some(ty) = infer_scalar(catalog, scope, value, reference_kind)?
@@ -278,6 +295,7 @@ fn infer_arithmetic_type(
 fn is_constant(expression: &ScalarExpression) -> bool {
     match expression {
         ScalarExpression::Literal(_) => true,
+        ScalarExpression::Parameter { .. } => true,
         ScalarExpression::Reference(_) => false,
         ScalarExpression::Length(value) | ScalarExpression::Negate { value, .. } => {
             is_constant(value)
@@ -367,7 +385,7 @@ fn orderable(catalog: &Catalog, ty: &ScalarType) -> Result<bool> {
     ))
 }
 
-fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
+pub(crate) fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
     match (left, right) {
         (ScalarType::Int, ScalarType::Int)
         | (ScalarType::Float, ScalarType::Float)
@@ -465,6 +483,10 @@ fn evaluate_scalar<'a>(
 ) -> Result<Option<Evaluated<'a>>> {
     match expression {
         ScalarExpression::Reference(path) => Ok(values(path).map(Evaluated::Borrowed)),
+        ScalarExpression::Parameter { name, .. } => Err(Error::new(
+            "E_PARAM_MISSING",
+            format!("parameter '${name}' was not bound"),
+        )),
         ScalarExpression::Literal(value) => Ok(Some(Evaluated::Borrowed(value))),
         ScalarExpression::Length(value) => {
             let Some(value) = evaluate_scalar(catalog, value, values)? else {

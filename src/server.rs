@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::protocol::{Request as ProtocolRequest, Response as ProtocolResponse, VERSION};
 use crate::{Engine, Error, QueryResponse};
 
 pub const MAX_FRAME_BYTES: usize = crate::syntax::MAX_SOURCE_BYTES * 6 + 256;
@@ -14,7 +15,7 @@ pub const MAX_CONNECTIONS: usize = 64;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Request {
+struct LegacyRequest {
     query: String,
 }
 
@@ -120,7 +121,7 @@ fn reject_busy(mut stream: TcpStream) -> Result<(), String> {
     Ok(())
 }
 
-fn write_response(stream: &mut TcpStream, response: &QueryResponse) -> Result<(), String> {
+fn write_response(stream: &mut TcpStream, response: &impl Serialize) -> Result<(), String> {
     serde_json::to_writer(&mut *stream, response).map_err(|e| format!("encode response: {e}"))?;
     stream
         .write_all(b"\n")
@@ -152,28 +153,22 @@ fn handle(mut writer: TcpStream, engine: Arc<Mutex<Engine>>) -> Result<(), Strin
         }
         let quit = input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("exit");
         let response = if oversized {
-            QueryResponse::failure(Error::new("E_LIMIT", "request frame too large"))
+            serde_json::to_value(QueryResponse::failure(Error::new(
+                "E_LIMIT",
+                "request frame too large",
+            )))
+            .map_err(|error| error.to_string())?
         } else if quit {
-            QueryResponse::ok_message("bye")
+            serde_json::to_value(QueryResponse::ok_message("bye"))
+                .map_err(|error| error.to_string())?
         } else {
-            let source = if input.starts_with('{') {
-                serde_json::from_str::<Request>(input)
-                    .map(|r| r.query)
-                    .map_err(|e| {
-                        Error::new(
-                            "E_PROTOCOL",
-                            format!("expected JSON object with a query string: {e}"),
-                        )
-                    })
+            let mut engine = engine
+                .lock()
+                .map_err(|_| "engine lock poisoned".to_string())?;
+            if input.starts_with('{') {
+                execute_json_request(input, &mut engine)
             } else {
-                Ok(input.into())
-            };
-            match source {
-                Ok(source) => engine
-                    .lock()
-                    .map_err(|_| "engine lock poisoned".to_string())?
-                    .execute(&source),
-                Err(error) => QueryResponse::failure(error),
+                serde_json::to_value(engine.execute(input)).map_err(|error| error.to_string())?
             }
         };
         write_response(&mut writer, &response)?;
@@ -181,4 +176,79 @@ fn handle(mut writer: TcpStream, engine: Arc<Mutex<Engine>>) -> Result<(), Strin
             return Ok(());
         }
     }
+}
+
+fn execute_json_request(input: &str, engine: &mut Engine) -> serde_json::Value {
+    let decoded = match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            return legacy_error(Error::new(
+                "E_PROTOCOL",
+                format!("expected a JSON request object: {error}"),
+            ));
+        }
+    };
+    let versioned = decoded
+        .as_object()
+        .is_some_and(|object| object.contains_key("version"));
+    if !versioned {
+        return match serde_json::from_value::<LegacyRequest>(decoded) {
+            Ok(request) => serde_json::to_value(engine.execute(&request.query))
+                .expect("QueryResponse serialization cannot fail"),
+            Err(error) => legacy_error(Error::new(
+                "E_PROTOCOL",
+                format!("expected JSON object with a query string: {error}"),
+            )),
+        };
+    }
+    let request_id = decoded
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let request = match serde_json::from_value::<ProtocolRequest>(decoded) {
+        Ok(request) => request,
+        Err(error) => {
+            return protocol_error(
+                request_id,
+                Error::new("E_PROTOCOL", format!("invalid versioned request: {error}")),
+                engine,
+            );
+        }
+    };
+    if request.version != VERSION {
+        return protocol_error(
+            request.request_id,
+            Error::new(
+                "E_PROTOCOL_VERSION",
+                format!(
+                    "unsupported protocol version {}; supported version is {VERSION}",
+                    request.version
+                ),
+            ),
+            engine,
+        );
+    }
+    let parameters = match request.decode_params() {
+        Ok(parameters) => parameters,
+        Err(error) => return protocol_error(request.request_id, error, engine),
+    };
+    let response =
+        engine.execute_with_params_at_schema(&request.query, parameters, request.schema.as_ref());
+    serde_json::to_value(ProtocolResponse::from_query(request.request_id, response))
+        .expect("ProtocolResponse serialization cannot fail")
+}
+
+fn legacy_error(error: Error) -> serde_json::Value {
+    serde_json::to_value(QueryResponse::failure(error))
+        .expect("QueryResponse serialization cannot fail")
+}
+
+fn protocol_error(request_id: String, error: Error, engine: &Engine) -> serde_json::Value {
+    serde_json::to_value(ProtocolResponse::failure(
+        request_id,
+        error,
+        engine.schema_info(),
+    ))
+    .expect("ProtocolResponse serialization cannot fail")
 }

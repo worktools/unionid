@@ -11,6 +11,8 @@ mod expression;
 mod matching;
 pub mod migration;
 pub mod model;
+mod params;
+pub mod protocol;
 pub mod query;
 mod redb_storage;
 pub mod schema;
@@ -21,10 +23,11 @@ pub mod wal;
 
 pub use backup::BackupInfo;
 pub use db::{QueryResponse, SchemaInfo, UpsertAction};
-pub use engine::{Engine, StorageIntegrity};
+pub use engine::{Engine, PreparedQuery, StorageIntegrity};
 pub use error::{Error, Result, Span};
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};
+pub use protocol::{Request as ProtocolRequest, Response as ProtocolResponse, WireValue};
 pub use schema::{
     SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation, SchemaDiffTableImpact,
 };

@@ -510,13 +510,14 @@ impl Catalog {
                         return Err(bad());
                     }
                 }
-                let variant = def
-                    .variants
-                    .iter()
-                    .find(|d| d.name == variant_name)
-                    .ok_or_else(|| {
-                        Error::new("E_TYPE", format!("{path}: unknown variant '{}'", v.variant))
-                    })?;
+                let variant = if v.id == 0 {
+                    def.variants.iter().find(|d| d.name == variant_name)
+                } else {
+                    def.variants.iter().find(|d| d.id == v.id)
+                }
+                .ok_or_else(|| {
+                    Error::new("E_TYPE", format!("{path}: unknown variant '{}'", v.variant))
+                })?;
                 if variant.args.len() != v.args.len() {
                     return Err(Error::new(
                         "E_TYPE",
