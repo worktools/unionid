@@ -54,6 +54,7 @@
 - 优先小而清晰的模块边界：`model`, `db`, `query`, `server`, `cli`。
 - 错误处理统一为可读字符串，保证 TCP/CLI 易观察。
 - 默认 UTF-8 文本协议。
+- GitHub PR 与 issue 使用中英双语标题；正文分别设置 `## 中文说明` 与 `## English Description`，两部分独立描述问题、范围、验收条件和验证结果。
 
 ## 测试与验证
 
