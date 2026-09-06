@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_directory};
 use crate::{
-    Engine, ProtocolRequest, ProtocolResponse, QueryAccessKind, QueryResponse, QueryStageKind,
-    SchemaCheck, Value, backup,
+    Engine, Error, InputStatus, ProtocolRequest, ProtocolResponse, QueryAccessKind, QueryResponse,
+    QueryStageKind, SchemaCheck, Value, backup, input_status,
 };
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
@@ -440,25 +440,18 @@ fn repl(mut engine: Option<&mut Engine>, addr: &str, json: bool) -> Result<(), S
         return print_response(&response, json);
     }
     eprintln!(
-        "Enter a script, then a blank line to run. .quit exits; local mode also supports .schema and .tables."
+        "Enter a script. A blank line runs it when ready; .quit exits. Local mode also supports .schema and .tables."
     );
-    let mut buffer = String::new();
+    let mut input = ReplInput::new();
     loop {
-        eprint!(
-            "{}",
-            if buffer.is_empty() {
-                "unionid> "
-            } else {
-                "     ..> "
-            }
-        );
+        eprint!("{}", input.prompt());
         io::stderr().flush().map_err(|e| e.to_string())?;
         let mut line = String::new();
         let n = stdin.read_line(&mut line).map_err(|e| e.to_string())?;
-        if buffer.is_empty() && matches!(line.trim(), ".quit" | "quit" | "exit") {
+        if input.is_empty() && matches!(line.trim(), ".quit" | "quit" | "exit") {
             break;
         }
-        if buffer.is_empty()
+        if input.is_empty()
             && let Some(engine) = engine.as_deref()
         {
             match line.trim() {
@@ -473,29 +466,117 @@ fn repl(mut engine: Option<&mut Engine>, addr: &str, json: bool) -> Result<(), S
                 _ => {}
             }
         }
-        if !line.trim().is_empty() {
-            buffer.push_str(&line);
-        }
-        if buffer.len() > crate::syntax::MAX_SOURCE_BYTES {
-            eprintln!("source exceeds 1 MiB");
-            buffer.clear();
-        }
-        if (line.trim().is_empty() || n == 0) && !buffer.trim().is_empty() {
-            let response = match engine.as_deref_mut() {
-                Some(engine) => Ok(engine.execute(&buffer)),
-                None => send_one(addr, &buffer),
-            };
-            match response.and_then(|r| print_response(&r, json)) {
-                Ok(()) => {}
-                Err(e) => eprintln!("{e}"),
+        match input.accept(&line, n == 0) {
+            ReplAction::Continue | ReplAction::Ready => {}
+            ReplAction::Execute(source) => {
+                let response = match engine.as_deref_mut() {
+                    Some(engine) => Ok(engine.execute(&source)),
+                    None => send_one(addr, &source),
+                };
+                match response.and_then(|response| print_response(&response, json)) {
+                    Ok(()) => {}
+                    Err(error) => eprintln!("{error}"),
+                }
             }
-            buffer.clear();
+            ReplAction::NeedMore(error) => {
+                eprintln!("{error}\ninput is incomplete; continue typing")
+            }
+            ReplAction::Reject(error) => eprintln!("{error}"),
+            ReplAction::ExitIncomplete(error) => {
+                eprintln!("{error}\ninput ended before the script was complete");
+                break;
+            }
+            ReplAction::Exit => break,
         }
         if n == 0 {
             break;
         }
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReplAction {
+    Continue,
+    Ready,
+    Execute(String),
+    NeedMore(Error),
+    Reject(Error),
+    ExitIncomplete(Error),
+    Exit,
+}
+
+struct ReplInput {
+    source: String,
+    status: InputStatus,
+}
+
+impl ReplInput {
+    fn new() -> Self {
+        Self {
+            source: String::new(),
+            status: InputStatus::Complete,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.source.is_empty()
+    }
+
+    fn prompt(&self) -> &'static str {
+        if self.is_empty() {
+            "unionid> "
+        } else if matches!(self.status, InputStatus::Complete) {
+            "  ready> "
+        } else {
+            "     ..> "
+        }
+    }
+
+    fn accept(&mut self, line: &str, eof: bool) -> ReplAction {
+        if eof {
+            return match &self.status {
+                _ if self.is_empty() => ReplAction::Exit,
+                InputStatus::Complete => ReplAction::Execute(std::mem::take(&mut self.source)),
+                InputStatus::Incomplete(error) => ReplAction::ExitIncomplete(error.clone()),
+                InputStatus::Invalid(error) => ReplAction::Reject(error.clone()),
+            };
+        }
+
+        if line.trim().is_empty() {
+            return match &self.status {
+                _ if self.is_empty() => ReplAction::Continue,
+                InputStatus::Complete => ReplAction::Execute(std::mem::take(&mut self.source)),
+                InputStatus::Incomplete(error) => ReplAction::NeedMore(error.clone()),
+                InputStatus::Invalid(error) => ReplAction::Reject(error.clone()),
+            };
+        }
+
+        if self.is_empty() && line.trim_start().starts_with('#') {
+            return ReplAction::Continue;
+        }
+
+        self.source.push_str(line);
+        if self.source.len() > crate::syntax::MAX_SOURCE_BYTES {
+            self.reset();
+            return ReplAction::Reject(Error::new("E_LIMIT", "source exceeds 1 MiB"));
+        }
+        self.status = input_status(&self.source);
+        match &self.status {
+            InputStatus::Complete => ReplAction::Ready,
+            InputStatus::Incomplete(_) => ReplAction::Continue,
+            InputStatus::Invalid(error) => {
+                let error = error.clone();
+                self.reset();
+                ReplAction::Reject(error)
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.source.clear();
+        self.status = InputStatus::Complete;
+    }
 }
 
 pub fn read_source(reader: impl Read) -> Result<String, String> {
@@ -665,4 +746,65 @@ fn query_stage_name(stage: &QueryStageKind) -> &'static str {
 
 pub fn display_value(value: &Value) -> String {
     value.source_text()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReplAction, ReplInput};
+
+    #[test]
+    fn repl_tracks_continuation_ready_submission_and_eof() {
+        let mut input = ReplInput::new();
+        assert_eq!(input.prompt(), "unionid> ");
+        assert_eq!(input.accept("type Task =\n", false), ReplAction::Continue);
+        assert_eq!(input.prompt(), "     ..> ");
+
+        let ReplAction::NeedMore(error) = input.accept("\n", false) else {
+            panic!("blank input must retain an incomplete script");
+        };
+        assert_eq!(error.code, "E_INCOMPLETE");
+        assert!(!input.is_empty());
+
+        assert_eq!(input.accept("  id int\n", false), ReplAction::Ready);
+        assert_eq!(input.prompt(), "  ready> ");
+        assert_eq!(
+            input.accept("\n", false),
+            ReplAction::Execute("type Task =\n  id int\n".into())
+        );
+        assert!(input.is_empty());
+        assert_eq!(input.prompt(), "unionid> ");
+
+        assert_eq!(input.accept("from tasks |\n", false), ReplAction::Continue);
+        assert_eq!(input.accept("filter id == 1\n", false), ReplAction::Ready);
+        assert_eq!(
+            input.accept("", true),
+            ReplAction::Execute("from tasks |\nfilter id == 1\n".into())
+        );
+    }
+
+    #[test]
+    fn repl_rejects_invalid_input_and_reports_incomplete_eof() {
+        let mut input = ReplInput::new();
+        let ReplAction::Reject(error) = input.accept("\tfrom tasks\n", false) else {
+            panic!("tab indentation must be rejected immediately");
+        };
+        assert_eq!(error.code, "E_SYNTAX");
+        assert!(error.span.is_some());
+        assert!(input.is_empty());
+
+        assert_eq!(input.accept("from tasks |\n", false), ReplAction::Continue);
+        let ReplAction::ExitIncomplete(error) = input.accept("", true) else {
+            panic!("EOF must report a buffered incomplete script");
+        };
+        assert_eq!(error.code, "E_INCOMPLETE");
+
+        let mut empty = ReplInput::new();
+        assert_eq!(empty.accept("\n", false), ReplAction::Continue);
+        assert_eq!(
+            empty.accept("# comment only\n", false),
+            ReplAction::Continue
+        );
+        assert!(empty.is_empty());
+        assert_eq!(empty.accept("", true), ReplAction::Exit);
+    }
 }

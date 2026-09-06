@@ -497,7 +497,8 @@ take 20
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
 - 括号和集合内允许换行。字符串里的 `|`、逗号和 `#` 都是文本，不参与分隔。
 - 同层出现新的 `from`、`explain`、`type`、`table`、`insert`、`upsert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
-- REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分。
+- REPL 使用与 parser 相同的 token、layout 和 EOF 状态判断 complete、incomplete、invalid。`ready>` 后的空行提交；incomplete 保留缓冲区继续输入，invalid 立即带 span 报错并清空。交互 EOF 执行 complete 缓冲区，或报告 incomplete 后退出。
+- REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分，也不引入分号。
 
 布尔表达式可在 `filter`／`=>` 的缩进块或括号内跨行；`any/all` 的 predicate 括号也可跨行。标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；每条 pipeline 或 DML target 最多求值 100,000 个 list predicate 元素，超限返回受控错误。
 

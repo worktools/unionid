@@ -154,6 +154,8 @@ migration task_state_v2
 
 空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。局部函数只复用当前纯 expression IR；当前不支持全局函数、递归、泛型、高阶函数或持久化闭包。`any/all` 的元素 predicate 与 let 函数都不产生可存储的函数值。
 
+Rust 客户端可以调用 `unionid::input_status(source)`，在执行前得到 `InputStatus::Complete`、`InputStatus::Incomplete(error)` 或 `InputStatus::Invalid(error)`。判断直接复用 lexer 的 delimiter/layout 状态和 parser 的 EOF 状态：未闭合的括号、等待缩进体的声明、match 分支或尾部 `|` 属于 incomplete；不匹配的退格、tab 缩进、未知 stage 和尾部垃圾属于 invalid。语法错误保留 `span`，incomplete 使用 `E_INCOMPLETE`。这个 API 只判断语法能否继续，不打开数据库，也不检查表、字段或值的类型。
+
 一次 `Engine.execute`、一次 `run` 或一个 TCP 请求是一个原子批次：先解析全部源码，再在候选状态中执行；任一步失败则不发布此次请求的任何修改。成功返回最后一条语句的结果，批次中的查询可以看到前面的写入。当前通过复制内存数据库实现写批次隔离，适合小工作集，尚未优化大批量写入的内存成本。
 
 错误包含 `code`、可读 `message`、可选 `span {line, column}`。语法错误标出 token 位置；执行前类型校验目前定位到所属语句，并给出具体字段路径，精确表达式 span 后续完善。源码最多 1 MiB、100,000 tokens、64 层类型／值／布局嵌套，超限返回错误。
@@ -171,7 +173,7 @@ cargo run --example embedded
 cargo run --example parameters
 ```
 
-`run` 每次创建一个内存库；`cli --memory` 的交互会话保留内存状态。在交互终端连续输入多行，空行显式提交整个缓冲区；`.quit` 退出，`.schema` 查看声明，`.tables` 列表。在管道或重定向 stdin 中读取到 EOF 后一次执行整个脚本，不按空行拆分。CLI 查询失败返回非零退出码。
+`run` 每次创建一个内存库；`cli --memory` 的交互会话保留内存状态。本地和 TCP REPL 使用同一个输入状态机：`unionid>` 等待新脚本，`..>` 表示仍需续写，`ready>` 表示当前缓冲区语法完整。空行只提交完整缓冲区；对 incomplete 输入按空行会显示原因并继续，对 invalid 输入会立即显示位置并清空缓冲区。交互 EOF 执行一次完整缓冲区；若缓冲区 incomplete，则报告错误后退出。`.quit` 退出，`.schema` 查看声明，`.tables` 列表。在管道或重定向 stdin 中仍读取到 EOF 后一次执行整个原子脚本，不按空行拆分。CLI 查询失败返回非零退出码。
 
 ```bash
 cargo run -- server --addr 127.0.0.1:7878

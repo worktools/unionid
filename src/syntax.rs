@@ -1,5 +1,8 @@
 //! Lexer and layout-aware parser. Newlines inside strings are never separators.
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
@@ -12,6 +15,18 @@ use crate::query::{
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+
+/// Syntactic readiness of a source buffer, without schema or type checking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "error", rename_all = "snake_case")]
+pub enum InputStatus {
+    /// The buffer parses as a complete script and can be submitted.
+    Complete,
+    /// More source can complete the buffer, for example an indented block or delimiter.
+    Incomplete(Error),
+    /// The buffer is already invalid and appending source cannot repair it.
+    Invalid(Error),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Kind {
@@ -42,11 +57,16 @@ struct Token {
     span: Span,
 }
 
+struct LexOutput {
+    tokens: Vec<Token>,
+    unclosed: Option<(char, Span)>,
+}
+
 fn syntax(message: impl Into<String>, span: Span) -> Error {
     Error::new("E_SYNTAX", message).at(span)
 }
 
-fn lex(source: &str) -> Result<Vec<Token>> {
+fn lex_source(source: &str) -> Result<LexOutput> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(Error::new("E_LIMIT", "source exceeds 1 MiB"));
     }
@@ -274,37 +294,92 @@ fn lex(source: &str) -> Result<Vec<Token>> {
             },
         });
     }
-    if let Some((_, span)) = brackets.last() {
-        return Err(syntax("unclosed bracket", *span));
-    }
+    let unclosed = brackets.last().copied();
     let end = Span {
         line: last_line + 1,
         column: 1,
     };
-    for _ in 1..indentation.len() {
-        tokens.push(Token {
-            kind: Kind::Dedent,
-            span: end,
-        });
+    if unclosed.is_none() {
+        for _ in 1..indentation.len() {
+            tokens.push(Token {
+                kind: Kind::Dedent,
+                span: end,
+            });
+        }
     }
     tokens.push(Token {
         kind: Kind::End,
         span: end,
     });
-    Ok(tokens)
+    Ok(LexOutput { tokens, unclosed })
+}
+
+fn lex(source: &str) -> Result<Vec<Token>> {
+    let output = lex_source(source)?;
+    if let Some((_, span)) = output.unclosed {
+        Err(syntax("unclosed bracket", span))
+    } else {
+        Ok(output.tokens)
+    }
 }
 
 pub fn parse(source: &str) -> Result<Vec<LocatedStatement>> {
     Parser {
         tokens: lex(source)?,
         pos: 0,
+        needs_more: Cell::new(false),
     }
     .script()
+}
+
+/// Classify whether `source` is complete, can be continued, or is already invalid.
+///
+/// This uses lexer layout/delimiter state and parser EOF state. It does not open a
+/// database or resolve names and types.
+pub fn input_status(source: &str) -> InputStatus {
+    if source.trim().is_empty() {
+        return InputStatus::Complete;
+    }
+    let output = match lex_source(source) {
+        Ok(output) => output,
+        Err(error) => return InputStatus::Invalid(error),
+    };
+    let unclosed = output.unclosed;
+    if !output.tokens.iter().any(|token| {
+        !matches!(
+            token.kind,
+            Kind::Newline | Kind::Indent | Kind::Dedent | Kind::End
+        )
+    }) {
+        return InputStatus::Complete;
+    }
+    let mut parser = Parser {
+        tokens: output.tokens,
+        pos: 0,
+        needs_more: Cell::new(false),
+    };
+    match parser.script() {
+        Ok(_) => InputStatus::Complete,
+        Err(error) if parser.needs_more.get() => {
+            let error = if let Some((open, span)) = unclosed {
+                Error::new("E_INCOMPLETE", format!("unclosed '{open}' delimiter")).at(span)
+            } else {
+                Error {
+                    code: "E_INCOMPLETE".into(),
+                    message: error.message,
+                    span: error.span,
+                }
+            };
+            InputStatus::Incomplete(error)
+        }
+        Err(error) => InputStatus::Invalid(error),
+    }
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    needs_more: Cell<bool>,
 }
 
 impl Parser {
@@ -315,6 +390,10 @@ impl Parser {
         &self.token().kind
     }
     fn error(&self, message: impl Into<String>) -> Error {
+        let end_span = self.tokens.last().map(|token| token.span);
+        if end_span == Some(self.token().span) && matches!(self.kind(), Kind::Dedent | Kind::End) {
+            self.needs_more.set(true);
+        }
         syntax(message, self.token().span)
     }
     fn bump(&mut self) -> Token {
