@@ -4,6 +4,8 @@
 - 状态：已接受
 - 关联：[GitHub issue #6](https://github.com/worktools/unionid/issues/6)
 
+实现状态：主 Engine 已提供 `Engine::open_redb`，CLI 的 `run/cli/server --db` 已使用下述固定内部表、版本化 codec、`Durability::Immediate` 与 two-phase commit。故障恢复矩阵、格式升级和备份仍由 #14/#20 跟踪。
+
 ## 背景
 
 unionid 的用户模型是运行时声明的代数数据类型。catalog、ADT 行、类型化索引和 migration ledger 必须作为一个原子单位提交，并在进程退出或机器故障后恢复。当前 JSON WAL 与 snapshot 能保护语言预览的正常重启和若干已知失败路径，但仍然回放源码，并由项目自行负责事务记录、校验、恢复、压缩和备份。

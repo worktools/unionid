@@ -25,6 +25,9 @@ enum Command {
     Server {
         #[arg(long, default_value = "127.0.0.1:7878")]
         addr: String,
+        /// Store data in a durable redb database.
+        #[arg(long, conflicts_with_all = ["wal_path", "snapshot_path", "snapshot_every"])]
+        db: Option<PathBuf>,
         #[arg(long)]
         wal_path: Option<PathBuf>,
         #[arg(long)]
@@ -32,8 +35,11 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         snapshot_every: usize,
     },
-    /// Execute an atomic script in a fresh in-memory database (stdin by default).
+    /// Execute an atomic script in memory or in a local redb database.
     Run {
+        /// Execute against a durable redb database instead of fresh memory.
+        #[arg(long)]
+        db: Option<PathBuf>,
         #[arg(short, long, conflicts_with = "file")]
         query: Option<String>,
         #[arg(short, long)]
@@ -47,6 +53,9 @@ enum Command {
         addr: String,
         #[arg(long)]
         memory: bool,
+        /// Use a local durable redb database instead of connecting over TCP.
+        #[arg(long, conflicts_with = "memory")]
+        db: Option<PathBuf>,
         #[arg(short, long, conflicts_with = "file")]
         query: Option<String>,
         #[arg(short, long)]
@@ -70,11 +79,13 @@ fn run() -> Result<(), String> {
     match Args::parse().command {
         Command::Server {
             addr,
+            db,
             wal_path,
             snapshot_path,
             snapshot_every,
-        } => server::run_server(&addr, wal_path, snapshot_path, snapshot_every),
+        } => server::run_server_with_db(&addr, db, wal_path, snapshot_path, snapshot_every),
         Command::Run {
+            db,
             query,
             file,
             format,
@@ -83,17 +94,25 @@ fn run() -> Result<(), String> {
                 Some(source) => source,
                 None => cli::read_source(std::io::stdin().lock())?,
             };
-            cli::run_local(Some(source), matches!(format, Format::Json))
+            match db {
+                Some(path) => {
+                    cli::run_local_redb(path, Some(source), matches!(format, Format::Json))
+                }
+                None => cli::run_local(Some(source), matches!(format, Format::Json)),
+            }
         }
         Command::Cli {
             addr,
             memory,
+            db,
             query,
             file,
             format,
         } => {
             let source = source(query, file)?;
-            if memory {
+            if let Some(path) = db {
+                cli::run_local_redb(path, source, matches!(format, Format::Json))
+            } else if memory {
                 cli::run_local(source, matches!(format, Format::Json))
             } else {
                 cli::run_cli(&addr, source, matches!(format, Format::Json))

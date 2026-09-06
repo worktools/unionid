@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::model::{Catalog, Column, DbObject, Row, ScalarType, Table, Value};
+use crate::model::{Catalog, Column, DbObject, Row, ScalarType, Table, TypeDefinition, Value};
 use crate::query::{Pipeline, Stage, Statement};
 
 type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<usize>>>>;
@@ -15,6 +15,52 @@ pub struct IndexDefinition {
     pub table_id: u64,
     pub column: String,
     pub field_path: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DurableMeta {
+    pub sequence: u64,
+    pub schema_revision: u64,
+    pub next_catalog_id: u64,
+    pub schema_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DurableTable {
+    pub id: u64,
+    pub name: String,
+    pub schema: Vec<Column>,
+    pub row_type: Option<u64>,
+    pub primary_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub(crate) enum DurableCatalogEntry {
+    Type(TypeDefinition),
+    Table(DurableTable),
+    Index {
+        table: String,
+        definition: IndexDefinition,
+    },
+}
+
+impl DurableCatalogEntry {
+    pub(crate) fn kind_tag(&self) -> u8 {
+        match self {
+            Self::Type(_) => 1,
+            Self::Table(_) => 2,
+            Self::Index { .. } => 3,
+        }
+    }
+
+    pub(crate) fn stable_id(&self) -> u64 {
+        match self {
+            Self::Type(definition) => definition.id,
+            Self::Table(table) => table.id,
+            Self::Index { definition, .. } => definition.id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -574,6 +620,261 @@ impl Database {
 
     pub fn table_names(&self) -> Vec<String> {
         self.objects.keys().cloned().collect()
+    }
+
+    pub(crate) fn durable_meta(&self) -> DurableMeta {
+        DurableMeta {
+            sequence: self.sequence,
+            schema_revision: self.schema_revision,
+            next_catalog_id: self.catalog.next_id(),
+            schema_hash: self.schema_info().hash,
+        }
+    }
+
+    pub(crate) fn durable_catalog_entries(&self) -> Vec<DurableCatalogEntry> {
+        let mut entries = self
+            .catalog
+            .types
+            .values()
+            .cloned()
+            .map(DurableCatalogEntry::Type)
+            .collect::<Vec<_>>();
+        entries.extend(self.objects.values().map(|object| match object {
+            DbObject::Table(table) => DurableCatalogEntry::Table(DurableTable {
+                id: table.id,
+                name: table.name.clone(),
+                schema: table.schema.clone(),
+                row_type: table.row_type,
+                primary_key: table.primary_key.clone(),
+            }),
+        }));
+        entries.extend(
+            self.index_definitions
+                .iter()
+                .flat_map(|(table, definitions)| {
+                    definitions
+                        .values()
+                        .cloned()
+                        .map(|definition| DurableCatalogEntry::Index {
+                            table: table.clone(),
+                            definition,
+                        })
+                }),
+        );
+        entries.sort_by_key(DurableCatalogEntry::stable_id);
+        entries
+    }
+
+    pub(crate) fn durable_rows(&self) -> Result<Vec<(u64, u64, Vec<u8>)>> {
+        let mut encoded = Vec::new();
+        for object in self.objects.values() {
+            let DbObject::Table(table) = object;
+            let ty = table
+                .row_type
+                .map(ScalarType::Ref)
+                .unwrap_or_else(|| ScalarType::Record(table.schema.clone()));
+            for (row_id, row) in table.rows.iter().enumerate() {
+                let row_id = u64::try_from(row_id)
+                    .map_err(|_| Error::new("E_LIMIT", "row ID space exhausted"))?;
+                let record = Value::Record(row.fields.clone());
+                let value = match table.row_type {
+                    Some(type_id) => Value::Named {
+                        type_id,
+                        value: Box::new(record),
+                    },
+                    None => record,
+                };
+                encoded.push((
+                    table.id,
+                    row_id,
+                    crate::codec::encode_value(&self.catalog, &ty, &value)?,
+                ));
+            }
+        }
+        Ok(encoded)
+    }
+
+    pub(crate) fn durable_secondary_indexes(&self) -> Result<Vec<(u64, String, u64)>> {
+        let mut entries = Vec::new();
+        for (table, definitions) in &self.index_definitions {
+            for (column, definition) in definitions {
+                let posting = self
+                    .indexes
+                    .get(table)
+                    .and_then(|columns| columns.get(column))
+                    .ok_or_else(|| {
+                        Error::new(
+                            "E_STORAGE",
+                            format!("missing in-memory index '{table}.{column}'"),
+                        )
+                    })?;
+                for (value_key, row_ids) in posting {
+                    for row_id in row_ids {
+                        entries.push((
+                            definition.id,
+                            value_key.clone(),
+                            u64::try_from(*row_id)
+                                .map_err(|_| Error::new("E_LIMIT", "row ID space exhausted"))?,
+                        ));
+                    }
+                }
+            }
+        }
+        entries.sort();
+        Ok(entries)
+    }
+
+    pub(crate) fn from_durable(
+        meta: DurableMeta,
+        entries: Vec<DurableCatalogEntry>,
+        mut rows: Vec<(u64, u64, Vec<u8>)>,
+    ) -> Result<Self> {
+        let mut ids = BTreeSet::new();
+        let mut catalog = Catalog::default();
+        let mut objects = BTreeMap::new();
+        let mut index_definitions: BTreeMap<String, BTreeMap<String, IndexDefinition>> =
+            BTreeMap::new();
+        let mut max_id = 0;
+        for entry in entries {
+            let id = entry.stable_id();
+            if id == 0 || !ids.insert(id) {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!("invalid or duplicate catalog ID {id}"),
+                ));
+            }
+            max_id = max_id.max(id);
+            match entry {
+                DurableCatalogEntry::Type(definition) => {
+                    if catalog
+                        .types
+                        .insert(definition.name.clone(), definition)
+                        .is_some()
+                    {
+                        return Err(Error::new("E_STORAGE", "duplicate durable type name"));
+                    }
+                }
+                DurableCatalogEntry::Table(table) => {
+                    if objects.contains_key(&table.name) || catalog.types.contains_key(&table.name)
+                    {
+                        return Err(Error::new(
+                            "E_STORAGE",
+                            format!("duplicate durable schema name '{}'", table.name),
+                        ));
+                    }
+                    objects.insert(
+                        table.name.clone(),
+                        DbObject::Table(Table {
+                            id: table.id,
+                            name: table.name,
+                            schema: table.schema,
+                            rows: Vec::new(),
+                            row_type: table.row_type,
+                            primary_key: table.primary_key,
+                        }),
+                    );
+                }
+                DurableCatalogEntry::Index { table, definition } => {
+                    let column = definition.column.clone();
+                    if index_definitions
+                        .entry(table)
+                        .or_default()
+                        .insert(column, definition)
+                        .is_some()
+                    {
+                        return Err(Error::new(
+                            "E_STORAGE",
+                            "duplicate durable index definition",
+                        ));
+                    }
+                }
+            }
+        }
+        if meta.next_catalog_id <= max_id {
+            return Err(Error::new(
+                "E_STORAGE",
+                "catalog next ID does not exceed every durable object ID",
+            ));
+        }
+        catalog.restore_next_id(meta.next_catalog_id)?;
+        for (table_name, definitions) in &index_definitions {
+            let Some(DbObject::Table(table)) = objects.get(table_name) else {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!("index references unknown table '{table_name}'"),
+                ));
+            };
+            for definition in definitions.values() {
+                if definition.table_id != table.id {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        format!("index '{}' has the wrong table ID", definition.column),
+                    ));
+                }
+            }
+        }
+        rows.sort_by_key(|(table_id, row_id, _)| (*table_id, *row_id));
+        let table_names_by_id = objects
+            .iter()
+            .map(|(name, object)| match object {
+                DbObject::Table(table) => (table.id, name.clone()),
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut decoded_rows: BTreeMap<String, Vec<Row>> = BTreeMap::new();
+        for (table_id, row_id, bytes) in rows {
+            let table_name = table_names_by_id.get(&table_id).ok_or_else(|| {
+                Error::new(
+                    "E_STORAGE",
+                    format!("row references unknown table ID {table_id}"),
+                )
+            })?;
+            let expected_id = decoded_rows.get(table_name).map_or(0, Vec::len);
+            if row_id != u64::try_from(expected_id).unwrap_or(u64::MAX) {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!("table '{table_name}' has noncontiguous row IDs"),
+                ));
+            }
+            let Some(DbObject::Table(table)) = objects.get(table_name) else {
+                unreachable!()
+            };
+            let ty = table
+                .row_type
+                .map(ScalarType::Ref)
+                .unwrap_or_else(|| ScalarType::Record(table.schema.clone()));
+            let value = crate::codec::decode_value(&catalog, &ty, &bytes)?;
+            let Value::Record(fields) = value.unwrapped() else {
+                return Err(Error::new("E_STORAGE", "durable row is not a record"));
+            };
+            decoded_rows
+                .entry(table_name.clone())
+                .or_default()
+                .push(Row {
+                    fields: fields.clone(),
+                });
+        }
+        for (table_name, rows) in decoded_rows {
+            let Some(DbObject::Table(table)) = objects.get_mut(&table_name) else {
+                unreachable!()
+            };
+            table.rows = rows;
+        }
+        let mut database = Self {
+            objects,
+            indexes: BTreeMap::new(),
+            index_definitions,
+            catalog,
+            sequence: meta.sequence,
+            schema_revision: meta.schema_revision,
+        };
+        database.rebuild_indexes()?;
+        if database.schema_info().hash != meta.schema_hash {
+            return Err(Error::new(
+                "E_STORAGE",
+                "durable schema hash does not match the catalog",
+            ));
+        }
+        Ok(database)
     }
 
     pub fn schema_text(&self) -> String {

@@ -235,6 +235,18 @@ impl Default for Catalog {
 }
 
 impl Catalog {
+    pub(crate) fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    pub(crate) fn restore_next_id(&mut self, next_id: u64) -> Result<()> {
+        if next_id == 0 {
+            return Err(Error::new("E_STORAGE", "catalog next ID must be positive"));
+        }
+        self.next_id = next_id;
+        Ok(())
+    }
+
     pub(crate) fn allocate(&mut self) -> Result<u64> {
         let id = self.next_id;
         self.next_id = id

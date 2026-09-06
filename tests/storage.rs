@@ -1,6 +1,114 @@
 mod common;
 use common::TempDir;
+use redb::{Database as RedbDatabase, Durability, ReadableDatabase, TableDefinition};
 use unionid::{Engine, Value};
+
+const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
+const REDB_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
+const REDB_SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("secondary_index");
+const REDB_MIGRATION_LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("migration_ledger");
+
+#[test]
+fn redb_atomic_adt_batches_survive_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    let expected_schema;
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        let response = engine.execute(include_str!("../examples/tasks.uid"));
+        assert!(response.ok, "{}", response.message);
+        assert!(engine.execute("create index tasks (owner.email)").ok);
+        expected_schema = engine.schema_info();
+        let failed = engine.execute("insert tasks {id = 3}");
+        assert!(!failed.ok);
+        assert_eq!(failed.error.unwrap().code, "E_FIELD");
+        assert_eq!(engine.execute("from tasks").rows.len(), 2);
+    }
+    let mut reopened = Engine::open_redb(path).unwrap();
+    assert_eq!(reopened.schema_info(), expected_schema);
+    let response = reopened
+        .execute("from tasks | filter owner.email == \"alice@example.com\" | select {id, state}");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 1);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
+fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    drop(Engine::open_redb(path.clone()).unwrap());
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let transaction = database.begin_read().unwrap();
+        let meta = transaction.open_table(REDB_META).unwrap();
+        assert_eq!(
+            meta.get("storage_format_version").unwrap().unwrap().value(),
+            1_u32.to_be_bytes()
+        );
+        transaction.open_table(REDB_CATALOG).unwrap();
+        transaction.open_table(REDB_ROWS).unwrap();
+        transaction.open_table(REDB_SECONDARY_INDEX).unwrap();
+        transaction.open_table(REDB_MIGRATION_LEDGER).unwrap();
+    }
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        transaction
+            .open_table(REDB_META)
+            .unwrap()
+            .insert("storage_format_version", 99_u32.to_be_bytes().as_slice())
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    drop(database);
+    let error = Engine::open_redb(path).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("unsupported storage_format_version"));
+}
+
+#[test]
+fn redb_enforces_single_database_ownership() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    let first = Engine::open_redb(path.clone()).unwrap();
+    let error = Engine::open_redb(path.clone()).err().unwrap();
+    assert_eq!(error.code, "E_BUSY");
+    drop(first);
+    assert!(Engine::open_redb(path).is_ok());
+}
+
+#[test]
+fn redb_rejects_secondary_indexes_that_do_not_match_rows() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        assert!(
+            engine
+                .execute("create table entries (id int, label text)\ncreate index entries (label)\ninsert entries {id = 1, label = \"saved\"}")
+                .ok
+        );
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        transaction
+            .open_table(REDB_SECONDARY_INDEX)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    drop(database);
+    let error = Engine::open_redb(path).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("secondary indexes do not match"));
+}
 
 #[test]
 fn typed_atomic_batches_survive_reopen() {

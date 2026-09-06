@@ -5,7 +5,19 @@ use std::time::Duration;
 use crate::{Engine, QueryResponse, Value};
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
-    let mut engine = Engine::memory();
+    run_local_engine(Engine::memory(), source, json)
+}
+
+pub fn run_local_redb(
+    path: impl Into<std::path::PathBuf>,
+    source: Option<String>,
+    json: bool,
+) -> Result<(), String> {
+    let engine = Engine::open_redb(path).map_err(|error| error.to_string())?;
+    run_local_engine(engine, source, json)
+}
+
+fn run_local_engine(mut engine: Engine, source: Option<String>, json: bool) -> Result<(), String> {
     if let Some(source) = source {
         return print_response(&engine.execute(&source), json);
     }

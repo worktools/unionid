@@ -11,6 +11,7 @@ mod matching;
 pub mod migration;
 pub mod model;
 pub mod query;
+mod redb_storage;
 pub mod server;
 pub mod snapshot;
 pub mod syntax;

@@ -4,7 +4,7 @@
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
-[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
+[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，无分号、减少标点。本轮草案采用 `field type`、`option text`／`list text`、缩进式声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不再沿用 TypeScript 风格字段注解或逐行 `|>`。
 
@@ -85,7 +85,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 [#3](https://github.com/worktools/unionid/issues/3)、[#4](https://github.com/worktools/unionid/issues/4) 和 [#5](https://github.com/worktools/unionid/issues/5) 已完成；实时状态和证据仍以 GitHub 为准。当前执行顺序是：
 
 1. [#28](https://github.com/worktools/unionid/issues/28) 已完成；继续以当前可执行查询规范回写 [#2](https://github.com/worktools/unionid/issues/2)。
-2. 合并 [#6](https://github.com/worktools/unionid/issues/6) 的 redb 存储 ADR，再用 [#7](https://github.com/worktools/unionid/issues/7) 冻结类型身份、schema revision 和演进契约，并由 [#13](https://github.com/worktools/unionid/issues/13) 开始接入。
+2. [#6](https://github.com/worktools/unionid/issues/6) 与 [#7](https://github.com/worktools/unionid/issues/7) 已完成；[#13](https://github.com/worktools/unionid/issues/13) 已开始让 redb 固定内部表和同步单事务接管新的持久入口，随后由 #14 完成故障恢复与格式校验矩阵。
 3. [#9](https://github.com/worktools/unionid/issues/9)/[#12](https://github.com/worktools/unionid/issues/12) 已完成；按 [#34](https://github.com/worktools/unionid/issues/34) → [#35](https://github.com/worktools/unionid/issues/35)/[#36](https://github.com/worktools/unionid/issues/36) 收敛实际读取体验，并回写 [#10](https://github.com/worktools/unionid/issues/10)/[#11](https://github.com/worktools/unionid/issues/11) 的完整验收。
 4. 按 M2→M3→M4 交付可靠写入、CRUD、长期演进和日常体验；CLI 基础与诊断随前面阶段逐步完善。
 
