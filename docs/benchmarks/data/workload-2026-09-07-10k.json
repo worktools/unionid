@@ -1,0 +1,20 @@
+{
+  "rows": 10000,
+  "samples": 20,
+  "warmups": 5,
+  "preparation_batch_rows": 3000,
+  "batch_write_rows": 100,
+  "database_bytes": 8425472,
+  "prepare_millis": 407,
+  "queries": [
+    {"name":"primary_key","iterations":20,"samples_micros":[10,7,13,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"p50_micros":7,"p95_micros":10,"peak_rss_bytes":56852480,"access_kind":"primary_key_lookup","index":"tasks.id"},
+    {"name":"secondary_index","iterations":20,"samples_micros":[9,10,9,7,9,8,7,7,7,8,8,9,8,7,7,7,7,7,7,7],"p50_micros":7,"p95_micros":9,"peak_rss_bytes":56868864,"access_kind":"secondary_index_lookup","index":"tasks.title"},
+    {"name":"full_scan","iterations":20,"samples_micros":[6569,6518,6461,6224,6275,6285,6241,6333,6289,6193,6196,6225,6223,6355,6405,6297,6265,6320,6284,6318],"p50_micros":6285,"p95_micros":6518,"peak_rss_bytes":76218368,"access_kind":"full_scan","index":null}
+  ],
+  "writes": [
+    {"name":"conditional_update","iterations":20,"samples_micros":[91161,91923,91976,93964,92022,90162,93996,92864,92334,92658,95910,92224,92816,91104,91912,91994,90026,93012,91079,93046],"p50_micros":92022,"p95_micros":93996,"peak_rss_bytes":115654656,"access_kind":"primary_key_lookup","index":"tasks.id"},
+    {"name":"upsert","iterations":20,"samples_micros":[92036,91914,94014,92951,90994,92014,93929,90803,93173,93080,90842,92718,91333,91305,91761,92970,91117,94919,93125,90955],"p50_micros":92014,"p95_micros":94014,"peak_rss_bytes":115605504,"access_kind":"primary_key_lookup","index":"tasks.id"},
+    {"name":"atomic_batch","iterations":20,"samples_micros":[64042,67289,62724,64305,67396,73080,66556,65948,66573,66670,66942,70157,67875,69084,69054,68922,70412,70921,71403,72420],"p50_micros":67396,"p95_micros":72420,"peak_rss_bytes":113590272,"access_kind":null,"index":null}
+  ],
+  "migration": {"name":"deep_migration","iterations":20,"samples_micros":[342596,343266,335160,336669,337643,341736,331519,331482,337343,337515,330956,335417,340925,339253,342709,336979,343890,348533,334945,339085],"p50_micros":337515,"p95_micros":343890,"peak_rss_bytes":143114240,"access_kind":"secondary_index_lookup","index":"tasks.priority"}
+}

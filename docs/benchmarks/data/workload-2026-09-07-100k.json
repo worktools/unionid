@@ -1,0 +1,20 @@
+{
+  "rows": 100000,
+  "samples": 20,
+  "warmups": 5,
+  "preparation_batch_rows": 3000,
+  "batch_write_rows": 100,
+  "database_bytes": 134746112,
+  "prepare_millis": 10501,
+  "queries": [
+    {"name":"primary_key","iterations":20,"samples_micros":[8,7,12,8,9,7,7,7,7,8,9,9,7,7,7,7,7,7,7,7],"p50_micros":7,"p95_micros":9,"peak_rss_bytes":495353856,"access_kind":"primary_key_lookup","index":"tasks.id"},
+    {"name":"secondary_index","iterations":20,"samples_micros":[11,12,10,8,9,8,8,8,8,12,8,9,8,7,7,7,7,7,8,7],"p50_micros":8,"p95_micros":12,"peak_rss_bytes":494059520,"access_kind":"secondary_index_lookup","index":"tasks.title"},
+    {"name":"full_scan","iterations":20,"samples_micros":[69349,69028,68983,69101,69387,69114,68847,69294,69246,69085,68955,69260,68879,68980,68682,68725,69147,70016,69617,70099],"p50_micros":69101,"p95_micros":70016,"peak_rss_bytes":668467200,"access_kind":"full_scan","index":null}
+  ],
+  "writes": [
+    {"name":"conditional_update","iterations":20,"samples_micros":[876703,864868,865975,868099,857369,874554,858035,844722,853330,854859,845304,858784,858421,845069,842377,854486,866045,883957,879449,874909],"p50_micros":858421,"p95_micros":879449,"peak_rss_bytes":1336836096,"access_kind":"primary_key_lookup","index":"tasks.id"},
+    {"name":"upsert","iterations":20,"samples_micros":[877809,874695,867071,872158,870453,873619,868347,870859,875980,873208,873884,873818,873802,872610,870536,871385,855420,863894,861798,846076],"p50_micros":871385,"p95_micros":875980,"peak_rss_bytes":1324204032,"access_kind":"primary_key_lookup","index":"tasks.id"},
+    {"name":"atomic_batch","iterations":20,"samples_micros":[483349,487268,477952,476781,484874,484751,485919,482489,495700,503535,510176,500735,504100,499403,498783,500636,505494,505939,500800,503750],"p50_micros":498783,"p95_micros":505939,"peak_rss_bytes":1144569856,"access_kind":null,"index":null}
+  ],
+  "migration": {"name":"deep_migration","iterations":20,"samples_micros":[4071147,4121967,4139826,3923604,3972842,4067988,4075112,4149364,3930853,3995211,3900951,4055095,4110824,4027452,4035949,3897992,4081443,4007479,4148903,4020331],"p50_micros":4035949,"p95_micros":4148903,"peak_rss_bytes":1350156288,"access_kind":"secondary_index_lookup","index":"tasks.priority"}
+}

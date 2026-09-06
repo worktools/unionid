@@ -2,3 +2,4 @@
 .DS_Store
 /tools/storage-eval/target
 /tools/recovery-eval/target
+/tools/workload-eval/target
