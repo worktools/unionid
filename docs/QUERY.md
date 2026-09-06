@@ -519,7 +519,7 @@ take 20
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |
 
-查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。insert/upsert/update/delete 成功响应包含 `affected_rows`；upsert 还包含 `upsert_action`。DML 响应的 rows/columns 为空。
+查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。insert/upsert/update/delete 成功响应包含 `affected_rows`；upsert 还包含 `upsert_action`。DML 响应的 rows/columns 为空。当前 indexed query、full scan、写入和 migration 的 10k/100k 实测边界见[工作负载成本记录](benchmarks/workload-2026-09-07.md)。
 
 以下片段是故意失败的反例：
 

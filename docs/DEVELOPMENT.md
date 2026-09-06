@@ -17,6 +17,7 @@
 - macOS/Linux 子进程通过 OS `RLIMIT_FSIZE` 强制真实 redb 文件增长失败；Engine 按失败点返回确定中止或结果不确定，父进程重开并验证 typed row、索引、schema、ledger 与完整性只处于完整旧／新状态。
 - `tools/recovery-eval` 在独立进程测量完整 ADT 工作集的 open/check 与 peak RSS；本机三次中位数为 10k 行 66/78 ms、52.67/81.48 MiB，100k 行 653/741 ms、459.28/745.84 MiB。CI 在 macOS/Linux 跑 100 行 smoke，完整环境与容量解释见恢复 benchmark 记录。
 - `tests/release_scenarios.rs` 从隔离临时目录驱动真实 CLI 子进程，覆盖任务条件状态转换、深层命名 ADT 配置迁移和 session key 生命周期；每条链路均跨重启执行 migration、check、backup/restore，并比较 schema identity、ledger、typed rows 与 explain。场景暴露并修复了 migration transform 递归展开嵌套命名 record、导致 `old.retry` 丢失类型身份的问题。
+- `tools/workload-eval` 使用新数据库副本和 release 子进程保留 20 个原始样本，测量 indexed query/full scan、条件 update、upsert、100-row batch 与深层 migration。10k 行写入 p95 约 72–94 ms、migration 344 ms；100k 行写入 p95 约 0.51–0.88 s、migration 4.15 s，写入／迁移 peak RSS 约 1.1–1.29 GiB。完整方法与 JSON 见 workload benchmark 记录。
 - `check --db` 调用 redb `check_integrity`，再重新加载并验证 unionid 逻辑状态；无效数据库文件、未知 codec 版本、索引不一致和跨进程占用都有结构化诊断。
 - 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、普通 scalar/bool derive、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter、match condition 与 derive result 共用有类型的 scalar expression，支持带 checked 错误的 int/float 算术；filter/match condition 和普通 derive 还支持括号、`not/and/or`、字段或 binding 间比较、list `contains`、list/text `length`、Option helper 与有预算的嵌套 `any/all`。复杂条件可使用 `filter`／`=>` 后的缩进块或跨行括号。
 - 未分组 `aggregate` 与 `group ... aggregate` 支持 count/sum/min/max；绑定阶段确定输入与输出类型，sum 保留命名数值类型，min/max 返回 option。group key 使用完整 typed equality，可包含 ADT；后续 filter/select/sort/take 使用汇总后的 schema。group 数量、accumulator cell 与估算状态内存都有显式上限。
@@ -74,6 +75,6 @@ cargo run --example embedded
 - #8/#10/#11/#34–#36：已实现默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、普通 scalar/bool derive、typed arithmetic/value construction、多键 sort、范围 take、布尔组合、`contains/length/any/all`、Option helper、typed 参数、schema-aware prepared query、有界的 group/aggregate 与查询局部纯函数。#9/#11/#12/#34–#36 和 #59–#61 已完成。
 - #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出与真实文件增长失败矩阵、`check --db`、10k/100k 恢复成本、共享类型化索引访问计划与 explain 均已接入。
 - #17–#20：显式 schema/data migration、版本化 runner/ledger、声明式 schema diff、逻辑备份还原和显式旧原型导入已实现。
-- #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；#66 补齐 parser 驱动的 REPL 续写，#69 提供规范 formatter。#74 已走通三条端到端升级恢复场景；下一步 #75 测量真实负载，再由 #70/#76 完成交互、产物和教程。
+- #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；#66 补齐 parser 驱动的 REPL 续写，#69 提供规范 formatter。#74 已走通三条端到端升级恢复场景，#75 已记录真实负载；下一步由 #70/#76 完成交互、产物和教程。
 
 GitHub issues 保留各自的完整验收范围；实现了部分能力不等于对应里程碑全部完成。

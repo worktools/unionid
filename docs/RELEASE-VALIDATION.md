@@ -24,7 +24,7 @@ cargo test --locked --test release_scenarios
 
 这些场景验证应用进程边界上的查询、DML、schema/data migration、索引重建、ledger 和 backup/restore 一致性。提交前／后退出、真实文件增长失败及 open/check 成本由 #13/#14 的存储测试和[恢复成本记录](benchmarks/recovery-2026-09-07.md)提供。
 
-它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。1 万／10 万行的 query、write 与 migration p50/p95 由 #75 单独测量；安装产物和五分钟教程由 #76 验收。
+它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。1 万／10 万行的 query、write 与 migration p50/p95 由 #75 的[工作负载成本记录](benchmarks/workload-2026-09-07.md)单独测量；安装产物和五分钟教程由 #76 验收。
 
 ## English Description
 
@@ -32,4 +32,4 @@ cargo test --locked --test release_scenarios
 
 The source and restored databases are compared for canonical schema, revision/hash, immutable migration ledger, typed query results, and structured explain access paths. The nested configuration case also prevents migration bindings from erasing the identity of a named record contained inside an outer sum payload.
 
-Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. #75 owns workload latency measurements and #76 owns installable release artifacts and the five-minute tutorial.
+Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. #75 records workload latency in the [workload cost report](benchmarks/workload-2026-09-07.md), and #76 owns installable release artifacts and the five-minute tutorial.
