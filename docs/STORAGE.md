@@ -41,7 +41,7 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 语法、类型、约束、编码或 redb transaction commit 之前的写入错误属于明确中止：返回 `E_STORAGE`，候选状态不发布，事务回滚，当前句柄仍可继续使用和重试。真正进入 redb `commit` 后返回的 I/O 错误属于结果不确定：当前 Engine 关闭 redb 句柄并禁用后续写入；读取仍反映进程内最后一次明确成功的状态。客户端不能把未确认写入当作确定回滚，也不应自动按 exactly-once 重试。重新打开数据库后，应通过业务主键查询确认结果。
 
-提交前，持久后端分别编码 Engine 的已提交状态与候选状态，再按稳定 catalog ID、`(table_id, row_id)` 和版本化 index key 计算确定性差异。redb transaction 只删除消失的 catalog/row/index 键，只写入新增或编码内容变化的键；未变化的数据和 `migration_ledger` 不触碰。meta 的固定版本与水位值保持同步更新。删除或覆盖时会核对 redb 中的旧值是否与 Engine 基线一致，不一致则在 commit 前明确中止并回滚事务。
+提交前，持久后端分别编码 Engine 的已提交状态与候选状态，再按稳定 catalog ID、`(table_id, row_id)`、版本化 index key 和 ledger sequence 计算确定性差异。redb transaction 只删除消失的键，只写入新增或编码内容变化的键；普通数据写入不触碰 `migration_ledger`。meta 的固定版本与水位值保持同步更新。删除或覆盖时会核对 redb 中的旧值是否与 Engine 基线一致，不一致则在 commit 前明确中止并回滚事务。
 
 当前 Engine 仍会为请求级隔离复制小工作集，并编码前后逻辑状态来计算差异，因此 CPU 与内存成本还不是 O(变更量)；本阶段消除的是 redb 的全表清空和持久写放大。后续若扩大工作集，可让执行器直接产生 mutation set，同时保留同一稳定键和原子提交契约。
 
@@ -55,9 +55,9 @@ cargo run -- check --db ./data/unionid.redb --format json
 | `catalog` | `(kind, stable_id)` | 版本化 catalog definition | 命名类型、用户表和索引定义；表记录也保存 RowId 分配游标 |
 | `rows` | `(table_id, row_id)` | 版本 1 ADT value codec | 完整类型化 record；字段与变体按稳定 ID 编码 |
 | `secondary_index` | 版本化 `(index_id, equality_key, row_id)` | unit | 当前等值索引的派生记录 |
-| `migration_ledger` | sequence | 版本化 migration record | 已预留；正式 runner 由 #18 接入 |
+| `migration_ledger` | sequence | 版本化 migration record | `UIDM` magic、codec version、JSON entry；与 schema/data/index 同事务提交 |
 
-打开数据库时会拒绝未知的存储、catalog、ADT value 或索引键版本，并验证 schema hash、RowId 唯一性／顺序／分配水位以及索引是否与 catalog/rows 一致。RowId 可以有删除形成的缺口。差异计划测试检查 update/delete/insert 只生成预期的 catalog/row/index 键变化；混合 schema+DML 的多表事务会在重开后运行完整性检查，并确认预留的 migration ledger 未被普通提交清空。集成测试还会在一个未提交 redb transaction 修改多个内部表后直接退出子进程，确认重开只看到完整旧状态；也会在 Engine commit 成功后不执行析构直接退出，确认重开看到完整新状态。无效 redb 文件会返回 `E_STORAGE` 并保留原文件，跨进程第二个打开者返回 `E_BUSY`。
+打开数据库时会拒绝未知的存储、catalog、ADT value、索引键或 migration codec，并验证 schema hash、ledger 单链及其 head、RowId 唯一性／顺序／分配水位以及索引是否与 catalog/rows 一致。RowId 可以有删除形成的缺口。差异计划测试检查 update/delete/insert 只生成预期的 catalog/row/index 键变化；migration 测试确认 schema、数据、索引和 ledger 一起提交，普通数据提交保留 ledger。集成测试还会在一个未提交 redb transaction 修改多个内部表后直接退出子进程，确认重开只看到完整旧状态；也会在 Engine commit 成功后不执行析构直接退出，确认重开看到完整新状态。无效 redb 文件会返回 `E_STORAGE` 并保留原文件，跨进程第二个打开者返回 `E_BUSY`。
 
 这些测试覆盖应用进程退出和库级一致性检查，没有模拟机器掉电、文件系统违反同步承诺、真实设备损坏或所有空间不足位置。`Immediate` 与 two-phase commit 的掉电保证来自 redb 的事务契约；设备与文件系统仍必须正确实现持久同步。更完整的真实 I/O 故障和恢复时间矩阵继续由 #13/#14 跟踪。
 

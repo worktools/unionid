@@ -1,7 +1,10 @@
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_directory};
 use crate::{Engine, QueryResponse, Value};
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
@@ -38,6 +41,207 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
             report.schema.revision,
             report.schema.hash
         );
+    }
+    Ok(())
+}
+
+pub fn migration_new(directory: impl AsRef<Path>, name: &str) -> Result<PathBuf, String> {
+    let directory = directory.as_ref();
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("create '{}': {error}", directory.display()))?;
+    let existing = load_directory(directory).map_err(|error| error.to_string())?;
+    let number = existing
+        .iter()
+        .filter_map(|file| {
+            file.path
+                .as_ref()?
+                .file_stem()?
+                .to_str()?
+                .split('_')
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(existing.len())
+        .checked_add(1)
+        .ok_or_else(|| "migration number exhausted".to_string())?;
+    let slug = migration_slug(name)?;
+    let id = format!("m{number:04}_{slug}");
+    let path = directory.join(format!("{number:04}_{slug}.uid"));
+    let mut source = format!("migration {id}\n");
+    if let Some(parent) = existing.last() {
+        source.push_str(&format!("  parent {}\n", parent.id));
+    }
+    source.push_str("  # Add one or more schema operations here\n");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("create '{}': {error}", path.display()))?;
+    file.write_all(source.as_bytes())
+        .map_err(|error| format!("write '{}': {error}", path.display()))?;
+    Ok(path)
+}
+
+pub fn migration_plan(
+    db: impl Into<PathBuf>,
+    directory: impl AsRef<Path>,
+    json: bool,
+) -> Result<(), String> {
+    let db = db.into();
+    let files = load_directory(directory).map_err(|error| error.to_string())?;
+    let engine = if db.exists() {
+        Engine::open_redb(db).map_err(|error| error.to_string())?
+    } else {
+        Engine::memory()
+    };
+    let plan = engine
+        .plan_migrations(&files)
+        .map_err(|error| error.to_string())?;
+    print_migration_plan(&plan, json)
+}
+
+pub fn migration_apply(
+    db: impl Into<PathBuf>,
+    directory: impl AsRef<Path>,
+    json: bool,
+) -> Result<(), String> {
+    let files = load_directory(directory).map_err(|error| error.to_string())?;
+    let mut engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
+    let result = engine
+        .apply_migrations(&files)
+        .map_err(|error| error.to_string())?;
+    print_migration_apply(&result, json)
+}
+
+pub fn migration_status(
+    db: impl Into<PathBuf>,
+    directory: impl AsRef<Path>,
+    json: bool,
+) -> Result<(), String> {
+    let db = db.into();
+    require_existing_database(&db)?;
+    let files = load_directory(directory).map_err(|error| error.to_string())?;
+    let engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
+    let status = engine
+        .migration_status(&files)
+        .map_err(|error| error.to_string())?;
+    print_migration_status(&status, json)
+}
+
+fn require_existing_database(path: &Path) -> Result<(), String> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "database '{}' does not exist; apply migrations to create it",
+            path.display()
+        ))
+    }
+}
+
+fn migration_slug(name: &str) -> Result<String, String> {
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in name.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('_');
+            }
+            slug.push(character.to_ascii_lowercase());
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    if slug.is_empty() {
+        Err("migration name must contain an ASCII letter or digit".into())
+    } else {
+        Ok(slug)
+    }
+}
+
+fn print_migration_plan(plan: &MigrationPlan, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(plan).map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+    println!(
+        "schema {} -> {}\n{} applied, {} pending",
+        plan.current_schema.revision,
+        plan.target_schema.revision,
+        plan.applied_count,
+        plan.pending.len()
+    );
+    for migration in &plan.pending {
+        println!(
+            "{}{}",
+            migration.id,
+            if migration.destructive {
+                " [destructive]"
+            } else {
+                ""
+            }
+        );
+        println!(
+            "  schema {} {} -> {} {}",
+            migration.before.revision,
+            migration.before.hash,
+            migration.after.revision,
+            migration.after.hash
+        );
+        for operation in &migration.operations {
+            println!("  {operation}");
+        }
+    }
+    Ok(())
+}
+
+fn print_migration_apply(result: &MigrationApply, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(result).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "applied {} migration(s), skipped {}\nschema revision {}\nschema hash {}",
+            result.applied.len(),
+            result.skipped.len(),
+            result.schema.revision,
+            result.schema.hash
+        );
+        for id in &result.applied {
+            println!("  applied {id}");
+        }
+    }
+    Ok(())
+}
+
+fn print_migration_status(status: &MigrationStatus, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(status).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "schema revision {}\nschema hash {}\n{} applied, {} pending",
+            status.schema.revision,
+            status.schema.hash,
+            status.applied.len(),
+            status.pending.len()
+        );
+        for entry in &status.applied {
+            println!("  applied {}", entry.id);
+        }
+        for id in &status.pending {
+            println!("  pending {id}");
+        }
     }
     Ok(())
 }

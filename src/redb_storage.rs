@@ -10,10 +10,12 @@ use redb::{
 use crate::codec::VALUE_CODEC_VERSION;
 use crate::db::{Database, DurableCatalogEntry, DurableMeta};
 use crate::error::{Error, Result};
+use crate::migration::MigrationEntry;
 
 const STORAGE_FORMAT_VERSION: u32 = 1;
 const CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
+const MIGRATION_CODEC_VERSION: u16 = 1;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
@@ -31,6 +33,7 @@ const NEXT_CATALOG_ID_KEY: &str = "next_catalog_id";
 const SCHEMA_HASH_KEY: &str = "schema_hash";
 const CATALOG_MAGIC: &[u8; 4] = b"UIDC";
 const INDEX_MAGIC: &[u8; 4] = b"UIDI";
+const MIGRATION_MAGIC: &[u8; 4] = b"UIDM";
 
 pub(crate) struct RedbStore {
     database: RedbDatabase,
@@ -125,9 +128,13 @@ impl RedbStore {
             apply_set_delta(&mut table, &prepared.secondary_indexes)
                 .map_err(CommitFailure::Definite)?;
         }
-        transaction
-            .open_table(MIGRATION_LEDGER)
-            .map_err(|error| CommitFailure::definite("open migration ledger table", error))?;
+        {
+            let mut table = transaction
+                .open_table(MIGRATION_LEDGER)
+                .map_err(|error| CommitFailure::definite("open migration ledger table", error))?;
+            apply_ledger_delta(&mut table, &prepared.migrations)
+                .map_err(CommitFailure::Definite)?;
+        }
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit redb transaction", error))?;
@@ -210,10 +217,33 @@ impl RedbStore {
             }
             keys
         };
-        transaction
-            .open_table(MIGRATION_LEDGER)
-            .map_err(|error| storage_error("open migration ledger table", error))?;
-        let database = Database::from_durable(meta.clone(), entries, rows)?;
+        let (migrations, stored_migrations) = {
+            let table = transaction
+                .open_table(MIGRATION_LEDGER)
+                .map_err(|error| storage_error("open migration ledger table", error))?;
+            let mut migrations = Vec::new();
+            let mut stored = BTreeMap::new();
+            for (expected, entry) in table
+                .iter()
+                .map_err(|error| storage_error("iterate migration ledger", error))?
+                .enumerate()
+            {
+                let (sequence, value) =
+                    entry.map_err(|error| storage_error("read migration ledger entry", error))?;
+                let sequence = sequence.value();
+                if sequence != expected as u64 {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "migration ledger sequence is not contiguous",
+                    ));
+                }
+                let value = value.value().to_vec();
+                migrations.push(decode_migration_entry(&value)?);
+                stored.insert(sequence, value);
+            }
+            (migrations, stored)
+        };
+        let database = Database::from_durable(meta.clone(), entries, rows, migrations)?;
         let expected_indexes = database
             .durable_secondary_indexes()?
             .into_iter()
@@ -230,6 +260,7 @@ impl RedbStore {
             catalog: stored_catalog,
             rows: stored_rows,
             secondary_indexes: stored_indexes,
+            migrations: stored_migrations,
         };
         Ok((database, committed))
     }
@@ -240,6 +271,7 @@ struct PreparedState {
     catalog: BTreeMap<Vec<u8>, Vec<u8>>,
     rows: BTreeMap<Vec<u8>, Vec<u8>>,
     secondary_indexes: BTreeSet<Vec<u8>>,
+    migrations: BTreeMap<u64, Vec<u8>>,
 }
 
 impl PreparedState {
@@ -261,11 +293,25 @@ impl PreparedState {
             .into_iter()
             .map(|(index_id, value, row_id)| encode_index_key(index_id, &value, row_id))
             .collect::<Result<BTreeSet<_>>>()?;
+        let migrations = database
+            .durable_migrations()
+            .iter()
+            .enumerate()
+            .map(|(sequence, entry)| {
+                Ok((
+                    u64::try_from(sequence).map_err(|_| {
+                        Error::new("E_LIMIT", "migration ledger sequence exhausted")
+                    })?,
+                    encode_migration_entry(entry)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(Self {
             meta: database.durable_meta(),
             catalog,
             rows,
             secondary_indexes,
+            migrations,
         })
     }
 }
@@ -275,6 +321,7 @@ struct PreparedDelta {
     catalog: BytesDelta,
     rows: BytesDelta,
     secondary_indexes: SetDelta,
+    migrations: LedgerDelta,
 }
 
 impl PreparedDelta {
@@ -294,7 +341,31 @@ impl PreparedDelta {
                 &previous.secondary_indexes,
                 &next.secondary_indexes,
             ),
+            migrations: LedgerDelta::between(&previous.migrations, &next.migrations),
         }
+    }
+}
+
+struct LedgerDelta {
+    deletes: Vec<(u64, Vec<u8>)>,
+    writes: Vec<(u64, Option<Vec<u8>>, Vec<u8>)>,
+}
+
+impl LedgerDelta {
+    fn between(previous: &BTreeMap<u64, Vec<u8>>, next: &BTreeMap<u64, Vec<u8>>) -> Self {
+        let deletes = previous
+            .iter()
+            .filter(|(key, _)| !next.contains_key(*key))
+            .map(|(key, value)| (*key, value.clone()))
+            .collect();
+        let writes = next
+            .iter()
+            .filter_map(|(key, value)| match previous.get(key) {
+                Some(previous) if previous == value => None,
+                previous => Some((*key, previous.cloned(), value.clone())),
+            })
+            .collect();
+        Self { deletes, writes }
     }
 }
 
@@ -377,6 +448,32 @@ fn apply_bytes_delta(
             return Err(Error::new(
                 "E_STORAGE",
                 format!("stored {entry_name} changed before incremental write"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_ledger_delta(table: &mut redb::Table<'_, u64, &[u8]>, delta: &LedgerDelta) -> Result<()> {
+    for (key, expected) in &delta.deletes {
+        let removed = table
+            .remove(*key)
+            .map_err(|error| storage_error("delete migration ledger entry", error))?;
+        if removed.as_ref().map(|value| value.value()) != Some(expected.as_slice()) {
+            return Err(Error::new(
+                "E_STORAGE",
+                "stored migration ledger changed before incremental delete",
+            ));
+        }
+    }
+    for (key, expected, value) in &delta.writes {
+        let replaced = table
+            .insert(*key, value.as_slice())
+            .map_err(|error| storage_error("write migration ledger entry", error))?;
+        if replaced.as_ref().map(|value| value.value().to_vec()) != *expected {
+            return Err(Error::new(
+                "E_STORAGE",
+                "stored migration ledger changed before incremental write",
             ));
         }
     }
@@ -510,6 +607,38 @@ fn encode_catalog_key(kind: u8, stable_id: u64) -> Vec<u8> {
     key.push(kind);
     key.extend_from_slice(&stable_id.to_be_bytes());
     key
+}
+
+fn encode_migration_entry(entry: &MigrationEntry) -> Result<Vec<u8>> {
+    let mut value = Vec::from(MIGRATION_MAGIC.as_slice());
+    value.extend_from_slice(&MIGRATION_CODEC_VERSION.to_be_bytes());
+    value
+        .extend(serde_json::to_vec(entry).map_err(|error| {
+            Error::new("E_STORAGE", format!("encode migration entry: {error}"))
+        })?);
+    Ok(value)
+}
+
+fn decode_migration_entry(value: &[u8]) -> Result<MigrationEntry> {
+    if value.len() < 6 || &value[..4] != MIGRATION_MAGIC {
+        return Err(Error::new(
+            "E_STORAGE",
+            "invalid migration ledger codec magic",
+        ));
+    }
+    let version = u16::from_be_bytes(value[4..6].try_into().unwrap());
+    if version != MIGRATION_CODEC_VERSION {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported migration ledger codec version {version}"),
+        ));
+    }
+    serde_json::from_slice(&value[6..]).map_err(|error| {
+        Error::new(
+            "E_STORAGE",
+            format!("decode migration ledger entry: {error}"),
+        )
+    })
 }
 
 fn encode_catalog_entry(entry: &DurableCatalogEntry) -> Result<Vec<u8>> {

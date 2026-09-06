@@ -37,6 +37,7 @@ pub enum Statement {
     },
     Migration {
         name: String,
+        parent: Option<String>,
         steps: Vec<SchemaMigration>,
     },
     Pipeline(Pipeline),
@@ -50,6 +51,14 @@ pub enum SchemaMigration {
     },
     DropType {
         name: String,
+    },
+    AddTable {
+        table: String,
+        row_type: String,
+        key: Option<String>,
+    },
+    DropTable {
+        table: String,
     },
     RenameType {
         from: String,

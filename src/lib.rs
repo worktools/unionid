@@ -20,4 +20,5 @@ pub mod wal;
 pub use db::{QueryResponse, SchemaInfo, UpsertAction};
 pub use engine::{Engine, StorageIntegrity};
 pub use error::{Error, Result, Span};
+pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};

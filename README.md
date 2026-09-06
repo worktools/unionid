@@ -11,6 +11,7 @@
 - 独立于 serde/Rust enum 布局的版本化 ADT value codec
 - redb 增量原子持久模式，可由本地命令、REPL 与 TCP 服务共同使用
 - 显式 ADT schema migration：稳定身份 rename、默认回填、typed conversion、约束与索引变更
+- 版本化 migration runner：`new/plan/apply/status`、不可变 checksum 与 redb ledger
 
 ## 先运行一个完整例子
 
@@ -24,6 +25,11 @@ cargo run -- run --file examples/events.uid
 cargo run -- run --file examples/sync_conflicts.uid
 cargo run -- run --file examples/task_mutations.uid
 cargo run -- run --file examples/schema_migration.uid
+
+# apply the versioned example history to a durable database
+cargo run -- migration plan --db app.redb --dir examples/migrations
+cargo run -- migration apply --db app.redb --dir examples/migrations
+cargo run -- migration status --db app.redb --dir examples/migrations
 cargo run --example embedded
 ```
 
@@ -52,7 +58,7 @@ cargo run -- cli --memory
 
 输入多行后用空行提交，`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。文件或重定向 stdin 则读取到 EOF 后整体执行。查询失败返回非零退出码。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，schema 演进语法见 [MIGRATIONS.md](docs/MIGRATIONS.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较和 `contains/length`。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引。通用函数、`let/group`、参数绑定和版本化 migration runner 还在后续计划中。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较和 `contains/length`。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/apply/status` 管理不可变迁移历史。通用函数、`let/group` 和参数绑定还在后续计划中。
 
 复杂条件推荐在 `filter` 或 match 分支的 `=>` 后换行并缩进；混用 `and` 与 `or` 时用括号写清分组。语言会减少无助于理解的标点，同时保留括号和集合边界等必要符号。
 

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
+use crate::migration::MigrationEntry;
 use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
 };
@@ -154,6 +155,8 @@ pub struct Database {
     pub sequence: u64,
     #[serde(default)]
     schema_revision: u64,
+    #[serde(default)]
+    migration_history: Vec<MigrationEntry>,
 }
 
 impl Database {
@@ -198,7 +201,11 @@ impl Database {
                 mut assignments,
             } => self.update(&mut target, &mut assignments),
             Statement::Delete { mut target } => self.delete(&mut target),
-            Statement::Migration { name, steps } => self.migrate(&name, steps),
+            Statement::Migration {
+                name,
+                parent: _,
+                steps,
+            } => self.migrate(&name, steps),
             Statement::Pipeline(pipeline) => self.query(pipeline),
         }
     }
@@ -1048,10 +1055,25 @@ impl Database {
         Ok(entries)
     }
 
+    pub fn migration_history(&self) -> &[MigrationEntry] {
+        &self.migration_history
+    }
+
+    pub(crate) fn append_migration(&mut self, entry: MigrationEntry) -> Result<()> {
+        crate::migration::validate_next(&self.migration_history, &entry)?;
+        self.migration_history.push(entry);
+        Ok(())
+    }
+
+    pub(crate) fn durable_migrations(&self) -> &[MigrationEntry] {
+        &self.migration_history
+    }
+
     pub(crate) fn from_durable(
         meta: DurableMeta,
         entries: Vec<DurableCatalogEntry>,
         mut rows: Vec<(u64, u64, Vec<u8>)>,
+        migration_history: Vec<MigrationEntry>,
     ) -> Result<Self> {
         let mut ids = BTreeSet::new();
         let mut catalog = Catalog::default();
@@ -1206,7 +1228,18 @@ impl Database {
             catalog,
             sequence: meta.sequence,
             schema_revision: meta.schema_revision,
+            migration_history,
         };
+        crate::migration::validate_history(&database.migration_history)?;
+        if let Some(head) = database.migration_history.last()
+            && (head.schema_revision != database.schema_revision
+                || head.schema_hash != meta.schema_hash)
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "migration ledger head does not match the durable schema",
+            ));
+        }
         database.rebuild_indexes()?;
         if database.schema_info().hash != meta.schema_hash {
             return Err(Error::new(
@@ -1381,6 +1414,7 @@ mod tests {
             database.durable_meta(),
             database.durable_catalog_entries(),
             database.durable_rows().unwrap(),
+            Vec::new(),
         )
         .unwrap();
         assert_eq!(

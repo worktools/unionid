@@ -4,7 +4,7 @@ use redb::{
     Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
 };
 use std::process::Command;
-use unionid::{Engine, UpsertAction, Value};
+use unionid::{Engine, MigrationFile, UpsertAction, Value};
 
 const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
@@ -47,6 +47,11 @@ fn redb_crash_transaction_child() {
             .unwrap()
             .retain(|_, _| false)
             .unwrap();
+        transaction
+            .open_table(REDB_MIGRATION_LEDGER)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
         std::process::exit(CRASH_BEFORE_COMMIT);
     }
     if mode == "after" {
@@ -64,9 +69,12 @@ fn redb_recovers_complete_state_across_process_exit_boundaries() {
     let path = dir.0.join("state.redb");
     {
         let mut engine = Engine::open_redb(path.clone()).unwrap();
+        engine
+            .apply_migrations(std::slice::from_ref(&crash_migration()))
+            .unwrap();
         assert!(
             engine
-                .execute("type Entry =\n  id int\n  value text\ntable entries Entry\n  key id\ninsert entries {id = 1, value = \"baseline\"}")
+                .execute("insert entries {id = 1, value = \"baseline\"}")
                 .ok
         );
     }
@@ -77,6 +85,14 @@ fn redb_recovers_complete_state_across_process_exit_boundaries() {
         assert!(rows.ok, "{}", rows.message);
         assert_eq!(rows.rows.len(), 1);
         assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
+        assert_eq!(
+            reopened
+                .migration_status(std::slice::from_ref(&crash_migration()))
+                .unwrap()
+                .applied
+                .len(),
+            1
+        );
     }
     run_crash_child(&path, "after", CRASH_AFTER_COMMIT);
     let mut reopened = Engine::open_redb(path).unwrap();
@@ -84,6 +100,21 @@ fn redb_recovers_complete_state_across_process_exit_boundaries() {
     assert!(rows.ok, "{}", rows.message);
     assert_eq!(rows.rows.len(), 2);
     assert!(rows.rows[1]["id"].cmp_eq(&Value::Int(2)));
+    assert_eq!(
+        reopened
+            .migration_status(std::slice::from_ref(&crash_migration()))
+            .unwrap()
+            .applied
+            .len(),
+        1
+    );
+}
+
+fn crash_migration() -> MigrationFile {
+    MigrationFile::parse(
+        "migration m0001_initial\n  add type Entry =\n    id int\n    value text\n  add table entries Entry key id\n",
+    )
+    .unwrap()
 }
 
 fn run_crash_child(path: &std::path::Path, mode: &str, expected_code: i32) {
@@ -176,20 +207,6 @@ fn redb_incremental_commit_handles_schema_and_multi_table_batches() {
                 .ok
         );
     }
-    let database = RedbDatabase::open(&path).unwrap();
-    {
-        let mut transaction = database.begin_write().unwrap();
-        transaction.set_durability(Durability::Immediate).unwrap();
-        transaction.set_two_phase_commit(true);
-        transaction
-            .open_table(REDB_MIGRATION_LEDGER)
-            .unwrap()
-            .insert(42, b"reserved".as_slice())
-            .unwrap();
-        transaction.commit().unwrap();
-    }
-    drop(database);
-
     {
         let mut engine = Engine::open_redb(path.clone()).unwrap();
         let changed = engine.execute(
@@ -211,11 +228,6 @@ fn redb_incremental_commit_handles_schema_and_multi_table_batches() {
     assert!(reopened.execute("from archive").rows.is_empty());
     assert_eq!(reopened.execute("from audits").rows.len(), 1);
     drop(reopened);
-
-    let database = RedbDatabase::open(path).unwrap();
-    let transaction = database.begin_read().unwrap();
-    let ledger = transaction.open_table(REDB_MIGRATION_LEDGER).unwrap();
-    assert_eq!(ledger.get(42).unwrap().unwrap().value(), b"reserved");
 }
 
 #[test]
@@ -439,6 +451,31 @@ fn redb_unknown_codec_versions_fail_closed() {
         assert_eq!(error.code, "E_STORAGE");
         assert!(error.message.contains(&format!("unsupported {key}")));
     }
+}
+
+#[test]
+fn redb_unknown_migration_codec_versions_fail_closed() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    drop(Engine::open_redb(path.clone()).unwrap());
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        let mut ledger = transaction.open_table(REDB_MIGRATION_LEDGER).unwrap();
+        ledger.insert(0, b"UIDM\0c{}".as_slice()).unwrap();
+        drop(ledger);
+        transaction.commit().unwrap();
+    }
+    drop(database);
+    let error = Engine::open_redb(path).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(
+        error
+            .message
+            .contains("unsupported migration ledger codec version")
+    );
 }
 
 #[test]

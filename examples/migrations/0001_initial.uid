@@ -1,0 +1,7 @@
+migration m0001_initial
+  add type State = Pending | Running | Complete
+  add type Task =
+    id int
+    title text
+    state State
+  add table tasks Task key id
