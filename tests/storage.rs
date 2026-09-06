@@ -195,6 +195,85 @@ fn redb_upgrades_and_persists_the_per_table_row_id_cursor() {
 }
 
 #[test]
+fn redb_update_delete_preserve_row_ids_constraints_and_indexes() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    {
+        let mut engine = Engine::open_redb(path.clone()).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ncreate index entries (label)\ninsert entries {id = 1, label = \"one\"}\ninsert entries {id = 2, label = \"two\"}\ninsert entries {id = 3, label = \"three\"}",
+                )
+                .ok
+        );
+        let deleted = engine.execute("delete entries | filter id == 2");
+        assert!(deleted.ok, "{}", deleted.message);
+        assert_eq!(deleted.affected_rows, Some(1));
+        let updated =
+            engine.execute("update entries\nfilter id == 3\nset id = 30\nset label = \"changed\"");
+        assert!(updated.ok, "{}", updated.message);
+        assert_eq!(updated.affected_rows, Some(1));
+        assert!(
+            engine
+                .execute("insert entries {id = 4, label = \"four\"}")
+                .ok
+        );
+
+        let failed = engine.execute("update entries\nset id = 1");
+        assert!(!failed.ok);
+        assert_eq!(failed.error.unwrap().code, "E_CONSTRAINT");
+    }
+
+    {
+        let mut reopened = Engine::open_redb(path.clone()).unwrap();
+        assert!(
+            reopened
+                .execute("from entries | filter id == 2")
+                .rows
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .execute("from entries | filter id == 30 | filter label == \"changed\"")
+                .rows
+                .len(),
+            1
+        );
+        let rows = reopened.execute("from entries | sort id");
+        assert!(rows.ok, "{}", rows.message);
+        assert_eq!(rows.rows.len(), 3);
+        assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
+        assert!(rows.rows[1]["id"].cmp_eq(&Value::Int(4)));
+        assert!(rows.rows[2]["id"].cmp_eq(&Value::Int(30)));
+    }
+
+    let database = RedbDatabase::open(&path).unwrap();
+    let transaction = database.begin_read().unwrap();
+    let rows = transaction.open_table(REDB_ROWS).unwrap();
+    let row_ids = rows
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (key, _) = entry.unwrap();
+            u64::from_be_bytes(key.value()[8..].try_into().unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(row_ids, vec![0, 2, 3]);
+    let catalog = transaction.open_table(REDB_CATALOG).unwrap();
+    let cursor = catalog
+        .iter()
+        .unwrap()
+        .filter_map(|entry| {
+            let (_, value) = entry.ok()?;
+            let json: serde_json::Value = serde_json::from_slice(&value.value()[6..]).ok()?;
+            (json["kind"] == "Table").then(|| json["value"]["next_row_id"].as_u64())?
+        })
+        .next();
+    assert_eq!(cursor, Some(4));
+}
+
+#[test]
 fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
     let dir = TempDir::new();
     let path = dir.0.join("state.redb");

@@ -77,6 +77,15 @@ fn executable_examples() {
     assert!(r.rows[0]["local_change"].cmp_eq(&Value::Text("modified".into())));
     assert!(r.rows[1]["local_change"].cmp_eq(&Value::Text("added".into())));
     assert!(r.rows[2]["local_change"].cmp_eq(&Value::Text("none".into())));
+
+    let mut mutations = Engine::memory();
+    let r = ok(
+        &mut mutations,
+        include_str!("../examples/task_mutations.uid"),
+    );
+    assert_eq!(r.rows.len(), 1);
+    assert!(r.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(r.rows[0]["attempts"].cmp_eq(&Value::Int(2)));
 }
 
 #[test]
@@ -1408,4 +1417,103 @@ fn deeply_nested_index_keys_grow_with_the_value_size() {
         Value::List(vec![a]).index_key(),
         Value::Tuple(vec![b]).index_key()
     );
+}
+
+#[test]
+fn update_and_delete_compose_with_typed_adt_filters_and_indexes() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type State = Pending | Running {attempt int} | Done {result text}\ntype Meta =\n  owner text\ntype Task =\n  id int\n  attempts int\n  state State\n  meta Meta\ntable tasks Task\n  key id\ncreate index tasks (meta.owner)\ninsert tasks {id = 1, attempts = 1, state = Pending, meta = {owner = \"alice\"}}\ninsert tasks {id = 2, attempts = 4, state = Running {attempt = 2}, meta = {owner = \"eve\"}}",
+    );
+    let updated = ok(
+        &mut engine,
+        "update tasks\nfilter match state\n  Pending => true\n  _ => false\nset state = Done {result = \"ok\"}\nset attempts = attempts + 1\nset meta.owner = \"bob\"",
+    );
+    assert_eq!(updated.affected_rows, Some(1));
+    let rows = ok(
+        &mut engine,
+        "from tasks | filter meta.owner == \"bob\" | select {id, attempts, state}",
+    );
+    assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(rows.rows[0]["attempts"].cmp_eq(&Value::Int(2)));
+
+    let deleted = ok(&mut engine, "delete tasks | filter meta.owner == \"bob\"");
+    assert_eq!(deleted.affected_rows, Some(1));
+    let remaining = ok(&mut engine, "from tasks");
+    assert_eq!(remaining.rows.len(), 1);
+    assert!(remaining.rows[0]["id"].cmp_eq(&Value::Int(2)));
+}
+
+#[test]
+fn update_assignments_are_simultaneous_and_batches_remain_atomic() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "create table pairs (id int, left int, right int)\ninsert pairs {id = 1, left = 10, right = 20}",
+    );
+    let updated = ok(
+        &mut engine,
+        "update pairs\nfilter id == 1\nset left = right\nset right = left",
+    );
+    assert_eq!(updated.affected_rows, Some(1));
+    let swapped = ok(&mut engine, "from pairs");
+    assert!(swapped.rows[0]["left"].cmp_eq(&Value::Int(20)));
+    assert!(swapped.rows[0]["right"].cmp_eq(&Value::Int(10)));
+
+    let failed = engine.execute("update pairs\nset left = left + 1\nfrom pairs | select {missing}");
+    assert!(!failed.ok);
+    assert!(ok(&mut engine, "from pairs").rows[0]["left"].cmp_eq(&Value::Int(20)));
+}
+
+#[test]
+fn failed_multi_row_updates_preserve_rows_constraints_and_indexes() {
+    let setup = "type Item =\n  id int\n  divisor int\n  value int\ntable items Item\n  key id\ninsert items {id = 1, divisor = 2, value = 5}\ninsert items {id = 2, divisor = 0, value = 6}";
+    let mut engine = Engine::memory();
+    ok(&mut engine, setup);
+
+    let duplicate = engine.execute("update items\nset id = 1");
+    assert!(!duplicate.ok);
+    assert_eq!(duplicate.error.unwrap().code, "E_CONSTRAINT");
+    assert_eq!(ok(&mut engine, "from items | filter id == 2").rows.len(), 1);
+
+    let arithmetic = engine.execute("update items\nset value = 10 / divisor");
+    assert!(!arithmetic.ok);
+    assert_eq!(arithmetic.error.unwrap().code, "E_ARITH");
+    let unchanged = ok(&mut engine, "from items | sort id");
+    assert!(unchanged.rows[0]["value"].cmp_eq(&Value::Int(5)));
+    assert!(unchanged.rows[1]["value"].cmp_eq(&Value::Int(6)));
+}
+
+#[test]
+fn update_and_delete_validate_before_scanning_empty_tables() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Meta =\n  owner text\ntype Row =\n  id int\n  meta Meta\ntable rows Row",
+    );
+    for (source, expected) in [
+        ("update rows\nset missing = 1", "unknown field 'missing'"),
+        ("update rows\nset id = \"wrong\"", "expected int"),
+        (
+            "update rows\nset meta = {owner = \"a\"}\nset meta.owner = \"b\"",
+            "overlap",
+        ),
+        (
+            "update rows\nset id = 1\nfilter id == 1",
+            "filters must appear before set",
+        ),
+        ("update rows\nfilter id == 1", "requires at least one set"),
+        (
+            "delete rows\nfilter missing == 1",
+            "unknown field 'missing'",
+        ),
+    ] {
+        let result = engine.execute(source);
+        assert!(!result.ok, "accepted {source}");
+        assert!(result.message.contains(expected), "{}", result.message);
+    }
+    let deleted = ok(&mut engine, "delete rows");
+    assert_eq!(deleted.affected_rows, Some(0));
 }

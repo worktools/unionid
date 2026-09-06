@@ -42,7 +42,7 @@
 - 类型声明和查询采用 PRQL 风格，优先空格、换行与缩进，不引入分号或 TypeScript 风格的密集注解。
 - 复杂 filter 和 match condition 可用缩进块或跨行括号组织；混用 `and` 与 `or` 时规范写法使用括号显式表达分组。括号属于帮助理解的必要符号，应谨慎使用而非一味移除。
 - `Engine` 是本地 Rust API、CLI 和 TCP 的共享入口；每次请求是一个原子脚本。
-- 已实现命名 sum/record、tuple、option/list、严格插入、主键、filter/select、单键/多键 sort、前 N 行/范围 take，以及支持递归 pattern 与 option/sum/product/list 新值构造的 `filter match` 和 ADT derive。同一顶层 constructor 可由多个互补嵌套分支覆盖；有预算的 pattern matrix 在扫描前检查穷尽性、不可达分支和积类型相关性。普通 filter、match condition 和 derive result 共用有类型 scalar expression，支持 int/float 的 `+ - * /` 和一元负号；整数溢出、除零或非有限 float 返回 `E_ARITH`。filter 与 condition 还支持括号、`not/and/or`、字段／binding 间比较和 `contains/length`；通用函数、更新操作及 migration 尚未实现。
+- 已实现命名 sum/record、tuple、option/list、严格插入、主键、filter/select、单键/多键 sort、前 N 行/范围 take，以及支持递归 pattern 与 option/sum/product/list 新值构造的 `filter match` 和 ADT derive。同一顶层 constructor 可由多个互补嵌套分支覆盖；有预算的 pattern matrix 在扫描前检查穷尽性、不可达分支和积类型相关性。普通 filter、match condition、derive result 和 typed set 复用 scalar expression，支持 int/float 的 `+ - * /` 和一元负号；整数溢出、除零或非有限 float 返回 `E_ARITH`。filter 与 condition 还支持括号、`not/and/or`、字段／binding 间比较和 `contains/length`。update/delete 已支持 filter/match target、嵌套 record 路径、同时求值的 set、affected rows、主键/索引维护和请求级回滚；upsert、通用函数及 migration 尚未实现。
 - `docs/SCENARIOS.md` 用任务队列、配置、事件、同步和 key/value 工作流维护查询覆盖；#35/#36 跟踪 ADT 派生及布尔/集合表达式。
 - 字段可用 `field type = value` 声明默认值；默认值在 schema 阶段类型检查，insert 会对嵌套 record 和 sum record 负载逐层补齐。
 - 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，并已接入 redb `rows` 表。

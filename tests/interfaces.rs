@@ -29,6 +29,27 @@ fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
 }
 
 #[test]
+fn local_cli_reports_affected_rows_for_mutations() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--query",
+            "create table tasks (id int, attempts int)\ninsert tasks {id: 1, attempts: 2}\nupdate tasks\nfilter id == 1\nset attempts = attempts + 1",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response.affected_rows, Some(1));
+}
+
+#[test]
 fn cli_eof_exits_and_query_does_not_wait_for_stdin() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_unionid"))
         .args(["cli", "--memory"])

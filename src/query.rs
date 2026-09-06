@@ -24,7 +24,20 @@ pub enum Statement {
         table: String,
         values: Value,
     },
+    Update {
+        target: Pipeline,
+        assignments: Vec<SetAssignment>,
+    },
+    Delete {
+        target: Pipeline,
+    },
     Pipeline(Pipeline),
+}
+
+#[derive(Debug, Clone)]
+pub struct SetAssignment {
+    pub path: String,
+    pub value: ScalarExpression,
 }
 
 impl Statement {

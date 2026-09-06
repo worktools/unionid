@@ -1,8 +1,8 @@
 # 当前可运行的语言预览
 
-本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)。
+本页是 unionid 当前可执行语言的规范入口。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)。
 
-当前包含类型与表声明、insert、布尔 filter、sum/option 的 `filter match`、ADT `derive match`、select、sort 和 take。filter 与 match/derive 表达式支持有类型的 int/float 算术；filter 还支持 `not/and/or`、字段间比较及 `contains/length`。参数、更新与 migration 尚未实现。
+当前包含类型与表声明、insert、update/delete、布尔 filter、sum/option 的 `filter match`、ADT `derive match`、select、sort 和 take。filter 与 match/derive/set 表达式支持有类型的 int/float 算术；filter 还支持 `not/and/or`、字段间比较及 `contains/length`。参数、upsert 与 migration 尚未实现。
 
 ## 类型、表与值
 
@@ -82,11 +82,36 @@ take 20
 
 兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。`group/aggregate`、参数、完整表达式及写操作的当前状态统一记录在 [查询能力表](QUERY.md#能力状态)。
 
+## 更新与删除
+
+`update` 和 `delete` 从目标表开始，后续 `filter` 与查询使用相同的 bool 或穷尽 match 语义。多行更新先写完筛选，再写一个或多个 `set`：
+
+```text
+update tasks
+filter match state
+  Pending => true
+  _ => false
+set attempts = attempts + 1
+set state = Done {result = "ok"}
+
+delete tasks | filter id == 2
+```
+
+- `update table` 与 `delete table` 不带 filter 时作用于整张表；这是显式有效操作。
+- 当前 mutation target 只接受 `filter` 与 `filter match`，并保持书写顺序。`select`、`derive`、`sort` 和 `take` 不属于修改目标。
+- 所有 filter 必须写在第一个 `set` 前。多个 `set` 同时求值：每个右侧读取该行修改前的值，因此 `set left = right` 和 `set right = left` 会交换两列。
+- `set` 右侧当前接受字段、literal、ADT constructor、`length` 和有类型算术。literal 按目标字段类型检查，未知字段和错误类型即使目标表为空也报错。
+- 可直接设置 record 的嵌套路径，如 `set owner.email = "new@example.com"`。路径不能穿过 sum/option；修改 variant 时设置完整值。父路径与子路径不能在同一 update 中同时赋值，避免依赖隐含顺序。
+- 每条候选 row 更新完成后重新检查完整 row 类型；全表重新检查主键唯一性，再原子替换 rows 与派生 indexes。任一行除零、溢出、类型或约束失败时，该请求不修改任何行。
+- 成功 insert/update/delete 的 JSON 响应包含 `affected_rows`；update/delete 未命中时返回 0。内部稳定 RowId 不出现在用户 record 中，删除后不会被后续插入复用。
+
+单行形式可用必要的 pipeline 分隔符，例如 `update tasks | filter id == 1 | set attempts = attempts + 1`。多项修改推荐换行，避免长表达式掩盖目标范围。
+
 ## 脚本边界与错误
 
-同层的 `from` / `type` / `table` / `insert` / `create` 开始新语句；查询中的同层 `filter/derive/select/sort/take/limit` 延续 pipeline。声明体、嵌套 record、变体负载、filter 条件和 match 分支通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
+同层的 `from` / `type` / `table` / `insert` / `update` / `delete` / `create` 开始新语句；查询中的同层 `filter/derive/select/sort/take/limit` 延续读取 pipeline，update 中的同层 `filter/set` 延续修改语句，delete 中的同层 `filter` 延续删除语句。声明体、嵌套 record、变体负载、filter 条件和 match 分支通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
 
-空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意函数、list 元素 lambda、let/group、参数占位符、update/delete/upsert 或 migration 语句。
+空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。当前不支持任意函数、list 元素 lambda、let/group、参数占位符、upsert 或 migration 语句。
 
 一次 `Engine.execute`、一次 `run` 或一个 TCP 请求是一个原子批次：先解析全部源码，再在候选状态中执行；任一步失败则不发布此次请求的任何修改。成功返回最后一条语句的结果，批次中的查询可以看到前面的写入。当前通过复制内存数据库实现写批次隔离，适合小工作集，尚未优化大批量写入的内存成本。
 
@@ -99,6 +124,7 @@ cargo run -- run --file examples/tasks.uid
 cargo run -- run --file examples/config.uid --format json
 cargo run -- run --file examples/events.uid
 cargo run -- run --file examples/sync_conflicts.uid
+cargo run -- run --file examples/task_mutations.uid
 cargo run -- cli --memory
 cargo run --example embedded
 ```
@@ -112,4 +138,4 @@ cargo run -- cli --addr 127.0.0.1:7878 --file examples/tasks.uid
 
 TCP 当前预览协议：每行一个 JSON 对象 `{"query":"完整源码（换行转义）"}`，每行一个 QueryResponse JSON 响应，也接受旧版纯文本单行请求。未知请求字段报错，结构化参数、request ID、完整协议版本协商仍待实现；JSON 中的换行不会被压平。
 
-响应包含 `ok/message/columns/rows/error/warnings/schema`。`schema` 提供当前应用 schema 的 revision 与 SHA-256 hash；原子 schema 脚本只推进一次 revision，行写入与失败请求不推进，完整规则见 [Schema 身份与演进契约](SCHEMA.md)。`columns` 保留投影顺序和类型描述；`rows` 采用有 tag 的值编码及名义类型 ID。该编码是预览接口，尚未提供跨客户端的 i64 兼容封装，JavaScript 等客户端需自行无损读取大整数。服务默认本机监听，当前限制 64 个活动连接、请求大小和 30 秒 socket 读写超时。连接数达到上限时，新连接收到一行 `E_BUSY` 响应后关闭，可以在已有连接释放后重试；拒绝过程使用独立的短超时，不执行请求。查询预算、取消、优雅关闭等仍待完善。
+响应包含 `ok/message/columns/rows/error/warnings/schema`，成功 DML 还包含 `affected_rows`。`schema` 提供当前应用 schema 的 revision 与 SHA-256 hash；原子 schema 脚本只推进一次 revision，行写入与失败请求不推进，完整规则见 [Schema 身份与演进契约](SCHEMA.md)。`columns` 保留投影顺序和类型描述；`rows` 采用有 tag 的值编码及名义类型 ID。该编码是预览接口，尚未提供跨客户端的 i64 兼容封装，JavaScript 等客户端需自行无损读取大整数。服务默认本机监听，当前限制 64 个活动连接、请求大小和 30 秒 socket 读写超时。连接数达到上限时，新连接收到一行 `E_BUSY` 响应后关闭，可以在已有连接释放后重试；拒绝过程使用独立的短超时，不执行请求。查询预算、取消、优雅关闭等仍待完善。

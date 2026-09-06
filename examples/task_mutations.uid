@@ -1,0 +1,27 @@
+type State =
+  Pending
+  | Running {attempt int}
+  | Done {result text}
+
+type Task =
+  id int
+  attempts int
+  state State
+
+table tasks Task
+  key id
+
+insert tasks {id = 1, attempts = 1, state = Pending}
+insert tasks {id = 2, attempts = 3, state = Running {attempt = 2}}
+
+update tasks
+filter match state
+  Pending => true
+  _ => false
+set attempts = attempts + 1
+set state = Done {result = "ok"}
+
+delete tasks | filter id == 2
+
+from tasks
+select {id, attempts, state}
