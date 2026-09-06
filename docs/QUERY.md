@@ -40,7 +40,7 @@ take 20
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
 | 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、嵌套 record 路径、filter/match、affected rows、原子约束与增量持久维护 | #15 |
 | Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId、结构化 action 与增量持久维护 | #15 |
-| schema migration | `migration name` | 已实现显式 ADT schema 操作、typed conversion、全引用路径重写与原子索引维护 | #17 继续补 plan 报告；#18 实现文件 runner/ledger |
+| schema migration | `migration name` | 已实现显式 ADT schema 操作、typed conversion、全引用路径重写、版本化 runner/ledger 与原子索引维护 | #19 继续补声明式 diff 与更细 plan 报告 |
 | join、window、递归和高阶函数 | — | v0.1 延后 | #25 |
 
 “未实现”的词只在状态表和限制说明中出现。除明确标为反例的片段外，本页其余查询代码均可由当前 parser 执行。

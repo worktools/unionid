@@ -632,8 +632,16 @@ impl Parser {
         self.expect_word("migration")?;
         let name = self.identifier()?;
         self.block()?;
+        let parent = if self.word("parent") {
+            self.bump();
+            let parent = self.identifier()?;
+            self.expect(Kind::Newline)?;
+            self.newlines();
+            Some(parent)
+        } else {
+            None
+        };
         let mut steps = Vec::new();
-        self.newlines();
         while *self.kind() != Kind::Dedent {
             steps.push(self.migration_step()?);
             if *self.kind() == Kind::Dedent {
@@ -649,7 +657,11 @@ impl Parser {
         if steps.is_empty() {
             return Err(self.error("migration requires at least one schema operation"));
         }
-        Ok(Statement::Migration { name, steps })
+        Ok(Statement::Migration {
+            name,
+            parent,
+            steps,
+        })
     }
 
     fn migration_step(&mut self) -> Result<SchemaMigration> {
@@ -660,6 +672,21 @@ impl Parser {
                     unreachable!()
                 };
                 Ok(SchemaMigration::AddType { name, ty })
+            } else if self.word("table") {
+                self.bump();
+                let table = self.identifier()?;
+                let row_type = self.identifier()?;
+                let key = if self.word("key") {
+                    self.bump();
+                    Some(self.path()?)
+                } else {
+                    None
+                };
+                Ok(SchemaMigration::AddTable {
+                    table,
+                    row_type,
+                    key,
+                })
             } else if self.word("field") {
                 self.bump();
                 let (owner, name) = self.migration_member("field")?;
@@ -691,6 +718,11 @@ impl Parser {
                 self.bump();
                 Ok(SchemaMigration::DropType {
                     name: self.identifier()?,
+                })
+            } else if self.word("table") {
+                self.bump();
+                Ok(SchemaMigration::DropTable {
+                    table: self.identifier()?,
                 })
             } else if self.word("field") {
                 self.bump();

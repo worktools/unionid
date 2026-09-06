@@ -1,4 +1,10 @@
-use unionid::migration::{ApplyDecision, MigrationEntry, validate_history, validate_next};
+mod common;
+
+use common::TempDir;
+use unionid::migration::{
+    ApplyDecision, MigrationEntry, MigrationFile, checksum, load_directory, validate_history,
+    validate_next,
+};
 use unionid::{Engine, Value};
 
 fn ok(engine: &mut Engine, source: &str) -> unionid::QueryResponse {
@@ -14,6 +20,7 @@ fn entry(id: &str, parent: Option<&str>, revision: u64) -> MigrationEntry {
         checksum: format!("checksum-{id}"),
         schema_revision: revision,
         schema_hash: format!("sha256:{id}"),
+        applied_at_unix_ms: 0,
     }
 }
 
@@ -66,6 +73,124 @@ fn next_migration_must_extend_the_current_head() {
     let error = validate_next(&history, &entry("v3", Some("v1"), 3)).unwrap_err();
     assert_eq!(error.code, "E_MIGRATION");
     assert!(error.message.contains("current head"));
+}
+
+fn initial_file() -> MigrationFile {
+    MigrationFile::parse(
+        "migration m0001_initial\n  add type Task =\n    id int\n    title text\n  add table tasks Task key id\n",
+    )
+    .unwrap()
+}
+
+fn title_file() -> MigrationFile {
+    MigrationFile::parse(
+        "migration m0002_title_default\n  parent m0001_initial\n  change default Task.title to \"untitled\"\n",
+    )
+    .unwrap()
+}
+
+#[test]
+fn migration_files_have_normalized_checksums_and_linear_parents() {
+    assert_eq!(checksum("migration x\n"), checksum("migration x\r\n\r\n"));
+    let files = [initial_file(), title_file()];
+    let mut engine = Engine::memory();
+    let plan = engine.plan_migrations(&files).unwrap();
+    assert_eq!(plan.applied_count, 0);
+    assert_eq!(plan.pending.len(), 2);
+    assert_eq!(plan.current_schema.revision, 0);
+    assert_eq!(plan.target_schema.revision, 2);
+    assert!(
+        plan.pending[0]
+            .operations
+            .contains(&"add table tasks Task key id".into())
+    );
+    assert_eq!(engine.schema_info().revision, 0, "plan must be read-only");
+
+    let applied = engine.apply_migrations(&files).unwrap();
+    assert_eq!(applied.applied, ["m0001_initial", "m0002_title_default"]);
+    assert!(applied.skipped.is_empty());
+    assert_eq!(
+        engine.migration_status(&files).unwrap().pending,
+        Vec::<String>::new()
+    );
+    let repeated = engine.apply_migrations(&files).unwrap();
+    assert!(repeated.applied.is_empty());
+    assert_eq!(repeated.skipped.len(), 2);
+}
+
+#[test]
+fn migration_apply_commits_files_individually_and_can_resume() {
+    let dir = TempDir::new();
+    let path = dir.0.join("resume.redb");
+    let first = initial_file();
+    let broken = MigrationFile::parse(
+        "migration m0002_add_priority\n  parent m0001_initial\n  add field Missing.priority int = 0\n",
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let error = engine
+        .apply_migrations(&[first.clone(), broken])
+        .unwrap_err();
+    assert!(error.message.contains("m0001_initial"));
+    assert_eq!(engine.migration_history().len(), 1);
+    drop(engine);
+
+    let fixed = MigrationFile::parse(
+        "migration m0002_add_priority\n  parent m0001_initial\n  add field Task.priority int = 0\n",
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let resumed = engine.apply_migrations(&[first, fixed]).unwrap();
+    assert_eq!(resumed.skipped, ["m0001_initial"]);
+    assert_eq!(resumed.applied, ["m0002_add_priority"]);
+    assert!(engine.schema().contains("priority int = 0"));
+}
+
+#[test]
+fn applied_migration_files_are_immutable() {
+    let mut engine = Engine::memory();
+    let first = initial_file();
+    engine
+        .apply_migrations(std::slice::from_ref(&first))
+        .unwrap();
+    let changed = MigrationFile::parse(format!("{}\n# edited\n", first.source)).unwrap();
+    let error = engine.apply_migrations(&[changed]).unwrap_err();
+    assert_eq!(error.code, "E_MIGRATION");
+    assert!(error.message.contains("was changed"));
+    let missing = engine.apply_migrations(&[]).unwrap_err();
+    assert!(missing.message.contains("is missing"));
+}
+
+#[test]
+fn redb_persists_schema_and_migration_ledger_together() {
+    let dir = TempDir::new();
+    let path = dir.0.join("state.redb");
+    let files = [initial_file(), title_file()];
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.apply_migrations(&files).unwrap();
+        assert!(engine.execute("insert tasks {id = 1}").ok);
+    }
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.migration_status(&files).unwrap().applied.len(), 2);
+    assert_eq!(reopened.execute("from tasks").rows.len(), 1);
+    let direct_schema_change = reopened.execute("type Extra = int");
+    assert!(!direct_schema_change.ok);
+    assert_eq!(direct_schema_change.error.unwrap().code, "E_MIGRATION");
+}
+
+#[test]
+fn migration_directory_order_and_parent_are_validated() {
+    let dir = TempDir::new();
+    std::fs::write(dir.0.join("0001_initial.uid"), initial_file().source).unwrap();
+    std::fs::write(
+        dir.0.join("0002_bad.uid"),
+        "migration m0002_bad\n  parent absent\n  add type Extra = text\n",
+    )
+    .unwrap();
+    let error = load_directory(&dir.0).unwrap_err();
+    assert_eq!(error.code, "E_MIGRATION");
+    assert!(error.message.contains("file order requires"));
 }
 
 #[test]

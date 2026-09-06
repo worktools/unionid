@@ -4,7 +4,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use unionid::{Engine, QueryResponse, UpsertAction, Value, cli};
+use unionid::{
+    Engine, MigrationApply, MigrationPlan, MigrationStatus, QueryResponse, UpsertAction, Value, cli,
+};
 
 #[test]
 fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
@@ -26,6 +28,164 @@ fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
     assert!(!output.status.success());
     let response: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response.error.unwrap().code, "E_TABLE");
+}
+
+#[test]
+fn migration_cli_creates_plans_applies_and_reports_status() {
+    let dir = TempDir::new();
+    let migrations = dir.0.join("migrations");
+    let database = dir.0.join("state.redb");
+    let first = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "new",
+            "Initial Tasks",
+            "--dir",
+            migrations.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_path = migrations.join("0001_initial_tasks.uid");
+    std::fs::write(
+        &first_path,
+        "migration m0001_initial_tasks\n  add type Task =\n    id int\n    title text\n  add table tasks Task key id\n",
+    )
+    .unwrap();
+    let second = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "new",
+            "Task priority",
+            "--dir",
+            migrations.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_path = migrations.join("0002_task_priority.uid");
+    let generated = std::fs::read_to_string(&second_path).unwrap();
+    assert!(generated.contains("parent m0001_initial_tasks"));
+    std::fs::write(
+        &second_path,
+        "migration m0002_task_priority\n  parent m0001_initial_tasks\n  add field Task.priority int = 0\n",
+    )
+    .unwrap();
+
+    let initial_plan = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "plan",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        initial_plan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial_plan.stderr)
+    );
+    let initial_plan: MigrationPlan = serde_json::from_slice(&initial_plan.stdout).unwrap();
+    assert_eq!(initial_plan.pending.len(), 2);
+    assert!(!database.exists(), "plan must not create the database file");
+
+    let apply = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "apply",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let applied: MigrationApply = serde_json::from_slice(&apply.stdout).unwrap();
+    assert_eq!(applied.applied.len(), 2);
+    assert_eq!(applied.schema.revision, 2);
+
+    let plan = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "plan",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        plan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let plan: MigrationPlan = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(plan.applied_count, 2);
+    assert!(plan.pending.is_empty());
+
+    let status = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "status",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: MigrationStatus = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status.applied.len(), 2);
+    assert!(status.pending.is_empty());
+
+    std::fs::write(
+        first_path,
+        "migration m0001_initial_tasks\n  add type Task =\n    id int\n    title text\n  add table tasks Task key id\n# checksum drift\n",
+    )
+    .unwrap();
+    let changed = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "plan",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("was changed"));
 }
 
 #[test]

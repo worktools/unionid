@@ -28,6 +28,21 @@ impl Database {
                 self.catalog.define(name, ty)
             }
             SchemaMigration::DropType { name } => self.drop_type(&name),
+            SchemaMigration::AddTable {
+                table,
+                row_type,
+                key,
+            } => {
+                let definition = self.catalog.types.get(&row_type).ok_or_else(|| {
+                    Error::new("E_SCHEMA", format!("unknown row type '{row_type}'"))
+                })?;
+                let ScalarType::Record(columns) = self.catalog.underlying(&definition.ty)? else {
+                    return Err(Error::new("E_TYPE", "a table's row type must be a record"));
+                };
+                self.create_table(table, columns.clone(), Some(definition.id), key)
+                    .map(|_| ())
+            }
+            SchemaMigration::DropTable { table } => self.drop_table(&table),
             SchemaMigration::RenameType { from, to } => self.rename_type(&from, to),
             SchemaMigration::AddField { owner, column } => self.add_field(&owner, column),
             SchemaMigration::DropField { owner, field } => self.drop_field(&owner, &field),
@@ -86,6 +101,15 @@ impl Database {
             ));
         }
         self.catalog.types.remove(name);
+        Ok(())
+    }
+
+    fn drop_table(&mut self, name: &str) -> Result<()> {
+        if self.objects.remove(name).is_none() {
+            return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
+        }
+        self.indexes.remove(name);
+        self.index_definitions.remove(name);
         Ok(())
     }
 

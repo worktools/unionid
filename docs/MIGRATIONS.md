@@ -1,8 +1,8 @@
 # Schema migration 语言
 
-本页描述当前可执行的 schema migration 语法。一个 `migration` block 是一个 schema 变更语句；它与同一 `Engine.execute` 请求中的其他语句一起原子执行。任何定义、数据转换、约束或持久提交失败都会保留变更前的 catalog、rows、indexes、revision 和 hash。
+本页描述当前可执行的 schema migration 语言和版本化 runner。每个 `.uid` 文件包含一个 migration block；文件按名称排序，`parent` 把它们连成不可分叉的单链。runner 计算规范化源码的 SHA-256 checksum，并把 ID、parent、checksum、应用时间和提交后的 schema revision/hash 持久化到 redb ledger。
 
-当前 migration 名称用于诊断，还不是持久历史 ID。版本化文件、checksum、`new/plan/apply/status` 和 redb ledger 由 #18 实现；在此之前不要把重复执行同名 block 当成幂等 apply。
+单个文件中的 catalog、ADT 数据转换、约束、索引和 ledger 在同一个 redb 事务中提交。多个待执行文件逐个提交：后续文件失败时，之前成功的文件保持已应用状态，修正失败文件后再次运行会从 ledger head 继续。没有隐式 down migration；回退通过新的前向 migration 或备份还原完成。
 
 ## 语法
 
@@ -10,6 +10,8 @@ Migration 使用与类型和查询相同的无分号、缩进式语言：
 
 ```text
 migration task_state_v2
+  parent task_state_v1
+
   rename type State to JobState
   rename variant JobState.Failed to Rejected
   rename field Task.id to task_id
@@ -27,6 +29,10 @@ migration task_state_v2
 add type Name = type-expression
 drop type Name
 rename type Old to New
+
+add table table_name RowType
+add table table_name RowType key field.path
+drop table table_name
 
 add field Record.field type-expression = literal
 drop field Record.field
@@ -68,4 +74,27 @@ drop key table
 - 修改命名 ADT 会扫描所有表及其 record/tuple/list/option/sum 嵌套路径。所有稳定 RowId 均保留；受影响的 secondary indexes 在提交前重建并验证。
 - 被其他类型或表直接／间接引用的 named type 不能删除。新增、删除或改名后的类型与变体仍遵守大写名称规则。
 
-当前 Engine 面向可装入内存的小工作集：原子请求先克隆候选数据库，schema step 在候选状态中验证和重写行。它提供清楚的正确性边界，但峰值内存和扫描时间仍与受影响数据量相关。#18 的 `plan` 会在写入前报告受影响表、行数、索引和破坏性操作。
+## 版本化 runner
+
+默认目录是 `migrations`，也可以对每条命令传 `--dir`：
+
+```text
+unionid migration new add_task_priority
+unionid migration plan --db app.redb
+unionid migration apply --db app.redb
+unionid migration status --db app.redb
+```
+
+`new` 生成下一个带序号的 `.uid` 文件和正确 parent，并留下需要编辑的注释占位。保存至少一个 schema 操作后，文件才是有效 migration。例如：
+
+```text
+migration m0002_add_task_priority
+  parent m0001_initial
+  add field Task.priority int = 0
+```
+
+`plan` 在数据库副本上执行全部待应用转换，因此会提前发现类型、既有行、唯一约束和索引重建错误；它不提交数据，数据库文件不存在时也只在内存中按空库规划。输出包含每个文件的 checksum、前后 revision/hash、操作列表与破坏性标记。`apply` 创建不存在的 redb 文件，并逐文件原子提交。`status` 展示完整已应用记录和待应用 ID。三条命令都支持 `--format json`，可供脚本稳定解析。
+
+已应用文件不可修改，也不能从目录删除。CRLF 与 LF 具有相同 checksum，其他注释、格式和内容变化都会被拒绝。文件名排序必须与 parent 链一致，重复 ID、缺少 parent、分叉或 ledger 与当前 schema hash 不一致都会返回 `E_MIGRATION` 或 `E_STORAGE`。ledger 非空后，普通 `run`、本地 CLI 或 TCP 不能直接执行 schema 变更；应用必须经过 runner，数据读写仍可照常使用。
+
+当前 Engine 面向可装入内存的小工作集：plan 和 apply 都克隆候选数据库，schema step 在候选状态中验证和重写行。峰值内存和扫描时间与受影响数据量相关。更细的行数、身份变化和客户端兼容报告由 schema diff 阶段继续完善。

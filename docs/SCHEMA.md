@@ -1,6 +1,6 @@
 # Schema 身份、版本与演进契约
 
-状态：v0.1 契约，2026-09-07。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据、[版本化 ADT value codec](CODEC.md)和[显式 schema migration](MIGRATIONS.md)；版本化 runner 与 schema diff 由 #18–#19 实现。
+状态：v0.1 契约，2026-09-07。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据、[版本化 ADT value codec](CODEC.md)、[显式 schema migration 与版本化 runner](MIGRATIONS.md)；声明式 schema diff 由 #19 实现。
 
 存储格式版本、语言／协议版本与应用 schema revision 是三个独立概念：升级 unionid 二进制不自动修改应用 schema，读取目标 schema 文件也不会隐式迁移已有数据。
 
@@ -110,7 +110,7 @@ apply 前必须验证：
 1. ledger 是从根到当前 head 的单链，ID 不重复且没有环。
 2. 新 migration 的 parent 等于当前 head；同一 parent 出现另一个子项视为分叉并拒绝。
 3. 已应用 ID 的 checksum 不得变化；完全相同的重复 apply 是 no-op。
-4. 当前 schema hash 与 ledger head 记录一致，输入 migration 的计划结果与声明的目标 hash 一致。
+4. 当前 schema hash 与 ledger head 记录一致；plan 计算每个待应用文件的目标 hash，apply 把实际提交后的同一 hash 写入 ledger。
 5. schema、数据、索引和 ledger 在一个持久事务中提交。
 
 `plan` 只读，展示前后 revision/hash、身份保留与新增列表、受影响表／索引、需扫描和转换的行数、客户端兼容影响与破坏性步骤。恢复旧 schema 通过备份还原或新的前向 migration 完成，不生成隐含 down migration。

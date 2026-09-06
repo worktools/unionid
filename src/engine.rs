@@ -1,10 +1,16 @@
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::db::{Database, QueryResponse};
 use crate::error::{Error, Result};
+use crate::migration::{
+    MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
+    MigrationStatus, describe_step, validate_files_against_history,
+};
+use crate::query::Statement;
 use crate::redb_storage::{CommitFailure, RedbStore};
 use crate::snapshot::SnapshotStore;
 use crate::syntax;
@@ -160,6 +166,12 @@ impl Engine {
         let statements = syntax::parse(source)?;
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
         let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
+        if schema_changing && !self.db.migration_history().is_empty() {
+            return Err(Error::new(
+                "E_MIGRATION",
+                "schema is managed by the migration ledger; use the versioned migration runner",
+            ));
+        }
         if mutating && self.write_failed {
             return Err(Error::new(
                 "E_STORAGE",
@@ -187,33 +199,184 @@ impl Engine {
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
-            if let Some(durable) = &mut self.durable {
-                match durable.commit(&self.db, &candidate) {
-                    Ok(()) => {}
-                    Err(CommitFailure::Definite(error)) => {
-                        return Err(Error::new(
-                            "E_STORAGE",
-                            format!(
-                                "durable transaction aborted before commit; state was not changed: {}",
-                                error.message
-                            ),
-                        ));
-                    }
-                    Err(CommitFailure::Uncertain(error)) => {
-                        self.durable = None;
-                        self.write_failed = true;
-                        return Err(Error::new(
-                            "E_STORAGE",
-                            format!(
-                                "redb commit result is uncertain; state was not published in this process: {}; reopen the database before retrying",
-                                error.message
-                            ),
-                        ));
-                    }
+            self.commit_candidate(candidate, Some(source), &mut response)?;
+        }
+        Ok(self.with_schema(response))
+    }
+
+    pub fn migration_status(&self, files: &[MigrationFile]) -> Result<MigrationStatus> {
+        let applied_count = validate_files_against_history(files, self.db.migration_history())?;
+        Ok(MigrationStatus {
+            schema: self.db.schema_info(),
+            applied: self.db.migration_history().to_vec(),
+            pending: files[applied_count..]
+                .iter()
+                .map(|file| file.id.clone())
+                .collect(),
+        })
+    }
+
+    pub fn plan_migrations(&self, files: &[MigrationFile]) -> Result<MigrationPlan> {
+        let applied_count = validate_files_against_history(files, self.db.migration_history())?;
+        let current_schema = self.db.schema_info();
+        let mut candidate = self.db.clone();
+        let mut pending = Vec::new();
+        for file in &files[applied_count..] {
+            let before = candidate.schema_info();
+            candidate
+                .execute(Statement::Migration {
+                    name: file.id.clone(),
+                    parent: file.parent.clone(),
+                    steps: file.steps.clone(),
+                })
+                .map_err(|error| migration_file_error(file, error))?;
+            candidate.advance_schema_revision()?;
+            let after = candidate.schema_info();
+            let operations = file.steps.iter().map(describe_step).collect::<Vec<_>>();
+            pending.push(MigrationPlanItem {
+                id: file.id.clone(),
+                parent: file.parent.clone(),
+                checksum: file.checksum.clone(),
+                before,
+                after: after.clone(),
+                operations: operations
+                    .iter()
+                    .map(|(description, _)| description.clone())
+                    .collect(),
+                destructive: operations.iter().any(|(_, destructive)| *destructive),
+            });
+            candidate.append_migration(MigrationEntry {
+                id: file.id.clone(),
+                parent: file.parent.clone(),
+                checksum: file.checksum.clone(),
+                schema_revision: after.revision,
+                schema_hash: after.hash,
+                applied_at_unix_ms: 0,
+            })?;
+        }
+        Ok(MigrationPlan {
+            current_schema,
+            target_schema: candidate.schema_info(),
+            applied_count,
+            pending,
+        })
+    }
+
+    pub fn apply_migrations(&mut self, files: &[MigrationFile]) -> Result<MigrationApply> {
+        if self.wal.is_some() {
+            return Err(Error::new(
+                "E_CONFIG",
+                "versioned migrations require redb or an in-memory Engine",
+            ));
+        }
+        let applied_count = validate_files_against_history(files, self.db.migration_history())?;
+        let skipped = files[..applied_count]
+            .iter()
+            .map(|file| file.id.clone())
+            .collect();
+        let mut applied = Vec::new();
+        for file in &files[applied_count..] {
+            if let Err(error) = self.apply_migration_file(file) {
+                if applied.is_empty() {
+                    return Err(error);
                 }
-            } else if let Some(wal) = &self.wal
-                && let Err(error) = wal.append(candidate.sequence, source)
-            {
+                return Err(Error::new(
+                    &error.code,
+                    format!(
+                        "{}; {} earlier migration(s) were committed: {}",
+                        error.message,
+                        applied.len(),
+                        applied.join(", ")
+                    ),
+                ));
+            }
+            applied.push(file.id.clone());
+        }
+        Ok(MigrationApply {
+            applied,
+            skipped,
+            schema: self.db.schema_info(),
+        })
+    }
+
+    fn apply_migration_file(&mut self, file: &MigrationFile) -> Result<()> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "writes are disabled after a storage failure; reopen the database to resolve the commit state",
+            ));
+        }
+        let mut candidate = self.db.clone();
+        candidate
+            .execute(Statement::Migration {
+                name: file.id.clone(),
+                parent: file.parent.clone(),
+                steps: file.steps.clone(),
+            })
+            .map_err(|error| migration_file_error(file, error))?;
+        candidate.advance_schema_revision()?;
+        candidate.sequence = self
+            .db
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
+        let schema = candidate.schema_info();
+        let applied_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| Error::new("E_TIME", error.to_string()))?
+            .as_millis()
+            .try_into()
+            .map_err(|_| Error::new("E_LIMIT", "migration timestamp exceeds u64"))?;
+        candidate.append_migration(MigrationEntry {
+            id: file.id.clone(),
+            parent: file.parent.clone(),
+            checksum: file.checksum.clone(),
+            schema_revision: schema.revision,
+            schema_hash: schema.hash,
+            applied_at_unix_ms,
+        })?;
+        let mut response = QueryResponse::ok_message(format!("migration '{}' applied", file.id));
+        self.commit_candidate(candidate, None, &mut response)
+    }
+
+    fn commit_candidate(
+        &mut self,
+        candidate: Database,
+        wal_source: Option<&str>,
+        response: &mut QueryResponse,
+    ) -> Result<()> {
+        if let Some(durable) = &mut self.durable {
+            match durable.commit(&self.db, &candidate) {
+                Ok(()) => {}
+                Err(CommitFailure::Definite(error)) => {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        format!(
+                            "durable transaction aborted before commit; state was not changed: {}",
+                            error.message
+                        ),
+                    ));
+                }
+                Err(CommitFailure::Uncertain(error)) => {
+                    self.durable = None;
+                    self.write_failed = true;
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        format!(
+                            "redb commit result is uncertain; state was not published in this process: {}; reopen the database before retrying",
+                            error.message
+                        ),
+                    ));
+                }
+            }
+        } else if let Some(wal) = &self.wal {
+            let source = wal_source.ok_or_else(|| {
+                Error::new(
+                    "E_CONFIG",
+                    "versioned migration commits cannot be represented by the transitional WAL",
+                )
+            })?;
+            if let Err(error) = wal.append(candidate.sequence, source) {
                 self.write_failed = true;
                 return Err(Error::new(
                     "E_STORAGE",
@@ -222,17 +385,16 @@ impl Engine {
                     ),
                 ));
             }
-            self.db = candidate;
-            self.writes_since_snapshot += 1;
-            if self.snapshot_every > 0 && self.writes_since_snapshot >= self.snapshot_every {
-                // The WAL commit has already succeeded. Checkpoint failure is a
-                // maintenance warning, never a false report that the write failed.
-                if let Err(error) = self.checkpoint() {
-                    response.warnings.push(error.to_string());
-                }
-            }
         }
-        Ok(self.with_schema(response))
+        self.db = candidate;
+        self.writes_since_snapshot += 1;
+        if self.snapshot_every > 0
+            && self.writes_since_snapshot >= self.snapshot_every
+            && let Err(error) = self.checkpoint()
+        {
+            response.warnings.push(error.to_string());
+        }
+        Ok(())
     }
 
     pub fn checkpoint(&mut self) -> Result<()> {
@@ -287,10 +449,28 @@ impl Engine {
         self.db.schema_info()
     }
 
+    pub fn migration_history(&self) -> &[MigrationEntry] {
+        self.db.migration_history()
+    }
+
     fn with_schema(&self, mut response: QueryResponse) -> QueryResponse {
         response.schema = Some(self.db.schema_info());
         response
     }
+}
+
+fn migration_file_error(file: &MigrationFile, error: Error) -> Error {
+    let location = file
+        .path
+        .as_ref()
+        .map_or_else(|| file.id.clone(), |path| path.display().to_string());
+    Error::new(
+        &error.code,
+        format!(
+            "migration '{}', file '{location}': {}",
+            file.id, error.message
+        ),
+    )
 }
 
 fn canonical_existing_path(path: PathBuf) -> Result<PathBuf> {

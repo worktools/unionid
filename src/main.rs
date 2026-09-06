@@ -70,6 +70,48 @@ enum Command {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Create, inspect, and apply ordered schema migrations.
+    Migration {
+        #[command(subcommand)]
+        command: MigrationCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MigrationCommand {
+    /// Create the next migration file.
+    New {
+        name: String,
+        #[arg(long, default_value = "migrations")]
+        dir: PathBuf,
+    },
+    /// Validate and preview all pending migrations without changing the database.
+    Plan {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, default_value = "migrations")]
+        dir: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Apply pending migrations, committing each file atomically.
+    Apply {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, default_value = "migrations")]
+        dir: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Show applied and pending migrations.
+    Status {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, default_value = "migrations")]
+        dir: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
 }
 
 fn source(query: Option<String>, file: Option<PathBuf>) -> Result<Option<String>, String> {
@@ -126,6 +168,22 @@ fn run() -> Result<(), String> {
             }
         }
         Command::Check { db, format } => cli::check_redb(db, matches!(format, Format::Json)),
+        Command::Migration { command } => match command {
+            MigrationCommand::New { name, dir } => {
+                let path = cli::migration_new(dir, &name)?;
+                println!("{}", path.display());
+                Ok(())
+            }
+            MigrationCommand::Plan { db, dir, format } => {
+                cli::migration_plan(db, dir, matches!(format, Format::Json))
+            }
+            MigrationCommand::Apply { db, dir, format } => {
+                cli::migration_apply(db, dir, matches!(format, Format::Json))
+            }
+            MigrationCommand::Status { db, dir, format } => {
+                cli::migration_status(db, dir, matches!(format, Format::Json))
+            }
+        },
     }
 }
 
