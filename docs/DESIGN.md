@@ -153,14 +153,14 @@ flowchart TD
   Exec --> Tx[单写者原子提交]
   Migration --> Tx
   Tx --> Memory[内存模式]
-  Tx --> Durable[SQLite 持久化后端]
+  Tx --> Durable[redb 持久化后端]
 ```
 
 从当前 `main.rs` 拆出可测试的 `lib.rs`。模块逐步演进为 `model/types`、`catalog`、`syntax`、`query`、`db`、`storage`、`migration`、`server`、`cli`，不急于拆成多个 crate。保留清楚的错误字符串，同时内部使用带错误码、源码位置和字段路径的结构化错误。
 
-[ADR 0001](adr/0001-sqlite-storage.md) 比较了当前 WAL/snapshot、redb 与 SQLite，并选定 SQLite 作为长期事务后端。评价覆盖 schema＋数据＋索引＋migration ledger 的原子性、进程退出恢复、一致备份、macOS/Linux、格式生命周期、依赖和维护成本；可复现实验固定在 `tools/storage-eval`。原生性来自 unionid 对 catalog、逻辑编码、表达式和约束的一致理解，而不是自写页管理器。
+[ADR 0001](adr/0001-redb-storage.md) 比较了当前 WAL/snapshot、redb 与 SQLite，并选定 redb 作为长期事务后端。评价优先考虑运行时 ADT、类型化索引和单写者模型的贴合度，同时覆盖原子性、进程退出恢复、一致备份、macOS/Linux、格式生命周期和维护成本；可复现实验固定在 `tools/storage-eval`。
 
-每个 Engine 写请求映射为一个 SQLite 事务，持久模式使用 WAL、同步提交和产品层独占锁。unionid 维护版本化逻辑 codec 和稳定 ID；SQLite 负责事务页、恢复与在线备份。当前源码回放 WAL/snapshot 只保留为过渡兼容输入，不进入长期双写路径。成功响应的持久性、提交结果不确定时的错误语义、完整性检查和备份还原继续由 #13/#14/#20 验收。
+每个 Engine 写请求映射为一个 redb 写事务，持久模式使用 `Durability::Immediate` 和 two-phase commit。unionid 维护版本化逻辑 codec、稳定 ID 与有序索引键；redb 负责事务 B-tree、校验和与崩溃恢复。当前源码回放 WAL/snapshot 只保留为过渡兼容输入，不进入长期双写路径。成功响应的持久性、提交结果不确定时的错误语义、逻辑快照备份和格式校验继续由 #13/#14/#20 验收。
 
 查询先用易验证的行执行器。`filter/select/derive/take/sort/group/aggregate` 明确输入输出类型和顺序规则；`take` 与 `filter` 不可随意交换。未排序查询不承诺稳定顺序。先做单列／类型化字段路径等值索引、主键查询和 `explain`；不追求复杂优化器。
 

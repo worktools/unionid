@@ -47,11 +47,11 @@ cargo run -- cli --memory
 - [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
 - [查询语言参考](docs/QUERY.md)：当前可执行的 pipeline grammar、stage 语义、模式和错误。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。
-- [存储 ADR](docs/adr/0001-sqlite-storage.md)：SQLite 选型、事务边界、实验和限制。
+- [存储 ADR](docs/adr/0001-redb-storage.md)：redb 选型、ADT 存储边界、实验和限制。
 - [原型基线与已知问题](docs/PROTOTYPE-AUDIT.md)：早期原型的验证结果和故障证据。
 - [第一轮开发记录](docs/DEVELOPMENT.md)：已实现能力、验证方法与尚未完成的范围。
 
-设计草案描述完整目标，部分语法已实现；整体能力边界以 LANGUAGE.md 为准，查询行为以 QUERY.md 为准。长期持久化后端已选定 SQLite，但尚未接入主 Engine；当前 WAL／snapshot 仍是过渡实现，不能作为正式长期格式。
+设计草案描述完整目标，部分语法已实现；整体能力边界以 LANGUAGE.md 为准，查询行为以 QUERY.md 为准。长期持久化后端已选定 redb，但尚未接入主 Engine；当前 WAL／snapshot 仍是过渡实现，不能作为正式长期格式。
 
 ## 运行
 
@@ -217,7 +217,7 @@ from events | filter kind = Purchase(42,19.9) | select id,kind
 ## 持久化说明
 
 - 默认不持久化（纯内存）。
-- [ADR 0001](docs/adr/0001-sqlite-storage.md) 已选定 SQLite 作为长期事务后端；当前命令尚未接入 SQLite。
+- [ADR 0001](docs/adr/0001-redb-storage.md) 已选定 redb 作为长期事务后端；当前命令尚未接入 redb。
 - 提供 `--wal-path` 后，每个成功的写批次以一条带版本与提交序号的 JSON 记录追加到 WAL；源码中的换行转义保存，同步后才发布内存状态。
 - 服务重启先加载 snapshot，再回放尚未包含的 WAL 提交；索引从数据重建。
 - `--snapshot-path` 要求同时配置 WAL；`--snapshot-every N` 表示每 `N` 个成功写批次保存一次快照。

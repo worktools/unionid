@@ -138,6 +138,7 @@ fn initialize(backend: Backend, path: &Path) -> AnyResult<()> {
             let database = Database::create(path)?;
             let mut transaction = database.begin_write()?;
             transaction.set_durability(Durability::Immediate)?;
+            transaction.set_two_phase_commit(true);
             transaction.open_table(KV)?;
             transaction.commit()?;
         }
@@ -195,6 +196,7 @@ fn crash(backend: Backend, path: &Path, commit: bool) -> AnyResult<()> {
             let database = Database::open(path)?;
             let mut transaction = database.begin_write()?;
             transaction.set_durability(Durability::Immediate)?;
+            transaction.set_two_phase_commit(true);
             {
                 let mut table = transaction.open_table(KV)?;
                 insert_domains(
@@ -247,6 +249,7 @@ fn crash(backend: Backend, path: &Path, commit: bool) -> AnyResult<()> {
 fn write_redb_batch(database: &Database, prefix: &str, id: usize) -> AnyResult<()> {
     let mut transaction = database.begin_write()?;
     transaction.set_durability(Durability::Immediate)?;
+    transaction.set_two_phase_commit(true);
     {
         let mut table = transaction.open_table(KV)?;
         insert_domains(
@@ -330,6 +333,7 @@ fn backup_database(backend: Backend, source: &Path, destination: &Path) -> AnyRe
             let destination_database = Database::create(destination)?;
             let mut destination_transaction = destination_database.begin_write()?;
             destination_transaction.set_durability(Durability::Immediate)?;
+            destination_transaction.set_two_phase_commit(true);
             {
                 let mut destination_table = destination_transaction.open_table(KV)?;
                 for entry in source_table.iter()? {
