@@ -96,16 +96,8 @@ fn bind_patterns<'a>(
     patterns: impl IntoIterator<Item = &'a mut MatchPattern>,
     arm_count: usize,
 ) -> Result<Vec<Vec<Column>>> {
-    let source = match catalog.underlying(source_ty)? {
-        ScalarType::Enum(enum_type) => MatchSource::Enum(enum_type.clone()),
-        ScalarType::Option(inner) => MatchSource::Option(inner.as_ref().clone()),
-        _ => {
-            return Err(Error::new(
-                "E_TYPE",
-                format!("match source '{source_name}' must be a sum type or option"),
-            ));
-        }
-    };
+    let source = match_source(catalog, source_ty, source_name)?;
+    let mut seen = BTreeSet::new();
     let mut covered = BTreeSet::new();
     let mut wildcard = false;
     let mut all_bindings = Vec::with_capacity(arm_count);
@@ -124,14 +116,24 @@ fn bind_patterns<'a>(
             MatchPattern::Constructor { name, payload, tag } => {
                 let (resolved_tag, argument_types, display_name) =
                     resolve_constructor(catalog, &source, source_name, name)?;
-                if !covered.insert(resolved_tag) {
+                if !seen.insert(resolved_tag) {
                     return Err(Error::new(
                         "E_MATCH",
                         format!("constructor '{display_name}' is matched more than once"),
                     ));
                 }
                 *tag = Some(resolved_tag);
-                bind_payload(catalog, &display_name, &argument_types, payload)?
+                let info = bind_payload(catalog, &display_name, &argument_types, payload)?;
+                if info.irrefutable {
+                    covered.insert(resolved_tag);
+                }
+                info.bindings
+            }
+            _ => {
+                return Err(Error::new(
+                    "E_MATCH",
+                    "top-level match branch must name a constructor or '_'",
+                ));
             }
         };
         all_bindings.push(bindings);
@@ -158,6 +160,17 @@ fn bind_patterns<'a>(
         }
     }
     Ok(all_bindings)
+}
+
+fn match_source(catalog: &Catalog, ty: &ScalarType, name: &str) -> Result<MatchSource> {
+    match catalog.underlying(ty)? {
+        ScalarType::Enum(enum_type) => Ok(MatchSource::Enum(enum_type.clone())),
+        ScalarType::Option(inner) => Ok(MatchSource::Option(inner.as_ref().clone())),
+        _ => Err(Error::new(
+            "E_TYPE",
+            format!("match source '{name}' must be a sum type or option"),
+        )),
+    }
 }
 
 fn resolve_constructor(
@@ -227,12 +240,12 @@ fn bind_payload(
     catalog: &Catalog,
     constructor: &str,
     argument_types: &[ScalarType],
-    payload: &MatchPayload,
-) -> Result<Vec<Column>> {
+    payload: &mut MatchPayload,
+) -> Result<PatternInfo> {
     match payload {
         MatchPayload::Unit => {
             if argument_types.is_empty() {
-                Ok(Vec::new())
+                Ok(PatternInfo::irrefutable())
             } else {
                 Err(Error::new(
                     "E_MATCH",
@@ -258,89 +271,195 @@ fn bind_payload(
                     format!("constructor '{constructor}' has no record payload"),
                 ));
             };
-            let mut seen_fields = BTreeSet::new();
-            let mut seen_bindings = BTreeSet::new();
-            let mut bindings = Vec::new();
-            for field in fields {
-                if !seen_fields.insert(&field.field) {
-                    return Err(Error::new(
-                        "E_MATCH",
-                        format!("field '{}' is bound more than once", field.field),
-                    ));
-                }
-                if !seen_bindings.insert(&field.binding) {
-                    return Err(Error::new(
-                        "E_MATCH",
-                        format!("binding '{}' is declared more than once", field.binding),
-                    ));
-                }
-                let definition = payload_fields
-                    .iter()
-                    .find(|definition| definition.name == field.field)
-                    .ok_or_else(|| {
-                        Error::new(
-                            "E_MATCH",
-                            format!(
-                                "constructor '{constructor}' has no payload field '{}'",
-                                field.field
-                            ),
-                        )
-                    })?;
-                let mut definition = definition.clone();
-                definition.name = field.binding.clone();
-                bindings.push(definition);
-            }
-            if !rest {
-                let missing = payload_fields
-                    .iter()
-                    .filter(|field| !seen_fields.contains(&field.name))
-                    .map(|field| field.name.clone())
-                    .collect::<Vec<_>>();
-                if !missing.is_empty() {
-                    return Err(Error::new(
-                        "E_MATCH",
-                        format!(
-                            "record pattern for '{constructor}' omits {}; add '..' to ignore them",
-                            missing.join(", ")
-                        ),
-                    ));
-                }
-            }
-            Ok(bindings)
+            bind_record_fields(
+                catalog,
+                payload_fields,
+                fields,
+                *rest,
+                &format!("constructor '{constructor}'"),
+                true,
+            )
         }
-        MatchPayload::Positional(names) => {
-            if names.len() != argument_types.len() {
+        MatchPayload::Positional(patterns) => {
+            if patterns.len() != argument_types.len() {
                 return Err(Error::new(
                     "E_MATCH",
                     format!(
                         "constructor '{constructor}' expects {} payload binding(s), got {}",
                         argument_types.len(),
-                        names.len()
+                        patterns.len()
                     ),
                 ));
             }
-            let mut seen = BTreeSet::new();
-            let mut bindings = Vec::new();
-            for (name, ty) in names.iter().zip(argument_types) {
-                if name == "_" {
-                    continue;
-                }
-                if !seen.insert(name) {
-                    return Err(Error::new(
-                        "E_MATCH",
-                        format!("binding '{name}' is declared more than once"),
-                    ));
-                }
-                bindings.push(Column {
-                    name: name.clone(),
-                    ty: ty.clone(),
-                    default: None,
-                    id: 0,
-                });
+            let mut infos = Vec::with_capacity(patterns.len());
+            for (index, (pattern, ty)) in patterns.iter_mut().zip(argument_types).enumerate() {
+                infos.push(bind_nested_pattern(
+                    catalog,
+                    ty,
+                    pattern,
+                    &format!("argument {} of constructor '{constructor}'", index + 1),
+                )?);
             }
-            Ok(bindings)
+            combine_patterns(infos)
         }
     }
+}
+
+struct PatternInfo {
+    bindings: Vec<Column>,
+    irrefutable: bool,
+}
+
+impl PatternInfo {
+    fn irrefutable() -> Self {
+        Self {
+            bindings: Vec::new(),
+            irrefutable: true,
+        }
+    }
+}
+
+fn bind_nested_pattern(
+    catalog: &Catalog,
+    expected: &ScalarType,
+    pattern: &mut MatchPattern,
+    context: &str,
+) -> Result<PatternInfo> {
+    match pattern {
+        MatchPattern::Wildcard => Ok(PatternInfo::irrefutable()),
+        MatchPattern::Binding(name) => Ok(PatternInfo {
+            bindings: vec![Column {
+                name: name.clone(),
+                ty: expected.clone(),
+                default: None,
+                id: 0,
+            }],
+            irrefutable: true,
+        }),
+        MatchPattern::Constructor { name, payload, tag } => {
+            let source = match_source(catalog, expected, context)?;
+            let (resolved_tag, argument_types, display_name) =
+                resolve_constructor(catalog, &source, context, name)?;
+            *tag = Some(resolved_tag);
+            let mut info = bind_payload(catalog, &display_name, &argument_types, payload)?;
+            info.irrefutable &=
+                matches!(&source, MatchSource::Enum(enum_type) if enum_type.variants.len() == 1);
+            Ok(info)
+        }
+        MatchPattern::Record { fields, rest } => {
+            let ScalarType::Record(definitions) = catalog.underlying(expected)? else {
+                return Err(Error::new(
+                    "E_MATCH",
+                    format!("{context} is not a record and cannot use a record pattern"),
+                ));
+            };
+            bind_record_fields(catalog, definitions, fields, *rest, context, false)
+        }
+        MatchPattern::Tuple(patterns) => {
+            let ScalarType::Tuple(items) = catalog.underlying(expected)? else {
+                return Err(Error::new(
+                    "E_MATCH",
+                    format!("{context} is not a tuple and cannot use a tuple pattern"),
+                ));
+            };
+            if patterns.len() != items.len() {
+                return Err(Error::new(
+                    "E_MATCH",
+                    format!(
+                        "tuple pattern for {context} expects {} item(s), got {}",
+                        items.len(),
+                        patterns.len()
+                    ),
+                ));
+            }
+            let mut infos = Vec::with_capacity(patterns.len());
+            for (index, (pattern, ty)) in patterns.iter_mut().zip(items).enumerate() {
+                infos.push(bind_nested_pattern(
+                    catalog,
+                    ty,
+                    pattern,
+                    &format!("tuple item {} of {context}", index + 1),
+                )?);
+            }
+            combine_patterns(infos)
+        }
+    }
+}
+
+fn bind_record_fields(
+    catalog: &Catalog,
+    definitions: &[Column],
+    fields: &mut [crate::query::MatchField],
+    rest: bool,
+    context: &str,
+    constructor_payload: bool,
+) -> Result<PatternInfo> {
+    let mut seen_fields = BTreeSet::new();
+    let mut infos = Vec::with_capacity(fields.len());
+    for field in fields {
+        if !seen_fields.insert(&field.field) {
+            return Err(Error::new(
+                "E_MATCH",
+                format!("field '{}' is bound more than once", field.field),
+            ));
+        }
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == field.field)
+            .ok_or_else(|| {
+                let message = if constructor_payload {
+                    format!("{context} has no payload field '{}'", field.field)
+                } else {
+                    format!("{context} has no field '{}'", field.field)
+                };
+                Error::new("E_MATCH", message)
+            })?;
+        infos.push(bind_nested_pattern(
+            catalog,
+            &definition.ty,
+            &mut field.pattern,
+            &format!("field '{}' of {context}", field.field),
+        )?);
+    }
+    if !rest {
+        let missing = definitions
+            .iter()
+            .filter(|field| !seen_fields.contains(&field.name))
+            .map(|field| field.name.clone())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(Error::new(
+                "E_MATCH",
+                format!(
+                    "record pattern for {context} omits {}; add '..' to ignore them",
+                    missing.join(", ")
+                ),
+            ));
+        }
+    }
+    combine_patterns(infos)
+}
+
+fn combine_patterns(infos: Vec<PatternInfo>) -> Result<PatternInfo> {
+    let mut seen = BTreeSet::new();
+    let mut bindings = Vec::new();
+    let mut irrefutable = true;
+    for info in infos {
+        irrefutable &= info.irrefutable;
+        for binding in info.bindings {
+            if !seen.insert(binding.name.clone()) {
+                return Err(Error::new(
+                    "E_MATCH",
+                    format!("binding '{}' is declared more than once", binding.name),
+                ));
+            }
+            bindings.push(binding);
+        }
+    }
+    Ok(PatternInfo {
+        bindings,
+        irrefutable,
+    })
 }
 
 fn bind_condition(
@@ -557,50 +676,84 @@ fn match_bindings<'p, 'v>(
     value: &'v Value,
     pattern: &'p MatchPattern,
 ) -> Option<BTreeMap<&'p str, &'v Value>> {
-    let MatchPattern::Constructor { payload, tag, .. } = pattern else {
-        return Some(BTreeMap::new());
-    };
-    let tag = tag.as_ref()?;
-    let value = value.unwrapped();
-    match (tag, value) {
-        (MatchTag::Variant(expected), Value::Enum(value)) if expected == &value.id => {
-            payload_bindings(payload, &value.args)
+    let mut bindings = BTreeMap::new();
+    match_value_pattern(value, pattern, &mut bindings).then_some(bindings)
+}
+
+fn match_value_pattern<'p, 'v>(
+    value: &'v Value,
+    pattern: &'p MatchPattern,
+    bindings: &mut BTreeMap<&'p str, &'v Value>,
+) -> bool {
+    match pattern {
+        MatchPattern::Wildcard => true,
+        MatchPattern::Binding(name) => bindings.insert(name, value).is_none(),
+        MatchPattern::Constructor { payload, tag, .. } => {
+            let Some(tag) = tag else {
+                return false;
+            };
+            match (tag, value.unwrapped()) {
+                (MatchTag::Variant(expected), Value::Enum(value)) if expected == &value.id => {
+                    match_payload(&value.args, payload, bindings)
+                }
+                (MatchTag::None, Value::Option(None)) => match_payload(&[], payload, bindings),
+                (MatchTag::Some, Value::Option(Some(value))) => {
+                    match_payload(std::slice::from_ref(value.as_ref()), payload, bindings)
+                }
+                _ => false,
+            }
         }
-        (MatchTag::None, Value::Option(None)) => payload_bindings(payload, &[]),
-        (MatchTag::Some, Value::Option(Some(value))) => {
-            payload_bindings(payload, std::slice::from_ref(value.as_ref()))
+        MatchPattern::Record { fields, .. } => {
+            let Value::Record(record) = value.unwrapped() else {
+                return false;
+            };
+            fields.iter().all(|field| {
+                record
+                    .get(&field.field)
+                    .is_some_and(|value| match_value_pattern(value, &field.pattern, bindings))
+            })
         }
-        _ => None,
+        MatchPattern::Tuple(patterns) => {
+            let Value::Tuple(values) = value.unwrapped() else {
+                return false;
+            };
+            patterns.len() == values.len()
+                && values
+                    .iter()
+                    .zip(patterns)
+                    .all(|(value, pattern)| match_value_pattern(value, pattern, bindings))
+        }
     }
 }
 
-fn payload_bindings<'p, 'v>(
-    payload: &'p MatchPayload,
+fn match_payload<'p, 'v>(
     values: &'v [Value],
-) -> Option<BTreeMap<&'p str, &'v Value>> {
-    let mut bindings = BTreeMap::new();
+    payload: &'p MatchPayload,
+    bindings: &mut BTreeMap<&'p str, &'v Value>,
+) -> bool {
     match payload {
-        MatchPayload::Unit => {}
+        MatchPayload::Unit => values.is_empty(),
         MatchPayload::Record { fields, .. } => {
-            let Value::Record(record) = values.first()?.unwrapped() else {
-                return None;
+            let [value] = values else {
+                return false;
             };
-            for field in fields {
-                bindings.insert(field.binding.as_str(), record.get(&field.field)?);
-            }
+            let Value::Record(record) = value.unwrapped() else {
+                return false;
+            };
+            fields.iter().all(|field| {
+                record
+                    .get(&field.field)
+                    .is_some_and(|value| match_value_pattern(value, &field.pattern, bindings))
+            })
         }
-        MatchPayload::Positional(names) => {
-            if names.len() != values.len() {
-                return None;
-            }
-            for (name, value) in names.iter().zip(values) {
-                if name != "_" {
-                    bindings.insert(name.as_str(), value);
-                }
-            }
+        MatchPayload::Positional(patterns) => {
+            patterns.len() == values.len()
+                && values
+                    .iter()
+                    .zip(patterns)
+                    .all(|(value, pattern)| match_value_pattern(value, pattern, bindings))
         }
     }
-    Some(bindings)
 }
 
 fn evaluate_condition(bindings: &BTreeMap<&str, &Value>, condition: &MatchCondition) -> bool {

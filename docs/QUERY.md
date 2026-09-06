@@ -26,13 +26,13 @@ take 20
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
 | 值过滤 | `filter field >= literal` | 已实现 | #10 扩展为通用表达式 |
-| sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、Option 和穷尽检查 | #35 增加 tuple/嵌套 pattern |
+| sum/option 模式过滤 | `filter match field` | 已实现 unit、record、位置负载、递归 record/tuple/sum/option pattern 和穷尽检查 | #35 完善嵌套穷尽分析 |
 | 投影 | `select {field, nested.field}` | 已实现 | #11 与派生列组合 |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | #16 增加索引计划 |
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` | 未实现 | #10、#22 |
-| ADT 派生列 | `derive x = match ...` | 已实现穷尽 match 返回 binding 或 typed literal | #35 增加嵌套 pattern 和通用表达式 |
+| ADT 派生列 | `derive x = match ...` | 已实现递归 pattern，分支返回 binding 或 typed literal | #35/#36 增加新值构造和通用表达式 |
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length` | 未实现 | #36 |
 | 其他派生列 | `derive` | 未实现 | #11 |
 | 分组与汇总 | `group`、`aggregate` | 未实现 | #11 |
@@ -69,22 +69,26 @@ stage             = value-filter | match-filter | derive-match | select | sort |
 
 value-filter      = "filter" field-path comparison literal
 match-filter      = "filter" "match" field-path newline indent match-arm+ dedent
-match-arm         = pattern "=>" condition newline?
+match-arm         = arm-pattern "=>" condition newline?
 derive-match      = "derive" identifier "=" nested-match-expression
 nested-match-expression = match-expression | newline indent match-expression dedent
 match-expression  = "match" field-path newline indent match-value-arm+ dedent
-match-value-arm   = pattern "=>" match-value newline?
+match-value-arm   = arm-pattern "=>" match-value newline?
 match-value       = binding-path | literal
 select            = "select" "{" field-path ("," field-path)* ","? "}"
 sort              = "sort" sort-key | "sort" "{" sort-key ("," sort-key)* ","? "}"
 sort-key          = "-"? field-path
 take              = "take" nonnegative-integer | "take" positive-integer ".." positive-integer
 
-pattern           = "_" | qualified-variant (record-pattern | positional-bindings)?
+arm-pattern       = "_" | constructor-pattern
+pattern           = "_" | binding | constructor-pattern | record-pattern | tuple-pattern
+constructor-pattern = qualified-variant (record-pattern | pattern-argument*)?
 qualified-variant = Variant | Type "." Variant
-record-pattern    = "{" (field-binding ("," field-binding)* ("," "..")? | "..")? "}"
-field-binding     = identifier ("=" identifier)?
-positional-bindings = identifier+
+pattern-argument  = binding | "_" | "(" pattern ")" | tuple-pattern
+record-pattern    = "{" (field-pattern ("," field-pattern)* ("," "..")? | "..")? "}"
+field-pattern     = identifier ("=" pattern)?
+tuple-pattern     = "(" pattern "," (pattern ("," pattern)*)? ")"
+binding           = lowercase-identifier
 condition         = bool | binding | binding comparison literal
 comparison        = "==" | "!=" | ">" | ">=" | "<" | "<="
 field-path        = identifier ("." identifier)*
@@ -167,12 +171,13 @@ take 1
 
 - unit 变体直接写 `Pending`。带单个 record 负载的变体写 `Running {worker, attempt}`；位置负载用空格绑定，例如 `Pair left right`。
 - option 使用 `None` 与 `Some value`；写成 `Some _` 可以只判断存在而忽略内容。
-- record 字段名默认也是局部绑定；`{retry_at = at, ..}` 把字段重命名为 `at`。绑定可以继续访问嵌套 record，例如 `meta.attempts >= 3`。
+- record 字段名默认也是局部绑定；`{retry_at = at, ..}` 把字段重命名为 `at`。等号右侧也可递归使用 constructor、record 或 tuple pattern，例如 `{error = Network {message}, retry_at = Some at}`。绑定可以继续访问嵌套 record，例如 `meta.attempts >= 3`。
+- tuple 用自身的积类型标点分解，例如 `Some (at, reason)`；`_` 可出现在任意嵌套位置并忽略该值。位置 constructor 的参数仍用空格，例如 `Pair left right`。一个位置参数本身又是 constructor 时用括号明确边界，例如 `Outer (Some value) other`。
 - `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
-- `_` 覆盖尚未出现的变体，必须位于最后。没有 `_` 时必须覆盖全部变体。
+- 顶层 `_` 覆盖尚未出现的变体，必须位于最后。没有 `_` 时必须覆盖全部变体。包含嵌套 constructor 的分支只覆盖满足该嵌套模式的值，因此当前需要最后的 `_` 处理其余值；不会把 `Failed {retry_at = Some at, ..}` 误认为覆盖了所有 `Failed`。
 - 构造器由被匹配字段的命名类型确定，也可写成 `State.Running`。其他命名 sum 的同名构造器不会混用。
 - condition 当前只能是 `true`、`false`、一个 bool 绑定，或者 `binding <op> literal`。绑定只在所属分支内有效。
-- 当前可绑定整个 tuple 值，但 tuple 内部分解、record 内 `Some`/sum 等嵌套 pattern 仍未实现。
+- 每个顶层 constructor 当前最多出现一次。需要为同一个 constructor 写多个嵌套分支的完整穷尽分析仍由 #35 跟踪；现阶段用一个嵌套分支加最终 `_` 表达优先匹配和兜底。
 
 未知构造器、重复分支、通配分支后的不可达分支、遗漏 constructor、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum/option 来源或非 bool 条件返回类型错误。
 
@@ -184,7 +189,7 @@ take 1
 from jobs
 derive retry_at =
   match state
-    Failed {retry_at = at, ..} => at
+    Failed {retry_at, ..} => retry_at
     _ => None
 filter retry_at == Some 30
 select {id, retry_at}
@@ -194,7 +199,7 @@ select {id, retry_at}
 
 当前分支结果可以是一个局部 binding（含嵌套 record 路径）或完整 literal。引擎先从 binding、primitive literal 或限定 constructor 推导一个结果类型，再按该类型检查全部分支；`None`、空 list/record 等不能单独确定类型，但可在其他分支已经给出类型时使用。不同命名类型不会因结构相同而统一。
 
-分支必须穷尽且结果类型一致，这些检查在扫描前完成。当前不能在结果中进行算术/函数调用，也不能用 binding 构造新的 record/sum，例如 `Some at` 会等 #36 的统一表达式 IR；嵌套 pattern 和嵌套 match 仍由 #35 后续完成。
+分支必须穷尽且结果类型一致，这些检查在扫描前完成。pattern 可以递归解构 record、tuple、sum 和 option；当前不能在结果中进行算术/函数调用，也不能用 binding 构造新的 record/sum，例如返回 `Some at` 会等 #36 的统一表达式 IR。为同一顶层 constructor 写多个互补嵌套分支和 prepared plan 的 schema revision 重绑定仍由 #35 后续完成。
 
 ## 投影、排序与截取
 
@@ -275,11 +280,11 @@ filter match state
 | 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、`filter match`、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
 | 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
 | 事件记录 | [events.uid](../examples/events.uid) | sum 完整值比较和字符串中的 `|` | `tests/language.rs::executable_examples` |
-| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、字段默认值、ADT derive、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
+| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、嵌套 pattern、字段默认值、ADT derive、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 穷尽性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*` |
-| ADT 派生 | 测试内脚本 | sum/option、位置/record 绑定、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*` |
+| ADT 派生 | 测试内脚本 | 递归 sum/option/record/tuple pattern、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。

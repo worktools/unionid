@@ -86,24 +86,30 @@ pub struct MatchArm {
 #[derive(Debug, Clone)]
 pub enum MatchPattern {
     Wildcard,
+    Binding(String),
     Constructor {
         name: String,
         payload: MatchPayload,
         tag: Option<MatchTag>,
     },
+    Record {
+        fields: Vec<MatchField>,
+        rest: bool,
+    },
+    Tuple(Vec<MatchPattern>),
 }
 
 #[derive(Debug, Clone)]
 pub enum MatchPayload {
     Unit,
     Record { fields: Vec<MatchField>, rest: bool },
-    Positional(Vec<String>),
+    Positional(Vec<MatchPattern>),
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchField {
     pub field: String,
-    pub binding: String,
+    pub pattern: MatchPattern,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

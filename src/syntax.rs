@@ -914,54 +914,79 @@ impl Parser {
     }
 
     fn match_pattern(&mut self) -> Result<MatchPattern> {
-        let mut name = self.identifier()?;
-        if name == "_" {
-            return Ok(MatchPattern::Wildcard);
+        let pattern = self.nested_match_pattern(0)?;
+        if matches!(
+            pattern,
+            MatchPattern::Wildcard | MatchPattern::Constructor { .. }
+        ) {
+            Ok(pattern)
+        } else {
+            Err(self.error("top-level match branch must name a constructor or '_'"))
         }
+    }
+
+    fn nested_match_pattern(&mut self, depth: usize) -> Result<MatchPattern> {
+        self.depth(depth)?;
+        match self.kind().clone() {
+            Kind::Ident(name) => {
+                self.bump();
+                if name == "_" {
+                    return Ok(MatchPattern::Wildcard);
+                }
+                if name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+                    self.constructor_pattern(name, depth + 1)
+                } else {
+                    Ok(MatchPattern::Binding(name))
+                }
+            }
+            Kind::Open('(') => {
+                self.bump();
+                self.newlines();
+                let first = self.nested_match_pattern(depth + 1)?;
+                self.newlines();
+                if !self.eat(Kind::Comma) {
+                    self.expect(Kind::Close(')'))?;
+                    return Ok(first);
+                }
+                let mut items = vec![first];
+                self.newlines();
+                while *self.kind() != Kind::Close(')') {
+                    items.push(self.nested_match_pattern(depth + 1)?);
+                    self.newlines();
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                    self.newlines();
+                }
+                self.expect(Kind::Close(')'))?;
+                Ok(MatchPattern::Tuple(items))
+            }
+            Kind::Open('{') => {
+                self.bump();
+                let (fields, rest) = self.match_record_pattern(depth + 1)?;
+                Ok(MatchPattern::Record { fields, rest })
+            }
+            _ => Err(self.error("expected a binding, constructor, record, tuple, or '_' pattern")),
+        }
+    }
+
+    fn constructor_pattern(&mut self, mut name: String, depth: usize) -> Result<MatchPattern> {
         while self.eat(Kind::Dot) {
             name.push('.');
             name.push_str(&self.identifier()?);
         }
         let payload = if self.eat(Kind::Open('{')) {
-            let mut fields = Vec::new();
-            let mut rest = false;
-            self.newlines();
-            while *self.kind() != Kind::Close('}') {
-                if self.eat(Kind::Dot) {
-                    self.expect(Kind::Dot)?;
-                    if rest {
-                        return Err(self.error("record pattern can contain '..' only once"));
-                    }
-                    rest = true;
-                } else {
-                    let field = self.identifier()?;
-                    let binding = if self.eat(Kind::Op("=".into())) {
-                        self.identifier()?
-                    } else {
-                        field.clone()
-                    };
-                    fields.push(MatchField { field, binding });
-                }
-                self.newlines();
-                if !self.eat(Kind::Comma) {
-                    break;
-                }
-                self.newlines();
-                if rest && *self.kind() != Kind::Close('}') {
-                    return Err(self.error("'..' must be the last item in a record pattern"));
-                }
-            }
-            self.expect(Kind::Close('}'))?;
+            let (fields, rest) = self.match_record_pattern(depth + 1)?;
             MatchPayload::Record { fields, rest }
         } else {
-            let mut bindings = Vec::new();
-            while matches!(self.kind(), Kind::Ident(_)) {
-                bindings.push(self.identifier()?);
+            let mut patterns = Vec::new();
+            while matches!(self.kind(), Kind::Ident(_) | Kind::Open('(')) {
+                patterns.push(self.nested_match_pattern(depth + 1)?);
             }
-            if bindings.is_empty() {
+            if patterns.is_empty() {
                 MatchPayload::Unit
             } else {
-                MatchPayload::Positional(bindings)
+                MatchPayload::Positional(patterns)
             }
         };
         Ok(MatchPattern::Constructor {
@@ -969,6 +994,40 @@ impl Parser {
             payload,
             tag: None,
         })
+    }
+
+    fn match_record_pattern(&mut self, depth: usize) -> Result<(Vec<MatchField>, bool)> {
+        self.depth(depth)?;
+        let mut fields = Vec::new();
+        let mut rest = false;
+        self.newlines();
+        while *self.kind() != Kind::Close('}') {
+            if self.eat(Kind::Dot) {
+                self.expect(Kind::Dot)?;
+                if rest {
+                    return Err(self.error("record pattern can contain '..' only once"));
+                }
+                rest = true;
+            } else {
+                let field = self.identifier()?;
+                let pattern = if self.eat(Kind::Op("=".into())) {
+                    self.nested_match_pattern(depth + 1)?
+                } else {
+                    MatchPattern::Binding(field.clone())
+                };
+                fields.push(MatchField { field, pattern });
+            }
+            self.newlines();
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+            self.newlines();
+            if rest && *self.kind() != Kind::Close('}') {
+                return Err(self.error("'..' must be the last item in a record pattern"));
+            }
+        }
+        self.expect(Kind::Close('}'))?;
+        Ok((fields, rest))
     }
 
     fn match_value_expression(&mut self, name: String) -> Result<DeriveMatch> {
