@@ -63,6 +63,15 @@ enum Command {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Format a script using the canonical semicolon-free style.
+    Fmt {
+        /// Read source from a file instead of stdin.
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Exit nonzero when the input differs from canonical formatting.
+        #[arg(long)]
+        check: bool,
+    },
     /// Verify redb and unionid logical storage integrity.
     Check {
         #[arg(long)]
@@ -231,6 +240,16 @@ fn run() -> Result<(), String> {
             } else {
                 cli::run_cli(&addr, source, matches!(format, Format::Json))
             }
+        }
+        Command::Fmt { file, check } => {
+            let source = match file {
+                Some(path) => cli::read_source(
+                    std::fs::File::open(&path)
+                        .map_err(|error| format!("open '{}': {error}", path.display()))?,
+                )?,
+                None => cli::read_source(std::io::stdin().lock())?,
+            };
+            cli::format_source(&source, check)
         }
         Command::Check { db, format } => cli::check_redb(db, matches!(format, Format::Json)),
         Command::Migration { command } => match command {

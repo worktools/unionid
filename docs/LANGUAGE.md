@@ -156,6 +156,12 @@ migration task_state_v2
 
 Rust 客户端可以调用 `unionid::input_status(source)`，在执行前得到 `InputStatus::Complete`、`InputStatus::Incomplete(error)` 或 `InputStatus::Invalid(error)`。判断直接复用 lexer 的 delimiter/layout 状态和 parser 的 EOF 状态：未闭合的括号、等待缩进体的声明、match 分支或尾部 `|` 属于 incomplete；不匹配的退格、tab 缩进、未知 stage 和尾部垃圾属于 invalid。语法错误保留 `span`，incomplete 使用 `E_INCOMPLETE`。这个 API 只判断语法能否继续，不打开数据库，也不检查表、字段或值的类型。
 
+## 规范格式
+
+`unionid::format_source(source)` 先解析完整脚本，再输出确定的无分号源码。顶层语句用一个空行分隔，缩进固定为两个空格，pipeline 每个 stage 独占一行，select 和多键 sort 使用 `{}`，兼容的 `=`/`limit` 会归一为 `==`/`take`。formatter 按 bool 与算术 precedence 生成必要括号；嵌套函数、ADT pattern/value、migration transform 和 explain 都可再次解析。格式化后的第二次输出保持字节不变，schema-only 脚本保持 schema identity。
+
+`unionid fmt --file path.uid` 把结果写到 stdout，不修改源文件；不提供 `--file` 时读取 stdin。`unionid fmt --file path.uid --check` 只校验，格式漂移或语法错误返回非零，语法错误保留 span。注释文本会保留；当前 parser AST 不保存 trivia 的精确节点归属，因此 inline 或 block 内注释会稳定移动到随后的顶层语句边界，文件尾注释保留在末尾。
+
 一次 `Engine.execute`、一次 `run` 或一个 TCP 请求是一个原子批次：先解析全部源码，再在候选状态中执行；任一步失败则不发布此次请求的任何修改。成功返回最后一条语句的结果，批次中的查询可以看到前面的写入。当前通过复制内存数据库实现写批次隔离，适合小工作集，尚未优化大批量写入的内存成本。
 
 错误包含 `code`、可读 `message`、可选 `span {line, column}`。语法错误标出 token 位置；执行前类型校验目前定位到所属语句，并给出具体字段路径，精确表达式 span 后续完善。源码最多 1 MiB、100,000 tokens、64 层类型／值／布局嵌套，超限返回错误。
@@ -168,6 +174,7 @@ cargo run -- run --file examples/config.uid --format json
 cargo run -- run --file examples/events.uid
 cargo run -- run --file examples/sync_conflicts.uid
 cargo run -- run --file examples/task_mutations.uid
+cargo run -- fmt --file examples/tasks.uid --check
 cargo run -- cli --memory
 cargo run --example embedded
 cargo run --example parameters

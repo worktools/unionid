@@ -5,9 +5,14 @@ type Contact =
 
 type State =
   Pending
-  | Running {worker text, attempt int}
-  | Done {result text}
-  | Failed {message text, retryable bool}
+  | Running
+    worker text
+    attempt int
+  | Done
+    result text
+  | Failed
+    message text
+    retryable bool
 
 type Task =
   id int
@@ -21,19 +26,21 @@ table tasks Task
 
 insert tasks
   id = 1
-  title = "同步目录"
   owner =
     email = "alice@example.com"
     nickname = None
+  state = Running {attempt = 2, worker = "local"}
   tags = ["local", "sync"]
-  state = Running {worker = "local", attempt = 2}
+  title = "同步目录"
 
 insert tasks
   id = 2
-  title = "检查配置"
-  owner = {email = "bob@example.com", nickname = Some "Bob"}
-  tags = ["local"]
+  owner =
+    email = "bob@example.com"
+    nickname = Some("Bob")
   state = Pending
+  tags = ["local"]
+  title = "检查配置"
 
 from tasks
 filter match state
