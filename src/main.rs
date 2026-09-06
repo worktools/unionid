@@ -80,6 +80,35 @@ enum Command {
         #[command(subcommand)]
         command: SchemaCommand,
     },
+    /// Create a verified logical backup from a redb database.
+    Backup {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Restore a verified backup to a new redb path.
+    Restore {
+        #[arg(long)]
+        backup: PathBuf,
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Explicitly convert the supported prototype snapshot/WAL into redb.
+    ImportLegacy {
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+        #[arg(long)]
+        wal: Option<PathBuf>,
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -235,6 +264,18 @@ fn run() -> Result<(), String> {
                 cli::schema_print(db, matches!(format, Format::Json))
             }
         },
+        Command::Backup { db, output, format } => {
+            cli::backup_create(db, output, matches!(format, Format::Json))
+        }
+        Command::Restore { backup, db, format } => {
+            cli::backup_restore(backup, db, matches!(format, Format::Json))
+        }
+        Command::ImportLegacy {
+            snapshot,
+            wal,
+            db,
+            format,
+        } => cli::import_legacy(snapshot, wal, db, matches!(format, Format::Json)),
     }
 }
 

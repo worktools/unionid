@@ -87,7 +87,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 1. [#6](https://github.com/worktools/unionid/issues/6)、[#7](https://github.com/worktools/unionid/issues/7) 与 [#28](https://github.com/worktools/unionid/issues/28) 已完成；继续用当前可执行规范、示例和实际反馈收敛 [#2](https://github.com/worktools/unionid/issues/2)。
 2. [#13](https://github.com/worktools/unionid/issues/13) 与 [#14](https://github.com/worktools/unionid/issues/14) 已交付 redb 原子提交、进程退出恢复、打开锁和格式校验子集，持久数据使用稳定 RowId；两项继续跟踪设备故障与恢复边界。
 3. [#9](https://github.com/worktools/unionid/issues/9)、[#12](https://github.com/worktools/unionid/issues/12) 与 [#34](https://github.com/worktools/unionid/issues/34) 已完成；[#35](https://github.com/worktools/unionid/issues/35) 与 [#36](https://github.com/worktools/unionid/issues/36) 已有可执行子集，继续跟踪 prepared plan、元素谓词与通用函数。
-4. [#15](https://github.com/worktools/unionid/issues/15)、[#17](https://github.com/worktools/unionid/issues/17)、[#18](https://github.com/worktools/unionid/issues/18) 已完成；[#19](https://github.com/worktools/unionid/issues/19) 已实现声明式 schema diff 与可检查草稿，下一项推进 [#20](https://github.com/worktools/unionid/issues/20) 的备份还原和旧格式导入。[#16](https://github.com/worktools/unionid/issues/16) 的 Explain 与 M4 体验工作暂后置。
+4. [#15](https://github.com/worktools/unionid/issues/15)、[#17](https://github.com/worktools/unionid/issues/17)、[#18](https://github.com/worktools/unionid/issues/18)、[#19](https://github.com/worktools/unionid/issues/19) 已完成；[#20](https://github.com/worktools/unionid/issues/20) 已实现逻辑备份还原和显式旧原型导入，M3 核心链路完成。下一步进入 M4 日常可用性与发布验收。
 
 类型演进规则刻意放在 M0，避免 migration 被当作事后附加；完整 migration 执行要等原子存储与 DML 成熟。
 

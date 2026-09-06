@@ -12,6 +12,7 @@
 - redb 增量原子持久模式，可由本地命令、REPL 与 TCP 服务共同使用
 - 显式 ADT schema migration：稳定身份 rename、默认回填、typed conversion、约束与索引变更
 - 版本化 migration runner：`new/plan/apply/status`、不可变 checksum 与 redb ledger
+- 可校验逻辑备份、只还原到新路径，以及显式原型 WAL/snapshot 导入
 
 ## 先运行一个完整例子
 
@@ -32,6 +33,8 @@ cargo run -- migration apply --db app.redb --dir examples/migrations
 cargo run -- migration status --db app.redb --dir examples/migrations
 cargo run -- schema check --file examples/schema.uid
 cargo run -- migration diff --db app.redb --schema examples/schema.uid --name sync_schema
+cargo run -- backup --db app.redb --output app.backup.json
+cargo run -- restore --backup app.backup.json --db restored.redb
 cargo run --example embedded
 ```
 
@@ -76,6 +79,7 @@ cargo run -- cli --memory
 - [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
 - [Schema migration 语言](docs/MIGRATIONS.md)：当前可执行的显式演进、typed conversion 与约束边界。
 - [声明式 Schema 与 Diff](docs/SCHEMA-DIFF.md)：规范化 schema、影响报告和不可猜测的迁移草稿。
+- [备份、还原与旧格式导入](docs/BACKUP.md)：逻辑备份校验、新路径恢复和显式原型转换。
 - [ADT value codec](docs/CODEC.md)：稳定 ID 驱动的持久值格式、限制与 schema evolution 边界。
 - [redb 持久模式](docs/STORAGE.md)：本地／服务入口、事务承诺、内部表与当前限制。
 - [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。
