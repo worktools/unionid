@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::routing::post;
@@ -18,8 +19,10 @@ use tokio::sync::{Mutex, oneshot};
 use unionid::backup;
 use unionid::migration::MigrationFile;
 use unionid::protocol::{Request, Response, VERSION};
-use unionid::server::execute_protocol_request;
-use unionid::{Engine, Error, SchemaInfo};
+use unionid::server::{execute_protocol_request, execute_protocol_request_until};
+use unionid::{Engine, Error, PageSpec, SchemaInfo};
+
+const HTTP_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 const INITIAL: &str = r#"migration m0001_todolist
   add type Retry =
@@ -278,6 +281,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             estimate: None,
             location: (0.0, 0.0),
         },
+        TaskV1 {
+            id: 1,
+            title: "triage pagination".into(),
+            status: StatusV1::Blocked {
+                reason: "waiting for review".into(),
+            },
+            reminder: ReminderV1::Off,
+            labels: vec![],
+            due: Due::At { unix_ms: 900 },
+            checklist: Checklist::Empty,
+            estimate: Some(20),
+            location: (1.0, 1.0),
+        },
+        TaskV1 {
+            id: 3,
+            title: "verify adapters".into(),
+            status: StatusV1::Done { at: 800 },
+            reminder: ReminderV1::Off,
+            labels: vec![Label::System {
+                name: "pagination".into(),
+            }],
+            due: Due::Never,
+            checklist: Checklist::Items {
+                entries: vec!["rust".into(), "tcp".into(), "http".into()],
+            },
+            estimate: Some(30),
+            location: (2.0, 2.0),
+        },
     ];
     let insert = Request::query("insert-todos", "insert many todos $rows\nreturning")
         .with_serde_param("rows", &tasks)?
@@ -313,17 +344,78 @@ returning"#,
         Some("E_TYPE")
     );
 
+    let page_query = "from todos\nsort id";
+    let first_page: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("http-page-1", page_query).with_page(PageSpec::forward(2)),
+    )
+    .await?;
+    let first_page = first_page.typed_page::<TaskV1>()?;
+    assert_eq!(
+        first_page
+            .rows
+            .iter()
+            .map(|task| task.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let second_page = first_page.page.next_page().unwrap();
+
+    post_json_then_disconnect(
+        address,
+        "/v1/query",
+        &Request::query("http-disconnect", page_query).with_page(PageSpec::forward(1)),
+    )
+    .await?;
+    let after_disconnect: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("http-after-disconnect", page_query).with_page(PageSpec::forward(1)),
+    )
+    .await?;
+    assert!(after_disconnect.ok, "{}", after_disconnect.message);
+
     ensure_admin_ok(
         &post_json::<_, AdminResponse>(address, "/v1/admin/restart", &admin("restart", vec![]))
             .await?,
     )?;
-    let reopened: Response = post_json(
+    let reopened_page: Response = post_json(
         address,
         "/v1/query",
-        &Request::query("reopened", "from todos | sort id"),
+        &Request::query("http-page-2-after-restart", page_query).with_page(second_page.clone()),
     )
     .await?;
-    assert_eq!(reopened.rows.len(), 2);
+    let reopened_page = reopened_page.typed_page::<TaskV1>()?;
+    assert_eq!(
+        reopened_page
+            .rows
+            .iter()
+            .map(|task| task.id)
+            .collect::<Vec<_>>(),
+        [3, 9_007_199_254_740_993]
+    );
+    assert!(reopened_page.page.next_page().is_none());
+
+    let mut invalid_page = second_page.clone();
+    let invalid_cursor = invalid_page.cursor.as_mut().unwrap();
+    let replacement = if invalid_cursor.ends_with('A') {
+        'B'
+    } else {
+        'A'
+    };
+    invalid_cursor.pop();
+    invalid_cursor.push(replacement);
+    let invalid: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("http-invalid-cursor", page_query).with_page(invalid_page),
+    )
+    .await?;
+    assert_eq!(
+        invalid.error.as_ref().map(|error| error.code.as_str()),
+        Some("E_CURSOR_INTEGRITY")
+    );
 
     let migrations = vec![INITIAL, UPGRADE];
     let planned: AdminResponse = post_json(
@@ -340,6 +432,17 @@ returning"#,
     )
     .await?;
     ensure_admin_ok(&upgraded)?;
+
+    let stale_page: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("http-page-after-migration", page_query).with_page(second_page),
+    )
+    .await?;
+    assert_eq!(
+        stale_page.error.as_ref().map(|error| error.code.as_str()),
+        Some("E_CURSOR_SCHEMA")
+    );
     let status: AdminResponse = post_json(
         address,
         "/v1/admin/migrations/status",
@@ -365,7 +468,28 @@ returning"#,
     )
     .await?;
     let current_tasks = current.typed_rows::<TaskV2>()?;
-    assert_eq!(current_tasks.len(), 2);
+    assert_eq!(current_tasks.len(), 4);
+    let upgraded_first: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("http-upgraded-page-1", page_query).with_page(PageSpec::forward(2)),
+    )
+    .await?;
+    let upgraded_first = upgraded_first.typed_page::<TaskV2>()?;
+    let upgraded_second: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("http-upgraded-page-2", page_query)
+            .with_page(upgraded_first.page.next_page().unwrap()),
+    )
+    .await?;
+    let upgraded_second = upgraded_second.typed_page::<TaskV2>()?;
+    let paged_tasks = upgraded_first
+        .rows
+        .into_iter()
+        .chain(upgraded_second.rows)
+        .collect::<Vec<_>>();
+    assert_eq!(paged_tasks, current_tasks);
     let explain: Response = post_json(
         address,
         "/v1/query",
@@ -412,7 +536,7 @@ returning"#,
     )?;
     server.await??;
     println!(
-        "HTTP todo flow passed: typed ADTs, lost-response replay, restart, migration, check, backup/restore ({})",
+        "HTTP todo flow passed: typed ADTs/pages, disconnect, lost-response replay, restart, migration, check, backup/restore ({})",
         archive.display()
     );
     Ok(())
@@ -440,7 +564,9 @@ fn ensure_admin_ok(response: &AdminResponse) -> Result<(), Error> {
 async fn query(State(state): State<Shared>, Json(request): Json<Request>) -> Json<Response> {
     let mut service = state.lock().await;
     let response = match service.engine.as_mut() {
-        Some(engine) => execute_protocol_request(engine, request),
+        Some(engine) => {
+            execute_protocol_request_until(engine, request, Instant::now() + HTTP_EXECUTION_TIMEOUT)
+        }
         None => Response::failure(
             request.request_id,
             engine_unavailable(),
@@ -698,4 +824,21 @@ async fn post_json_then_lose_response<T: Serialize>(
         "injected response loss after the server committed the request",
     )
     .into())
+}
+
+async fn post_json_then_disconnect<T: Serialize>(
+    address: std::net::SocketAddr,
+    path: &str,
+    value: &T,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let body = serde_json::to_vec(value)?;
+    let mut stream = tokio::net::TcpStream::connect(address).await?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(&body).await?;
+    stream.shutdown().await?;
+    Ok(())
 }

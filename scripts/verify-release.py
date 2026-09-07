@@ -38,6 +38,23 @@ def main():
             archive.extractall(temporary, filter="data")
         root = temporary / roots.pop()
         release = json.loads((root / "RELEASE.json").read_text())
+        expected_formats = {
+            "storage_format": 3,
+            "storage_formats_readable": [1, 2, 3],
+            "catalog_codec": 2,
+            "value_codec": 1,
+            "index_key_codec": 1,
+            "migration_codec": 1,
+            "receipt_codec": 1,
+            "backup_format": 2,
+            "backup_formats_readable": [1, 2],
+            "protocol": 1,
+        }
+        actual_formats = {key: release.get(key) for key in expected_formats}
+        if actual_formats != expected_formats:
+            raise RuntimeError(
+                f"release format contract mismatch: expected {expected_formats}, got {actual_formats}"
+            )
         executable = "unionid.exe" if "windows" in release["target"] else "unionid"
         binary = root / "bin" / executable
         required = [

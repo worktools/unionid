@@ -4,7 +4,7 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 
 持久幂等写入的 exactly-once effect、request digest、回执、容量、显式清理和格式升级契约见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)。`request_id` 仍然只做单次尝试的关联；安全重试必须复用独立的 `idempotency_key`。
 
-version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。内置服务使用 JSON Lines；HTTP adapter 应在 `POST /v1/query` 的 JSON body 中直接使用同一结构，并调用 `server::execute_protocol_request`。这样 TCP、HTTP 和嵌入式 adapter 共享版本检查、参数解码、schema identity、deadline、introspection、错误与返回行语义，而不是各自解释 query。
+version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。内置服务使用 JSON Lines；HTTP adapter 应在 `POST /v1/query` 的 JSON body 中直接使用同一结构，并调用 `server::execute_protocol_request`，或用 `execute_protocol_request_until` 设置 adapter 自己的 deadline。这样 TCP、HTTP 和嵌入式 adapter 共享版本检查、参数解码、schema identity、deadline、introspection、错误与返回行语义，而不是各自解释 query。
 
 ## 请求
 
@@ -58,7 +58,20 @@ Rust 客户端使用 `Request::with_idempotency_key`，不发送或手写 digest
 {"version":1,"request_id":"tasks-2","query":"from tasks\nfilter archived == false\nsort {-priority, id}","page":{"limit":100,"direction":"forward","cursor":"u1.payload.mac"}}
 ~~~
 
-`direction` 为 `forward` 或 `backward`，省略时是 forward；第一页省略 cursor。Rust 可写 `Request::query(...).with_page(PageSpec::forward(100))`，后续用 `PageSpec::after` 或 `PageSpec::before`。服务把结构化字段归一为语言的最终 `page` stage，因此两种入口共享绑定、plan digest、错误和资源限制。page 只接受单条 read pipeline；与源码 page、mutation、introspection、receipt operation 或 idempotency key 混用时返回稳定错误。
+`direction` 为 `forward` 或 `backward`，省略时是 forward；第一页省略 cursor。Rust 可写 `Request::query(...).with_page(PageSpec::forward(100))`。`Response::typed_page::<T>()` 同时返回应用 row 与 `PageInfo`；`PageInfo::next_page()` / `previous_page()` 直接构造下一次 `with_page` 所需的结构，不需要应用读取或拼接 wire cursor tag：
+
+~~~rust
+let mut page = PageSpec::forward(100);
+loop {
+    let response = send(Request::query("tasks", query).with_page(page))?;
+    let typed = response.typed_page::<Task>()?;
+    consume(typed.rows);
+    let Some(next) = typed.page.next_page() else { break };
+    page = next;
+}
+~~~
+
+服务把结构化字段归一为语言的最终 `page` stage，因此两种入口共享绑定、plan digest、错误和资源限制。page 只接受单条 read pipeline；与源码 page、mutation、introspection、receipt operation 或 idempotency key 混用时返回稳定错误。
 
 Introspection 使用同一版本请求，返回完整的类型化快照，客户端再按请求种类展示。它不执行查询或修改数据：
 
@@ -125,7 +138,7 @@ HTTP 适配、生命周期 endpoint 和完整 todo 场景见 [HTTP 数据协议�
 
 ## Rust 嵌入接口
 
-<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>Engine::open_redb_read_only(path)</code> 只打开已存在的 redb，并建立返回 `E_READ_ONLY` 的 mutation 边界。已有 Engine 也可用 <code>with_read_only(true)</code> 配置 adapter。<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数；`execute_page` 和 `execute_with_params_page` 接受结构化 `PageSpec`。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert/upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code>、`PageInfo` 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
+<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>Engine::open_redb_read_only(path)</code> 只打开已存在的 redb，并建立返回 `E_READ_ONLY` 的 mutation 边界。已有 Engine 也可用 <code>with_read_only(true)</code> 配置 adapter。<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数；`execute_page` 和 `execute_with_params_page` 接受结构化 `PageSpec`，`QueryResponse::typed_page` 返回 `TypedPage<T>`。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert/upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code>、`PageInfo` 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
 
 可运行示例：
 
@@ -135,4 +148,4 @@ cargo run --example parameters
 
 TCP 客户端可直接构造 <code>ProtocolRequest</code> 并调用 <code>cli::send_request</code>。<code>WireValue</code> 与 <code>Value</code> 之间提供无损转换；网络 codec、redb 的版本化 binary value codec 和内部 Rust enum 布局彼此独立。连接、执行与响应限制以及优雅关闭行为见[服务运行边界](SERVICE.md)。
 
-HTTP/TCP Rust adapter 还可使用 `Request::query`、`Request::with_serde_param` 和 `Response::typed_rows`，避免应用代码手工拆装 `WireValue`。`server::execute_protocol_request` 是 transport adapter 的统一执行入口；它不启动 listener，也不规定认证、TLS、路由或部署策略。
+HTTP/TCP Rust adapter 还可使用 `Request::query`、`Request::with_serde_param`、`Request::with_page`、`Response::typed_rows` 和 `Response::typed_page`，避免应用代码手工拆装 `WireValue` 或 cursor。`server::execute_protocol_request` 是使用内置 25 秒预算的统一执行入口；`execute_protocol_request_until` 接受 adapter 计算的绝对 deadline。两者都不启动 listener，也不规定认证、TLS、路由或部署策略。

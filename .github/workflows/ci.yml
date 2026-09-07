@@ -32,5 +32,6 @@ jobs:
       - run: cargo clippy --locked --manifest-path tools/workload-eval/Cargo.toml --all-targets -- -D warnings
       - run: cargo run --release --locked --manifest-path tools/workload-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-workload.db" 100 5 50
       - run: cargo run --locked --example getting_started -- "${RUNNER_TEMP}/unionid-embedded.redb"
+      - run: cargo run --locked --example todolist -- "${RUNNER_TEMP}/unionid-todolist"
       - run: python3 scripts/package-release.py --output "${RUNNER_TEMP}/unionid-dist"
       - run: python3 scripts/verify-release.py --dist "${RUNNER_TEMP}/unionid-dist"

@@ -536,6 +536,10 @@ page 100 after "u1.payload.mac"
 
 首版使用 sequence-pinned 一致性：第一页固定当前 commit sequence；其后任何成功 data/schema mutation 都让旧 cursor 在扫描前返回 `E_CURSOR_STALE`。失败或回滚的 mutation、普通 read 和幂等 replay 不推进 sequence。redb 重开后 cursor 仍可使用；逻辑 backup/restore 会轮换数据库身份和 secret，因此源库 cursor 在恢复副本上返回完整性错误。完整契约与错误检查顺序见 [RFC 0003](rfc/0003-stable-cursor-pagination.md)。
 
+Rust 应用可用 `QueryResponse::typed_page::<T>()` 或协议 `Response::typed_page::<T>()` 一次取得应用类型 rows 与 `PageInfo`。`PageInfo::next_page()` 和 `previous_page()` 返回可直接传给 `Engine::execute_page` 或 `Request::with_page` 的 `PageSpec`。没有 page 元数据时 `typed_page` 返回 `E_PAGE_SHAPE`，查询失败时保留原错误。
+
+page response 总是一个完整、有界的 JSON 结果，不是 streaming。deadline 超时返回 `E_TIMEOUT` 且不产生 cursor；TCP/HTTP 客户端断开后，当前串行执行器可能继续完成只读请求，但最多到服务 deadline，并始终受 working row、sort memory、page 和响应 byte 上限约束。显式跨请求取消与带背压的 NDJSON/streaming 由 [#135](https://github.com/worktools/unionid/issues/135) 跟踪，并依赖 [#116](https://github.com/worktools/unionid/issues/116) 的一致性读快照。
+
 如果业务依赖“前 N 行”，必须先 sort：
 
 ```text
@@ -614,6 +618,7 @@ filter match state
 | 布尔与集合表达式 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 数值表达式 | 测试内脚本 | int/float 类型、优先级、跨行括号、命名数值类型、整数除法、短路及运行时错误 | `typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
+| 稳定游标分页 | HTTP todolist 与接口测试 | typed page helper、重复排序前缀、正反向、redb 重开、TCP/HTTP 断开、deadline、migration 和 cursor 错误 | `tests/pagination.rs`、`tests/pagination_interfaces.rs`、`examples/todolist.rs` |
 | 原子修改 | [task_mutations.uid](../examples/task_mutations.uid) 与测试内脚本 | typed/nested/simultaneous set、match target、穷尽 ADT match assignment、顶层保留 binding、typed 参数、主键冲突、运行时回滚、索引维护、稳定 RowId、TCP 和 redb 重开 | `update_*`、`failed_multi_row_updates_*`、`versioned_tcp_updates_*`、`adt_match_updates_*`、`redb_update_delete_*` |
 | 主键 Upsert | [config.uid](../examples/config.uid) 与测试内脚本 | insert/replace action、完整 row 默认值、重复执行、回滚、索引更新、RowId/cursor 和 redb 重开 | `upsert_*`、`local_cli_reports_the_structured_upsert_action`、`redb_update_delete_*` |
 | 批量插入 | [events.uid](../examples/events.uid) 与测试内脚本 | literal／参数 list、默认值、嵌套 ADT、空批次、批内冲突、预算、deadline、RowId/index 原子性、prepared/redb/TCP 与 returning 顺序 | `typed_bulk_insert_*`、`bulk_insert_validates_*`、`prepared_bulk_insert_*`、`parameterized_rows_*`、`versioned_tcp_bulk_inserts_*` |
