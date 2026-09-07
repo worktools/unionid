@@ -46,6 +46,8 @@ TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON by
 
 客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；在未收到响应时不能推断提交结果，也不能盲目把写入当作 exactly-once 重试。需要安全重试时使用应用主键、upsert 或业务幂等标识。
 
+后续持久幂等写入不会改变网络只能 best-effort delivery 的事实，而是通过“数据效果与回执同事务”提供 exactly-once effect。规范 digest、commit uncertain 重开流程、有界保留和禁止自动 TTL 的决策见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)；在 #125/#126 完成前，生产客户端仍必须遵守上一段的现有边界。
+
 只读模式限制 unionid 的查询执行入口，并不把 redb 文件改成操作系统级只读格式，也不允许同一路径绕过独占打开锁。部署仍应配合文件权限、独立运行身份和只向受限进程暴露的数据库路径；需要安全重试的写服务由 [#113](https://github.com/worktools/unionid/issues/113) 跟踪 durable idempotency receipt。
 
 ## 嵌入式控制

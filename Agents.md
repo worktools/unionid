@@ -64,6 +64,7 @@
 - v0.1 发布闭环使用 `scripts/package-release.py` 生成包含完整文档与示例的原生 target 压缩包、`RELEASE.json` 与 SHA-256；包内教程由 `scripts/verify-release.py` 从空目录验证本地 redb CLI 和 TCP，并由集成测试核对 Rust Engine 的 typed 语义。入门和升级契约分别见 `docs/GETTING_STARTED.md` 与 `docs/UPGRADING.md`；#103 跟踪实际 `v0.1.0` tag 与 GitHub Release。
 - README 是面向用户的中英双语产品入口，优先解释“直接用 ADT 描述数据库数据”和“query language 直接理解 ADT”两个核心特点，并保留最短可运行路径。实现历史、测试矩阵、原型兼容、存储内部结构和实时计划分别放在 `docs/DEVELOPMENT.md`、专题文档与 GitHub issues，避免重新堆回 README。
 - `Engine::open_redb_read_only`、`run/cli/server --db --read-only` 提供统一只读执行边界；完整解析和参数绑定后、创建候选状态或持久事务前以 `E_READ_ONLY` 拒绝 mutation，`introspection.read_only` 可验证实际状态。
+- 持久幂等写入契约见 `docs/rfc/0002-idempotent-write-receipts.md`：独立 key + canonical digest 保存完整成功回执，目标是 exactly-once effect；不自动 TTL/LRU，首次持久回执需要原子进入 storage format 2。#125/#126 完成前，version 1 尚未开放该字段，`request_id` 仍只用于关联。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）

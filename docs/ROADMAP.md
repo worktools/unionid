@@ -96,6 +96,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#111](https://github.com/worktools/unionid/issues/111) | [路线图] M5 总览与验收顺序 | P0 | v0.1.0 发布基线 |
 | [#112](https://github.com/worktools/unionid/issues/112) | [核心] 只读执行边界与可观测状态 | P0 | 无；首个实现切片 |
 | [#113](https://github.com/worktools/unionid/issues/113) | [协议] 持久幂等写入 receipt | P0 | [#112](https://github.com/worktools/unionid/issues/112) |
+| [#124](https://github.com/worktools/unionid/issues/124) | [设计] 幂等 effect、digest、receipt 与清理 RFC | P0 | [#112](https://github.com/worktools/unionid/issues/112)；[#113](https://github.com/worktools/unionid/issues/113) 的设计切片 |
+| [#125](https://github.com/worktools/unionid/issues/125) | [存储] Engine/redb/backup 原子持久回执 | P0 | [#124](https://github.com/worktools/unionid/issues/124) |
+| [#126](https://github.com/worktools/unionid/issues/126) | [协议] version 1、清理与 HTTP 丢响应场景 | P0 | [#125](https://github.com/worktools/unionid/issues/125) |
 | [#114](https://github.com/worktools/unionid/issues/114) | [查询] 稳定 cursor 分页与取消 | P1 | [#113](https://github.com/worktools/unionid/issues/113) 的请求身份契约 |
 | [#115](https://github.com/worktools/unionid/issues/115) | [类型] 生产标量契约 | P1 | 先冻结时间、十进制与二进制编码边界 |
 | [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | P1 | [#112](https://github.com/worktools/unionid/issues/112)、[#114](https://github.com/worktools/unionid/issues/114) |
