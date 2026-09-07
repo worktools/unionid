@@ -71,5 +71,6 @@ cargo run --example todolist -- /path/to/empty-work-directory
 
 - `request_id` 只做关联，不是幂等键。写请求在 response 前断线时，提交结果可能未知。
 - query source 仍受解析、执行、结果大小和 deadline 限制；HTTP adapter 应设置更严格的 body/header/connection 限额。
-- 当前 response 是有界完整 JSON。大结果集的 cursor/NDJSON、背压、取消与 prepared handle 由 #101 后续阶段定义。
+- 只读 HTTP 服务应使用 `Engine::open_redb_read_only(path)`，或在已打开的 Engine 上调用 `with_read_only(true)`；所有 adapter 继续走 `execute_protocol_request`，不要只在路由层按字符串猜测写语句。`introspection.read_only` 可作为启动检查。
+- 当前 response 是有界完整 JSON。大结果集的 cursor/NDJSON、背压和取消由 [#114](https://github.com/worktools/unionid/issues/114) 跟踪。
 - HTTP 层不得把普通 JSON number/null/object 当作无损 wire value；application-shaped serde 数据应由 Rust helper 或 schema-aware decoder 转为 `WireValue`。

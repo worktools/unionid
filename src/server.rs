@@ -107,10 +107,32 @@ pub fn run_server_with_db(
     snapshot_path: Option<PathBuf>,
     snapshot_every: usize,
 ) -> Result<(), String> {
+    run_server_with_db_read_only(
+        addr,
+        db_path,
+        wal_path,
+        snapshot_path,
+        snapshot_every,
+        false,
+    )
+}
+
+pub fn run_server_with_db_read_only(
+    addr: &str,
+    db_path: Option<PathBuf>,
+    wal_path: Option<PathBuf>,
+    snapshot_path: Option<PathBuf>,
+    snapshot_every: usize,
+    read_only: bool,
+) -> Result<(), String> {
     if db_path.is_some() && (wal_path.is_some() || snapshot_path.is_some() || snapshot_every > 0) {
         return Err("E_CONFIG: --db cannot be combined with WAL or snapshot options".into());
     }
+    if read_only && db_path.is_none() {
+        return Err("E_CONFIG: --read-only requires --db".into());
+    }
     let engine = match db_path {
+        Some(path) if read_only => Engine::open_redb_read_only(path),
         Some(path) => Engine::open_redb(path),
         None => Engine::open(wal_path, snapshot_path, snapshot_every),
     }

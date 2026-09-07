@@ -29,7 +29,7 @@ Introspection 使用同一版本请求，返回完整的类型化快照，客户
 {"version":1,"request_id":"inspect-1","query":"","introspect":"types"}
 ~~~
 
-响应的 <code>introspection</code> 包含 schema identity、规范 schema 源码、tables、types、fields、storage mode、migration count 和可选 head。payload 上限为 1 MiB，超过时返回 <code>E_LIMIT</code>；整个响应仍受服务的 16 MiB 上限。未知 introspection 值或与 query/params/schema 混用返回 <code>E_PROTOCOL</code>。不带 <code>introspect</code> 的既有 version 1 请求以及旧 `{query}` 请求保持兼容。
+响应的 <code>introspection</code> 包含 schema identity、规范 schema 源码、tables、types、fields、storage mode、`read_only`、migration count 和可选 head。`read_only` 表示当前 Engine 是否拒绝 mutation，客户端可用它验证自己连接的服务边界；旧 payload 缺少该字段时反序列化为 `false`。payload 上限为 1 MiB，超过时返回 <code>E_LIMIT</code>；整个响应仍受服务的 16 MiB 上限。未知 introspection 值或与 query/params/schema 混用返回 <code>E_PROTOCOL</code>。不带 <code>introspect</code> 的既有 version 1 请求以及旧 `{query}` 请求保持兼容。
 
 ## 无损值编码
 
@@ -87,7 +87,7 @@ HTTP 适配、生命周期 endpoint 和完整 todo 场景见 [HTTP 数据协议�
 
 ## Rust 嵌入接口
 
-<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert/upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
+<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>Engine::open_redb_read_only(path)</code> 只打开已存在的 redb，并建立返回 `E_READ_ONLY` 的 mutation 边界。已有 Engine 也可用 <code>with_read_only(true)</code> 配置 adapter。<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert/upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
 
 可运行示例：
 

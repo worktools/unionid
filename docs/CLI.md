@@ -5,8 +5,11 @@
 ```bash
 unionid cli --memory
 unionid cli --db app.redb
+unionid cli --db app.redb --read-only
 unionid cli --addr 127.0.0.1:7878
 ```
+
+`run`、本地 `cli` 和 `server` 都支持 `--db <path> --read-only`。该模式只打开已经存在的 redb 文件；路径不存在会返回 `E_CONFIG`，不会创建空数据库。查询、`explain` 和 introspection 正常工作，任何包含 DDL、DML 或待应用 migration 的请求都在构造候选状态或 durable transaction 前以 `E_READ_ONLY` 整批拒绝。远程 `cli` 是否只读取决于服务端配置，客户端参数不能替代服务端边界。
 
 REPL 使用 `unionid>` 开始新脚本，`..>` 表示语法还需继续，`ready>` 表示当前脚本完整。完整脚本在空行后提交；Ctrl-C 清空当前缓冲区，Ctrl-D 按当前完整性执行或报告未完成输入。
 
@@ -19,7 +22,7 @@ REPL 使用 `unionid>` 开始新脚本，`..>` 表示语法还需继续，`ready
 | `.schema` | 可重新解析的规范 schema |
 | `.tables` | 按名称排列的表 |
 | `.types` | 按名称排列的命名类型 |
-| `.storage` | storage mode、schema revision/hash、migration 数量与 head |
+| `.storage` | storage mode、read-only 状态、schema revision/hash、migration 数量与 head |
 | `.help` | 交互命令和提交方式 |
 | `.quit` | 退出 |
 

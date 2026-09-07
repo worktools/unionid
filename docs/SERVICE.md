@@ -2,6 +2,14 @@
 
 unionid server 面向本机受信应用：默认监听 <code>127.0.0.1:7878</code>，使用自己的 JSON Lines 协议，不兼容 Redis wire protocol。当前不提供用户认证或 TLS；若要跨主机暴露，应由受控网络或具备认证和 TLS 的代理保护。
 
+生产中的查询副本或受限应用可以从已有 redb 启动只读执行边界：
+
+```bash
+unionid server --db ./data/app.redb --read-only
+```
+
+`--read-only` 必须与 `--db` 一起使用，且数据库文件必须已经存在。查询、`explain`、introspection、migration status/plan 可继续使用；任何包含 schema 或数据修改的原子脚本，以及待应用的 migration，都会返回 `E_READ_ONLY`。拒绝发生在完整解析和参数绑定之后、候选数据库 clone 和 redb transaction 之前，因此参数错误仍会准确报告，混合读写脚本也不会执行其中的读取或部分写入。`.storage` / version 1 introspection 的 `read_only` 字段可用于启动探针确认实际边界。
+
 ## 有界资源
 
 | 资源 | 当前边界 | 超限行为 |
@@ -37,6 +45,8 @@ TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON by
 优雅关闭完成后可以立即以同一路径重新打开 redb。强制终止、掉电和 commit 结果不确定的恢复边界见 [存储说明](STORAGE.md)；正常 signal 测试不替代那些故障测试。
 
 客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；在未收到响应时不能推断提交结果，也不能盲目把写入当作 exactly-once 重试。需要安全重试时使用应用主键、upsert 或业务幂等标识。
+
+只读模式限制 unionid 的查询执行入口，并不把 redb 文件改成操作系统级只读格式，也不允许同一路径绕过独占打开锁。部署仍应配合文件权限、独立运行身份和只向受限进程暴露的数据库路径；需要安全重试的写服务由 [#113](https://github.com/worktools/unionid/issues/113) 跟踪 durable idempotency receipt。
 
 ## 嵌入式控制
 

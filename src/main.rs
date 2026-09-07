@@ -34,12 +34,18 @@ enum Command {
         snapshot_path: Option<PathBuf>,
         #[arg(long, default_value_t = 0)]
         snapshot_every: usize,
+        /// Reject every mutating request; requires --db.
+        #[arg(long, requires = "db")]
+        read_only: bool,
     },
     /// Execute an atomic script in memory or in a local redb database.
     Run {
         /// Execute against a durable redb database instead of fresh memory.
         #[arg(long)]
         db: Option<PathBuf>,
+        /// Reject every mutating script; requires --db.
+        #[arg(long, requires = "db")]
+        read_only: bool,
         #[arg(short, long, conflicts_with = "file")]
         query: Option<String>,
         #[arg(short, long)]
@@ -59,6 +65,9 @@ enum Command {
         /// Use a local durable redb database instead of connecting over TCP.
         #[arg(long, conflicts_with = "memory")]
         db: Option<PathBuf>,
+        /// Reject every mutating script; requires --db.
+        #[arg(long, requires = "db")]
+        read_only: bool,
         #[arg(short, long, conflicts_with = "file")]
         query: Option<String>,
         #[arg(short, long)]
@@ -215,21 +224,34 @@ fn run() -> Result<(), String> {
             wal_path,
             snapshot_path,
             snapshot_every,
-        } => server::run_server_with_db(&addr, db, wal_path, snapshot_path, snapshot_every),
+            read_only,
+        } => server::run_server_with_db_read_only(
+            &addr,
+            db,
+            wal_path,
+            snapshot_path,
+            snapshot_every,
+            read_only,
+        ),
         Command::Run {
             db,
             query,
             file,
             format,
+            read_only,
         } => {
             let source = match source(query, file)? {
                 Some(source) => source,
                 None => cli::read_source(std::io::stdin().lock())?,
             };
             match db {
-                Some(path) => {
-                    cli::run_local_redb(path, Some(source), matches!(format, Format::Json))
-                }
+                Some(path) => cli::run_local_redb_read_only_with_options(
+                    path,
+                    Some(source),
+                    matches!(format, Format::Json),
+                    cli::HistoryOptions::default(),
+                    read_only,
+                ),
                 None => cli::run_local(Some(source), matches!(format, Format::Json)),
             }
         }
@@ -242,6 +264,7 @@ fn run() -> Result<(), String> {
             format,
             history,
             no_history,
+            read_only,
         } => {
             let source = source(query, file)?;
             let history = cli::HistoryOptions {
@@ -249,11 +272,12 @@ fn run() -> Result<(), String> {
                 path: history,
             };
             if let Some(path) = db {
-                cli::run_local_redb_with_options(
+                cli::run_local_redb_read_only_with_options(
                     path,
                     source,
                     matches!(format, Format::Json),
                     history,
+                    read_only,
                 )
             } else if memory {
                 cli::run_local_with_options(source, matches!(format, Format::Json), history)

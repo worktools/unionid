@@ -12,6 +12,7 @@
 - 稳定 catalog 身份、原子 schema revision 与可校验 hash
 - 独立于 serde/Rust enum 布局的版本化 ADT value codec
 - redb 增量原子持久模式，可由本地命令、REPL 与 TCP 服务共同使用
+- 面向查询副本和受限应用的 redb 只读执行边界，可由 introspection 验证
 - 显式 ADT schema migration：稳定身份 rename、默认回填、typed conversion、约束与索引变更
 - 版本化 migration runner：`new/plan/apply/status`、不可变 checksum 与 redb ledger
 - 可校验逻辑备份、只还原到新路径，以及显式原型 WAL/snapshot 导入
@@ -61,6 +62,7 @@ id | title | owner.email | state
 cargo run -- run --db ./data/unionid.redb --file examples/tasks.uid
 cargo run -- run --db ./data/unionid.redb --query 'from tasks | filter id == 1'
 cargo run -- run --db ./data/unionid.redb --query 'explain from tasks | filter id == 1'
+cargo run -- run --db ./data/unionid.redb --read-only --query 'from tasks | take 10'
 cargo run -- cli --db ./data/unionid.redb
 cargo run -- check --db ./data/unionid.redb
 cargo run -- fmt --file examples/tasks.uid
@@ -127,6 +129,7 @@ cargo run -- server --addr 127.0.0.1:7878
 
 ```bash
 cargo run -- server --addr 127.0.0.1:7878 --db ./data/unionid.redb
+cargo run -- server --addr 127.0.0.1:7878 --db ./data/unionid.redb --read-only
 ```
 
 过渡 WAL 兼容入口：
