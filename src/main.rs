@@ -48,6 +48,9 @@ enum Command {
         format: Format,
     },
     /// Connect to a server, or use --memory for a local interactive session.
+    #[command(
+        after_long_help = "Examples:\n  unionid cli --memory\n  unionid cli --db app.redb\n  unionid cli --addr 127.0.0.1:7878 --query \"from tasks | take 10\"\n\nInteractive commands:\n  .schema  .tables  .types  .storage  .help  .quit"
+    )]
     Cli {
         #[arg(long, default_value = "127.0.0.1:7878")]
         addr: String,
@@ -62,6 +65,12 @@ enum Command {
         file: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
+        /// Store safe interactive entries at this JSON Lines path.
+        #[arg(long, value_name = "PATH", conflicts_with = "no_history")]
+        history: Option<PathBuf>,
+        /// Disable persistent interactive history.
+        #[arg(long)]
+        no_history: bool,
     },
     /// Format a script using the canonical semicolon-free style.
     Fmt {
@@ -231,14 +240,25 @@ fn run() -> Result<(), String> {
             query,
             file,
             format,
+            history,
+            no_history,
         } => {
             let source = source(query, file)?;
+            let history = cli::HistoryOptions {
+                disabled: no_history,
+                path: history,
+            };
             if let Some(path) = db {
-                cli::run_local_redb(path, source, matches!(format, Format::Json))
+                cli::run_local_redb_with_options(
+                    path,
+                    source,
+                    matches!(format, Format::Json),
+                    history,
+                )
             } else if memory {
-                cli::run_local(source, matches!(format, Format::Json))
+                cli::run_local_with_options(source, matches!(format, Format::Json), history)
             } else {
-                cli::run_cli(&addr, source, matches!(format, Format::Json))
+                cli::run_cli_with_options(&addr, source, matches!(format, Format::Json), history)
             }
         }
         Command::Fmt { file, check } => {

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use unionid::{
-    Engine, MigrationApply, MigrationPlan, MigrationStatus, ProtocolRequest, QueryResponse,
-    SchemaCheck, UpsertAction, Value, WireValue, cli,
+    Engine, IntrospectionKind, MigrationApply, MigrationPlan, MigrationStatus, ProtocolRequest,
+    QueryResponse, SchemaCheck, StorageMode, UpsertAction, Value, WireValue, cli,
 };
 
 #[test]
@@ -420,6 +420,79 @@ fn cli_eof_exits_and_query_does_not_wait_for_stdin() {
 }
 
 #[test]
+fn cli_help_uses_current_low_punctuation_examples_that_execute() {
+    let help = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["cli", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    for expected in [
+        "unionid cli --memory",
+        "unionid cli --db app.redb",
+        "from tasks | take 10",
+        ".schema  .tables  .types  .storage  .help  .quit",
+        "--history <PATH>",
+        "--no-history",
+    ] {
+        assert!(help.contains(expected), "missing help text: {expected}");
+    }
+
+    let memory = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["cli", "--memory", "--query", "create table items (id int)"])
+        .output()
+        .unwrap();
+    assert!(
+        memory.status.success(),
+        "{}",
+        String::from_utf8_lossy(&memory.stderr)
+    );
+
+    let dir = TempDir::new();
+    let database = dir.0.join("help-example.redb");
+    let redb = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "cli",
+            "--db",
+            database.to_str().unwrap(),
+            "--query",
+            "create table items (id int)",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        redb.status.success(),
+        "{}",
+        String::from_utf8_lossy(&redb.stderr)
+    );
+
+    let server = Server::start(&[]);
+    assert!(
+        cli::send_one(
+            &server.addr,
+            "type Task =\n  id int\ntable tasks Task\n  key id"
+        )
+        .unwrap()
+        .ok
+    );
+    let remote = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "cli",
+            "--addr",
+            &server.addr,
+            "--query",
+            "from tasks | take 10",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        remote.status.success(),
+        "{}",
+        String::from_utf8_lossy(&remote.stderr)
+    );
+}
+
+#[test]
 fn multiline_stdin_is_a_single_atomic_batch() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_unionid"))
         .args(["cli", "--memory", "--format", "json"])
@@ -634,6 +707,7 @@ insert items
         version: unionid::protocol::VERSION,
         request_id: "tcp-1".into(),
         query: "from items\nfilter id == $id\nselect {id, note}".into(),
+        introspect: None,
         params: BTreeMap::from([(
             "id".into(),
             WireValue::Int {
@@ -668,6 +742,7 @@ insert items
         version: unionid::protocol::VERSION,
         request_id: "tcp-3".into(),
         query: "from items | filter id == $id".into(),
+        introspect: None,
         params: BTreeMap::new(),
         schema: None,
     };
@@ -696,6 +771,49 @@ insert items
             .code,
         "E_SCHEMA_CHANGED"
     );
+}
+
+#[test]
+fn introspection_is_consistent_across_memory_redb_and_all_tcp_commands() {
+    let setup = "type Task =\n  id int\n  title text\ntable tasks Task\n  key id";
+    let mut local = Engine::memory();
+    assert!(local.execute(setup).ok);
+    let expected = local.introspection();
+
+    let memory_server = Server::start(&[]);
+    assert!(cli::send_one(&memory_server.addr, setup).unwrap().ok);
+    for kind in [
+        IntrospectionKind::Schema,
+        IntrospectionKind::Tables,
+        IntrospectionKind::Types,
+        IntrospectionKind::Storage,
+    ] {
+        assert_eq!(
+            cli::send_introspection(&memory_server.addr, kind).unwrap(),
+            expected
+        );
+    }
+
+    let dir = TempDir::new();
+    let path = dir.0.join("introspection.redb");
+    let redb_server = Server::start(&["--db", path.to_str().unwrap()]);
+    assert!(cli::send_one(&redb_server.addr, setup).unwrap().ok);
+    let redb = cli::send_introspection(&redb_server.addr, IntrospectionKind::Storage).unwrap();
+    assert_eq!(redb.storage, StorageMode::Redb);
+    assert_eq!(redb.schema, expected.schema);
+    assert_eq!(redb.schema_source, expected.schema_source);
+    assert_eq!(redb.tables, expected.tables);
+    assert_eq!(redb.types, expected.types);
+    assert_eq!(redb.fields, expected.fields);
+
+    let mut invalid = ProtocolRequest::introspection("invalid", IntrospectionKind::Schema);
+    invalid.query = "from tasks".into();
+    let response = cli::send_request(&memory_server.addr, &invalid).unwrap();
+    assert_eq!(response.error.unwrap().code, "E_PROTOCOL");
+
+    let disconnected =
+        cli::send_introspection("127.0.0.1:0", IntrospectionKind::Tables).unwrap_err();
+    assert!(disconnected.contains("connect 127.0.0.1:0"));
 }
 
 #[test]

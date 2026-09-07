@@ -12,6 +12,7 @@ unionid server 面向本机受信应用：默认监听 <code>127.0.0.1:7878</cod
 | ADT value | 16 MiB encoded / 64 层 / 1,000,000 collection items | codec、恢复或写入拒绝超限值 |
 | 查询 working rows | 250,000 | 返回 <code>E_LIMIT</code>；应增加选择性 indexed filter |
 | 查询结果 rows | 100,000 | 返回 <code>E_LIMIT</code>；应增加 filter 或 take |
+| Introspection payload | 1 MiB | version 1 请求返回带 request ID 与 schema 的 <code>E_LIMIT</code> |
 | TCP response | 16 MiB | 丢弃超限结果，发送小型结构化 <code>E_LIMIT</code> |
 | 服务执行 deadline | 25 秒 | 返回 <code>E_TIMEOUT</code>；候选写批次不提交 |
 | 空闲连接 / socket write | 30 秒 | 关闭空闲或不读取响应的客户端 |

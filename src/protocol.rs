@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, UpsertAction};
 use crate::error::Error;
+use crate::introspection::{Introspection, IntrospectionKind};
 use crate::model::{EnumValue, Value};
 
 pub const VERSION: u32 = 1;
+pub const MAX_INTROSPECTION_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +18,8 @@ pub struct Request {
     pub version: u32,
     pub request_id: String,
     pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspect: Option<IntrospectionKind>,
     #[serde(default)]
     pub params: BTreeMap<String, WireValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,6 +41,17 @@ impl Request {
                     })
             })
             .collect()
+    }
+
+    pub fn introspection(request_id: impl Into<String>, kind: IntrospectionKind) -> Self {
+        Self {
+            version: VERSION,
+            request_id: request_id.into(),
+            query: String::new(),
+            introspect: Some(kind),
+            params: BTreeMap::new(),
+            schema: None,
+        }
     }
 }
 
@@ -205,6 +220,8 @@ pub struct Response {
     pub upsert_action: Option<UpsertAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueryPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection: Option<Introspection>,
 }
 
 impl Response {
@@ -230,6 +247,25 @@ impl Response {
             affected_rows: response.affected_rows,
             upsert_action: response.upsert_action,
             plan: response.plan,
+            introspection: None,
+        }
+    }
+
+    pub fn from_introspection(request_id: impl Into<String>, introspection: Introspection) -> Self {
+        Self {
+            version: VERSION,
+            request_id: request_id.into(),
+            ok: true,
+            message: "introspection complete".into(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            error: None,
+            warnings: Vec::new(),
+            schema: Some(introspection.schema.clone()),
+            affected_rows: None,
+            upsert_action: None,
+            plan: None,
+            introspection: Some(introspection),
         }
     }
 

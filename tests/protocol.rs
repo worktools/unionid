@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use common::TempDir;
 use unionid::protocol::{Request, Response, VERSION, WireValue};
-use unionid::{Engine, QueryAccessKind, Value};
+use unionid::{Engine, IntrospectionKind, QueryAccessKind, StorageMode, Value};
 
 fn setup() -> Engine {
     let mut engine = Engine::memory();
@@ -266,6 +266,7 @@ fn protocol_response_uses_wire_values_and_echoes_request_id() {
         version: VERSION,
         request_id: "req-42".into(),
         query: "from tasks | filter id == $id".into(),
+        introspect: None,
         params: BTreeMap::from([(
             "id".into(),
             WireValue::Int {
@@ -286,4 +287,35 @@ fn protocol_response_uses_wire_values_and_echoes_request_id() {
         response.rows[0].get("id"),
         Some(WireValue::Int { value }) if value == "9007199254740993"
     ));
+}
+
+#[test]
+fn version_one_introspection_request_and_response_round_trip() {
+    let engine = setup();
+    let request = Request::introspection("inspect-1", IntrospectionKind::Types);
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert_eq!(encoded["version"], VERSION);
+    assert_eq!(encoded["query"], "");
+    assert_eq!(encoded["introspect"], "types");
+    assert!(encoded.get("params").is_some());
+
+    let introspection = engine.introspection();
+    assert_eq!(introspection.storage, StorageMode::Memory);
+    assert_eq!(introspection.tables, ["tasks"]);
+    assert_eq!(introspection.types, ["State", "Task"]);
+    assert!(introspection.fields.contains(&"title".into()));
+    assert_eq!(introspection.migration_count, 0);
+    assert_eq!(introspection.migration_head, None);
+
+    let response = Response::from_introspection(request.request_id, introspection.clone());
+    let decoded: Response =
+        serde_json::from_slice(&serde_json::to_vec(&response).unwrap()).unwrap();
+    assert!(decoded.ok);
+    assert_eq!(decoded.introspection, Some(introspection));
+
+    let legacy_v1: Request = serde_json::from_str(
+        r#"{"version":1,"request_id":"old-v1","query":"from tasks","params":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy_v1.introspect, None);
 }

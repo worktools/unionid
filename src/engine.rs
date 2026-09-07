@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::db::{Database, QueryResponse};
 use crate::error::{Error, Result};
+use crate::introspection::{Introspection, StorageMode};
 use crate::migration::{
     MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
     MigrationStatus, describe_step, validate_files_against_history,
@@ -27,6 +28,7 @@ pub struct Engine {
     writes_since_snapshot: usize,
     write_failed: bool,
     durable: Option<Box<dyn DurableBackend>>,
+    storage_mode: StorageMode,
     _locks: Vec<File>,
 }
 
@@ -161,6 +163,11 @@ impl Engine {
                 .map_err(|e| Error::new("E_STORAGE", e))?;
         }
         db.rebuild_indexes()?;
+        let storage_mode = match (&wal, &snapshot) {
+            (Some(_), Some(_)) => StorageMode::LegacyWalSnapshot,
+            (Some(_), None) => StorageMode::LegacyWal,
+            (None, _) => StorageMode::Memory,
+        };
         Ok(Self {
             db,
             wal,
@@ -169,6 +176,7 @@ impl Engine {
             writes_since_snapshot: 0,
             write_failed: false,
             durable: None,
+            storage_mode,
             _locks: locks,
         })
     }
@@ -180,6 +188,7 @@ impl Engine {
         Ok(Self {
             db,
             durable: Some(Box::new(redb)),
+            storage_mode: StorageMode::Redb,
             ..Self::default()
         })
     }
@@ -628,6 +637,23 @@ impl Engine {
     }
     pub fn tables(&self) -> Vec<String> {
         self.db.table_names()
+    }
+
+    pub fn introspection(&self) -> Introspection {
+        Introspection {
+            schema: self.db.schema_info(),
+            schema_source: self.db.schema_text(),
+            tables: self.db.table_names(),
+            types: self.db.type_names(),
+            fields: self.db.field_names(),
+            storage: self.storage_mode,
+            migration_count: self.db.migration_history().len(),
+            migration_head: self
+                .db
+                .migration_history()
+                .last()
+                .map(|entry| entry.id.clone()),
+        }
     }
 
     pub fn schema_info(&self) -> crate::db::SchemaInfo {
