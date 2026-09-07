@@ -16,6 +16,10 @@
 - 版本化 migration runner：`new/plan/apply/status`、不可变 checksum 与 redb ledger
 - 可校验逻辑备份、只还原到新路径，以及显式原型 WAL/snapshot 导入
 
+## 五分钟开始使用
+
+从空目录创建持久 ADT 数据库、查询和类型化解构、原子更新、关闭重开、完整性检查，以及切换到 TCP/Rust API 的完整路径见[五分钟教程](docs/GETTING_STARTED.md)。发布压缩包自带相同脚本和自动验证器。
+
 ## 先运行一个完整例子
 
 需要 Rust 1.94 或更高版本（Cargo 已声明 `rust-version`，CI 使用 1.94.0）：
@@ -68,7 +72,7 @@ cargo run -- cli --memory
 
 REPL 用 `unionid>` 表示新输入、`..>` 表示语法仍需续写、`ready>` 表示当前脚本已经完整。只在 `ready>` 后用空行提交；不完整时空行会保留缓冲区，明确非法的输入会立即显示源码位置并重新开始。Tab 补全语言关键字和当前 catalog 的表／类型／字段；`.schema`、`.tables`、`.types`、`.storage` 在 memory、redb 和 TCP 模式返回一致 introspection。交互历史默认只持久化不含写入或字面量的安全输入，可用 `--history <path>` 改路径或 `--no-history` 关闭。详细行为见 [CLI 与交互式 REPL](docs/CLI.md)。
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，[version 1 协议与参数](docs/PROTOCOL.md)描述无损 ADT/i64 wire codec 和 Rust prepared query，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)，声明式目标结构与草稿生成见 [SCHEMA-DIFF.md](docs/SCHEMA-DIFF.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list；`derive x = expression` 可直接追加 scalar 或 bool 结果并供后续 stage 使用。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较、`contains/length`、Option helper，以及有类型的嵌套 `any/all` 元素谓词。查询局部 `let` 可定义常量和有类型、非递归纯函数，以空格调用并在 filter、derive、match 与 aggregate 输入中复用。`group ... aggregate` 与未分组 `aggregate` 提供 count/sum/min/max，并保留命名字段和 ADT group key 的类型。`explain` 返回 full scan／主键或二级索引 lookup、当前候选数、stage 顺序和结果 schema，不执行数据行。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/diff/apply/status` 管理不可变迁移历史。
+当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，[version 1 协议与参数](docs/PROTOCOL.md)描述无损 ADT/i64 wire codec 和 Rust prepared query，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)，声明式目标结构与草稿生成见 [SCHEMA-DIFF.md](docs/SCHEMA-DIFF.md)，跨版本操作见[升级与格式兼容](docs/UPGRADING.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list；`derive x = expression` 可直接追加 scalar 或 bool 结果并供后续 stage 使用。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较、`contains/length`、Option helper，以及有类型的嵌套 `any/all` 元素谓词。查询局部 `let` 可定义常量和有类型、非递归纯函数，以空格调用并在 filter、derive、match 与 aggregate 输入中复用。`group ... aggregate` 与未分组 `aggregate` 提供 count/sum/min/max，并保留命名字段和 ADT group key 的类型。`explain` 返回 full scan／主键或二级索引 lookup、当前候选数、stage 顺序和结果 schema，不执行数据行。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/diff/apply/status` 管理不可变迁移历史。
 
 `fmt` 从文件或 stdin 读取并把规范源码写到 stdout，不会隐式覆盖文件。`fmt --check` 在输入不是规范格式或存在语法错误时返回非零，适合 CI。
 

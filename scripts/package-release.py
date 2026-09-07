@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+import argparse
+import gzip
+import hashlib
+import io
+import json
+import pathlib
+import re
+import subprocess
+import tarfile
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def command(*args):
+    return subprocess.check_output(args, cwd=ROOT, text=True).strip()
+
+
+def add_bytes(archive, name, data, mode=0o644):
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    info.mode = mode
+    info.mtime = 0
+    info.uid = 0
+    info.gid = 0
+    info.uname = "root"
+    info.gname = "root"
+    archive.addfile(info, io.BytesIO(data))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Build a deterministic unionid release archive")
+    parser.add_argument("--output", type=pathlib.Path, default=ROOT / "dist")
+    parser.add_argument("--target")
+    parser.add_argument("--expect-version")
+    parser.add_argument("--skip-build", action="store_true")
+    args = parser.parse_args()
+
+    cargo = (ROOT / "Cargo.toml").read_text()
+    version = re.search(r'^version = "([^"]+)"$', cargo, re.MULTILINE).group(1)
+    redb = re.search(r'^redb = "=([^"]+)"$', cargo, re.MULTILINE).group(1)
+    if args.expect_version and version != args.expect_version:
+        raise RuntimeError(
+            f"Cargo version {version} does not match requested release {args.expect_version}"
+        )
+    host = next(
+        line.split(":", 1)[1].strip()
+        for line in command("rustc", "-vV").splitlines()
+        if line.startswith("host:")
+    )
+    target = args.target or host
+    if not args.skip_build:
+        subprocess.run(
+            ["cargo", "build", "--release", "--locked", "--target", target],
+            cwd=ROOT,
+            check=True,
+        )
+    executable = "unionid.exe" if "windows" in target else "unionid"
+    binary = ROOT / "target" / target / "release" / executable
+    if not binary.is_file():
+        raise RuntimeError(f"release binary not found: {binary}")
+
+    package = f"unionid-v{version}-{target}"
+    files = {
+        f"{package}/bin/{executable}": (binary.read_bytes(), 0o755),
+        f"{package}/README.md": ((ROOT / "README.md").read_bytes(), 0o644),
+        f"{package}/docs/GETTING_STARTED.md": ((ROOT / "docs/GETTING_STARTED.md").read_bytes(), 0o644),
+        f"{package}/docs/UPGRADING.md": ((ROOT / "docs/UPGRADING.md").read_bytes(), 0o644),
+        f"{package}/docs/LANGUAGE.md": ((ROOT / "docs/LANGUAGE.md").read_bytes(), 0o644),
+        f"{package}/docs/QUERY.md": ((ROOT / "docs/QUERY.md").read_bytes(), 0o644),
+        f"{package}/docs/RELEASE-v0.1.0.md": ((ROOT / "docs/RELEASE-v0.1.0.md").read_bytes(), 0o644),
+        f"{package}/tutorial/validate.py": ((ROOT / "scripts/validate-tutorial.py").read_bytes(), 0o755),
+    }
+    for source in sorted((ROOT / "examples/getting-started").glob("*.uid")):
+        files[f"{package}/tutorial/{source.name}"] = (source.read_bytes(), 0o644)
+    release = {
+        "name": "unionid",
+        "version": version,
+        "target": target,
+        "rust_toolchain": command("rustc", "--version"),
+        "redb": redb,
+        "storage_format": 1,
+        "catalog_codec": 1,
+        "value_codec": 1,
+        "index_key_codec": 1,
+        "migration_codec": 1,
+        "backup_format": 1,
+        "protocol": 1,
+    }
+    files[f"{package}/RELEASE.json"] = (
+        (json.dumps(release, indent=2, sort_keys=True) + "\n").encode(),
+        0o644,
+    )
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    archive_path = args.output / f"{package}.tar.gz"
+    with archive_path.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+                for name, (data, mode) in sorted(files.items()):
+                    add_bytes(archive, name, data, mode)
+    digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    checksum = archive_path.with_suffix(archive_path.suffix + ".sha256")
+    checksum.write_text(f"{digest}  {archive_path.name}\n")
+    print(json.dumps({"archive": str(archive_path), "checksum": str(checksum), **release}))
+
+
+if __name__ == "__main__":
+    main()
