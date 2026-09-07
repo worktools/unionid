@@ -17,7 +17,7 @@ use crate::migration::{
     MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
     MigrationStatus, describe_step, validate_files_against_history,
 };
-use crate::query::{LocatedStatement, Statement};
+use crate::query::{LocatedStatement, PageSpec, Stage, Statement};
 use crate::redb_storage::{CommitFailure, RedbStore};
 use crate::snapshot::SnapshotStore;
 use crate::syntax;
@@ -37,7 +37,18 @@ pub struct Engine {
     read_only: bool,
     durable: Option<Box<dyn DurableBackend>>,
     storage_mode: StorageMode,
-    _locks: Vec<File>,
+    _locks: Vec<DatabaseLock>,
+}
+
+struct DatabaseLock(File);
+
+impl Drop for DatabaseLock {
+    fn drop(&mut self) {
+        // Closing a file releases its advisory lock, but explicitly unlocking
+        // avoids a transient reacquisition failure observed on macOS when a
+        // database is reopened immediately after dropping its Engine.
+        let _ = self.0.unlock();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -159,7 +170,7 @@ impl Engine {
                     ),
                 )
             })?;
-            locks.push(lock);
+            locks.push(DatabaseLock(lock));
         }
         let snapshot = snapshot_path
             .map(SnapshotStore::new)
@@ -261,6 +272,30 @@ impl Engine {
         self.execute_with_params_at_schema_and_deadline(source, parameters, None, None)
     }
 
+    pub fn execute_page(&mut self, source: &str, page: PageSpec) -> QueryResponse {
+        self.execute_with_params_page(source, std::collections::BTreeMap::new(), None, page)
+    }
+
+    pub fn execute_with_params_page(
+        &mut self,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        page: PageSpec,
+    ) -> QueryResponse {
+        match self.try_execute_with_params_and_idempotency(
+            source,
+            parameters,
+            expected_schema,
+            None,
+            None,
+            Some(page),
+        ) {
+            Ok(response) => response,
+            Err(error) => self.with_schema(QueryResponse::failure(error)),
+        }
+    }
+
     pub fn execute_with_params_at_schema(
         &mut self,
         source: &str,
@@ -283,6 +318,29 @@ impl Engine {
             expected_schema,
             Some(deadline),
         )
+    }
+
+    /// Execute a structured bounded-page request through the same pipeline
+    /// stage used by the source language.
+    pub fn execute_with_params_page_until(
+        &mut self,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        page: PageSpec,
+        deadline: std::time::Instant,
+    ) -> QueryResponse {
+        match self.try_execute_with_params_and_idempotency(
+            source,
+            parameters,
+            expected_schema,
+            Some(deadline),
+            None,
+            Some(page),
+        ) {
+            Ok(response) => response,
+            Err(error) => self.with_schema(QueryResponse::failure(error)),
+        }
     }
 
     /// Execute one mutation with an already-computed canonical request digest.
@@ -371,6 +429,7 @@ impl Engine {
             expected_schema,
             deadline,
             Some(PendingIdempotency { key, digest }),
+            None,
         )?;
         let receipt = self
             .receipts
@@ -713,6 +772,7 @@ impl Engine {
             expected_schema,
             deadline,
             None,
+            None,
         )
     }
 
@@ -723,6 +783,7 @@ impl Engine {
         expected_schema: Option<&crate::db::SchemaInfo>,
         deadline: Option<std::time::Instant>,
         idempotency: Option<PendingIdempotency<'_>>,
+        page: Option<PageSpec>,
     ) -> Result<QueryResponse> {
         if let Some(expected) = expected_schema
             && expected != &self.db.schema_info()
@@ -739,11 +800,27 @@ impl Engine {
             ));
         }
         let mut statements = syntax::parse(source)?;
+        if let Some(page) = page {
+            attach_structured_page(&mut statements, page)?;
+        }
         crate::params::bind(&mut statements, &parameters)?;
         let contains_parameters = !parameters.is_empty();
         let mutating = statements
             .iter()
             .any(|statement| statement.statement.is_mutating());
+        let contains_page = statements.iter().any(|located| {
+            matches!(
+                &located.statement,
+                Statement::Pipeline(pipeline) | Statement::Explain(pipeline)
+                    if pipeline.stages.iter().any(|stage| matches!(stage, Stage::Page(_)))
+            )
+        });
+        if contains_page && (statements.len() != 1 || mutating) {
+            return Err(Error::new(
+                "E_PAGE_SHAPE",
+                "page requires exactly one read pipeline or explain statement",
+            ));
+        }
         if idempotency.is_some() && !mutating {
             return Err(Error::new(
                 "E_IDEMPOTENCY_NOT_MUTATION",
@@ -1224,6 +1301,33 @@ fn canonical_existing_path(path: PathBuf) -> Result<PathBuf> {
             format!("resolve database path: {error}"),
         )),
     }
+}
+
+fn attach_structured_page(statements: &mut [LocatedStatement], page: PageSpec) -> Result<()> {
+    let [located] = statements else {
+        return Err(Error::new(
+            "E_PAGE_SHAPE",
+            "a structured page request requires exactly one read pipeline",
+        ));
+    };
+    let Statement::Pipeline(pipeline) = &mut located.statement else {
+        return Err(Error::new(
+            "E_PAGE_SHAPE",
+            "a structured page request requires a read pipeline",
+        ));
+    };
+    if pipeline
+        .stages
+        .iter()
+        .any(|stage| matches!(stage, Stage::Page(_)))
+    {
+        return Err(Error::new(
+            "E_PAGE_SHAPE",
+            "query page stage and structured page request cannot be combined",
+        ));
+    }
+    pipeline.stages.push(Stage::Page(page));
+    Ok(())
 }
 
 #[cfg(test)]

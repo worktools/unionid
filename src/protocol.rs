@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::db::{QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, UpsertAction};
+use crate::db::{PageInfo, QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, UpsertAction};
 use crate::error::Error;
 use crate::idempotency::{
     IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyStatus,
@@ -13,6 +13,7 @@ use crate::idempotency::{
 };
 use crate::introspection::{Introspection, IntrospectionKind};
 use crate::model::{EnumValue, Value};
+use crate::query::PageSpec;
 
 pub const VERSION: u32 = 1;
 pub const MAX_INTROSPECTION_BYTES: usize = 1024 * 1024;
@@ -34,6 +35,8 @@ pub struct Request {
     pub idempotency_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<ReceiptOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageSpec>,
 }
 
 impl Request {
@@ -48,6 +51,7 @@ impl Request {
             schema: None,
             idempotency_key: None,
             receipts: None,
+            page: None,
         }
     }
 
@@ -64,6 +68,11 @@ impl Request {
         let value = Value::from_serde(value)?;
         self.params.insert(name.into(), WireValue::from(&value));
         Ok(self)
+    }
+
+    pub fn with_page(mut self, page: PageSpec) -> Self {
+        self.page = Some(page);
+        self
     }
 
     pub fn decode_params(&self) -> Result<BTreeMap<String, Value>, Error> {
@@ -100,6 +109,7 @@ impl Request {
                 revision: schema.revision.to_string(),
             }),
             version: self.version.to_string(),
+            page: self.page.as_ref(),
         };
         let encoded = serde_json::to_vec(&document).map_err(|error| {
             Error::new(
@@ -120,6 +130,7 @@ impl Request {
             schema: None,
             idempotency_key: None,
             receipts: None,
+            page: None,
         }
     }
 
@@ -164,6 +175,8 @@ struct CanonicalRequest<'a> {
     query: &'a str,
     schema: Option<CanonicalSchema<'a>>,
     version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<&'a PageSpec>,
 }
 
 #[derive(Serialize)]
@@ -345,6 +358,8 @@ pub struct Response {
     pub idempotency: Option<IdempotencyMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<ReceiptOperationResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -419,6 +434,7 @@ impl Response {
             upsert_action: response.upsert_action,
             upsert_actions: response.upsert_actions,
             plan: response.plan,
+            page: response.page,
             introspection: None,
             idempotency: None,
             receipts: None,
@@ -460,6 +476,7 @@ impl Response {
             introspection: Some(introspection),
             idempotency: None,
             receipts: None,
+            page: None,
         }
     }
 

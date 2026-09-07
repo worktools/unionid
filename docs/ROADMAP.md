@@ -100,6 +100,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#125](https://github.com/worktools/unionid/issues/125) | [存储] Engine/redb/backup 原子持久回执 | P0 | [#124](https://github.com/worktools/unionid/issues/124) |
 | [#126](https://github.com/worktools/unionid/issues/126) | [协议] version 1、清理与 HTTP 丢响应场景 | P0 | [#125](https://github.com/worktools/unionid/issues/125) |
 | [#114](https://github.com/worktools/unionid/issues/114) | [查询] 稳定 cursor 分页与取消 | P1 | [#113](https://github.com/worktools/unionid/issues/113) 的请求身份契约 |
+| [#130](https://github.com/worktools/unionid/issues/130) | [设计] 冻结稳定 cursor、快照与取消契约 | P1 | [#114](https://github.com/worktools/unionid/issues/114) 的设计子任务；已由 #133 完成 |
+| [#131](https://github.com/worktools/unionid/issues/131) | [查询] 有界 keyset page 与 version 1 cursor | P1 | [#130](https://github.com/worktools/unionid/issues/130) |
+| [#132](https://github.com/worktools/unionid/issues/132) | [接口] Rust/TCP/HTTP 分页与取消旅程 | P1 | [#131](https://github.com/worktools/unionid/issues/131) |
 | [#115](https://github.com/worktools/unionid/issues/115) | [类型] 生产标量契约 | P1 | 先冻结时间、十进制与二进制编码边界 |
 | [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | P1 | [#112](https://github.com/worktools/unionid/issues/112)、[#114](https://github.com/worktools/unionid/issues/114) |
 | [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | P1 | 核心错误协议稳定 |
@@ -110,7 +113,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#112 的显式只读边界与 #113/#124–#126 的 exactly-once effect 已完成；#114 已拆为 #130–#132，先冻结 sequence-pinned cursor 契约，再实现有界 page 和接口旅程。#115、#116 和 #117 可在核心协议稳定后并行拆分。#118–#120 是从已关闭的宽泛 #25 拆出的独立探索，不作为生产正确性的前置条件。
+#112 的显式只读边界与 #113/#124–#126 的 exactly-once effect 已完成；#114 的 #130 sequence-pinned cursor 契约已冻结，当前实现 #131 的有界 page，随后由 #132 验证完整接口旅程并拆出显式取消／streaming。#115、#116 和 #117 在分页核心协议稳定后继续拆分。#118–#120 是从已关闭的宽泛 #25 拆出的独立探索，不作为生产正确性的前置条件。
 
 ## 维护约定
 

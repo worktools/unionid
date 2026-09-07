@@ -51,7 +51,7 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 | 表 | 键 | 值 | 当前用途 |
 | --- | --- | --- | --- |
-| `meta` | UTF-8 名称 | 固定宽度数字或 UTF-8 hash | 存储格式、codec 版本、提交序号、schema revision、ID 水位和 schema hash |
+| `meta` | UTF-8 名称 | 固定宽度数字或 UTF-8 hash | 存储格式、codec 版本、提交序号、schema revision、ID 水位、schema hash、cursor instance ID 与 secret |
 | `catalog` | `(kind, stable_id)` | 版本化 catalog definition | 命名类型、用户表和索引定义；表记录也保存 RowId 分配游标 |
 | `rows` | `(table_id, row_id)` | 版本 1 ADT value codec | 完整类型化 record；字段与变体按稳定 ID 编码 |
 | `secondary_index` | 版本化 `(index_id, equality_key, row_id)` | unit | 当前等值索引的派生记录 |
@@ -60,7 +60,7 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 打开数据库时会拒绝未知的存储、catalog、ADT value、索引键、migration 或 receipt codec，并验证 schema hash、ledger 单链及其 head、RowId 唯一性／顺序／分配水位、索引是否与 catalog/rows 一致，以及 receipt key/digest/成功响应/sequence/容量边界。RowId 可以有删除形成的缺口。差异计划测试检查 update/delete/insert 只生成预期的 catalog/row/index 键变化；migration 测试确认 schema、数据、索引和 ledger 一起提交，普通数据提交保留 ledger。集成测试还会在一个未提交 redb transaction 修改多个内部表后直接退出子进程，确认重开只看到完整旧状态；也会在带 receipt 的 Engine commit 成功后不执行析构直接退出，确认重开能重放完整新状态。无效 redb 文件会返回 `E_STORAGE` 并保留原文件，跨进程第二个打开者返回 `E_BUSY`。
 
-storage format 1 表示没有持久回执；新实现仍可直接打开。第一次成功提交 durable idempotency receipt 时，同一事务把 storage format 升为 2。format 2 不可用只认识 format 1 的旧二进制安全打开，因为忽略回执会让重试重复产生效果。memory Engine 使用同样的 key/digest/replay/容量规则，但回执只在进程内存在。完整语义与限制见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)；version 1 网络字段和 canonical digest builder 由 #126 接入。
+storage format 1 表示没有持久回执，format 2 增加 durable idempotency receipt。format 3 在 meta 中增加 128-bit database instance ID 和 256-bit cursor HMAC secret；打开 format 1/2 时会生成并通过同步事务升级，之后无写入重开仍可恢复 cursor。secret 不进入 introspection、日志、错误或逻辑 backup；restore 生成新身份，所以源数据库 cursor 不能用于副本。旧二进制不能安全打开更高格式。memory Engine 使用进程内随机身份；WAL/snapshot 兼容入口不承诺跨重启 cursor。幂等语义见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)，分页语义见 [RFC 0003](rfc/0003-stable-cursor-pagination.md)。
 
 macOS/Linux 测试还在隔离子进程中用操作系统 `RLIMIT_FSIZE` 把 redb 文件上限固定在已提交基线大小，再写入 900,000 字节 typed text 强制触发真实文件增长失败。子进程忽略 `SIGXFSZ`，使底层写入以错误返回 Engine：若失败发生在 `commit` 前，响应明确中止且句柄允许再次尝试；若 `commit` 返回错误，响应标记结果不确定并禁用后续写。父进程重开并运行完整性检查，接受完整旧状态或完整新状态，再核对 typed row、主键索引、schema 和 migration ledger，不接受部分内部表。
 

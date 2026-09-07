@@ -43,6 +43,12 @@ pub fn format_source(source: &str) -> Result<String> {
     Ok(output)
 }
 
+pub(crate) fn format_pipeline(pipeline: &Pipeline) -> String {
+    let mut output = String::new();
+    pipeline_text(&mut output, pipeline, 0);
+    output.trim_end().to_owned()
+}
+
 fn comments(source: &str) -> (Vec<(usize, String)>, bool) {
     let mut comments = Vec::new();
     let mut has_code = false;
@@ -370,6 +376,17 @@ fn stage_text(output: &mut String, stage: &Stage, depth: usize) {
                 format!("{}..{}", offset + 1, offset.saturating_add(*limit))
             };
             line(output, depth, &format!("take {range}"));
+        }
+        Stage::Page(page) => {
+            let mut text = format!("page {}", page.limit);
+            if let Some(cursor) = &page.cursor {
+                text.push_str(match page.direction {
+                    crate::query::PageDirection::Forward => " after ",
+                    crate::query::PageDirection::Backward => " before ",
+                });
+                text.push_str(&serde_json::to_string(cursor).expect("cursor strings serialize"));
+            }
+            line(output, depth, &text);
         }
     }
 }

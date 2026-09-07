@@ -658,6 +658,7 @@ fn protocol_response_uses_wire_values_and_echoes_request_id() {
         schema: Some(engine.schema_info()),
         idempotency_key: None,
         receipts: None,
+        page: None,
     };
     let response = engine.execute_with_params_at_schema(
         &request.query,

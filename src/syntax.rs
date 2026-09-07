@@ -10,8 +10,9 @@ use crate::query::{
     Aggregate, AggregateAssignment, AggregateFunction, ArithmeticOp, BoolExpression, CmpOp,
     DeriveExpression, DeriveMatch, LocalBinding, LocalParameter, LocatedStatement, MatchArm,
     MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
-    MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, Returning, ScalarExpression,
-    SchemaMigration, SetAssignment, SetValue, SortKey, Stage, Statement,
+    MatchValueField, MatchValuePayload, MigrationTransform, PageDirection, PageSpec, Pipeline,
+    Returning, ScalarExpression, SchemaMigration, SetAssignment, SetValue, SortKey, Stage,
+    Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -1530,10 +1531,12 @@ impl Parser {
                 self.sort_stage()?
             } else if self.word("take") || self.word("limit") {
                 self.take_stage()?
+            } else if self.word("page") {
+                self.page_stage()?
             } else {
                 if piped {
                     return Err(self.error(
-                        "expected let / filter / derive / aggregate / group / select / sort / take after '|'",
+                        "expected let / filter / derive / aggregate / group / select / sort / take / page after '|'",
                     ));
                 }
                 break;
@@ -1554,6 +1557,7 @@ impl Parser {
             "sort",
             "take",
             "limit",
+            "page",
         ]
         .iter()
         .any(|word| self.word(word))
@@ -1623,6 +1627,39 @@ impl Parser {
                     .map_err(|_| syntax("invalid row count", token.span))?,
             })
         }
+    }
+
+    fn page_stage(&mut self) -> Result<Stage> {
+        self.expect_word("page")?;
+        let token = self.bump();
+        let Kind::Number(number) = token.kind else {
+            return Err(syntax("expected a positive page size", token.span));
+        };
+        let limit = number
+            .replace('_', "")
+            .parse::<usize>()
+            .map_err(|_| syntax("invalid page size", token.span))?;
+        let (direction, cursor) = if self.word("after") || self.word("before") {
+            let direction = if self.word("after") {
+                self.bump();
+                PageDirection::Forward
+            } else {
+                self.bump();
+                PageDirection::Backward
+            };
+            let token = self.bump();
+            let Kind::Text(cursor) = token.kind else {
+                return Err(syntax("expected an opaque cursor string", token.span));
+            };
+            (direction, Some(cursor))
+        } else {
+            (PageDirection::Forward, None)
+        };
+        Ok(Stage::Page(PageSpec {
+            limit,
+            direction,
+            cursor,
+        }))
     }
 
     fn path_list(&mut self, context: &str, item: &str) -> Result<Vec<String>> {

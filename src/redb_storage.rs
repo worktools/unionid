@@ -19,6 +19,7 @@ use crate::migration::MigrationEntry;
 
 const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
 const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
+const CURSOR_STORAGE_FORMAT_VERSION: u32 = 3;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
@@ -41,6 +42,8 @@ const SEQUENCE_KEY: &str = "commit_sequence";
 const SCHEMA_REVISION_KEY: &str = "schema_revision";
 const NEXT_CATALOG_ID_KEY: &str = "next_catalog_id";
 const SCHEMA_HASH_KEY: &str = "schema_hash";
+const CURSOR_INSTANCE_ID_KEY: &str = "cursor_instance_id";
+const CURSOR_SECRET_KEY: &str = "cursor_secret";
 const CATALOG_MAGIC: &[u8; 4] = b"UIDC";
 const INDEX_MAGIC: &[u8; 4] = b"UIDI";
 const MIGRATION_MAGIC: &[u8; 4] = b"UIDM";
@@ -88,7 +91,7 @@ impl RedbStore {
             committed: PreparedState::new(
                 &empty,
                 &ReceiptMap::new(),
-                LEGACY_STORAGE_FORMAT_VERSION,
+                CURSOR_STORAGE_FORMAT_VERSION,
             )?,
         };
         if fresh {
@@ -97,7 +100,13 @@ impl RedbStore {
                 .map_err(CommitFailure::into_error)?;
         }
         let (loaded, receipts, committed) = store.load()?;
+        let needs_cursor_upgrade = committed.format_version < CURSOR_STORAGE_FORMAT_VERSION;
         store.committed = committed;
+        if needs_cursor_upgrade {
+            store
+                .commit(&loaded, &loaded, &receipts)
+                .map_err(CommitFailure::into_error)?;
+        }
         Ok((store, loaded, receipts))
     }
 
@@ -108,11 +117,7 @@ impl RedbStore {
         receipts: &ReceiptMap,
     ) -> std::result::Result<(), CommitFailure> {
         validate_receipts(receipts, database.sequence).map_err(CommitFailure::Definite)?;
-        let format_version = if receipts.is_empty() {
-            self.committed.format_version
-        } else {
-            RECEIPT_STORAGE_FORMAT_VERSION
-        };
+        let format_version = CURSOR_STORAGE_FORMAT_VERSION;
         let next = PreparedState::new(database, receipts, format_version)
             .map_err(CommitFailure::Definite)?;
         let prepared = PreparedDelta::between(&self.committed, &next);
@@ -637,6 +642,11 @@ fn write_meta(
             meta.next_catalog_id.to_be_bytes().to_vec(),
         ),
         (SCHEMA_HASH_KEY, meta.schema_hash.as_bytes().to_vec()),
+        (
+            CURSOR_INSTANCE_ID_KEY,
+            meta.cursor_instance_id.as_slice().to_vec(),
+        ),
+        (CURSOR_SECRET_KEY, meta.cursor_secret.as_slice().to_vec()),
     ] {
         table
             .insert(key, value.as_slice())
@@ -651,7 +661,9 @@ fn read_meta(
     let format_version = u32::from_be_bytes(read_fixed::<4>(table, FORMAT_KEY)?);
     if !matches!(
         format_version,
-        LEGACY_STORAGE_FORMAT_VERSION | RECEIPT_STORAGE_FORMAT_VERSION
+        LEGACY_STORAGE_FORMAT_VERSION
+            | RECEIPT_STORAGE_FORMAT_VERSION
+            | CURSOR_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
     }
@@ -681,12 +693,22 @@ fn read_meta(
     let hash = read_bytes(table, SCHEMA_HASH_KEY)?;
     let schema_hash = String::from_utf8(hash)
         .map_err(|error| Error::new("E_STORAGE", format!("schema hash is not UTF-8: {error}")))?;
+    let identity = if format_version >= CURSOR_STORAGE_FORMAT_VERSION {
+        crate::pagination::CursorIdentity::from_bytes(
+            read_fixed::<16>(table, CURSOR_INSTANCE_ID_KEY)?,
+            read_fixed::<32>(table, CURSOR_SECRET_KEY)?,
+        )
+    } else {
+        crate::pagination::CursorIdentity::generate()?
+    };
     Ok((
         DurableMeta {
             sequence,
             schema_revision,
             next_catalog_id,
             schema_hash,
+            cursor_instance_id: *identity.instance_id(),
+            cursor_secret: *identity.secret(),
         },
         format_version,
     ))

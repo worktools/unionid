@@ -512,12 +512,13 @@ pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -
             || request.schema.is_some()
             || request.introspect.is_some()
             || request.idempotency_key.is_some()
+            || request.page.is_some()
         {
             return ProtocolResponse::failure(
                 request.request_id,
                 Error::new(
                     "E_PROTOCOL",
-                    "receipt operations cannot include query, params, schema, introspection, or an idempotency key",
+                    "receipt operations cannot include query, params, schema, introspection, an idempotency key, or page",
                 ),
                 engine.schema_info(),
             );
@@ -555,12 +556,16 @@ pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -
                 engine.schema_info(),
             );
         }
-        if !request.query.is_empty() || !request.params.is_empty() || request.schema.is_some() {
+        if !request.query.is_empty()
+            || !request.params.is_empty()
+            || request.schema.is_some()
+            || request.page.is_some()
+        {
             return ProtocolResponse::failure(
                 request.request_id,
                 Error::new(
                     "E_PROTOCOL",
-                    "introspection requests cannot include query, params, or schema",
+                    "introspection requests cannot include query, params, schema, or page",
                 ),
                 engine.schema_info(),
             );
@@ -577,6 +582,16 @@ pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -
     } else {
         None
     };
+    if request.idempotency_key.is_some() && request.page.is_some() {
+        return ProtocolResponse::failure(
+            request.request_id,
+            Error::new(
+                "E_PAGE_SHAPE",
+                "page requests are read-only and cannot use an idempotency key",
+            ),
+            engine.schema_info(),
+        );
+    }
     let parameters = match request.decode_params() {
         Ok(parameters) => parameters,
         Err(error) => {
@@ -598,15 +613,23 @@ pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -
             }
         };
     }
-    ProtocolResponse::from_query(
-        request.request_id,
+    let response = if let Some(page) = request.page {
+        engine.execute_with_params_page_until(
+            &request.query,
+            parameters,
+            request.schema.as_ref(),
+            page,
+            Instant::now() + EXECUTION_TIMEOUT,
+        )
+    } else {
         engine.execute_with_params_until(
             &request.query,
             parameters,
             request.schema.as_ref(),
             Instant::now() + EXECUTION_TIMEOUT,
-        ),
-    )
+        )
+    };
+    ProtocolResponse::from_query(request.request_id, response)
 }
 
 fn introspection_protocol_response(

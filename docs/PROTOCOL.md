@@ -22,6 +22,7 @@ version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。�
 | <code>schema</code> | 可省略的 <code>{revision, hash}</code>；不等于当前 schema 时，在解析或扫描前返回 <code>E_SCHEMA_CHANGED</code> |
 | <code>idempotency_key</code> | mutation 可选，1–256 UTF-8 bytes；同 key 与规范 digest 重放原成功响应，不同 digest 返回 `E_IDEMPOTENCY_CONFLICT` |
 | <code>receipts</code> | 可选的独立 `status` / `prune` 运维操作；不能和 query、params、schema、introspection 或 idempotency key 混用 |
+| <code>page</code> | 可选的 `{limit, direction, cursor}`；与源码末尾 `page` 同构，不能同时出现，limit 为 1..=1000 |
 
 参数名使用与标识符相同的 ASCII 规则，以字母或下划线开头。缺少参数返回 <code>E_PARAM_MISSING</code>，多余参数返回 <code>E_PARAM_EXTRA</code>，wire value 无法解码返回 <code>E_PARAM_TYPE</code>；参数解码后仍由查询上下文做普通类型检查，所以类型不匹配返回 <code>E_TYPE</code>。绑定发生在 AST 上，不通过文本替换，文本参数中的引号、换行、注释符或 pipeline 符号不会改变查询结构。参数也可直接作为 `derive match` 或 `set ... = match ...` 的分支结果及嵌套 constructor 负载，并由结果／目标字段类型检查。
 
@@ -48,6 +49,16 @@ Rust 客户端使用 `Request::with_idempotency_key`，不发送或手写 digest
 清理后同 key 会重新成为可执行的新请求，因此保留窗口必须长于客户端、消息队列和人工重放的最大重试窗口。系统没有自动 TTL/LRU。CLI 对应 `unionid receipts status` 和默认预览的 `unionid receipts prune`；执行删除必须显式传 `--confirm`。
 
 参数可用于 filter、match condition、普通／match derive 的算术或 bool 结果，以及 update <code>set</code>；prepared 绑定会在扫描前从字段或分支结果推导类型。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>；<code>insert many tasks $rows</code> 与 <code>upsert many tasks $rows</code> 接受 <code>list Task</code>，按输入顺序原子写入并 returning。批量 upsert 要求主键，拒绝输入内重复主键，并返回与输入逐项对齐的 action。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
+
+### 结构化分页
+
+应用可以让 query 省略源码 `page`，改用结构化字段，避免拼接 cursor：
+
+~~~json
+{"version":1,"request_id":"tasks-2","query":"from tasks\nfilter archived == false\nsort {-priority, id}","page":{"limit":100,"direction":"forward","cursor":"u1.payload.mac"}}
+~~~
+
+`direction` 为 `forward` 或 `backward`，省略时是 forward；第一页省略 cursor。Rust 可写 `Request::query(...).with_page(PageSpec::forward(100))`，后续用 `PageSpec::after` 或 `PageSpec::before`。服务把结构化字段归一为语言的最终 `page` stage，因此两种入口共享绑定、plan digest、错误和资源限制。page 只接受单条 read pipeline；与源码 page、mutation、introspection、receipt operation 或 idempotency key 混用时返回稳定错误。
 
 Introspection 使用同一版本请求，返回完整的类型化快照，客户端再按请求种类展示。它不执行查询或修改数据：
 
@@ -105,15 +116,16 @@ HTTP 适配、生命周期 endpoint 和完整 todo 场景见 [HTTP 数据协议�
   "message": "1 row(s)",
   "columns": [{"name":"id","ty":"int"},{"name":"title","ty":"text"}],
   "rows": [{"id":{"type":"int","value":"9007199254740993"},"title":{"type":"text","value":"hello"}}],
-  "schema": {"revision":2,"hash":"..."}
+  "schema": {"revision":2,"hash":"..."},
+  "page": {"limit":100,"direction":"forward","snapshot_sequence":"42","next_cursor":"u1...","previous_cursor":null,"has_more":true}
 }
 ~~~
 
-<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；introspection 响应改为包含 <code>introspection</code>，receipt 运维响应包含 `receipts`，这些操作都不执行数据查询。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>；单行 upsert 使用 <code>upsert_action</code>，批量 upsert 使用按输入顺序排列的 <code>upsert_actions</code> array。`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。旧 version 1 request 缺少新增字段时按 `None` 处理。warnings 不改变 <code>ok</code>。
+<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。分页响应增加 `page`，cursor 缺失时字段省略；`has_more` 表示当前遍历方向还有数据。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；分页计划还包含唯一 order、boundary、sequence、`sorted_scan` 和预算。introspection 响应改为包含 <code>introspection</code>，receipt 运维响应包含 `receipts`，这些操作都不执行数据查询。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>；单行 upsert 使用 <code>upsert_action</code>，批量 upsert 使用按输入顺序排列的 <code>upsert_actions</code> array。`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。旧 version 1 request 缺少新增字段时按 `None` 处理。warnings 不改变 <code>ok</code>。
 
 ## Rust 嵌入接口
 
-<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>Engine::open_redb_read_only(path)</code> 只打开已存在的 redb，并建立返回 `E_READ_ONLY` 的 mutation 边界。已有 Engine 也可用 <code>with_read_only(true)</code> 配置 adapter。<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert/upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
+<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>Engine::open_redb_read_only(path)</code> 只打开已存在的 redb，并建立返回 `E_READ_ONLY` 的 mutation 边界。已有 Engine 也可用 <code>with_read_only(true)</code> 配置 adapter。<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数；`execute_page` 和 `execute_with_params_page` 接受结构化 `PageSpec`。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert/upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code>、`PageInfo` 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
 
 可运行示例：
 

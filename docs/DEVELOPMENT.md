@@ -6,6 +6,7 @@
 
 - v0.1.0 crate、原生 target 包、校验清单和 GitHub Release 已由 tag workflow 发布。
 - Engine、本地 run/CLI 和 TCP 服务已提供统一只读执行边界；`introspection.read_only` 可验证实际状态，mutation 在创建候选状态或持久事务前返回 `E_READ_ONLY`。
+- 查询语言、Rust Engine 和 version 1 协议共享有界 keyset `page`：唯一排序以主键收尾，`u1` cursor 绑定 schema/query/params/sequence 并使用数据库 HMAC secret；redb 重开保留身份，逻辑 restore 轮换身份。
 - 后续工作按生产正确性、用户体验和语言探索拆分，不再把宽泛目标或已完成发布步骤保留为“当前任务”。
 
 ## 已实现

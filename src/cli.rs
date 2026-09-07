@@ -12,8 +12,8 @@ pub use crate::repl::HistoryOptions;
 use crate::repl::{CompletionHelper, HistoryStore};
 use crate::{
     Engine, Error, IdempotencyPruneOptions, InputStatus, Introspection, IntrospectionKind,
-    ProtocolRequest, ProtocolResponse, QueryAccessKind, QueryResponse, QueryStageKind, SchemaCheck,
-    StorageMode, Value, backup, input_status,
+    PageDirection, ProtocolRequest, ProtocolResponse, QueryAccessKind, QueryResponse,
+    QueryStageKind, SchemaCheck, StorageMode, Value, backup, input_status,
 };
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
@@ -1019,6 +1019,15 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            if let Some(page) = &plan.page {
+                println!(
+                    "page | {} {} via sorted_scan (read at most {}, cursor at most {} bytes)",
+                    page.limit,
+                    page_direction_name(page.direction),
+                    page.read_limit,
+                    page.max_cursor_bytes
+                );
+            }
         } else if response.columns.is_empty() {
             println!("{}", response.message);
         } else {
@@ -1044,8 +1053,30 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
             }
             println!("{}", response.message);
         }
+        if let Some(page) = &response.page {
+            println!(
+                "page | {} {} at sequence {} (has_more: {})",
+                page.limit,
+                page_direction_name(page.direction),
+                page.snapshot_sequence,
+                page.has_more
+            );
+            if let Some(cursor) = &page.previous_cursor {
+                println!("previous_cursor | {cursor}");
+            }
+            if let Some(cursor) = &page.next_cursor {
+                println!("next_cursor | {cursor}");
+            }
+        }
     }
     Ok(())
+}
+
+fn page_direction_name(direction: PageDirection) -> &'static str {
+    match direction {
+        PageDirection::Forward => "forward",
+        PageDirection::Backward => "backward",
+    }
 }
 
 fn query_stage_name(stage: &QueryStageKind) -> &'static str {
@@ -1059,6 +1090,7 @@ fn query_stage_name(stage: &QueryStageKind) -> &'static str {
         QueryStageKind::Select => "select",
         QueryStageKind::Sort => "sort",
         QueryStageKind::Take => "take",
+        QueryStageKind::Page => "page",
     }
 }
 

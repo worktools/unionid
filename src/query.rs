@@ -1,5 +1,6 @@
 use crate::error::Span;
 use crate::model::{Column, ScalarType, Value};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub enum Statement {
@@ -239,6 +240,51 @@ pub enum Stage {
     Select(Vec<String>),
     Sort(Vec<SortKey>),
     Take { offset: usize, limit: usize },
+    Page(PageSpec),
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PageDirection {
+    #[default]
+    Forward,
+    Backward,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PageSpec {
+    pub limit: usize,
+    #[serde(default)]
+    pub direction: PageDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl PageSpec {
+    pub fn forward(limit: usize) -> Self {
+        Self {
+            limit,
+            direction: PageDirection::Forward,
+            cursor: None,
+        }
+    }
+
+    pub fn after(limit: usize, cursor: impl Into<String>) -> Self {
+        Self {
+            limit,
+            direction: PageDirection::Forward,
+            cursor: Some(cursor.into()),
+        }
+    }
+
+    pub fn before(limit: usize, cursor: impl Into<String>) -> Self {
+        Self {
+            limit,
+            direction: PageDirection::Backward,
+            cursor: Some(cursor.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
