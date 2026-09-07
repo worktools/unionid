@@ -402,13 +402,16 @@ returning"#,
 
     let mut invalid_page = second_page.clone();
     let invalid_cursor = invalid_page.cursor.as_mut().unwrap();
-    let replacement = if invalid_cursor.ends_with('A') {
+    let signature_start = invalid_cursor.rfind('.').unwrap() + 1;
+    let replacement = if invalid_cursor.as_bytes()[signature_start] == b'A' {
         'B'
     } else {
         'A'
     };
-    invalid_cursor.pop();
-    invalid_cursor.push(replacement);
+    invalid_cursor.replace_range(
+        signature_start..signature_start + 1,
+        &replacement.to_string(),
+    );
     let invalid: Response = post_json(
         address,
         "/v1/query",
