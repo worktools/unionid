@@ -32,7 +32,7 @@ insert tasks
   state = Running {worker = "local", attempt = 2}
 ```
 
-- 无分号。类型名和变体名以大写字母开头；缩进式 record 以小写字段名开头。当前标识符为 ASCII 字母、数字与下划线，首字符不能是数字；文本值支持 UTF-8。
+- 无分号。花括号用于 record、projection 和多项 sort 等明确结构边界的地方，圆括号表达 precedence、tuple 或嵌套调用，方括号表达 list；语言不会为了减少符号而牺牲层级清晰度。类型名和变体名以大写字母开头；缩进式 record 以小写字段名开头。当前标识符为 ASCII 字母、数字与下划线，首字符不能是数字；文本值支持 UTF-8。
 - 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。`uuid`、时间、定点 decimal 和 bytes 的目标契约见 [RFC 0004](rfc/0004-production-scalars.md)，在对应实现合并前不能作为当前语法使用。
 - 支持命名 record/sum、嵌套积类型、tuple，以及内建 `option T`、`list T`，例如 `type Point = (float, float)`、`option (list Contact)`。
 - record 类型可内联为 `{email text, nickname option text}`；变体负载也可缩进：在 `| Running` 的下一层写 `worker text` 和 `attempt int`。

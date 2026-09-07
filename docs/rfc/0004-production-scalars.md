@@ -11,16 +11,19 @@
 
 unionid 选择六个原生生产标量：`uuid`、`date`、`timestamp`、`duration`、`decimal P S` 和 `bytes`。它们是 `ScalarType` 与 `Value` 的独立成员，不伪装成 `text`、`int` 或命名 record。这样 schema、参数、查询结果、索引、migration 和持久 codec 都能保留值的实际含义。
 
-类型声明继续采用 PRQL 风格的空格应用，不增加分号或 TypeScript 风格标注：
+类型声明继续采用 PRQL 风格的空格应用，不增加语句末尾分号或 TypeScript 风格的密集标注。花括号不是要消除的符号：它在 record、projection 或嵌套层级中明确结构边界时应当使用；圆括号用于 precedence、tuple 和嵌套调用，方括号用于 list，逗号分隔同一行的相邻项。换行已经能清楚分隔字段时可省略逗号。formatter 以清晰且唯一的输出为准，不以符号数最少为目标。
+
+下面使用花括号明确 `Invoice` 的 product type 边界，同时保留无分号字段和空格式类型应用：
 
 ```text
-type Invoice =
+type Invoice = {
   id uuid
   issued_on date
   created_at timestamp
   payment_window duration
   amount decimal 18 2
   receipt bytes
+}
 
 table invoices Invoice
   key id
@@ -197,7 +200,9 @@ value codec 2 的 payload 分别为本 RFC 第 3 节列出的固定表示；现�
 
 unionid will add six native production scalars: `uuid`, `date`, `timestamp`, `duration`, `decimal P S`, and `bytes`. They remain distinct throughout schema identity, values, query binding, indexes, migrations, Rust adapters, wire values, and durable codecs. Named wrappers still add domain identity, such as `type UserId = uuid`; money remains an ADT containing a decimal amount and an explicit currency.
 
-Declarations keep the semicolon-free PRQL-style application syntax. Values use one necessary quoted boundary: `uuid "..."`, `date "..."`, `timestamp "..."`, `duration "..."`, `decimal "..."`, and `bytes "..."`. UUID text follows RFC 9562 and normalizes to lowercase. Dates are proleptic Gregorian civil days. Timestamps accept RFC 3339 offsets, normalize to UTC, reject leap seconds, and retain microsecond precision. Durations are signed microseconds expressed through the exact ISO day/time subset, without calendar years or months. Decimal uses a signed i128 coefficient with precision 1–38 and a schema-fixed scale. Source bytes use lowercase hex, while wire bytes use canonical unpadded base64url.
+Declarations keep PRQL-style space application and omit statement-terminating semicolons. This is not a blanket punctuation-minimization rule: braces should mark record, projection, and nested structural boundaries when they improve scanning; parentheses express precedence, tuples, and nested calls; brackets express lists; commas separate adjacent inline items. Newlines may separate fields without commas. The formatter optimizes for one clear representation rather than the fewest symbols.
+
+Values use one necessary quoted boundary: `uuid "..."`, `date "..."`, `timestamp "..."`, `duration "..."`, `decimal "..."`, and `bytes "..."`. UUID text follows RFC 9562 and normalizes to lowercase. Dates are proleptic Gregorian civil days. Timestamps accept RFC 3339 offsets, normalize to UTC, reject leap seconds, and retain microsecond precision. Durations are signed microseconds expressed through the exact ISO day/time subset, without calendar years or months. Decimal uses a signed i128 coefficient with precision 1–38 and a schema-fixed scale. Source bytes use lowercase hex, while wire bytes use canonical unpadded base64url.
 
 All six values have total equality and ordering, grouping, min/max, equality indexes, and cursor support. UUID becomes an eligible primary key. Decimal and duration support checked addition, subtraction, negation, and sum. Timestamp supports exact duration addition/subtraction and timestamp difference. Decimal multiplication/division/average, calendar arithmetic, local time, named time zones, and implicit cross-type conversions are deferred until their result and rounding semantics are explicit.
 

@@ -8,7 +8,7 @@
 
 v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。当前进入 [M5 总览 #111](https://github.com/worktools/unionid/issues/111)：先收紧真实生产边界，再改善大结果集、标量类型和 CLI 诊断，最后按独立需求验证语言扩展；join、window 和分布式仍不混入这一轮。
 
-用户已明确语言方向：类型定义与查询都采用 PRQL 风格，无分号、减少标点。本轮草案采用 `field type`、`option text`／`list text`、缩进式声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不再沿用 TypeScript 风格字段注解或逐行 `|>`。
+用户已明确语言方向：类型定义与查询都采用 PRQL 风格，不使用没有意义的语句末尾分号；花括号、圆括号、方括号和逗号在能明确结构、层级或 precedence 时正常使用。本轮草案采用 `field type`、`option text`／`list text`、结构化声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不沿用 TypeScript 风格的密集字段注解或逐行 `|>`。
 
 ## 阶段与验收
 

@@ -198,13 +198,14 @@ table documents Document
 现有场景用 `text` 表示 ID/hash、用 `int` 表示时间/金额，能验证 ADT 查询，却会把格式、单位与精度留给应用。生产 schema 需要在不削弱命名 ADT 的前提下把这些物理语义带到索引和协议边界。以下是 [RFC 0004](rfc/0004-production-scalars.md) 的目标语法，尚不是当前可执行示例：
 
 ```text
-type Payment =
+type Payment = {
   invoice_id uuid
   issued_on date
   received_at timestamp
   retry_after duration
   amount decimal 18 2
   payload_hash bytes
+}
 
 table payments Payment
   key invoice_id
