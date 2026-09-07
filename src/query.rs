@@ -19,6 +19,7 @@ pub enum Statement {
     CreateIndex {
         table: String,
         column: String,
+        unique: bool,
     },
     Insert {
         table: String,
@@ -148,6 +149,7 @@ pub enum SchemaMigration {
     AddIndex {
         table: String,
         column: String,
+        unique: bool,
     },
     DropIndex {
         table: String,

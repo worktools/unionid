@@ -24,6 +24,40 @@ fn schema_check_normalizes_reusable_declarations_and_indexes() {
 }
 
 #[test]
+fn schema_diff_changes_index_constraint_kind_with_drop_then_add() {
+    let base = "type User =\n  id int\n  email text\ntable users User\n  key id\ncreate index users (email)";
+    let target = "type User =\n  id int\n  email text\ntable users User\n  key id\ncreate unique index users (email)";
+    let checked = Engine::check_schema(target).unwrap();
+    assert!(
+        checked
+            .normalized
+            .contains("create unique index users (email)")
+    );
+    assert_eq!(Engine::check_schema(&checked.normalized).unwrap(), checked);
+
+    let mut engine = Engine::memory();
+    ok(&mut engine, base);
+    let diff = engine
+        .diff_schema(target, "m0001_unique_email", None)
+        .unwrap();
+    assert!(diff.runnable);
+    assert_eq!(
+        diff.operations
+            .iter()
+            .map(|operation| operation.description.as_str())
+            .collect::<Vec<_>>(),
+        ["drop index users.email", "add unique index users.email"]
+    );
+    assert!(
+        diff.migration_source
+            .contains("add unique index users.email")
+    );
+    let file = MigrationFile::parse(diff.migration_source).unwrap();
+    engine.apply_migrations(&[file]).unwrap();
+    assert_eq!(engine.schema(), checked.normalized);
+}
+
+#[test]
 fn empty_database_diff_is_runnable_and_reaches_the_target_schema() {
     let target = "type State = Pending | Complete\ntype Task =\n  id int\n  state State\ntable tasks Task\n  key id\ncreate index tasks (state)";
     let mut engine = Engine::memory();

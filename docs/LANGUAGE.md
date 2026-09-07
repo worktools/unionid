@@ -42,6 +42,15 @@ insert tasks
 - 命名类型保留身份；有歧义时可用 `State.Pending` 或 `State.Running {...}` 限定构造器。
 - `table tasks Task` 要求 Task 是 record；可选的缩进 `key id` 声明 int/text 主键，拒绝重复键。无 key 时允许重复行。
 
+普通 secondary index 加速完整 typed value 的等值过滤；`unique` 在同一相等语义上增加约束：
+
+```text
+create index tasks (state)
+create unique index tasks (owner.email)
+```
+
+索引路径可以指向嵌套 record 字段。unique index 支持 primitive、命名 sum/record、tuple、option 和 list；比较的是完整类型和值，`None` 也是普通 typed value，因此同一 unique index 最多出现一次 `None`。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert、upsert、update、migration、restore 和 redb 完整性检查都在发布候选状态前执行同一约束。当前只支持单字段路径，不支持复合、partial 或 SQL `NULL` 语义。
+
 批量插入使用明确的 `many` 关键字和已有 list/record 值语法：
 
 ```text
@@ -52,7 +61,7 @@ insert many tasks [
 returning id, state
 ```
 
-也可写 `insert many tasks $rows`，其中 `$rows` 的期望类型是 `list Task`。每行独立补齐默认值并检查完整 ADT record，随后整批检查主键和索引；输入顺序决定 RowId 分配与 returning 顺序。空 list 成功返回 `affected_rows = 0`，使用 returning 时仍提供稳定 columns。单批最多 100,000 行；任一行、预算、deadline 或提交失败都不会发布部分 rows、indexes 或 RowId 游标。批量 upsert 与流式导入不属于当前语法。
+也可写 `insert many tasks $rows`，其中 `$rows` 的期望类型是 `list Task`。每行独立补齐默认值并检查完整 ADT record，随后整批检查主键和 unique indexes；输入顺序决定 RowId 分配与 returning 顺序。空 list 成功返回 `affected_rows = 0`，使用 returning 时仍提供稳定 columns。单批最多 100,000 行；任一行、预算、deadline 或提交失败都不会发布部分 rows、indexes 或 RowId 游标。批量 upsert 与流式导入不属于当前语法。
 
 直接自递归沿用同一套无分号声明语法，不增加 `rec` 标记。递归类型必须至少能构造一个有限值：sum 需要终止变体，record/tuple 的每个必需成员都必须可终止，`option` 的 `None` 与 `list` 的空列表可作为终止路径。例如：
 
@@ -147,7 +156,7 @@ delete tasks | filter id == 2 | returning
 - `set` 右侧接受字段、literal、ADT constructor、`length` 和有类型算术，也可在下一层写 `match source`，使用与 `derive match` 相同的递归 pattern 和 option/sum/product/list 构造。目标字段给出分支结果类型，未知字段、非穷尽／不可达分支和错误结果即使目标表为空也报错。
 - 顶层小写 binding 是带类型的不可反驳 pattern，必须是最后一支；`current => current` 可保留其余 constructor 的完整原值。分支可使用 typed 参数和自己的 pattern bindings。
 - 可直接设置 record 的嵌套路径，如 `set owner.email = "new@example.com"`。路径不能穿过 sum/option；修改 variant 时设置完整值。父路径与子路径不能在同一 update 中同时赋值，避免依赖隐含顺序。
-- 每条候选 row 更新完成后重新检查完整 row 类型；全表重新检查主键唯一性，再原子替换 rows 与派生 indexes。任一行除零、溢出、类型或约束失败时，该请求不修改任何行。
+- 每条候选 row 更新完成后重新检查完整 row 类型；全表重新检查主键与 unique indexes，再原子替换 rows 与派生 indexes。任一行除零、溢出、类型或约束失败时，该请求不修改任何行。
 - 成功 insert/upsert/update/delete 的 JSON 响应包含 `affected_rows`；批量 insert 返回输入行数，update/delete 未命中时返回 0。末尾的 `returning` 返回完整受影响行，`returning id, state` 按给定顺序投影字段：单行／批量 insert 与 upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像。空批次或空命中仍返回稳定 columns 和空 rows。
 - returning 字段在扫描前按表 schema 检查，行数和 8 MiB typed wire 预算也在提交前检查；失败不会发布 row 或索引。内部稳定 RowId 不出现在用户 record 中，删除后不会被后续插入复用。
 

@@ -62,7 +62,7 @@ fn formatter_preserves_comments_at_stable_statement_boundaries() {
 #[test]
 fn formatter_covers_statements_stages_patterns_values_and_migrations() {
     for source in [
-        "create table legacy (id int, state enum(Pending, Done(text)))\ncreate index legacy (state)",
+        "create table legacy (id int, state enum(Pending, Done(text)))\ncreate index legacy (state)\ncreate unique index legacy (id)",
         "insert tasks $row | returning\nupsert tasks $row\nreturning id, state",
         "insert many tasks [{id = 2, state = Pending}, {id = 1, state = Done}] | returning {id, state}\ninsert many tasks $rows\nreturning id",
         "update tasks\nfilter match state\n  Pending => true\n  _ => false\nsort {-priority, id}\ntake 1\nset score = base + bonus * 2",
@@ -70,7 +70,7 @@ fn formatter_covers_statements_stages_patterns_values_and_migrations() {
         "delete tasks | filter id == $id | returning {id, state}",
         "explain from tasks | let retryable = attempt -> attempt < 3 | filter retryable attempts | derive score = base + bonus | group {state, owner.id}\n  aggregate\n    rows = count\n    total = sum score\nselect {state, rows}\nsort {-rows, state}\ntake 11..20",
         "from tasks\nderive next = match state\n  Pending {attempt = Some n, ..} => State.Running {attempt = n + 1}\n  Running worker => State.Done (worker, [1, 2])\n  _ => None",
-        "migration all_steps\n  parent earlier\n  add type Extra =\n    id int\n  drop type Old\n  add table extras Extra key id\n  drop table old_rows\n  rename table extras to items\n  rename type Extra to Item\n  add field Item.note text = \"\"\n  drop field Item.old\n  change default Item.note to \"new\"\n  drop default Item.note\n  rename field Item.note to label\n  change field Item.score to float using old -> old + 1\n  add variant State.Paused {reason text}\n  drop variant State.Old using old -> State.Done\n  rename variant State.Done to Complete\n  change variant State.Failed to {code int, message text} using old -> {code = 0, message = old.message}\n  add index items.label\n  drop index items.old\n  set key items.id\n  drop key items",
+        "migration all_steps\n  parent earlier\n  add type Extra =\n    id int\n  drop type Old\n  add table extras Extra key id\n  drop table old_rows\n  rename table extras to items\n  rename type Extra to Item\n  add field Item.note text = \"\"\n  drop field Item.old\n  change default Item.note to \"new\"\n  drop default Item.note\n  rename field Item.note to label\n  change field Item.score to float using old -> old + 1\n  add variant State.Paused {reason text}\n  drop variant State.Old using old -> State.Done\n  rename variant State.Done to Complete\n  change variant State.Failed to {code int, message text} using old -> {code = 0, message = old.message}\n  add index items.label\n  add unique index items.id\n  drop index items.old\n  set key items.id\n  drop key items",
     ] {
         let formatted = format_source(source).unwrap_or_else(|error| panic!("{error}\n{source}"));
         assert_eq!(format_source(&formatted).unwrap(), formatted, "{source}");

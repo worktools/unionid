@@ -254,9 +254,17 @@ pub fn describe_step(step: &SchemaMigration) -> (String, bool) {
             format!("change variant {owner}.{variant} using conversion"),
             true,
         ),
-        SchemaMigration::AddIndex { table, column } => {
-            (format!("add index {table}.{column}"), false)
-        }
+        SchemaMigration::AddIndex {
+            table,
+            column,
+            unique,
+        } => (
+            format!(
+                "add {}index {table}.{column}",
+                if *unique { "unique " } else { "" }
+            ),
+            false,
+        ),
         SchemaMigration::DropIndex { table, column } => {
             (format!("drop index {table}.{column}"), true)
         }

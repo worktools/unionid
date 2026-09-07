@@ -610,7 +610,7 @@ fn diff_tables(
         .map(|(table, definition)| {
             (
                 format!("{table}.{}", definition.column),
-                (table, definition.column.as_str()),
+                (table, definition.column.as_str(), definition.kind),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -620,24 +620,34 @@ fn diff_tables(
         .map(|(table, definition)| {
             (
                 format!("{table}.{}", definition.column),
-                (table, definition.column.as_str()),
+                (table, definition.column.as_str(), definition.kind),
             )
         })
         .collect::<BTreeMap<_, _>>();
-    for (identity, (table, column)) in &target_indexes {
+    for (identity, (table, column, kind)) in &target_indexes {
         if !renamed_to.contains(table)
-            && !current_indexes.contains_key(identity)
+            && current_indexes
+                .get(identity)
+                .is_none_or(|(_, _, current_kind)| current_kind != kind)
             && target_tables[*table]
                 .primary_key
                 .as_deref()
                 .is_none_or(|key| key != *column)
         {
-            generated.push(operation(format!("add index {table}.{column}"), false));
+            generated.push(operation(
+                format!(
+                    "add {}index {table}.{column}",
+                    if kind.is_unique() { "unique " } else { "" }
+                ),
+                false,
+            ));
         }
     }
-    for (identity, (table, column)) in &current_indexes {
+    for (identity, (table, column, kind)) in &current_indexes {
         if !renamed_from.contains(table)
-            && !target_indexes.contains_key(identity)
+            && target_indexes
+                .get(identity)
+                .is_none_or(|(_, _, target_kind)| target_kind != kind)
             && target_tables.contains_key(table)
         {
             let remains_primary = target_tables[*table]
@@ -715,7 +725,8 @@ fn operation_priority(description: &str) -> u8 {
         6
     } else if description.starts_with("set key ") {
         7
-    } else if description.starts_with("add index ") {
+    } else if description.starts_with("add index ") || description.starts_with("add unique index ")
+    {
         8
     } else {
         3
