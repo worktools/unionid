@@ -220,6 +220,7 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "type Task =\n  id int",
         "from tasks\ngroup id\n  aggregate\n    rows = count",
         "from tasks\nfilter match state\n  Pending => true",
+        "delete tasks\nreturning",
     ] {
         assert_eq!(input_status(source), InputStatus::Complete, "{source:?}");
     }
@@ -236,6 +237,7 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "migration initial\n",
         "update rows\nset state =\n",
         "update rows\nset state =\n  match state\n",
+        "insert rows {id = 1}\nreturning id,",
     ] {
         let InputStatus::Incomplete(error) = input_status(source) else {
             panic!("expected incomplete source: {source:?}");
@@ -2354,6 +2356,169 @@ set tree =
             before
         );
     }
+}
+
+#[test]
+fn dml_returning_exposes_typed_pre_and_post_images() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type State =
+  Queued {attempt int}
+  | Running {worker text, attempt int}
+  | Done
+
+type Tree =
+  Leaf text
+  | Branch {children list Tree}
+
+type Meta =
+  owner option text = None
+  retries int = 0
+
+type Job =
+  id int
+  state State
+  tree Tree
+  meta Meta = {}
+
+table jobs Job
+  key id"#,
+    );
+
+    let inserted = ok(
+        &mut engine,
+        r#"insert jobs
+  id = 1
+  state = Queued {attempt = 0}
+  tree = Leaf "root"
+returning id, state, meta.owner"#,
+    );
+    assert_eq!(inserted.affected_rows, Some(1));
+    assert_eq!(inserted.rows.len(), 1);
+    assert_eq!(
+        inserted
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "state", "meta.owner"]
+    );
+    assert_eq!(
+        inserted.rows[0]["state"].source_text(),
+        "Queued {attempt = 0}"
+    );
+    assert_eq!(inserted.rows[0]["meta.owner"].source_text(), "None");
+
+    let upserted = engine.execute_with_params(
+        "upsert jobs $job\nreturning",
+        std::collections::BTreeMap::from([(
+            "job".into(),
+            Value::Record(
+                [
+                    ("id".into(), Value::Int(2)),
+                    (
+                        "state".into(),
+                        Value::Enum(unionid::model::EnumValue {
+                            id: 0,
+                            variant: "Queued".into(),
+                            args: vec![Value::Record([("attempt".into(), Value::Int(4))].into())],
+                        }),
+                    ),
+                    (
+                        "tree".into(),
+                        Value::Enum(unionid::model::EnumValue {
+                            id: 0,
+                            variant: "Leaf".into(),
+                            args: vec![Value::Text("other".into())],
+                        }),
+                    ),
+                ]
+                .into(),
+            ),
+        )]),
+    );
+    assert!(upserted.ok, "{}", upserted.message);
+    assert_eq!(upserted.rows.len(), 1);
+    assert_eq!(upserted.columns.len(), 4);
+    assert!(
+        upserted.rows[0]["meta"]
+            .field("retries")
+            .unwrap()
+            .cmp_eq(&Value::Int(0))
+    );
+
+    let updated = engine.execute_with_params(
+        r#"update jobs
+filter id == 1
+set state =
+  match state
+    Queued {attempt} => Running {worker = $worker, attempt = attempt + 1}
+    current => current
+returning {id, state}"#,
+        std::collections::BTreeMap::from([("worker".into(), Value::Text("local".into()))]),
+    );
+    assert!(updated.ok, "{}", updated.message);
+    assert_eq!(updated.affected_rows, Some(1));
+    assert_eq!(
+        updated.rows[0]["state"].source_text(),
+        "Running {attempt = 1, worker = \"local\"}"
+    );
+
+    let empty = ok(
+        &mut engine,
+        "update jobs\nfilter id == 99\nset state = Done\nreturning id, state",
+    );
+    assert_eq!(empty.affected_rows, Some(0));
+    assert!(empty.rows.is_empty());
+    assert_eq!(empty.columns.len(), 2);
+
+    let failed =
+        engine.execute("update jobs\nfilter id == 1\nset state = Done\nreturning id, missing");
+    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "E_FIELD");
+    assert_eq!(
+        ok(&mut engine, "from jobs | filter id == 1").rows[0]["state"].source_text(),
+        "Running {attempt = 1, worker = \"local\"}"
+    );
+
+    let deleted = ok(
+        &mut engine,
+        "delete jobs | filter id == 2 | returning id, state, tree",
+    );
+    assert_eq!(deleted.affected_rows, Some(1));
+    assert!(deleted.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert_eq!(
+        deleted.rows[0]["state"].source_text(),
+        "Queued {attempt = 4}"
+    );
+    assert_eq!(ok(&mut engine, "from jobs").rows.len(), 1);
+}
+
+#[test]
+fn returning_limits_are_checked_before_publishing_mutations() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Item =\n  id int\n  payload text\ntable items Item\n  key id",
+    );
+    let large = Value::Record(
+        [
+            ("id".into(), Value::Int(1)),
+            (
+                "payload".into(),
+                Value::Text("x".repeat(unionid::db::MAX_RETURNING_BYTES + 1)),
+            ),
+        ]
+        .into(),
+    );
+    let failed = engine.execute_with_params(
+        "insert items $item\nreturning",
+        std::collections::BTreeMap::from([("item".into(), large)]),
+    );
+    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "E_LIMIT");
+    assert!(ok(&mut engine, "from items").rows.is_empty());
 }
 
 #[test]

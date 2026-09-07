@@ -12,7 +12,9 @@ unionid server 面向本机受信应用：默认监听 <code>127.0.0.1:7878</cod
 | ADT value | 16 MiB encoded / 64 层 / 1,000,000 collection items | codec、恢复或写入拒绝超限值 |
 | 查询 working rows | 250,000 | 返回 <code>E_LIMIT</code>；应增加选择性 indexed filter |
 | 查询结果 rows | 100,000 | 返回 <code>E_LIMIT</code>；应增加 filter 或 take |
+| DML returning rows | 100,000 / 8 MiB typed wire rows | 提交候选状态前返回 <code>E_LIMIT</code>；应增加选择性 filter 或缩小投影 |
 | Introspection payload | 1 MiB | version 1 请求返回带 request ID 与 schema 的 <code>E_LIMIT</code> |
+| Version 1 request ID | 1 KiB UTF-8 | 在进入 Engine 前返回 <code>E_LIMIT</code>，避免写入提交后才发现响应元数据过大 |
 | TCP response | 16 MiB | 丢弃超限结果，发送小型结构化 <code>E_LIMIT</code> |
 | 服务执行 deadline | 25 秒 | 返回 <code>E_TIMEOUT</code>；候选写批次不提交 |
 | 空闲连接 / socket write | 30 秒 | 关闭空闲或不读取响应的客户端 |
@@ -20,7 +22,7 @@ unionid server 面向本机受信应用：默认监听 <code>127.0.0.1:7878</cod
 
 查询、写批次与 migration 使用同一个 Engine mutex，最多只有一个请求进入 Engine；其他已接纳连接形成至多 64 个等待者，因此不会产生无界线程或请求队列。读写只观察完整的 Engine 提交。查询扫描和 aggregate 输出定期检查 deadline；其他批次至少在每条语句前后检查，若计算期间越过 deadline，候选状态会被丢弃而不发布。排序受 working-row 上限约束；group/aggregate 另有限制 group 数、accumulator cell 和估算状态内存，查询局部函数限制定义数、调用深度和展开步骤，具体数值见 [QUERY.md](QUERY.md)。`explain` 只绑定查询并读取表／索引元数据和目标 posting，不扫描或复制数据行。
 
-TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON byte buffer。版本化响应超限时仍回显 request ID 与 schema；旧协议得到旧格式的 <code>E_LIMIT</code>。
+TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON byte buffer。带 returning 的写入先在 Engine 候选状态内验证 typed wire rows 预算，version 1 request ID 也在执行前限长，避免已知 DML 结果在提交后才因响应超限被改写为失败。版本化响应超限时仍回显 request ID 与 schema；旧协议得到旧格式的 <code>E_LIMIT</code>。
 
 ## 关闭与失败
 

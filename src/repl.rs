@@ -55,6 +55,7 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "or",
     "parent",
     "rename",
+    "returning",
     "select",
     "set",
     "sort",
@@ -427,7 +428,15 @@ mod tests {
                 .ok
         );
         let helper = CompletionHelper::new(Some(&engine.introspection()));
-        for expected in ["from", ".schema", "Task", "tasks", "id", "title"] {
+        for expected in [
+            "from",
+            "returning",
+            ".schema",
+            "Task",
+            "tasks",
+            "id",
+            "title",
+        ] {
             assert!(
                 helper
                     .candidates

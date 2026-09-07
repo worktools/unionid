@@ -23,25 +23,31 @@ pub enum Statement {
     Insert {
         table: String,
         values: Value,
+        returning: Option<Returning>,
     },
     InsertParameter {
         table: String,
         parameter: String,
+        returning: Option<Returning>,
     },
     Upsert {
         table: String,
         values: Value,
+        returning: Option<Returning>,
     },
     UpsertParameter {
         table: String,
         parameter: String,
+        returning: Option<Returning>,
     },
     Update {
         target: Pipeline,
         assignments: Vec<SetAssignment>,
+        returning: Option<Returning>,
     },
     Delete {
         target: Pipeline,
+        returning: Option<Returning>,
     },
     Migration {
         name: String,
@@ -153,6 +159,12 @@ pub struct MigrationTransform {
 pub struct SetAssignment {
     pub path: String,
     pub value: SetValue,
+}
+
+#[derive(Debug, Clone)]
+pub struct Returning {
+    /// An empty projection returns the complete table row.
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

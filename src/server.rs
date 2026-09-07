@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    MAX_INTROSPECTION_BYTES, Request as ProtocolRequest, Response as ProtocolResponse, VERSION,
+    MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, Request as ProtocolRequest,
+    Response as ProtocolResponse, VERSION,
 };
 use crate::{Engine, Error, QueryResponse};
 
@@ -464,6 +465,16 @@ fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
             engine,
         );
     }
+    if request.request_id.len() > MAX_REQUEST_ID_BYTES {
+        return protocol_error(
+            request.request_id,
+            Error::new(
+                "E_LIMIT",
+                format!("request_id exceeds {MAX_REQUEST_ID_BYTES} byte limit"),
+            ),
+            engine,
+        );
+    }
     if request.introspect.is_some() {
         if !request.query.is_empty() || !request.params.is_empty() || request.schema.is_some() {
             return protocol_error(
@@ -556,5 +567,22 @@ mod tests {
         };
         assert_eq!(response.request_id, "large-introspection");
         assert_eq!(response.error.unwrap().code, "E_LIMIT");
+    }
+
+    #[test]
+    fn oversized_request_ids_are_rejected_before_mutations() {
+        let mut engine = Engine::memory();
+        let input = serde_json::json!({
+            "version": VERSION,
+            "request_id": "x".repeat(MAX_REQUEST_ID_BYTES + 1),
+            "query": "create table items (id int)"
+        })
+        .to_string();
+        let OutgoingResponse::Versioned(response) = execute_json_request(&input, &mut engine)
+        else {
+            panic!("versioned request must receive a versioned response");
+        };
+        assert_eq!(response.error.unwrap().code, "E_LIMIT");
+        assert_eq!(engine.execute("from items").error.unwrap().code, "E_TABLE");
     }
 }

@@ -11,7 +11,7 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 | 字段 | 规则 |
 | --- | --- |
 | <code>version</code> | 当前只能是 1；其他值返回 <code>E_PROTOCOL_VERSION</code> |
-| <code>request_id</code> | 客户端提供的 string，响应原样返回；它只用于关联请求，不提供去重或 exactly-once |
+| <code>request_id</code> | 客户端提供的 UTF-8 string，最多 1 KiB，响应原样返回；它只用于关联请求，不提供去重或 exactly-once |
 | <code>query</code> | 完整 unionid 源码，最多 1 MiB |
 | <code>introspect</code> | 可选的 `schema`／`tables`／`types`／`storage`；使用时 query 必须为空且不能携带 params/schema |
 | <code>params</code> | 可省略的命名 typed value；源码以 <code>$name</code> 引用 |
@@ -64,7 +64,7 @@ Introspection 使用同一版本请求，返回完整的类型化快照，客户
 }
 ~~~
 
-<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；introspection 响应改为包含 <code>introspection</code>，两者都不执行数据行。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>，upsert 另有 <code>upsert_action</code>；warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
+<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；introspection 响应改为包含 <code>introspection</code>，两者都不执行数据行。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>，upsert 另有 <code>upsert_action</code>；`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
 
 ## Rust 嵌入接口
 

@@ -23,8 +23,9 @@ set state =
   match state
     Pending => Done {result = "ok"}
     current => current
+returning id, state
 
-delete tasks | filter id == 2
+delete tasks | filter id == 2 | returning id
 
 from tasks
 select {id, attempts, state}
