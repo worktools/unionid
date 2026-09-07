@@ -219,6 +219,8 @@ pub struct Response {
     pub affected_rows: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upsert_action: Option<UpsertAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upsert_actions: Vec<UpsertAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueryPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,6 +249,7 @@ impl Response {
             schema: response.schema,
             affected_rows: response.affected_rows,
             upsert_action: response.upsert_action,
+            upsert_actions: response.upsert_actions,
             plan: response.plan,
             introspection: None,
         }
@@ -265,6 +268,7 @@ impl Response {
             schema: Some(introspection.schema.clone()),
             affected_rows: None,
             upsert_action: None,
+            upsert_actions: Vec::new(),
             plan: None,
             introspection: Some(introspection),
         }

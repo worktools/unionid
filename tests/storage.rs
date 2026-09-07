@@ -53,6 +53,64 @@ fn typed_unique_indexes_survive_redb_reopen_and_integrity_checks() {
 }
 
 #[test]
+fn typed_bulk_upserts_commit_atomically_and_survive_redb_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("bulk-upsert.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(
+            "type User =\n  id int\n  email text\n  name text\ntable users User\n  key id\ncreate unique index users (email)\ninsert users {id = 1, email = \"one@example.com\", name = \"old\"}",
+        );
+        assert!(setup.ok, "{}", setup.message);
+
+        let prepared = engine
+            .prepare("upsert many users $rows\nreturning id, name")
+            .unwrap();
+        let rows = Value::List(vec![
+            Value::Record(std::collections::BTreeMap::from([
+                ("id".into(), Value::Int(1)),
+                ("email".into(), Value::Text("one@example.com".into())),
+                ("name".into(), Value::Text("updated".into())),
+            ])),
+            Value::Record(std::collections::BTreeMap::from([
+                ("id".into(), Value::Int(2)),
+                ("email".into(), Value::Text("two@example.com".into())),
+                ("name".into(), Value::Text("second".into())),
+            ])),
+        ]);
+        let response = engine.execute_prepared(
+            &prepared,
+            std::collections::BTreeMap::from([("rows".into(), rows)]),
+        );
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(
+            response.upsert_actions,
+            [UpsertAction::Updated, UpsertAction::Inserted]
+        );
+
+        let failed = engine.execute(
+            "upsert many users [{id = 3, email = \"two@example.com\", name = \"conflict\"}, {id = 4, email = \"four@example.com\", name = \"fourth\"}]",
+        );
+        assert!(!failed.ok);
+        assert_eq!(failed.error.unwrap().code, "E_CONSTRAINT");
+        assert_eq!(engine.execute("from users").rows.len(), 2);
+    }
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let rows = reopened.execute("from users | sort id");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 2);
+    assert!(rows.rows[0]["name"].cmp_eq(&Value::Text("updated".into())));
+    assert!(rows.rows[1]["name"].cmp_eq(&Value::Text("second".into())));
+    let indexed = reopened.execute("explain from users | filter email == \"two@example.com\"");
+    assert_eq!(
+        indexed.plan.unwrap().access.kind,
+        QueryAccessKind::SecondaryIndexLookup
+    );
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
 fn redb_v1_catalog_indexes_open_as_ordinary_and_upgrade_on_commit() {
     let dir = TempDir::new();
     let path = dir.0.join("legacy-index.redb");

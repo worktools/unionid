@@ -404,6 +404,8 @@ pub struct QueryResponse {
     pub affected_rows: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upsert_action: Option<UpsertAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upsert_actions: Vec<UpsertAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueryPlan>,
 }
@@ -445,6 +447,7 @@ impl QueryResponse {
             schema: None,
             affected_rows: None,
             upsert_action: None,
+            upsert_actions: Vec::new(),
             plan: None,
         }
     }
@@ -460,6 +463,7 @@ impl QueryResponse {
             schema: None,
             affected_rows: None,
             upsert_action: None,
+            upsert_actions: Vec::new(),
             plan: None,
         }
     }
@@ -545,7 +549,8 @@ impl Database {
             } => self.insert_many(&table, values, returning.as_ref(), deadline),
             Statement::InsertParameter { parameter, .. }
             | Statement::InsertManyParameter { parameter, .. }
-            | Statement::UpsertParameter { parameter, .. } => Err(Error::new(
+            | Statement::UpsertParameter { parameter, .. }
+            | Statement::UpsertManyParameter { parameter, .. } => Err(Error::new(
                 "E_PARAM_MISSING",
                 format!("parameter '${parameter}' was not bound"),
             )),
@@ -554,6 +559,11 @@ impl Database {
                 values,
                 returning,
             } => self.upsert(&table, values, returning.as_ref()),
+            Statement::UpsertMany {
+                table,
+                values,
+                returning,
+            } => self.upsert_many(&table, values, returning.as_ref(), deadline),
             Statement::Update {
                 mut target,
                 mut assignments,
@@ -822,6 +832,114 @@ impl Database {
         Ok(response)
     }
 
+    fn upsert_many(
+        &mut self,
+        name: &str,
+        values: Value,
+        returning: Option<&Returning>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<QueryResponse> {
+        check_deadline(deadline)?;
+        let returning = self.bind_returning(name, returning)?;
+        let table = self.table(name)?;
+        let key = table.primary_key.clone().ok_or_else(|| {
+            Error::new(
+                "E_CONSTRAINT",
+                format!("upsert many requires a primary key on table '{name}'"),
+            )
+        })?;
+        let Value::List(values) = values else {
+            return Err(Error::new(
+                "E_TYPE",
+                "upsert many requires a list of complete records",
+            ));
+        };
+        if values.len() > MAX_BULK_INSERT_ROWS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "bulk upsert contains {} rows; limit is {MAX_BULK_INSERT_ROWS}",
+                    values.len()
+                ),
+            ));
+        }
+
+        let mut fields = Vec::with_capacity(values.len());
+        let mut batch_keys = BTreeSet::new();
+        for (position, value) in values.iter().enumerate() {
+            check_deadline_periodically(deadline, position)?;
+            let row = self.coerce_row(name, value, "upsert many")?;
+            let key_value = row_field(&row, &key)
+                .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
+            if !batch_keys.insert(key_value.index_key()) {
+                return Err(Error::new(
+                    "E_CONSTRAINT",
+                    format!("duplicate primary key in bulk upsert '{name}.{key}'"),
+                ));
+            }
+            fields.push(row);
+        }
+        let returned_fields = fields.iter().collect::<Vec<_>>();
+        let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
+
+        let table = self.table(name)?;
+        let mut rows = table.rows.clone();
+        let mut next_row_id = table.next_row_id;
+        let mut positions = BTreeMap::new();
+        for (position, row) in rows.iter().enumerate() {
+            let value = row_field(&row.fields, &key).ok_or_else(|| {
+                Error::new("E_FIELD", format!("missing primary key '{name}.{key}'"))
+            })?;
+            if positions.insert(value.index_key(), position).is_some() {
+                return Err(Error::new(
+                    "E_CONSTRAINT",
+                    format!("duplicate primary key '{name}.{key}'"),
+                ));
+            }
+        }
+
+        let mut actions = Vec::with_capacity(fields.len());
+        for (position, fields) in fields.into_iter().enumerate() {
+            check_deadline_periodically(deadline, position)?;
+            let key_value = row_field(&fields, &key)
+                .expect("bulk upsert rows were checked for their primary key")
+                .index_key();
+            if let Some(existing) = positions.get(&key_value).copied() {
+                rows[existing].fields = fields;
+                actions.push(UpsertAction::Updated);
+            } else {
+                let id = next_row_id;
+                next_row_id = next_row_id
+                    .checked_add(1)
+                    .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
+                let new_position = rows.len();
+                rows.push(Row { id, fields });
+                positions.insert(key_value, new_position);
+                actions.push(UpsertAction::Inserted);
+            }
+        }
+        check_deadline(deadline)?;
+        self.replace_rows_and_indexes(name, rows)?;
+        let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
+            unreachable!("bulk upsert table was validated")
+        };
+        table.next_row_id = next_row_id;
+
+        let inserted = actions
+            .iter()
+            .filter(|action| **action == UpsertAction::Inserted)
+            .count();
+        let updated = actions.len() - inserted;
+        let mut response = QueryResponse::ok_message(format!(
+            "upserted {} rows in '{name}' ({inserted} inserted, {updated} updated)",
+            actions.len()
+        ));
+        response.affected_rows = Some(actions.len());
+        response.upsert_actions = actions;
+        apply_returning(&mut response, returning, returned);
+        Ok(response)
+    }
+
     fn coerce_row(
         &self,
         name: &str,
@@ -878,6 +996,16 @@ impl Database {
             ));
         }
         Ok(row_type)
+    }
+
+    pub(crate) fn prepare_bulk_upsert_parameter(
+        &self,
+        table: &str,
+        returning: Option<&Returning>,
+    ) -> Result<ScalarType> {
+        Ok(ScalarType::List(Box::new(
+            self.prepare_upsert_parameter(table, returning)?,
+        )))
     }
 
     fn insert_fields(&mut self, name: &str, fields: BTreeMap<String, Value>) -> Result<RowId> {
@@ -1897,6 +2025,7 @@ impl Database {
             schema: None,
             affected_rows: None,
             upsert_action: None,
+            upsert_actions: Vec::new(),
             plan: None,
         })
     }
@@ -2746,6 +2875,61 @@ mod tests {
         );
         assert_eq!(table(&database, "entries").next_row_id, 3);
         assert_eq!(database.indexes["entries"]["id"].values().count(), 3);
+    }
+
+    #[test]
+    fn bulk_upsert_preserves_row_ids_and_rolls_back_the_whole_batch() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "type Entry =\n  id int\n  email text\ntable entries Entry\n  key id\ncreate unique index entries (email)\ninsert entries {id = 1, email = \"one@example.com\"}\ninsert entries {id = 2, email = \"two@example.com\"}",
+        );
+
+        let statement = crate::syntax::parse(
+            "upsert many entries [{id = 2, email = \"updated@example.com\"}, {id = 3, email = \"three@example.com\"}, {id = 4, email = \"four@example.com\"}]\nreturning id, email",
+        )
+        .unwrap()
+        .remove(0)
+        .statement;
+        let response = database.execute(statement).unwrap();
+        assert_eq!(
+            response.upsert_actions,
+            [
+                UpsertAction::Updated,
+                UpsertAction::Inserted,
+                UpsertAction::Inserted
+            ]
+        );
+        for (row, id) in response.rows.iter().zip([2, 3, 4]) {
+            assert!(row["id"].cmp_eq(&Value::Int(id)));
+        }
+        assert_eq!(
+            table(&database, "entries")
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert_eq!(table(&database, "entries").next_row_id, 4);
+
+        for source in [
+            "upsert many entries [{id = 5, email = \"five@example.com\"}, {id = 5, email = \"other@example.com\"}]",
+            "upsert many entries [{id = 5, email = \"updated@example.com\"}, {id = 6, email = \"six@example.com\"}]",
+        ] {
+            let before_rows = table(&database, "entries").rows.clone();
+            let before_cursor = table(&database, "entries").next_row_id;
+            let before_indexes = database.indexes.get("entries").cloned().unwrap();
+            let statement = crate::syntax::parse(source).unwrap().remove(0).statement;
+            let error = database.execute(statement).unwrap_err();
+            assert_eq!(error.code, "E_CONSTRAINT");
+            assert_eq!(
+                serde_json::to_value(&table(&database, "entries").rows).unwrap(),
+                serde_json::to_value(before_rows).unwrap()
+            );
+            assert_eq!(table(&database, "entries").next_row_id, before_cursor);
+            assert_eq!(database.indexes["entries"], before_indexes);
+        }
     }
 
     #[test]

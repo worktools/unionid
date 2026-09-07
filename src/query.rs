@@ -54,6 +54,17 @@ pub enum Statement {
         parameter_type: Option<ScalarType>,
         returning: Option<Returning>,
     },
+    UpsertMany {
+        table: String,
+        values: Value,
+        returning: Option<Returning>,
+    },
+    UpsertManyParameter {
+        table: String,
+        parameter: String,
+        parameter_type: Option<ScalarType>,
+        returning: Option<Returning>,
+    },
     Update {
         target: Pipeline,
         assignments: Vec<SetAssignment>,

@@ -444,6 +444,78 @@ table items Item
 }
 
 #[test]
+fn prepared_bulk_upsert_infers_row_lists_actions_and_deadlines() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "type Item =\n  id int\n  note text\ntable items Item\n  key id\ninsert items {id = 1, note = \"old\"}"
+            )
+            .ok
+    );
+    let row = |id, note: &str| {
+        Value::Record(BTreeMap::from([
+            ("id".into(), Value::Int(id)),
+            ("note".into(), Value::Text(note.into())),
+        ]))
+    };
+    let prepared = engine
+        .prepare("upsert many items $rows\nreturning id, note")
+        .unwrap();
+    assert_eq!(prepared.parameter_types()["rows"], "list Item");
+
+    let values = Value::List(vec![row(1, "updated"), row(2, "inserted")]);
+    let response =
+        engine.execute_prepared(&prepared, BTreeMap::from([("rows".into(), values.clone())]));
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(
+        response.upsert_actions,
+        [
+            unionid::UpsertAction::Updated,
+            unionid::UpsertAction::Inserted
+        ]
+    );
+    assert_eq!(response.rows.len(), 2);
+
+    let wire = Response::from_query("bulk", response);
+    let json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(
+        json["upsert_actions"],
+        serde_json::json!(["updated", "inserted"])
+    );
+    assert!(json.get("upsert_action").is_none());
+    assert_eq!(
+        serde_json::from_value::<Response>(json)
+            .unwrap()
+            .upsert_actions,
+        [
+            unionid::UpsertAction::Updated,
+            unionid::UpsertAction::Inserted
+        ]
+    );
+    let legacy: Response = serde_json::from_value(serde_json::json!({
+        "version": VERSION,
+        "request_id": "legacy",
+        "ok": true,
+        "message": "updated one row",
+        "columns": [],
+        "rows": [],
+        "upsert_action": "updated"
+    }))
+    .unwrap();
+    assert!(legacy.upsert_actions.is_empty());
+
+    let expired = engine.execute_prepared_until(
+        &prepared,
+        BTreeMap::from([("rows".into(), values)]),
+        Instant::now() - Duration::from_millis(1),
+    );
+    assert!(!expired.ok);
+    assert_eq!(expired.error.unwrap().code, "E_TIMEOUT");
+    assert_eq!(engine.execute("from items").rows.len(), 2);
+}
+
+#[test]
 fn parameterized_rows_commit_and_reopen_through_redb() {
     let temp = TempDir::new();
     let path = temp.0.join("data.redb");
