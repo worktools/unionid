@@ -28,6 +28,7 @@ pub enum Statement {
     InsertParameter {
         table: String,
         parameter: String,
+        parameter_type: Option<ScalarType>,
         returning: Option<Returning>,
     },
     InsertMany {
@@ -49,6 +50,7 @@ pub enum Statement {
     UpsertParameter {
         table: String,
         parameter: String,
+        parameter_type: Option<ScalarType>,
         returning: Option<Returning>,
     },
     Update {

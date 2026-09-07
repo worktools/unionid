@@ -106,6 +106,7 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             table,
             parameter,
             returning,
+            ..
         } => {
             line(output, depth, &format!("insert {table} ${parameter}"));
             returning_text(output, returning.as_ref(), depth);
@@ -139,6 +140,7 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             table,
             parameter,
             returning,
+            ..
         } => {
             line(output, depth, &format!("upsert {table} ${parameter}"));
             returning_text(output, returning.as_ref(), depth);

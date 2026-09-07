@@ -116,7 +116,10 @@ fn prepared_queries_reject_schema_changes_and_unsupported_mutations() {
         QueryAccessKind::PrimaryKeyLookup
     );
     assert_eq!(
-        engine.prepare("delete tasks").unwrap_err().code,
+        engine
+            .prepare("create table forbidden (id int)")
+            .unwrap_err()
+            .code,
         "E_PREPARE"
     );
     assert!(engine.execute("create table metadata (id int)").ok);
@@ -177,6 +180,161 @@ fn prepared_bulk_insert_infers_row_lists_and_honors_deadlines() {
 }
 
 #[test]
+fn prepared_dml_infers_types_and_executes_atomically() {
+    let mut engine = setup();
+    let state = |variant: &str, args: Vec<Value>| {
+        Value::Enum(unionid::model::EnumValue {
+            id: 0,
+            variant: variant.into(),
+            args,
+        })
+    };
+    let row = |id, title: &str, state: Value| {
+        Value::Record(BTreeMap::from([
+            ("id".into(), Value::Int(id)),
+            ("title".into(), Value::Text(title.into())),
+            ("state".into(), state),
+        ]))
+    };
+
+    let insert = engine
+        .prepare("insert tasks $row\nreturning id, state")
+        .unwrap();
+    assert_eq!(insert.parameter_types()["row"], "Task");
+    let inserted = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([("row".into(), row(1, "one", state("Pending", vec![])))]),
+    );
+    assert!(inserted.ok, "{}", inserted.message);
+    assert!(inserted.rows[0]["id"].cmp_eq(&Value::Int(1)));
+
+    let upsert = engine
+        .prepare("upsert tasks $row\nreturning id, title")
+        .unwrap();
+    assert_eq!(upsert.parameter_types()["row"], "Task");
+    let updated = engine.execute_prepared(
+        &upsert,
+        BTreeMap::from([("row".into(), row(1, "replaced", state("Pending", vec![])))]),
+    );
+    assert!(updated.ok, "{}", updated.message);
+    assert_eq!(
+        updated.upsert_action,
+        Some(unionid::db::UpsertAction::Updated)
+    );
+    assert!(updated.rows[0]["title"].cmp_eq(&Value::Text("replaced".into())));
+
+    let update = engine
+        .prepare(
+            "update tasks\nfilter id == $id\nset state = match state\n  Pending => $state\n  current => current\nreturning id, state",
+        )
+        .unwrap();
+    assert_eq!(update.parameter_types()["id"], "int");
+    assert_eq!(update.parameter_types()["state"], "State");
+    let running = state(
+        "Running",
+        vec![Value::Record(BTreeMap::from([
+            ("attempt".into(), Value::Int(3)),
+            ("worker".into(), Value::Text("prepared".into())),
+        ]))],
+    );
+    let changed = engine.execute_prepared(
+        &update,
+        BTreeMap::from([("id".into(), Value::Int(1)), ("state".into(), running)]),
+    );
+    assert!(changed.ok, "{}", changed.message);
+    assert_eq!(changed.affected_rows, Some(1));
+    assert_eq!(
+        changed.rows[0]["state"].source_text(),
+        "Running {attempt = 3, worker = \"prepared\"}"
+    );
+
+    let expired = engine.execute_prepared_until(
+        &update,
+        BTreeMap::from([
+            ("id".into(), Value::Int(1)),
+            ("state".into(), state("Pending", vec![])),
+        ]),
+        Instant::now() - Duration::from_millis(1),
+    );
+    assert!(!expired.ok);
+    assert_eq!(expired.error.unwrap().code, "E_TIMEOUT");
+    assert_eq!(
+        engine.execute("from tasks | filter id == 1").rows[0]["state"].source_text(),
+        "Running {attempt = 3, worker = \"prepared\"}"
+    );
+
+    let delete = engine
+        .prepare("delete tasks\nfilter id == $id\nreturning id")
+        .unwrap();
+    assert_eq!(delete.parameter_types()["id"], "int");
+    let deleted = engine.execute_prepared(&delete, BTreeMap::from([("id".into(), Value::Int(1))]));
+    assert!(deleted.ok, "{}", deleted.message);
+    assert_eq!(deleted.affected_rows, Some(1));
+    assert!(deleted.rows[0]["id"].cmp_eq(&Value::Int(1)));
+
+    assert!(engine.execute("create table metadata (id int)").ok);
+    let stale = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([("row".into(), row(2, "stale", state("Pending", vec![])))]),
+    );
+    assert!(!stale.ok);
+    assert_eq!(stale.error.unwrap().code, "E_SCHEMA_CHANGED");
+}
+
+#[test]
+fn prepared_dml_rejects_invalid_empty_table_operations_before_execution() {
+    let mut engine = setup();
+    assert!(engine.execute("delete tasks").ok);
+
+    assert_eq!(
+        engine
+            .prepare("update tasks\nset missing = $value")
+            .unwrap_err()
+            .code,
+        "E_FIELD"
+    );
+    assert_eq!(
+        engine
+            .prepare("delete tasks\nfilter missing == $value")
+            .unwrap_err()
+            .code,
+        "E_FIELD"
+    );
+    assert_eq!(
+        engine
+            .prepare("update tasks\nfilter id == $value\nset title = $value")
+            .unwrap_err()
+            .code,
+        "E_TYPE"
+    );
+    assert_eq!(
+        engine
+            .prepare("update tasks\nset state = match state\n  Pending => $state")
+            .unwrap_err()
+            .code,
+        "E_MATCH"
+    );
+    assert_eq!(
+        engine
+            .prepare("delete tasks\nreturning missing")
+            .unwrap_err()
+            .code,
+        "E_FIELD"
+    );
+
+    let mut no_key = Engine::memory();
+    assert!(no_key.execute("create table items (id int)").ok);
+    assert_eq!(
+        no_key.prepare("upsert items $row").unwrap_err().code,
+        "E_CONSTRAINT"
+    );
+    assert_eq!(
+        no_key.prepare("insert items {id = 1}").unwrap_err().code,
+        "E_PREPARE"
+    );
+}
+
+#[test]
 fn prepared_bulk_insert_rejects_the_transitional_wal() {
     let temp = TempDir::new();
     let wal = temp.0.join("prepared-bulk.wal");
@@ -195,6 +353,18 @@ fn prepared_bulk_insert_rejects_the_transitional_wal() {
                 "id".into(),
                 Value::Int(1),
             )]))]),
+        )]),
+    );
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "E_CONFIG");
+    assert!(engine.execute("from items").rows.is_empty());
+
+    let prepared = engine.prepare("insert items $row").unwrap();
+    let response = engine.execute_prepared(
+        &prepared,
+        BTreeMap::from([(
+            "row".into(),
+            Value::Record(BTreeMap::from([("id".into(), Value::Int(1))])),
         )]),
     );
     assert!(!response.ok);
@@ -305,14 +475,22 @@ fn parameterized_rows_commit_and_reopen_through_redb() {
         assert_eq!(response.affected_rows, Some(2));
         assert!(response.rows[0]["id"].cmp_eq(&Value::Int(2)));
         assert!(response.rows[1]["id"].cmp_eq(&Value::Int(1)));
+
+        let delete = engine
+            .prepare("delete items\nfilter id == $id\nreturning id")
+            .unwrap();
+        let response =
+            engine.execute_prepared(&delete, BTreeMap::from([("id".into(), Value::Int(1))]));
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(response.affected_rows, Some(1));
+        assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
     }
     let mut reopened = Engine::open_redb(&path).unwrap();
     let response = reopened.execute("from items | sort id");
     assert!(response.ok, "{}", response.message);
-    assert_eq!(response.rows.len(), 3);
-    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
-    assert!(response.rows[1]["id"].cmp_eq(&Value::Int(2)));
-    assert!(response.rows[2]["id"].cmp_eq(&Value::Int(i64::MAX)));
+    assert_eq!(response.rows.len(), 2);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(response.rows[1]["id"].cmp_eq(&Value::Int(i64::MAX)));
     assert!(reopened.check_integrity().unwrap().backend_clean);
 }
 

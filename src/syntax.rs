@@ -1053,6 +1053,7 @@ impl Parser {
                 Statement::InsertParameter {
                     table,
                     parameter,
+                    parameter_type: None,
                     returning,
                 }
             });
@@ -1087,6 +1088,7 @@ impl Parser {
             return Ok(Statement::UpsertParameter {
                 table,
                 parameter,
+                parameter_type: None,
                 returning,
             });
         }

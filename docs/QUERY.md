@@ -33,7 +33,7 @@ take 20
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | — |
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
-| 参数 | `$id` / `insert table $row` / `insert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及只读查询与批量 insert 的 schema-aware prepared operation | #22/#89 |
+| 参数 | `$id` / `insert table $row` / `insert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91 |
 | ADT 派生列 | `derive x = match ...` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
 | 布尔表达式与集合函数 | `and/or/not`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于普通 filter 与 match condition | — |
 | 其他派生列 | `derive score = priority + bonus` | 已实现 scalar 与 bool expression、typed 参数及后续 stage 作用域 | — |
@@ -210,6 +210,8 @@ returning id, event
 Rust API 与 version 1 TCP 可传入 `insert many events $rows`；prepared operation 会把 `$rows` 推导为 `list Event` 并绑定当前 schema identity。每个输入 record 先按表 row type 递归补默认值和检查命名 ADT，再对“旧 rows + 完整新批次”统一检查主键并重建派生索引。输入顺序决定新 RowId 和 returning 行顺序；空 list 返回 `affected_rows = 0`，有 returning 时仍返回稳定 columns。
 
 单批最多 100,000 行，并继续受 1 MiB source／TCP frame、16 MiB 单值 codec、8 MiB returning 与请求 deadline 约束。字段、类型、批内／已有主键冲突、预算、deadline 或 redb commit 失败时，候选数据库不会发布，因此没有部分 rows、indexes 或 RowId 游标缺口。prepared 写入只支持 memory/redb；过渡 WAL 无法重放绑定后的参数值并返回 `E_CONFIG`。当前没有批量 upsert、流式导入或跨请求事务。
+
+Rust `prepare` 也可在相同 schema identity 下绑定单行 `insert table $row`、`upsert table $row` 和下文的 update/delete。完整 row 参数显示为表的命名类型；filter、set 和 match 结果参数从字段位置推导。prepare 不扫描或修改行，但会检查表与主键要求、target stage、字段、constructor、穷尽性和 returning，所以空表不会延迟 DML 错误。执行继续使用 `execute_prepared` 或带 deadline 的 `execute_prepared_until`，并通过同一候选事务提交。
 
 ## Pipeline 更新与删除
 
@@ -587,5 +589,6 @@ filter match state
 | 原子修改 | [task_mutations.uid](../examples/task_mutations.uid) 与测试内脚本 | typed/nested/simultaneous set、match target、穷尽 ADT match assignment、顶层保留 binding、typed 参数、主键冲突、运行时回滚、索引维护、稳定 RowId、TCP 和 redb 重开 | `update_*`、`failed_multi_row_updates_*`、`versioned_tcp_updates_*`、`adt_match_updates_*`、`redb_update_delete_*` |
 | 主键 Upsert | [config.uid](../examples/config.uid) 与测试内脚本 | insert/replace action、完整 row 默认值、重复执行、回滚、索引更新、RowId/cursor 和 redb 重开 | `upsert_*`、`local_cli_reports_the_structured_upsert_action`、`redb_update_delete_*` |
 | 批量插入 | [events.uid](../examples/events.uid) 与测试内脚本 | literal／参数 list、默认值、嵌套 ADT、空批次、批内冲突、预算、deadline、RowId/index 原子性、prepared/redb/TCP 与 returning 顺序 | `typed_bulk_insert_*`、`bulk_insert_validates_*`、`prepared_bulk_insert_*`、`parameterized_rows_*`、`versioned_tcp_bulk_inserts_*` |
+| Prepared DML | [parameters.rs](../examples/parameters.rs) 与测试内脚本 | 命名 row/list 参数、filter/set/match 推导、空表预检、主键/returning、schema 失效、deadline、WAL 拒绝和 redb 重开 | `prepared_dml_*`、`prepared_bulk_insert_*`、`parameterized_rows_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。

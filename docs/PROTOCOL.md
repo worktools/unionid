@@ -68,7 +68,7 @@ Introspection 使用同一版本请求，返回完整的类型化快照，客户
 
 ## Rust 嵌入接口
 
-<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline、explain，以及参数化的 <code>insert many table $rows</code>，并记录当前 schema revision/hash 与 <code>list RowType</code> 参数类型；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 批量写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
+<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert、参数化 upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
 
 可运行示例：
 

@@ -22,8 +22,8 @@ table tasks Task
             Value::Text("quoted \"text\"\nwith | pipe".into()),
         ),
     ]));
-    let inserted =
-        database.execute_with_params("insert tasks $row", BTreeMap::from([("row".into(), row)]));
+    let insert = database.prepare("insert tasks $row\nreturning id")?;
+    let inserted = database.execute_prepared(&insert, BTreeMap::from([("row".into(), row)]));
     if let Some(error) = inserted.error {
         return Err(error.into());
     }
