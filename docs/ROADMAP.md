@@ -4,7 +4,7 @@
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
-[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
+[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
 v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。当前进入 [M5 总览 #111](https://github.com/worktools/unionid/issues/111)：先收紧真实生产边界，再改善大结果集、标量类型和 CLI 诊断，最后按独立需求验证语言扩展；join、window 和分布式仍不混入这一轮。
 
@@ -105,6 +105,10 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#132](https://github.com/worktools/unionid/issues/132) | [接口] Rust/TCP/HTTP 分页与取消旅程 | P1 | [#131](https://github.com/worktools/unionid/issues/131) |
 | [#135](https://github.com/worktools/unionid/issues/135) | [服务] 显式取消与有背压的流式读取 | P2 | [#116](https://github.com/worktools/unionid/issues/116)；由 #132 拆出 |
 | [#115](https://github.com/worktools/unionid/issues/115) | [类型] 生产标量契约 | P1 | 先冻结时间、十进制与二进制编码边界 |
+| [#137](https://github.com/worktools/unionid/issues/137) | [类型] 生产标量兼容与 codec 基础 | P1 | [#115](https://github.com/worktools/unionid/issues/115) RFC；后续标量共同前置 |
+| [#138](https://github.com/worktools/unionid/issues/138) | [类型] UUID 与 bytes 端到端能力 | P1 | [#137](https://github.com/worktools/unionid/issues/137) |
+| [#139](https://github.com/worktools/unionid/issues/139) | [类型] date、timestamp 与 duration | P1 | [#137](https://github.com/worktools/unionid/issues/137) |
+| [#140](https://github.com/worktools/unionid/issues/140) | [类型] 固定精度 decimal | P1 | [#137](https://github.com/worktools/unionid/issues/137) |
 | [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | P1 | [#112](https://github.com/worktools/unionid/issues/112)、[#114](https://github.com/worktools/unionid/issues/114) |
 | [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | P1 | 核心错误协议稳定 |
 | [#122](https://github.com/worktools/unionid/issues/122) | [文档] 中英双语 README 与 ADT/query 产品入口 | P1 | 使用已发布 v0.1.0 和 [#112](https://github.com/worktools/unionid/issues/112) 的真实入口 |
@@ -114,7 +118,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect 和 #131 的有界 page 已完成；当前由 #132 验证完整 Rust/TCP/HTTP 旅程。显式取消与 streaming 已拆到 #135，等待 #116 的一致性读快照。随后继续 #115、#116 和 #117。#118–#120 是从已关闭的宽泛 #25 拆出的独立探索，不作为生产正确性的前置条件。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect 以及 #130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程已完成。当前先通过 [RFC 0004](rfc/0004-production-scalars.md) 收敛 #115，并按兼容基础、UUID/bytes、时间和 decimal 分批实现；随后继续 #116 和 #117。显式取消与 streaming 已拆到 #135，等待 #116 的一致性读快照。#118–#120 是从已关闭的宽泛 #25 拆出的独立探索，不作为生产正确性的前置条件。
 
 ## 维护约定
 

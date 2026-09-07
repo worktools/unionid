@@ -193,6 +193,27 @@ table documents Document
 
 这些值没有对象身份、共享节点或循环边，并受 64 层值预算约束。当前查询可以在源码中写出已知深度的 pattern，不提供任意深度遍历、递归函数或 subtree 路径索引；需要频繁跨节点查询的任意图仍应拆表或交给应用代码。类型有效性、codec、migration 与 backup 规则见 [RFC 0001](rfc/0001-finite-recursive-adts.md)。
 
+## 7. 生产标量：身份、时间、金额与 binary
+
+现有场景用 `text` 表示 ID/hash、用 `int` 表示时间/金额，能验证 ADT 查询，却会把格式、单位与精度留给应用。生产 schema 需要在不削弱命名 ADT 的前提下把这些物理语义带到索引和协议边界。以下是 [RFC 0004](rfc/0004-production-scalars.md) 的目标语法，尚不是当前可执行示例：
+
+```text
+type Payment =
+  invoice_id uuid
+  issued_on date
+  received_at timestamp
+  retry_after duration
+  amount decimal 18 2
+  payload_hash bytes
+
+table payments Payment
+  key invoice_id
+```
+
+它覆盖几类反复出现的操作：UUIDv4/v7 可作为分布式写入产生的稳定 key；带 offset 的事件时间在插入时规范为同一个 UTC instant；账单金额按固定 scale 精确求和并在溢出时整体失败；retry duration 保持单位；digest 以 bytes 做精确匹配，避免 hex 大小写造成两个逻辑 key。应用仍可用 `type InvoiceId = uuid`、`type Currency = CNY | USD` 和 `{amount decimal 18 2, currency Currency}` 保留领域约束。
+
+迁移场景必须验证已有 text/int 数据，而不是把 cast 隐藏在类型变化中。例如 text ID 通过 `uuid_parse old` 转换，旧 amount text 通过 `decimal_parse old 18 2` 转换；任一坏行会阻止 schema、数据、索引和 ledger 发布。wire、redb、backup、cursor 与旧版本兼容边界由 RFC 的 golden vectors 一起验收。
+
 ## 功能覆盖与优先级
 
 | 应用需要 | 当前能力 | 缺口与任务 | v0.1 优先级 |
@@ -204,7 +225,8 @@ table documents Document
 | 派生普通值或从 ADT 分支归一结果 | 已实现 scalar/bool 普通 derive、递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | — | #59，已满足 |
 | 复用重复业务表达式 | 已实现查询局部常量、单/多参数非递归纯函数、有限推断、词法遮蔽和展开预算 | 泛型、高阶与递归函数延后 | #61，P0 |
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none；filter、普通／match derive、typed set 和 migration conversion 共享这些 bool 结果 | 通用高阶函数延后 | #36/#100，已满足核心 |
-| 可复现列表顺序与分页 | 复合 sort、范围 take、类型化索引访问计划与 explain 已实现 | cursor 分页延后 | #34/#16，已满足 v0.1 |
+| 可复现列表顺序与分页 | 复合 sort、范围 take、类型化索引访问计划、explain 与有界双向 cursor page 已实现 | 真正跨写入 snapshot 等待 #116；显式取消/streaming 见 #135 | #34/#16/#131/#132 |
+| UUID、时间、定点数与 binary | RFC 已冻结候选语法、值域、ordering、wire/codec 和 migration 边界 | 按兼容基础、UUID/bytes、时间、decimal 四个切片实现 | #115，M5 P1 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | option helper/元素谓词可继续扩展 | #10/#22/#36/#91 |
 | 批量写入 typed row list | `insert many` 与 `upsert many` 已实现默认值、嵌套 ADT、输入内主键去重、整批主键／unique index 验证、稳定 RowId/returning/action 顺序和 memory/redb/TCP 原子提交 | 流式导入单独设计 | #89/#97，P1 核心 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match/sort/take target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 多写者／skip-locked 不在当前单写模型内 | #15/#83/#85/#87 |

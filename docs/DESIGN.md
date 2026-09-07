@@ -2,7 +2,7 @@
 
 日期：2026-09-06。状态：完整目标设计，部分子集已实现；当前可执行范围见 [LANGUAGE.md](LANGUAGE.md)，查询语义和能力状态见 [QUERY.md](QUERY.md)，实现与验证见 [开发记录](DEVELOPMENT.md)。其余语法由 M0 的语言设计 issue 继续收敛。用户已明确：类型定义也采用 PRQL 风格，不使用分号，减少影响阅读的标点，不采用 TypeScript 风格的密集类型注解。
 
-本文说明设计理由与目标体验；执行顺序、依赖和完成状态以 [GitHub issues](https://github.com/worktools/unionid/issues) 为准，入口见 [路线图](ROADMAP.md)。当前可运行语法见 [语言文档](LANGUAGE.md)，当前查询行为见 [查询语言参考](QUERY.md)。
+本文说明设计理由与目标体验；执行顺序、依赖和完成状态以 [GitHub issues](https://github.com/worktools/unionid/issues) 为准，入口见 [路线图](ROADMAP.md)。当前可运行语法见 [语言文档](LANGUAGE.md)，当前查询行为见 [查询语言参考](QUERY.md)，UUID、时间、定点 decimal 和 bytes 的兼容设计见 [生产标量 RFC](rfc/0004-production-scalars.md)。
 
 ## 1. 产品定位
 
