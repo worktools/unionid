@@ -1,6 +1,13 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use unionid::{Engine, Value};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Task {
+    id: i64,
+    title: String,
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut database = Engine::memory();
@@ -15,15 +22,15 @@ table tasks Task
         return Err(error.into());
     }
 
-    let row = Value::Record(BTreeMap::from([
-        ("id".into(), Value::Int(9_007_199_254_740_993)),
-        (
-            "title".into(),
-            Value::Text("quoted \"text\"\nwith | pipe".into()),
-        ),
-    ]));
-    let insert = database.prepare("insert tasks $row\nreturning id")?;
-    let inserted = database.execute_prepared(&insert, BTreeMap::from([("row".into(), row)]));
+    let row = Task {
+        id: 9_007_199_254_740_993,
+        title: "quoted \"text\"\nwith | pipe".into(),
+    };
+    let insert = database.prepare("insert tasks $row\nreturning")?;
+    let inserted = database.execute_prepared(
+        &insert,
+        BTreeMap::from([("row".into(), Value::from_serde(&row)?)]),
+    );
     if let Some(error) = inserted.error {
         return Err(error.into());
     }
@@ -36,6 +43,6 @@ table tasks Task
     if let Some(error) = result.error {
         return Err(error.into());
     }
-    println!("{}", serde_json::to_string_pretty(&result.rows)?);
+    println!("{:#?}", result.typed_rows::<Task>()?);
     Ok(())
 }

@@ -129,6 +129,28 @@ take 20
 
 兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。filter、match condition、derive 数值表达式与 update `set` 可引用 `$name`；完整单行 insert/upsert 写成 `insert tasks $row`，批量 insert 写成 `insert many tasks $rows`。参数由调用端提供 typed value，在 AST 上绑定并在扫描前按上下文检查，详见[版本化接口与参数](PROTOCOL.md)。
 
+嵌入式 Rust 应用可以直接把 serde 类型用于 prepared 参数和结果，无需手工拆装 `Value`：
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Task {
+    id: i64,
+    state: State,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum State {
+    Pending,
+    Running { worker: String, attempt: i64 },
+}
+
+let row = Value::from_serde(&Task { /* ... */ })?;
+let response = engine.execute_prepared(&insert, BTreeMap::from([("row".into(), row)]));
+let tasks: Vec<Task> = response.typed_rows()?;
+```
+
+转换保留 struct、enum 的 unit/newtype/tuple/struct payload、Option、tuple 与 sequence 形状；prepared binder 再按目标 named ADT schema 补上 nominal identity 并严格检查。读取时内部 type/variant/field ID 不泄漏到应用类型。enum 使用 serde 默认的 externally tagged representation；自定义 representation 需与数据库 constructor 形状一致。unionid `int` 对应 i64，超范围 unsigned integer、非有限 float、bytes 和非文本 map key 返回 `E_SERDE`。完整可运行代码见 [`examples/parameters.rs`](../examples/parameters.rs)。
+
 ## 更新与删除
 
 `update` 和 `delete` 从目标表开始，后续 `filter` 与查询使用相同的 bool 或穷尽 match 语义。多行更新先写完目标选择，再写一个或多个 `set`：
