@@ -4,14 +4,28 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use rustyline::history::DefaultHistory;
+use rustyline::{CompletionType, Config, Editor, error::ReadlineError};
+
 use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_directory};
+pub use crate::repl::HistoryOptions;
+use crate::repl::{CompletionHelper, HistoryStore};
 use crate::{
-    Engine, Error, InputStatus, ProtocolRequest, ProtocolResponse, QueryAccessKind, QueryResponse,
-    QueryStageKind, SchemaCheck, Value, backup, input_status,
+    Engine, Error, InputStatus, Introspection, IntrospectionKind, ProtocolRequest,
+    ProtocolResponse, QueryAccessKind, QueryResponse, QueryStageKind, SchemaCheck, StorageMode,
+    Value, backup, input_status,
 };
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
-    run_local_engine(Engine::memory(), source, json)
+    run_local_with_options(source, json, HistoryOptions::default())
+}
+
+pub fn run_local_with_options(
+    source: Option<String>,
+    json: bool,
+    history: HistoryOptions,
+) -> Result<(), String> {
+    run_local_engine(Engine::memory(), source, json, history)
 }
 
 pub fn format_source(source: &str, check: bool) -> Result<(), String> {
@@ -32,8 +46,17 @@ pub fn run_local_redb(
     source: Option<String>,
     json: bool,
 ) -> Result<(), String> {
+    run_local_redb_with_options(path, source, json, HistoryOptions::default())
+}
+
+pub fn run_local_redb_with_options(
+    path: impl Into<std::path::PathBuf>,
+    source: Option<String>,
+    json: bool,
+    history: HistoryOptions,
+) -> Result<(), String> {
     let engine = Engine::open_redb(path).map_err(|error| error.to_string())?;
-    run_local_engine(engine, source, json)
+    run_local_engine(engine, source, json, history)
 }
 
 pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(), String> {
@@ -424,21 +447,40 @@ fn print_migration_status(status: &MigrationStatus, json: bool) -> Result<(), St
     Ok(())
 }
 
-fn run_local_engine(mut engine: Engine, source: Option<String>, json: bool) -> Result<(), String> {
+fn run_local_engine(
+    mut engine: Engine,
+    source: Option<String>,
+    json: bool,
+    history: HistoryOptions,
+) -> Result<(), String> {
     if let Some(source) = source {
         return print_response(&engine.execute(&source), json);
     }
-    repl(Some(&mut engine), "", json)
+    repl(Some(&mut engine), "", json, history)
 }
 
 pub fn run_cli(addr: &str, source: Option<String>, json: bool) -> Result<(), String> {
+    run_cli_with_options(addr, source, json, HistoryOptions::default())
+}
+
+pub fn run_cli_with_options(
+    addr: &str,
+    source: Option<String>,
+    json: bool,
+    history: HistoryOptions,
+) -> Result<(), String> {
     if let Some(source) = source {
         return print_response(&send_one(addr, &source)?, json);
     }
-    repl(None, addr, json)
+    repl(None, addr, json, history)
 }
 
-fn repl(mut engine: Option<&mut Engine>, addr: &str, json: bool) -> Result<(), String> {
+fn repl(
+    mut engine: Option<&mut Engine>,
+    addr: &str,
+    json: bool,
+    history_options: HistoryOptions,
+) -> Result<(), String> {
     let stdin = io::stdin();
     let interactive = stdin.is_terminal();
     if !interactive {
@@ -452,41 +494,100 @@ fn repl(mut engine: Option<&mut Engine>, addr: &str, json: bool) -> Result<(), S
         };
         return print_response(&response, json);
     }
-    eprintln!(
-        "Enter a script. A blank line runs it when ready; .quit exits. Local mode also supports .schema and .tables."
-    );
+    eprintln!("Enter a script. A blank line runs it when ready; .help lists commands.");
+    let mut introspection = load_introspection(engine.as_deref(), addr, IntrospectionKind::Schema)
+        .map_err(|error| {
+            eprintln!(
+                "catalog completion unavailable: {error}; keyword completion remains available"
+            );
+        })
+        .ok();
+    let config = Config::builder()
+        .completion_type(CompletionType::List)
+        .auto_add_history(false)
+        .build();
+    let mut editor = Editor::<CompletionHelper, DefaultHistory>::with_config(config)
+        .map_err(|error| format!("initialize line editor: {error}"))?;
+    editor.set_helper(Some(CompletionHelper::new(introspection.as_ref())));
+    let loaded = HistoryStore::load(&history_options);
+    if let Some(warning) = loaded.warning {
+        eprintln!("warning: {warning}");
+    }
+    for entry in loaded.entries {
+        let _ = editor.add_history_entry(entry);
+    }
+    let mut history = loaded.store;
     let mut input = ReplInput::new();
     loop {
-        eprint!("{}", input.prompt());
-        io::stderr().flush().map_err(|e| e.to_string())?;
-        let mut line = String::new();
-        let n = stdin.read_line(&mut line).map_err(|e| e.to_string())?;
-        if input.is_empty() && matches!(line.trim(), ".quit" | "quit" | "exit") {
+        let (line, eof) = match editor.readline(input.prompt()) {
+            Ok(line) => (format!("{line}\n"), false),
+            Err(ReadlineError::Eof) => (String::new(), true),
+            Err(ReadlineError::Interrupted) => {
+                input.reset();
+                eprintln!("input cleared");
+                continue;
+            }
+            Err(error) => return Err(format!("read input: {error}")),
+        };
+        let command = line.trim();
+        if input.is_empty() && matches!(command, ".quit" | "quit" | "exit") {
+            remember(&mut editor, &mut history, command);
             break;
         }
-        if input.is_empty()
-            && let Some(engine) = engine.as_deref()
-        {
-            match line.trim() {
-                ".schema" => {
-                    println!("{}", engine.schema());
-                    continue;
-                }
-                ".tables" => {
-                    println!("{}", engine.tables().join("\n"));
-                    continue;
-                }
-                _ => {}
-            }
+        if input.is_empty() && command == ".help" {
+            remember(&mut editor, &mut history, command);
+            print_repl_help();
+            continue;
         }
-        match input.accept(&line, n == 0) {
+        if input.is_empty()
+            && let Some(kind) = introspection_command(command)
+        {
+            remember(&mut editor, &mut history, command);
+            match load_introspection(engine.as_deref(), addr, kind) {
+                Ok(current) => {
+                    print_introspection(&current, kind, json)?;
+                    introspection = Some(current);
+                    editor
+                        .helper_mut()
+                        .expect("REPL helper is installed")
+                        .set_catalog(introspection.as_ref());
+                }
+                Err(error) => eprintln!("{error}"),
+            }
+            continue;
+        }
+        match input.accept(&line, eof) {
             ReplAction::Continue | ReplAction::Ready => {}
             ReplAction::Execute(source) => {
+                remember(&mut editor, &mut history, &source);
                 let response = match engine.as_deref_mut() {
                     Some(engine) => Ok(engine.execute(&source)),
                     None => send_one(addr, &source),
                 };
-                match response.and_then(|response| print_response(&response, json)) {
+                match response.and_then(|response| {
+                    let changed = response.schema.as_ref()
+                        != introspection.as_ref().map(|current| &current.schema);
+                    let result = print_response(&response, json);
+                    if changed && response.ok {
+                        match load_introspection(
+                            engine.as_deref(),
+                            addr,
+                            IntrospectionKind::Schema,
+                        ) {
+                            Ok(current) => {
+                                introspection = Some(current);
+                                editor
+                                    .helper_mut()
+                                    .expect("REPL helper is installed")
+                                    .set_catalog(introspection.as_ref());
+                            }
+                            Err(error) => eprintln!(
+                                "catalog completion unavailable: {error}; keyword completion remains available"
+                            ),
+                        }
+                    }
+                    result
+                }) {
                     Ok(()) => {}
                     Err(error) => eprintln!("{error}"),
                 }
@@ -501,11 +602,118 @@ fn repl(mut engine: Option<&mut Engine>, addr: &str, json: bool) -> Result<(), S
             }
             ReplAction::Exit => break,
         }
-        if n == 0 {
+        if eof {
             break;
         }
     }
     Ok(())
+}
+
+fn remember(
+    editor: &mut Editor<CompletionHelper, DefaultHistory>,
+    history: &mut HistoryStore,
+    source: &str,
+) {
+    let source = source.trim_end();
+    if source.is_empty() {
+        return;
+    }
+    let _ = editor.add_history_entry(source);
+    if let Err(error) = history.append(source) {
+        eprintln!("warning: {error}; history disabled for this session");
+        history.disable();
+    }
+}
+
+fn load_introspection(
+    engine: Option<&Engine>,
+    addr: &str,
+    kind: IntrospectionKind,
+) -> Result<Introspection, String> {
+    match engine {
+        Some(engine) => Ok(engine.introspection()),
+        None => send_introspection(addr, kind),
+    }
+}
+
+pub fn send_introspection(addr: &str, kind: IntrospectionKind) -> Result<Introspection, String> {
+    let request = ProtocolRequest::introspection("cli-introspection", kind);
+    let response = send_request(addr, &request)?;
+    if !response.ok {
+        return Err(response.message);
+    }
+    response
+        .introspection
+        .ok_or_else(|| "server returned no introspection payload".into())
+}
+
+fn introspection_command(command: &str) -> Option<IntrospectionKind> {
+    match command {
+        ".schema" => Some(IntrospectionKind::Schema),
+        ".tables" => Some(IntrospectionKind::Tables),
+        ".types" => Some(IntrospectionKind::Types),
+        ".storage" => Some(IntrospectionKind::Storage),
+        _ => None,
+    }
+}
+
+fn print_introspection(
+    introspection: &Introspection,
+    kind: IntrospectionKind,
+    json: bool,
+) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "kind": kind,
+                "introspection": introspection,
+            }))
+            .map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+    match kind {
+        IntrospectionKind::Schema => {
+            if introspection.schema_source.is_empty() {
+                println!("(empty schema)");
+            } else {
+                println!("{}", introspection.schema_source);
+            }
+        }
+        IntrospectionKind::Tables => print_names(&introspection.tables, "tables"),
+        IntrospectionKind::Types => print_names(&introspection.types, "types"),
+        IntrospectionKind::Storage => {
+            let mode = match introspection.storage {
+                StorageMode::Memory => "memory",
+                StorageMode::Redb => "redb",
+                StorageMode::LegacyWal => "legacy_wal",
+                StorageMode::LegacyWalSnapshot => "legacy_wal_snapshot",
+            };
+            println!("mode {mode}");
+            println!("schema revision {}", introspection.schema.revision);
+            println!("schema hash {}", introspection.schema.hash);
+            println!("migrations {}", introspection.migration_count);
+            if let Some(head) = &introspection.migration_head {
+                println!("migration head {head}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_names(names: &[String], noun: &str) {
+    if names.is_empty() {
+        println!("(no {noun})");
+    } else {
+        println!("{}", names.join("\n"));
+    }
+}
+
+fn print_repl_help() {
+    eprintln!(
+        ".schema   show the canonical schema\n.tables   list tables\n.types    list named types\n.storage  show storage, schema identity, and migration head\n.help     show this help\n.quit     exit\n\nTab completes language keywords and catalog names. A blank line submits a complete script."
+    );
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -763,7 +971,7 @@ pub fn display_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReplAction, ReplInput};
+    use super::{IntrospectionKind, ReplAction, ReplInput, introspection_command};
 
     #[test]
     fn repl_tracks_continuation_ready_submission_and_eof() {
@@ -819,5 +1027,26 @@ mod tests {
         );
         assert!(empty.is_empty());
         assert_eq!(empty.accept("", true), ReplAction::Exit);
+    }
+
+    #[test]
+    fn every_documented_introspection_command_maps_to_a_protocol_kind() {
+        assert_eq!(
+            introspection_command(".schema"),
+            Some(IntrospectionKind::Schema)
+        );
+        assert_eq!(
+            introspection_command(".tables"),
+            Some(IntrospectionKind::Tables)
+        );
+        assert_eq!(
+            introspection_command(".types"),
+            Some(IntrospectionKind::Types)
+        );
+        assert_eq!(
+            introspection_command(".storage"),
+            Some(IntrospectionKind::Storage)
+        );
+        assert_eq!(introspection_command(".unknown"), None);
     }
 }

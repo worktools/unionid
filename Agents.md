@@ -39,6 +39,7 @@
 ## 当前开发进展（2026-09-07）
 
 - 已开始新的无分号语言预览；当前可执行子集见 `docs/LANGUAGE.md`，查询细则见 `docs/QUERY.md`，完整目标见 `docs/DESIGN.md`。
+- REPL 已支持可关闭／可配置路径的安全持久历史、关键字与当前 catalog 补全；`.schema`、`.tables`、`.types`、`.storage` 通过共享 introspection 在 memory、redb 与 version 1 TCP 模式保持一致。
 - 类型声明和查询采用 PRQL 风格，优先空格、换行与缩进，不引入分号或 TypeScript 风格的密集注解。
 - 复杂 filter 和 match condition 可用缩进块或跨行括号组织；混用 `and` 与 `or` 时规范写法使用括号显式表达分组。括号属于帮助理解的必要符号，应谨慎使用而非一味移除。
 - `Engine` 是本地 Rust API、CLI 和 TCP 的共享入口；每次请求是一个原子脚本。

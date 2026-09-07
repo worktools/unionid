@@ -66,7 +66,7 @@ cargo run -- fmt --file examples/tasks.uid --check
 cargo run -- cli --memory
 ```
 
-REPL 用 `unionid>` 表示新输入、`..>` 表示语法仍需续写、`ready>` 表示当前脚本已经完整。只在 `ready>` 后用空行提交；不完整时空行会保留缓冲区，明确非法的输入会立即显示源码位置并重新开始。`.schema` 查看类型与表，`.tables` 列出表，`.quit` 退出。交互 EOF 会执行一次完整缓冲区；不完整缓冲区则报告错误后退出。文件或重定向 stdin 仍读取到 EOF 后作为一个原子脚本整体执行。查询失败返回非零退出码。
+REPL 用 `unionid>` 表示新输入、`..>` 表示语法仍需续写、`ready>` 表示当前脚本已经完整。只在 `ready>` 后用空行提交；不完整时空行会保留缓冲区，明确非法的输入会立即显示源码位置并重新开始。Tab 补全语言关键字和当前 catalog 的表／类型／字段；`.schema`、`.tables`、`.types`、`.storage` 在 memory、redb 和 TCP 模式返回一致 introspection。交互历史默认只持久化不含写入或字面量的安全输入，可用 `--history <path>` 改路径或 `--no-history` 关闭。详细行为见 [CLI 与交互式 REPL](docs/CLI.md)。
 
 当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，[version 1 协议与参数](docs/PROTOCOL.md)描述无损 ADT/i64 wire codec 和 Rust prepared query，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)，声明式目标结构与草稿生成见 [SCHEMA-DIFF.md](docs/SCHEMA-DIFF.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。`derive x = match ...` 可从 binding 和有类型算术构造新的 option、sum、record、tuple 和 list；`derive x = expression` 可直接追加 scalar 或 bool 结果并供后续 stage 使用。普通 filter 与 match condition 支持括号、int/float 算术、`not/and/or`、字段间比较、`contains/length`、Option helper，以及有类型的嵌套 `any/all` 元素谓词。查询局部 `let` 可定义常量和有类型、非递归纯函数，以空格调用并在 filter、derive、match 与 aggregate 输入中复用。`group ... aggregate` 与未分组 `aggregate` 提供 count/sum/min/max，并保留命名字段和 ADT group key 的类型。`explain` 返回 full scan／主键或二级索引 lookup、当前候选数、stage 顺序和结果 schema，不执行数据行。`update`/`delete` 复用 filter，多个 typed `set` 同时求值；`upsert` 按主键插入或整行替换。三者都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/diff/apply/status` 管理不可变迁移历史。
 
@@ -90,6 +90,7 @@ REPL 用 `unionid>` 表示新输入、`..>` 表示语法仍需续写、`ready>` 
 
 - [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
 - [查询语言参考](docs/QUERY.md)：当前可执行的 pipeline grammar、stage 语义、模式和错误。
+- [CLI 与交互式 REPL](docs/CLI.md)：历史安全策略、Tab 补全和本地／远程 introspection。
 - [实际场景与覆盖矩阵](docs/SCENARIOS.md)：任务队列、配置、事件、同步和 key/value 用法所需的 ADT 与查询缺口。
 - [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
 - [Schema migration 语言](docs/MIGRATIONS.md)：当前可执行的显式演进、typed conversion 与约束边界。

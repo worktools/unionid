@@ -13,12 +13,21 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 | <code>version</code> | 当前只能是 1；其他值返回 <code>E_PROTOCOL_VERSION</code> |
 | <code>request_id</code> | 客户端提供的 string，响应原样返回；它只用于关联请求，不提供去重或 exactly-once |
 | <code>query</code> | 完整 unionid 源码，最多 1 MiB |
+| <code>introspect</code> | 可选的 `schema`／`tables`／`types`／`storage`；使用时 query 必须为空且不能携带 params/schema |
 | <code>params</code> | 可省略的命名 typed value；源码以 <code>$name</code> 引用 |
 | <code>schema</code> | 可省略的 <code>{revision, hash}</code>；不等于当前 schema 时，在解析或扫描前返回 <code>E_SCHEMA_CHANGED</code> |
 
 参数名使用与标识符相同的 ASCII 规则，以字母或下划线开头。缺少参数返回 <code>E_PARAM_MISSING</code>，多余参数返回 <code>E_PARAM_EXTRA</code>，wire value 无法解码返回 <code>E_PARAM_TYPE</code>；参数解码后仍由查询上下文做普通类型检查，所以类型不匹配返回 <code>E_TYPE</code>。绑定发生在 AST 上，不通过文本替换，文本参数中的引号、换行、注释符或 pipeline 符号不会改变查询结构。
 
 参数可用于 filter、match condition、derive 算术表达式和 update <code>set</code>。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
+
+Introspection 使用同一版本请求，返回完整的类型化快照，客户端再按请求种类展示。它不执行查询或修改数据：
+
+~~~json
+{"version":1,"request_id":"inspect-1","query":"","introspect":"types"}
+~~~
+
+响应的 <code>introspection</code> 包含 schema identity、规范 schema 源码、tables、types、fields、storage mode、migration count 和可选 head。payload 上限为 1 MiB，超过时返回 <code>E_LIMIT</code>；整个响应仍受服务的 16 MiB 上限。未知 introspection 值或与 query/params/schema 混用返回 <code>E_PROTOCOL</code>。不带 <code>introspect</code> 的既有 version 1 请求以及旧 `{query}` 请求保持兼容。
 
 ## 无损值编码
 
@@ -55,7 +64,7 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 }
 ~~~
 
-<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；它不执行数据行。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>，upsert 另有 <code>upsert_action</code>；warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
+<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；introspection 响应改为包含 <code>introspection</code>，两者都不执行数据行。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>，upsert 另有 <code>upsert_action</code>；warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
 
 ## Rust 嵌入接口
 

@@ -1592,6 +1592,54 @@ impl Database {
         self.objects.keys().cloned().collect()
     }
 
+    pub fn type_names(&self) -> Vec<String> {
+        self.catalog.types.keys().cloned().collect()
+    }
+
+    pub fn field_names(&self) -> Vec<String> {
+        fn collect(ty: &ScalarType, fields: &mut BTreeSet<String>) {
+            match ty {
+                ScalarType::Record(columns) => {
+                    for column in columns {
+                        fields.insert(column.name.clone());
+                        collect(&column.ty, fields);
+                    }
+                }
+                ScalarType::Enum(definition) => {
+                    for variant in &definition.variants {
+                        for argument in &variant.args {
+                            collect(argument, fields);
+                        }
+                    }
+                }
+                ScalarType::Option(inner) | ScalarType::List(inner) => collect(inner, fields),
+                ScalarType::Tuple(items) => {
+                    for item in items {
+                        collect(item, fields);
+                    }
+                }
+                ScalarType::Int
+                | ScalarType::Float
+                | ScalarType::Bool
+                | ScalarType::Text
+                | ScalarType::Named(_)
+                | ScalarType::Ref(_) => {}
+            }
+        }
+
+        let mut fields = BTreeSet::new();
+        for definition in self.catalog.types.values() {
+            collect(&definition.ty, &mut fields);
+        }
+        for table in self.schema_tables() {
+            for column in &table.schema {
+                fields.insert(column.name.clone());
+                collect(&column.ty, &mut fields);
+            }
+        }
+        fields.into_iter().collect()
+    }
+
     pub(crate) fn schema_tables(&self) -> Vec<&Table> {
         self.objects
             .values()
