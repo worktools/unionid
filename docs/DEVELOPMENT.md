@@ -5,10 +5,10 @@
 ## 已实现
 
 - 共享 Rust `Engine`，本地 CLI 与 TCP 复用同一个执行、类型校验和原子提交边界。
-- Lexer、源码位置、缩进与换行 AST；命名 sum/record、tuple、option/list、完整值构造和严格校验。
+- Lexer、源码位置、缩进与换行 AST；命名 sum/record、tuple、option/list、有限直接自递归 ADT、完整值构造和严格校验。自递归类型必须至少有一个有限值，互递归与用户泛型仍延后。
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。
-- `field type = value` 字段默认值在声明时完成递归类型检查，insert 对嵌套 record 和 sum record 负载逐层补齐；schema 展示、WAL/snapshot 恢复与 hash 均保留默认值。
-- 版本 1 ADT value codec 以 catalog 和期望类型驱动，用稳定 type/field/variant ID 编码命名类型、record、sum、tuple、option/list；不依赖 serde 或 Rust enum 布局，字段重排和显式 rename 保持字节可解释。
+- `field type = value` 字段默认值在完整命名类型体建立后完成递归类型检查，可使用自递归类型的终止 constructor；insert 对嵌套 record 和 sum record 负载逐层补齐，schema 展示、WAL/snapshot 恢复与 hash 均保留默认值。
+- 版本 1 ADT value codec 以 catalog 和期望类型驱动，用稳定 type/field/variant ID 编码命名类型、record、sum、tuple、option/list 及有限递归子值；不依赖 serde 或 Rust enum 布局，字段重排和显式 rename 保持字节可解释。
 - redb 4.1 已接入共享 Engine：`run --db`、`cli --db` 与 `server --db` 使用同一个持久文件；每个写脚本按稳定 ID/RowId 计算已提交状态与候选状态的差异，只删除或写入变化的 catalog、ADT row 和 secondary-index 键，再与 meta 一起放入一个 `Immediate`、two-phase write transaction。版本化 migration 在同一事务追加 ledger entry，普通数据提交不触碰 ledger。覆盖前核对旧值，打开时校验存储／catalog／value／索引／migration 编码版本、schema hash、ledger head、RowId 水位和派生索引一致性。
 - 每条 row 带表内稳定 `u64` RowId，每表持久化单调分配游标；索引 posting 不再保存 `Vec` 下标。删除形成的 ID 缺口可安全恢复，后续插入不会复用旧身份；旧 redb 和 snapshot 会从原有连续顺序升级。
 - `update table`/`delete table` 复用普通与 match filter；多个 typed `set` 从原 row 同时求值，可设置嵌套 record 路径。执行器先生成全部候选 row，再检查完整类型和主键唯一性并重建该表索引；失败请求不发布任何修改。DML 响应包含 `affected_rows`。
@@ -67,7 +67,7 @@ cargo run -- fmt --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 196 项测试通过：lib 单元测试 17 项、`tests/language.rs` 75 项、`tests/formatter.rs` 4 项、`tests/storage.rs` 30 项、`tests/migration.rs` 17 项、`tests/release_scenarios.rs` 3 项、`tests/getting_started.rs` 1 项、`tests/schema.rs` 8 项、`tests/backup.rs` 3 项、`tests/interfaces.rs` 20 项、`tests/codec.rs` 8 项、`tests/protocol.rs` 10 项，分别验证 Engine 注入提交失败、REPL complete/incomplete/invalid 状态与 EOF、安全历史／补全／introspection、formatter 全 AST 覆盖／幂等／语义 round-trip、真实磁盘增长失败分类与原子重开、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、基础汇总、局部纯函数及其预算、类型化索引计划/explain、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、嵌套命名类型 migration、版本化 migration 文件/ledger/断点续跑、端到端升级恢复场景、五分钟教程的三入口一致性、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发与优雅关闭、typed 参数/prepared query/deadline，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
+当前全部 203 项测试通过：lib 单元测试 17 项、`tests/language.rs` 77 项、`tests/formatter.rs` 4 项、`tests/storage.rs` 31 项、`tests/migration.rs` 18 项、`tests/release_scenarios.rs` 3 项、`tests/getting_started.rs` 1 项、`tests/schema.rs` 9 项、`tests/backup.rs` 4 项、`tests/interfaces.rs` 20 项、`tests/codec.rs` 9 项、`tests/protocol.rs` 10 项，分别验证 Engine 注入提交失败、REPL complete/incomplete/invalid 状态与 EOF、安全历史／补全／introspection、formatter 全 AST 覆盖／幂等／语义 round-trip、真实磁盘增长失败分类与原子重开、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、基础汇总、局部纯函数及其预算、类型化索引计划/explain、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、有限自递归类型的终止性／默认值／match witness／深度预算／codec／索引／redb 重开／migration／schema diff／backup restore、嵌套命名类型 migration、版本化 migration 文件/ledger/断点续跑、端到端升级恢复场景、五分钟教程的三入口一致性、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发与优雅关闭、typed 参数/prepared query/deadline，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
@@ -78,5 +78,6 @@ cargo run --example embedded
 - #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出与真实文件增长失败矩阵、`check --db`、10k/100k 恢复成本、共享类型化索引访问计划与 explain 均已接入。
 - #17–#20：显式 schema/data migration、版本化 runner/ledger、声明式 schema diff、逻辑备份还原和显式旧原型导入已实现。
 - #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；#66 补齐 parser 驱动的 REPL 续写，#69 提供规范 formatter，#70 增加安全历史、补全和跨模式 introspection。#74 已走通三条端到端升级恢复场景，#75 已记录真实负载；#76 提供可校验产物、包内教程与三入口一致性验证。
+- #25/#81：第一条后续核心切片已实现有限直接自递归 named ADT；互递归、用户泛型、递归查询函数和 match 简写继续根据实际场景分别设计。
 
 GitHub issues 保留各自的完整验收范围；实现了部分能力不等于对应里程碑全部完成。

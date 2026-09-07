@@ -43,6 +43,31 @@ fn empty_database_diff_is_runnable_and_reaches_the_target_schema() {
 }
 
 #[test]
+fn recursive_target_schema_diff_is_runnable_and_stable() {
+    let target = r#"type Chain =
+  Next Chain
+  | End
+
+type Entry =
+  id int
+  chain Chain
+
+table entries Entry
+  key id
+
+create index entries (chain)"#;
+    let checked = Engine::check_schema(target).unwrap();
+    assert_eq!(Engine::check_schema(&checked.normalized).unwrap(), checked);
+
+    let mut engine = Engine::memory();
+    let diff = engine.diff_schema(target, "m0001_recursive", None).unwrap();
+    assert!(diff.runnable);
+    let file = MigrationFile::parse(diff.migration_source).unwrap();
+    engine.apply_migrations(&[file]).unwrap();
+    assert_eq!(engine.schema(), checked.normalized);
+}
+
+#[test]
 fn diff_reports_nested_type_impact_and_exhaustive_match_compatibility() {
     let current = "type State = Pending | Running\ntype Task =\n  id int\n  state State\ntype Boxed =\n  task Task\ntable active Task\n  key id\ntable archive Task\ntable boxes Boxed\ncreate index archive (state)";
     let target = "type State = Pending | Running | Complete\ntype Task =\n  id int\n  state State\n  priority int = 0\ntype Boxed =\n  task Task\ntable active Task\n  key id\ntable archive Task\ntable boxes Boxed\ncreate index archive (state)";

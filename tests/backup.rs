@@ -37,6 +37,37 @@ fn backup_restore_preserves_typed_data_schema_indexes_and_history() {
 }
 
 #[test]
+fn backup_restore_preserves_recursive_named_values() {
+    let dir = TempDir::new();
+    let source = dir.0.join("recursive.redb");
+    let archive = dir.0.join("recursive.backup.json");
+    let restored = dir.0.join("restored.redb");
+    let expected_schema;
+    {
+        let mut engine = Engine::open_redb(&source).unwrap();
+        let response = engine.execute(include_str!("../examples/recursive_tree.uid"));
+        assert!(response.ok, "{}", response.message);
+        expected_schema = engine.schema_info();
+    }
+    let created = backup::create(&source, &archive).unwrap();
+    let recovered = backup::restore(&archive, &restored).unwrap();
+    assert_eq!(created, recovered);
+    assert_eq!(recovered.schema, expected_schema);
+
+    let mut engine = Engine::open_redb(&restored).unwrap();
+    let rows = engine.execute(
+        r#"from documents
+filter match tree
+  Leaf value => value == "single"
+  Branch {children, ..} => contains children (Tree.Leaf "readme")
+sort id"#,
+    );
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 2);
+    assert!(engine.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
 fn corrupt_or_unknown_backups_do_not_create_or_replace_a_target() {
     let dir = TempDir::new();
     let source = dir.0.join("source.redb");

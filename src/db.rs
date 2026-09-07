@@ -1887,6 +1887,15 @@ impl Database {
             ));
         }
         catalog.restore_next_id(meta.next_catalog_id)?;
+        catalog.validate_finite_types().map_err(|error| {
+            Error::new(
+                "E_STORAGE",
+                format!(
+                    "durable catalog contains an invalid type cycle: {}",
+                    error.message
+                ),
+            )
+        })?;
         for (table_name, definitions) in &index_definitions {
             let Some(DbObject::Table(table)) = objects.get(table_name) else {
                 return Err(Error::new(

@@ -694,19 +694,36 @@ fn coverage_record_pattern(
 
 fn constructor_specs(catalog: &Catalog, ty: &ScalarType) -> Result<Option<Vec<ConstructorSpec>>> {
     Ok(match catalog.underlying(ty)? {
-        ScalarType::Enum(enum_type) => Some(
-            enum_type
-                .variants
-                .iter()
-                .map(|variant| ConstructorSpec {
-                    constructor: CoverageConstructor::Variant {
-                        id: variant.id,
-                        name: variant.name.clone(),
-                    },
-                    arguments: variant.args.clone(),
-                })
-                .collect(),
-        ),
+        ScalarType::Enum(enum_type) => {
+            let recursive_id = match ty {
+                ScalarType::Ref(id) => Some(*id),
+                _ => None,
+            };
+            let mut variants = enum_type.variants.iter().collect::<Vec<_>>();
+            if let Some(recursive_id) = recursive_id {
+                // Prefer a terminating branch when constructing a missing
+                // witness. Otherwise `Next Tree | End` would descend through
+                // Next forever before considering End.
+                variants.sort_by_key(|variant| {
+                    variant
+                        .args
+                        .iter()
+                        .any(|argument| type_contains_ref(argument, recursive_id))
+                });
+            }
+            Some(
+                variants
+                    .into_iter()
+                    .map(|variant| ConstructorSpec {
+                        constructor: CoverageConstructor::Variant {
+                            id: variant.id,
+                            name: variant.name.clone(),
+                        },
+                        arguments: variant.args.clone(),
+                    })
+                    .collect(),
+            )
+        }
         ScalarType::Option(inner) => Some(vec![
             ConstructorSpec {
                 constructor: CoverageConstructor::None,
@@ -737,6 +754,28 @@ fn constructor_specs(catalog: &Catalog, ty: &ScalarType) -> Result<Option<Vec<Co
     })
 }
 
+fn type_contains_ref(ty: &ScalarType, target: u64) -> bool {
+    match ty {
+        ScalarType::Ref(id) => *id == target,
+        ScalarType::Record(fields) => fields
+            .iter()
+            .any(|field| type_contains_ref(&field.ty, target)),
+        ScalarType::Enum(sum) => sum.variants.iter().any(|variant| {
+            variant
+                .args
+                .iter()
+                .any(|argument| type_contains_ref(argument, target))
+        }),
+        ScalarType::Tuple(items) => items.iter().any(|item| type_contains_ref(item, target)),
+        ScalarType::Option(inner) | ScalarType::List(inner) => type_contains_ref(inner, target),
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Named(_) => false,
+    }
+}
+
 fn pattern_is_useful(
     catalog: &Catalog,
     matrix: &[Vec<CoveragePattern>],
@@ -748,6 +787,14 @@ fn pattern_is_useful(
     // Expanding product constructors into more columns preserves correlations
     // between tuple/record fields instead of checking each field independently.
     budget.step()?;
+    if matrix.iter().any(|row| {
+        row.len() == query.len()
+            && row
+                .iter()
+                .all(|pattern| matches!(pattern, CoveragePattern::Wildcard))
+    }) {
+        return Ok(false);
+    }
     if query.is_empty() {
         return Ok(matrix.is_empty());
     }
@@ -825,6 +872,14 @@ fn uncovered_patterns(
     budget: &mut CoverageBudget,
 ) -> Result<Option<Vec<CoveragePattern>>> {
     budget.step()?;
+    if matrix.iter().any(|row| {
+        row.len() == types.len()
+            && row
+                .iter()
+                .all(|pattern| matches!(pattern, CoveragePattern::Wildcard))
+    }) {
+        return Ok(None);
+    }
     let Some((head_type, tail_types)) = types.split_first() else {
         return Ok(matrix.is_empty().then(Vec::new));
     };

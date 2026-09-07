@@ -1,6 +1,6 @@
 # 实际场景与查询覆盖矩阵
 
-状态：v0.1 场景契约，2026-09-06。本文从应用代码会保存和读取的数据出发，检验 ADT 与查询语言是否实用。当前可执行语法仍以 [LANGUAGE.md](LANGUAGE.md) 和 [QUERY.md](QUERY.md) 为准；标有 issue 的片段是目标语法。
+状态：核心场景契约，2026-09-07。本文从应用代码会保存和读取的数据出发，检验 ADT 与查询语言是否实用。当前可执行语法仍以 [LANGUAGE.md](LANGUAGE.md) 和 [QUERY.md](QUERY.md) 为准；标有 issue 的片段是目标语法。
 
 unionid 最适合一个进程或少量客户端持有的应用状态：数据规模有限，表之间很少 join，但单行内部有明确的状态、分支和嵌套结构。重点不是替代分析型 SQL，而是让应用从 schema、查询到返回值都保持同一套代数类型。
 
@@ -170,11 +170,35 @@ type Session =
 
 功能开关可以把规则声明为 list of sum，例如 `User text | Group text | Percentage int`。按 key 读取整个 typed flag 很合适；固定规则值可用 `contains`，元素 predicate 可用 `any/all`，需要按不同 constructor 提取 payload 的复杂规则求值仍更适合在应用代码完成。
 
+## 6. 有限树、原因链与规则 AST
+
+固定层数的嵌套 record 无法表达目录、评论树或规则表达式。把节点拆成父子表会引入 join 和跨行一致性，而这些小型结构通常随所属对象整行读取和原子替换。直接自递归 named ADT 保留 constructor 约束：
+
+```text
+type Tree =
+  Leaf text
+  | Branch
+    label text
+    children list Tree
+
+type Document =
+  id int
+  tree Tree
+
+table documents Document
+  key id
+```
+
+[recursive_tree.uid](../examples/recursive_tree.uid) 构造多层 Branch/Leaf 值，用递归 pattern 区分根节点并派生统一标签，还验证完整值的精确二级索引。相同机制可表达 `cause option Error` 的有限原因链，或 `Literal | All (list Rule) | Not Rule` 的规则 AST。
+
+这些值没有对象身份、共享节点或循环边，并受 64 层值预算约束。当前查询可以在源码中写出已知深度的 pattern，不提供任意深度遍历、递归函数或 subtree 路径索引；需要频繁跨节点查询的任意图仍应拆表或交给应用代码。类型有效性、codec、migration 与 backup 规则见 [RFC 0001](rfc/0001-finite-recursive-adts.md)。
+
 ## 功能覆盖与优先级
 
 | 应用需要 | 当前能力 | 缺口与任务 | v0.1 优先级 |
 | --- | --- | --- | --- |
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
+| 有限自递归 sum/record 值 | 已实现直接自引用、有限性检查、match、精确索引、migration 和持久恢复 | 互递归、用户泛型、任意深度递归查询延后 | #81，核心切片 |
 | 固定 record 的嵌套路径过滤/投影 | 已实现 | option/sum 不能直接穿透 | 已满足基础 |
 | 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载、record/tuple/sum/option 嵌套 pattern，以及同 constructor 多分支的完整覆盖分析 | — | #35，P0 |
 | 派生普通值或从 ADT 分支归一结果 | 已实现 scalar/bool 普通 derive、递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | — | #59，已满足 |
@@ -194,6 +218,6 @@ type Session =
 3. 所有字段、pattern、函数和参数在扫描前绑定；空表不会掩盖错误。schema revision 改变时 plan 重新绑定。
 4. 没有 sort 就没有跨请求顺序承诺；分页查询以唯一键结束排序。offset range 适合小工作集，大页或频繁翻页后续增加显式 cursor，而不是暗中改变 `take`。
 5. 时间、随机数、网络和文件不是查询表达式的隐含副作用。当前时间由参数传入；外部 I/O 留在应用层。
-6. v0.1 不以 join、window、递归、高阶泛型换取表面覆盖率。若一个场景主要依赖大规模关联、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
+6. 核心版本不以 join、window、递归查询函数和高阶泛型换取表面覆盖率。有限自递归 ADT 只表示整行拥有的有限树；若一个场景主要依赖大规模关联、任意图遍历、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
 
-实现顺序按用户可完成的工作流安排：#34–#36 与 #59–#61 已补齐列表读取、ADT 表达式、普通派生、基础汇总和查询局部纯函数；#11 已收口查询核心，#16 已补齐共享索引访问计划与 explain。#74 用任务队列、嵌套配置和 session/cache 走通持久重启、migration 与 backup/restore，下一阶段由 #75 测量工作负载，再由 #70/#76 收敛日常体验和安装发布。
+实现顺序按用户可完成的工作流安排：#34–#36 与 #59–#61 已补齐列表读取、ADT 表达式、普通派生、基础汇总和查询局部纯函数；#11 已收口查询核心，#16 已补齐共享索引访问计划与 explain。#74 用任务队列、嵌套配置和 session/cache 走通持久重启、migration 与 backup/restore，#75、#70 和 #76 已收敛工作负载、日常体验与安装发布；#81 从 #25 中切出有限自递归 ADT，先补树形核心模型，再依据真实反馈决定互递归与泛型。

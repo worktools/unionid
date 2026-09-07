@@ -4,7 +4,7 @@ use redb::{
     Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
 };
 use std::process::Command;
-use unionid::{Engine, MigrationFile, UpsertAction, Value};
+use unionid::{Engine, MigrationFile, QueryAccessKind, UpsertAction, Value};
 
 const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
@@ -18,6 +18,34 @@ const DISK_LIMIT_RESULT_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_RESULT";
 const CRASH_BEFORE_COMMIT: i32 = 91;
 const CRASH_AFTER_COMMIT: i32 = 92;
 const DISK_LIMIT_FAILURE: i32 = 93;
+
+#[test]
+fn recursive_adt_rows_indexes_and_schema_survive_redb_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("recursive.redb");
+    let schema;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let result = engine.execute(include_str!("../examples/recursive_tree.uid"));
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(result.rows.len(), 2);
+        schema = engine.schema_info();
+    }
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.schema_info(), schema);
+    let exact = r#"Tree.Branch {label = "root", children = [Tree.Leaf "readme", Tree.Branch {label = "src", children = []}]}"#;
+    let rows = reopened.execute(&format!("from documents | filter tree == {exact}"));
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 1);
+    let plan = reopened.execute(&format!("explain from documents | filter tree == {exact}"));
+    assert!(plan.ok, "{}", plan.message);
+    assert_eq!(
+        plan.plan.unwrap().access.kind,
+        QueryAccessKind::SecondaryIndexLookup
+    );
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
 
 #[test]
 fn redb_crash_transaction_child() {

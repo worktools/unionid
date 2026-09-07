@@ -86,7 +86,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 
 ### 后续探索
 
-[#25](https://github.com/worktools/unionid/issues/25)：用户定义泛型与递归 ADT、模式查询简写、函数组合。P2，不阻塞 v0.1；先收集首版实际用例。
+[#25](https://github.com/worktools/unionid/issues/25)：用户定义泛型与递归 ADT、模式查询简写、函数组合。P2，不阻塞 v0.1；[#81](https://github.com/worktools/unionid/issues/81) 先交付有实际树／原因链场景支撑的有限直接自递归 ADT。互递归、用户泛型、递归查询函数和 match 简写继续分别评估，避免一次引入批量 catalog 注册、参数化身份和新的执行语义。
 
 ## 建议从哪里开始
 
@@ -95,7 +95,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 1. [#6](https://github.com/worktools/unionid/issues/6)、[#7](https://github.com/worktools/unionid/issues/7) 与 [#28](https://github.com/worktools/unionid/issues/28) 已完成；继续用当前可执行规范、示例和实际反馈收敛 [#2](https://github.com/worktools/unionid/issues/2)。
 2. [#13](https://github.com/worktools/unionid/issues/13) 已交付 redb 原子提交、进程退出与真实文件增长失败验证；[#14](https://github.com/worktools/unionid/issues/14) 已记录 10k/100k ADT 工作集的 open/check 耗时、峰值内存和可重复环境。
 3. [#9](https://github.com/worktools/unionid/issues/9)、[#11](https://github.com/worktools/unionid/issues/11)、[#12](https://github.com/worktools/unionid/issues/12)、[#34](https://github.com/worktools/unionid/issues/34)–[#36](https://github.com/worktools/unionid/issues/36) 与 [#59](https://github.com/worktools/unionid/issues/59)–[#61](https://github.com/worktools/unionid/issues/61) 已完成；[#16](https://github.com/worktools/unionid/issues/16) 已补齐共享类型化索引访问计划与 explain。
-4. [#15](https://github.com/worktools/unionid/issues/15)、[#17](https://github.com/worktools/unionid/issues/17)–[#20](https://github.com/worktools/unionid/issues/20) 已完成，M2/M3 核心链路闭合。[#22](https://github.com/worktools/unionid/issues/22)、[#23](https://github.com/worktools/unionid/issues/23)、[#66](https://github.com/worktools/unionid/issues/66) 与 [#69](https://github.com/worktools/unionid/issues/69) 已完成。[#74](https://github.com/worktools/unionid/issues/74) 已验证端到端数据正确性，[#75](https://github.com/worktools/unionid/issues/75) 已测量工作负载；[#70](https://github.com/worktools/unionid/issues/70) 补齐历史、补全和跨模式 introspection 后，只剩 [#76](https://github.com/worktools/unionid/issues/76) 的安装发布。
+4. [#15](https://github.com/worktools/unionid/issues/15)、[#17](https://github.com/worktools/unionid/issues/17)–[#20](https://github.com/worktools/unionid/issues/20) 已完成，M2/M3 核心链路闭合。[#22](https://github.com/worktools/unionid/issues/22)、[#23](https://github.com/worktools/unionid/issues/23)、[#66](https://github.com/worktools/unionid/issues/66) 与 [#69](https://github.com/worktools/unionid/issues/69) 已完成。[#74](https://github.com/worktools/unionid/issues/74) 已验证端到端数据正确性，[#75](https://github.com/worktools/unionid/issues/75) 已测量工作负载；[#70](https://github.com/worktools/unionid/issues/70) 和 [#76](https://github.com/worktools/unionid/issues/76) 已完成日常体验与安装发布。[#81](https://github.com/worktools/unionid/issues/81) 正从后续探索中交付有限自递归 ADT 的核心切片。
 
 类型演进规则刻意放在 M0，避免 migration 被当作事后附加；完整 migration 执行要等原子存储与 DML 成熟。
 

@@ -1,6 +1,6 @@
 # ADT value codec
 
-状态：格式版本 1，2026-09-06。本文定义 unionid 逻辑值的持久化编码。实现位于 `src/codec.rs`；它是 #13 中 redb `rows` 表将使用的值边界，目前还没有替换 Engine 的过渡 WAL/snapshot。
+状态：格式版本 1，2026-09-07。本文定义 unionid 逻辑值的持久化编码。实现位于 `src/codec.rs`；redb `rows` 表使用这一边界，过渡 WAL/snapshot 只保留为旧原型兼容入口。
 
 ## 目标与调用约束
 
@@ -40,7 +40,7 @@ payload 规则如下：
 | `list T` | item count `u32`，随后依次编码各项 |
 | sum | variant ID `u64`、argument count `u32`，随后按声明顺序编码负载 |
 
-record 编码前按 field ID 排序，因此源码字段重排不改变字节。type、field 和 variant 的名称均不写入 payload；显式 rename 保留 ID 时，旧字节可由新名称正常解码。tuple 与 sum 负载的位置是其类型契约的一部分。
+record 编码前按 field ID 排序，因此源码字段重排不改变字节。type、field 和 variant 的名称均不写入 payload；显式 rename 保留 ID 时，旧字节可由新名称正常解码。tuple 与 sum 负载的位置是其类型契约的一部分。直接自递归类型继续写入同一个 type ID，并只对实际存在的有限子值递归编码；schema manifest 不展开这个引用，因此不需要新的 codec version。
 
 编码是 canonical 的：同一 catalog、类型和逻辑值总是得到相同字节。版本 1 不接受非有限浮点、未知 tag、重复／未知 field ID、未知 variant ID、错误的 type ID、数量与 schema 不符、非法 UTF-8、截断或尾随字节。
 
@@ -63,6 +63,6 @@ record 编码前按 field ID 排序，因此源码字段重排不改变字节。
 
 ## 限制与损坏处理
 
-单个编码值最多 16 MiB，单个 list 最多 1,000,000 项，嵌套深度沿用模型的 64 层上限。解码在分配集合前检查长度，并为嵌套类型错误保留 `value.field[index]` 路径。所有格式错误使用 `E_CODEC`；调用方应将其视为存储损坏或版本不兼容，不能返回部分值。
+单个编码值最多 16 MiB，单个 list 最多 1,000,000 项，嵌套深度沿用模型的 64 层上限。该上限同时约束直接自递归 named ref、record、sum、tuple、option 和 list；超限值不能部分编码或解码。解码在分配集合前检查长度，并为嵌套类型错误保留 `value.field[index]` 路径。所有格式错误使用 `E_CODEC`；调用方应将其视为存储损坏或版本不兼容，不能返回部分值。有限递归类型的完整契约见 [RFC 0001](rfc/0001-finite-recursive-adts.md)。
 
 codec 不包含压缩、加密或独立 checksum。redb 负责事务页的完整性与提交原子性；备份／导入层再校验数据库级 schema hash、表行数和文件完整性。格式升级使用新的 header version，并通过显式存储升级流程重写，不能让同一 version 产生两种解释。

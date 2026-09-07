@@ -1,0 +1,32 @@
+type Tree =
+  Leaf text
+  | Branch
+    label text
+    children list Tree
+
+type Document =
+  id int
+  tree Tree
+
+table documents Document
+  key id
+
+create index documents (tree)
+
+insert documents
+  id = 1
+  tree = Branch {children = [Leaf("readme"), Branch {children = [], label = "src"}], label = "root"}
+
+insert documents
+  id = 2
+  tree = Leaf("single")
+
+from documents
+filter match tree
+  Leaf value => value == "single"
+  Branch {children, ..} => contains children Tree.Leaf("readme")
+derive root_label = match tree
+  Leaf value => value
+  Branch {label, ..} => label
+select {id, tree, root_label}
+sort id
