@@ -15,6 +15,7 @@ mod local;
 mod matching;
 pub mod migration;
 pub mod model;
+mod pagination;
 mod params;
 pub mod protocol;
 pub mod query;
@@ -29,8 +30,8 @@ pub mod wal;
 
 pub use backup::BackupInfo;
 pub use db::{
-    QueryAccessKind, QueryAccessPlan, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind,
-    SchemaInfo, UpsertAction,
+    PageAccessKind, PageInfo, PageOrder, PagePlan, QueryAccessKind, QueryAccessPlan, QueryPlan,
+    QueryPlanStage, QueryResponse, QueryStageKind, SchemaInfo, UpsertAction,
 };
 pub use engine::{Engine, PreparedQuery, StorageIntegrity};
 pub use error::{Error, Result, Span};
@@ -46,6 +47,7 @@ pub use protocol::{
     IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,
     Response as ProtocolResponse, WireValue,
 };
+pub use query::{PageDirection, PageSpec};
 pub use schema::{
     SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation, SchemaDiffTableImpact,
 };

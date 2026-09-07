@@ -60,7 +60,7 @@ fn idempotent_effect_and_receipt_commit_together_and_survive_reopen() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            2_u32.to_be_bytes()
+            3_u32.to_be_bytes()
         );
         let receipts = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
         assert_eq!(receipts.len().unwrap(), 1);
@@ -940,7 +940,7 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            1_u32.to_be_bytes()
+            3_u32.to_be_bytes()
         );
         transaction.open_table(REDB_CATALOG).unwrap();
         transaction.open_table(REDB_ROWS).unwrap();

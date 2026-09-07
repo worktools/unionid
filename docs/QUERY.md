@@ -32,6 +32,7 @@ take 20
 | 投影 | `select {field, nested.field}` | 已实现并可选择普通或 ADT 派生列 | — |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | — |
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
+| 稳定分页 | `page 100` / `page 100 after "u1..."` | 已实现有界 keyset page、正反向 opaque cursor、sequence-pinned 一致性 | #114/#131 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` / `upsert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91/#97 |
 | ADT 派生列 | `derive x = match ...` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
@@ -74,7 +75,7 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 query             = "from" table pipeline-stage*
 explain           = "explain" query | "explain" newline indent query dedent
 pipeline-stage    = newline stage | "|" stage
-stage             = local-binding | value-filter | match-filter | derive-expression | derive-match | aggregate | group-aggregate | select | sort | take
+stage             = local-binding | value-filter | match-filter | derive-expression | derive-match | aggregate | group-aggregate | select | sort | take | page
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
@@ -113,6 +114,7 @@ select            = "select" "{" field-path ("," field-path)* ","? "}"
 sort              = "sort" sort-key | "sort" "{" sort-key ("," sort-key)* ","? "}"
 sort-key          = "-"? field-path
 take              = "take" nonnegative-integer | "take" positive-integer ".." positive-integer
+page              = "page" positive-integer (("after" | "before") string)?
 
 arm-pattern       = "_" | constructor-pattern
 pattern           = "_" | binding | constructor-pattern | record-pattern | tuple-pattern
@@ -280,6 +282,7 @@ from tasks | filter id > 1 | take 1
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
 | `sort` | 不变 | 单列或多列词典序；全部键相同的次序不承诺 | 返回空结果但仍检查全部键 |
 | `take` | 不变 | 保留前 N 行，或一基闭区间内的行；无 sort 时位置不稳定 | 返回空结果但仍检查范围 |
+| `page` | 不变 | 按唯一 sort tuple 返回有界页和 opaque cursor；必须是最后一个 stage | 返回空页且不产生新 cursor |
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
@@ -511,10 +514,27 @@ select {title, id, owner.email}
 ```text
 from jobs
 sort {-priority, created_at, id}
-take 11..20
+page 100
 ```
 
 `take N` 接受非负整数并保留前 N 行，`take 0` 返回空行但仍保留当前结果 schema。`take start..end` 使用一基闭区间，因此 `take 11..20` 跳过前 10 行并最多返回 10 行；尾部越界返回剩余行。start 必须至少为 1，end 不能小于 start。范围总是相对于该 stage 收到的当前结果。
+
+### 有界 keyset page
+
+`page N` 开始正向遍历，N 必须在 1..=1000。查询必须有显式 `sort`，最后一个排序键必须是源表主键；绑定器根据 schema 证明完整 tuple 唯一，不根据当前样本数据猜测。`page` 必须是最后一个 stage，最终 sort 后只允许 `select` 和 `page`，因此可以投影掉排序字段而不把主键暴露给客户端。首版不与 `take`、`aggregate`、`group` 或 mutation target 混用。
+
+成功响应的 `page` 包含 `limit`、`direction`、十进制 string `snapshot_sequence`、`has_more` 以及可用的 `next_cursor`／`previous_cursor`。继续向后读取时使用：
+
+```text
+from jobs
+filter archived == false
+sort {-priority, id}
+page 100 after "u1.payload.mac"
+```
+
+返回上一页时使用 `page 100 before "..."`。正反向响应都保持声明的 sort 顺序。cursor 绑定数据库实例、schema identity、绑定后的规范查询与 typed 参数、方向、limit、commit sequence 和最后一行的完整 typed sort tuple；它由数据库 secret 使用 HMAC-SHA-256 验证，内容不加密。token 最多 8192 bytes、payload 最多 6144 bytes、sort key 最多 16 项。
+
+首版使用 sequence-pinned 一致性：第一页固定当前 commit sequence；其后任何成功 data/schema mutation 都让旧 cursor 在扫描前返回 `E_CURSOR_STALE`。失败或回滚的 mutation、普通 read 和幂等 replay 不推进 sequence。redb 重开后 cursor 仍可使用；逻辑 backup/restore 会轮换数据库身份和 secret，因此源库 cursor 在恢复副本上返回完整性错误。完整契约与错误检查顺序见 [RFC 0003](rfc/0003-stable-cursor-pagination.md)。
 
 如果业务依赖“前 N 行”，必须先 sort：
 
@@ -526,7 +546,7 @@ take 20
 
 ## 布局与语句边界
 
-- 顶层 `from` 开始一条查询。同层 `let`、`filter`、`derive`、`group`、`aggregate`、`select`、`sort`、`take` 或兼容的 `limit` 延续当前 pipeline。
+- 顶层 `from` 开始一条查询。同层 `let`、`filter`、`derive`、`group`、`aggregate`、`select`、`sort`、`take`、`page` 或兼容的 `limit` 延续当前 pipeline。
 - 顶层 `update table` 开始修改，后续同层 filter、sort、take、set 和 returning 延续当前语句；顶层 `delete table` 开始删除，后续同层 filter、sort、take 和 returning 延续当前语句。
 - `let`／`filter` 的表达式块、`filter match`／`derive ... match`／`set ... = match ...` 的分支，以及 `=>` 后的 condition 块通过缩进进入和退出；退格必须回到已有缩进层级。缩进不能使用 tab。
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
@@ -553,8 +573,11 @@ take 20
 | `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |
+| `E_PAGE_SHAPE` / `E_PAGE_ORDER` | page 位置、limit、组合不合法，或排序没有以主键形成可证明的唯一顺序 |
+| `E_CURSOR_LIMIT` / `E_CURSOR_CODEC` / `E_CURSOR_INTEGRITY` | cursor 超限、编码无效或 HMAC 验证失败 |
+| `E_CURSOR_DATABASE` / `E_CURSOR_SCHEMA` / `E_CURSOR_QUERY` / `E_CURSOR_STALE` | cursor 的数据库、schema、绑定查询/参数/方向/limit 或 commit sequence 不匹配 |
 
-查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。insert/upsert/update/delete 成功响应包含 `affected_rows`；单行 upsert 还包含 `upsert_action`，批量 upsert 包含 `upsert_actions`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。当前 indexed query、full scan、写入和 migration 的 10k/100k 实测边界见[工作负载成本记录](benchmarks/workload-2026-09-07.md)。
+查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。分页查询另带 `page` 元数据；`explain` 的 `plan.page` 显示 limit、方向、唯一排序 tuple、resume boundary、snapshot sequence、候选行、`limit + 1` 读取预算、cursor 上限和当前 `sorted_scan` 路径。insert/upsert/update/delete 成功响应包含 `affected_rows`；单行 upsert 还包含 `upsert_action`，批量 upsert 包含 `upsert_actions`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。当前 indexed query、full scan、写入和 migration 的 10k/100k 实测边界见[工作负载成本记录](benchmarks/workload-2026-09-07.md)。
 
 以下片段是故意失败的反例：
 

@@ -819,6 +819,7 @@ insert items
         schema: None,
         idempotency_key: None,
         receipts: None,
+        page: None,
     };
     let response = cli::send_request(&server.addr, &request).unwrap();
     assert!(response.ok, "{}", response.message);
@@ -851,6 +852,7 @@ insert items
         schema: None,
         idempotency_key: None,
         receipts: None,
+        page: None,
     };
     assert_eq!(
         cli::send_request(&server.addr, &missing)
@@ -1030,6 +1032,7 @@ create index events (state)"#;
         schema: None,
         idempotency_key: None,
         receipts: None,
+        page: None,
     };
     let response = cli::send_request(&server.addr, &request).unwrap();
     assert!(response.ok, "{}", response.message);
@@ -1082,6 +1085,7 @@ insert items {id = 1, value = "old"}"#;
         schema: None,
         idempotency_key: None,
         receipts: None,
+        page: None,
     };
     let response = cli::send_request(&server.addr, &request).unwrap();
     assert!(response.ok, "{}", response.message);
@@ -1147,6 +1151,7 @@ returning id, state"#
         schema: None,
         idempotency_key: None,
         receipts: None,
+        page: None,
     };
     let response = cli::send_request(&server.addr, &request).unwrap();
     assert!(response.ok, "{}", response.message);
@@ -1187,6 +1192,7 @@ returning id, ready"#
         schema: None,
         idempotency_key: None,
         receipts: None,
+        page: None,
     };
     let response = cli::send_request(&server.addr, &boolean_update).unwrap();
     assert!(response.ok, "{}", response.message);

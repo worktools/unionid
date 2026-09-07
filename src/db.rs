@@ -9,8 +9,8 @@ use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
 };
 use crate::query::{
-    Aggregate, AggregateAssignment, AggregateFunction, Pipeline, Returning, SetAssignment,
-    SetValue, Stage, Statement,
+    Aggregate, AggregateAssignment, AggregateFunction, PageDirection, PageSpec, Pipeline,
+    Returning, SetAssignment, SetValue, SortKey, Stage, Statement,
 };
 
 mod migration;
@@ -29,6 +29,21 @@ pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
 struct PlannedAccess {
     plan: QueryAccessPlan,
     candidates: Option<Vec<RowId>>,
+}
+
+#[derive(Clone)]
+struct BoundPageOrder {
+    key: SortKey,
+    field_path: Vec<u64>,
+    ty: ScalarType,
+}
+
+struct PreparedPage {
+    spec: PageSpec,
+    order: Vec<BoundPageOrder>,
+    boundary: Option<Vec<Value>>,
+    forward_digest: String,
+    backward_digest: String,
 }
 
 struct BoundReturning {
@@ -223,6 +238,69 @@ fn check_group_limits(
     Ok(())
 }
 
+fn page_plan_digest(pipeline: &Pipeline, direction: PageDirection) -> String {
+    let mut canonical = pipeline.clone();
+    for stage in &mut canonical.stages {
+        if let Stage::Page(page) = stage {
+            page.cursor = None;
+            page.direction = direction;
+        }
+    }
+    let source = crate::formatter::format_pipeline(&canonical);
+    let direction = match direction {
+        PageDirection::Forward => "forward",
+        PageDirection::Backward => "backward",
+    };
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(format!("{source}\npage_direction {direction}").as_bytes())
+    )
+}
+
+fn compare_page_boundary(
+    row: &BTreeMap<String, Value>,
+    order: &[BoundPageOrder],
+    boundary: &[Value],
+) -> Result<std::cmp::Ordering> {
+    for (key, boundary) in order.iter().zip(boundary) {
+        let value = row_field(row, &key.key.column).ok_or_else(|| {
+            Error::new(
+                "E_CURSOR_QUERY",
+                format!("page sort field '{}' is missing", key.key.column),
+            )
+        })?;
+        let comparison = value.cmp_ord(boundary).ok_or_else(|| {
+            Error::new(
+                "E_CURSOR_CODEC",
+                format!("cursor value for '{}' has no ordering", key.key.column),
+            )
+        })?;
+        let comparison = if key.key.descending {
+            comparison.reverse()
+        } else {
+            comparison
+        };
+        if comparison != std::cmp::Ordering::Equal {
+            return Ok(comparison);
+        }
+    }
+    Ok(std::cmp::Ordering::Equal)
+}
+
+fn project_rows(
+    rows: Vec<BTreeMap<String, Value>>,
+    columns: &[String],
+) -> Vec<BTreeMap<String, Value>> {
+    rows.into_iter()
+        .map(|row| {
+            columns
+                .iter()
+                .filter_map(|name| row_field(&row, name).map(|value| (name.clone(), value.clone())))
+                .collect()
+        })
+        .collect()
+}
+
 fn check_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
         Err(Error::new(
@@ -279,6 +357,8 @@ pub(crate) struct DurableMeta {
     pub schema_revision: u64,
     pub next_catalog_id: u64,
     pub schema_hash: String,
+    pub cursor_instance_id: [u8; 16],
+    pub cursor_secret: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,6 +444,7 @@ pub enum QueryStageKind {
     Select,
     Sort,
     Take,
+    Page,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -378,6 +459,46 @@ pub struct QueryPlan {
     pub access: QueryAccessPlan,
     pub stages: Vec<QueryPlanStage>,
     pub result_schema: Vec<ResponseColumn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PagePlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PageOrder {
+    pub column: String,
+    pub field_path: Vec<u64>,
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PageAccessKind {
+    SortedScan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PagePlan {
+    pub limit: usize,
+    pub direction: PageDirection,
+    pub order: Vec<PageOrder>,
+    pub resume_boundary: bool,
+    pub snapshot_sequence: String,
+    pub access: PageAccessKind,
+    pub candidate_rows: usize,
+    pub read_limit: usize,
+    pub max_cursor_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PageInfo {
+    pub limit: usize,
+    pub direction: PageDirection,
+    pub snapshot_sequence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -408,6 +529,8 @@ pub struct QueryResponse {
     pub upsert_actions: Vec<UpsertAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueryPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageInfo>,
 }
 
 impl QueryResponse {
@@ -449,6 +572,7 @@ impl QueryResponse {
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
+            page: None,
         }
     }
 
@@ -465,6 +589,7 @@ impl QueryResponse {
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
+            page: None,
         }
     }
 
@@ -488,6 +613,8 @@ pub struct Database {
     schema_revision: u64,
     #[serde(default)]
     migration_history: Vec<MigrationEntry>,
+    #[serde(skip, default)]
+    cursor_identity: crate::pagination::CursorIdentity,
 }
 
 impl Database {
@@ -1347,6 +1474,12 @@ impl Database {
                     }
                 }
                 Stage::Take { .. } => {}
+                Stage::Page(_) => {
+                    return Err(Error::new(
+                        "E_PAGE_SHAPE",
+                        "page cannot be used as an update or delete target",
+                    ));
+                }
                 Stage::Let(_)
                 | Stage::Derive(_)
                 | Stage::DeriveMatch(_)
@@ -1451,6 +1584,7 @@ impl Database {
                 Stage::Take { offset, limit } => {
                     rows = rows.into_iter().skip(*offset).take(*limit).collect();
                 }
+                Stage::Page(_) => unreachable!("page mutation targets are rejected during bind"),
                 Stage::Let(_)
                 | Stage::Derive(_)
                 | Stage::DeriveMatch(_)
@@ -1621,9 +1755,10 @@ impl Database {
                         }
                     }
                 }
-                Stage::Take { .. } => {}
+                Stage::Take { .. } | Stage::Page(_) => {}
             }
         }
+        self.prepare_page(pipeline)?;
         Ok(schema)
     }
 
@@ -1778,8 +1913,332 @@ impl Database {
         Ok(output)
     }
 
+    fn prepare_page(&self, pipeline: &Pipeline) -> Result<Option<PreparedPage>> {
+        let page_positions = pipeline
+            .stages
+            .iter()
+            .enumerate()
+            .filter_map(|(position, stage)| matches!(stage, Stage::Page(_)).then_some(position))
+            .collect::<Vec<_>>();
+        if page_positions.is_empty() {
+            return Ok(None);
+        }
+        if page_positions.len() != 1 || page_positions[0] + 1 != pipeline.stages.len() {
+            return Err(Error::new(
+                "E_PAGE_SHAPE",
+                "page must be the single final pipeline stage",
+            ));
+        }
+        let page_position = page_positions[0];
+        let Stage::Page(spec) = &pipeline.stages[page_position] else {
+            unreachable!()
+        };
+        if !(1..=crate::pagination::MAX_PAGE_LIMIT).contains(&spec.limit) {
+            return Err(Error::new(
+                "E_PAGE_SHAPE",
+                format!(
+                    "page size must be between 1 and {}",
+                    crate::pagination::MAX_PAGE_LIMIT
+                ),
+            ));
+        }
+        if pipeline
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, Stage::Take { .. } | Stage::Aggregate(_)))
+        {
+            return Err(Error::new(
+                "E_PAGE_SHAPE",
+                "page does not support take, aggregate, or group stages",
+            ));
+        }
+        let sort_position = pipeline.stages[..page_position]
+            .iter()
+            .rposition(|stage| matches!(stage, Stage::Sort(_)))
+            .ok_or_else(|| {
+                Error::new(
+                    "E_PAGE_ORDER",
+                    "page requires an explicit sort ending in the table primary key",
+                )
+            })?;
+        if pipeline.stages[sort_position + 1..page_position]
+            .iter()
+            .any(|stage| !matches!(stage, Stage::Select(_)))
+        {
+            return Err(Error::new(
+                "E_PAGE_SHAPE",
+                "only select may appear between the final sort and page",
+            ));
+        }
+        let Stage::Sort(keys) = &pipeline.stages[sort_position] else {
+            unreachable!()
+        };
+        if keys.is_empty() || keys.len() > crate::pagination::MAX_CURSOR_SORT_KEYS {
+            return Err(Error::new(
+                "E_PAGE_ORDER",
+                format!(
+                    "page sort must contain between 1 and {} fields",
+                    crate::pagination::MAX_CURSOR_SORT_KEYS
+                ),
+            ));
+        }
+        let table = self.table(&pipeline.from)?;
+        let primary_key = table.primary_key.as_deref().ok_or_else(|| {
+            Error::new(
+                "E_PAGE_ORDER",
+                format!("table '{}' has no primary key", pipeline.from),
+            )
+        })?;
+        if keys.last().map(|key| key.column.as_str()) != Some(primary_key) {
+            return Err(Error::new(
+                "E_PAGE_ORDER",
+                format!("page sort must end with primary key '{primary_key}'"),
+            ));
+        }
+
+        let mut schema = table.schema.clone();
+        let mut order = None;
+        for (position, stage) in pipeline.stages.iter().enumerate() {
+            match stage {
+                Stage::Derive(derive) => schema.push(Column {
+                    name: derive.name.clone(),
+                    ty: derive
+                        .output_type
+                        .clone()
+                        .ok_or_else(|| Error::new("E_TYPE", "derive output is not bound"))?,
+                    default: None,
+                    id: 0,
+                }),
+                Stage::DeriveMatch(derive) => {
+                    let ty = derive
+                        .output_type
+                        .clone()
+                        .ok_or_else(|| Error::new("E_TYPE", "derive output is not bound"))?;
+                    schema.push(Column {
+                        name: derive.name.clone(),
+                        ty,
+                        default: None,
+                        id: 0,
+                    });
+                }
+                Stage::Select(columns) => {
+                    schema = columns
+                        .iter()
+                        .map(|name| {
+                            Ok(Column {
+                                name: name.clone(),
+                                ty: self.catalog.field_type(&schema, name)?.clone(),
+                                default: None,
+                                id: 0,
+                            })
+                        })
+                        .collect::<Result<_>>()?;
+                }
+                Stage::Sort(sort) if position == sort_position => {
+                    order = Some(
+                        sort.iter()
+                            .map(|key| {
+                                let ty = self.catalog.field_type(&schema, &key.column)?.clone();
+                                let field_path = self
+                                    .catalog
+                                    .field_path_ids(&table.schema, &key.column)
+                                    .unwrap_or_default();
+                                Ok(BoundPageOrder {
+                                    key: key.clone(),
+                                    field_path,
+                                    ty,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    );
+                }
+                _ => {}
+            }
+            if position == sort_position {
+                break;
+            }
+        }
+        let order = order.expect("final sort was visited");
+        let forward_digest = page_plan_digest(pipeline, PageDirection::Forward);
+        let backward_digest = page_plan_digest(pipeline, PageDirection::Backward);
+        let expected_digest = match spec.direction {
+            PageDirection::Forward => &forward_digest,
+            PageDirection::Backward => &backward_digest,
+        };
+        let boundary = spec
+            .cursor
+            .as_deref()
+            .map(|cursor| {
+                let decoded = crate::pagination::decode(
+                    &self.cursor_identity,
+                    cursor,
+                    crate::pagination::CursorExpectation {
+                        schema: &self.schema_info(),
+                        snapshot_sequence: self.sequence,
+                        plan_digest: expected_digest,
+                        direction: spec.direction,
+                        limit: spec.limit,
+                    },
+                )?;
+                if decoded.keys.len() != order.len() {
+                    return Err(Error::new(
+                        "E_CURSOR_QUERY",
+                        "cursor sort key count does not match the query",
+                    ));
+                }
+                decoded
+                    .keys
+                    .into_iter()
+                    .zip(&order)
+                    .map(|(cursor_key, expected)| {
+                        if cursor_key.column != expected.key.column
+                            || cursor_key.field_path != expected.field_path
+                            || cursor_key.descending != expected.key.descending
+                        {
+                            return Err(Error::new(
+                                "E_CURSOR_QUERY",
+                                "cursor sort key identity does not match the query",
+                            ));
+                        }
+                        let value = Value::try_from(cursor_key.value).map_err(|_| {
+                            Error::new("E_CURSOR_CODEC", "cursor contains an invalid typed value")
+                        })?;
+                        self.catalog.coerce(&value, &expected.ty, "cursor boundary")
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        Ok(Some(PreparedPage {
+            spec: spec.clone(),
+            order,
+            boundary,
+            forward_digest,
+            backward_digest,
+        }))
+    }
+
+    fn apply_page(
+        &self,
+        rows: Vec<BTreeMap<String, Value>>,
+        page: &PreparedPage,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(Vec<BTreeMap<String, Value>>, PageInfo)> {
+        let eligible = |row: &BTreeMap<String, Value>| -> Result<bool> {
+            let Some(boundary) = &page.boundary else {
+                return Ok(true);
+            };
+            let order = compare_page_boundary(row, &page.order, boundary)?;
+            Ok(match page.spec.direction {
+                PageDirection::Forward => order == std::cmp::Ordering::Greater,
+                PageDirection::Backward => order == std::cmp::Ordering::Less,
+            })
+        };
+        let bound = page.spec.limit.saturating_add(1);
+        let mut selected = Vec::with_capacity(bound);
+        match page.spec.direction {
+            PageDirection::Forward => {
+                for (position, row) in rows.into_iter().enumerate() {
+                    check_deadline_periodically(deadline, position)?;
+                    if eligible(&row)? {
+                        selected.push(row);
+                        if selected.len() == bound {
+                            break;
+                        }
+                    }
+                }
+            }
+            PageDirection::Backward => {
+                for (position, row) in rows.into_iter().rev().enumerate() {
+                    check_deadline_periodically(deadline, position)?;
+                    if eligible(&row)? {
+                        selected.push(row);
+                        if selected.len() == bound {
+                            break;
+                        }
+                    }
+                }
+                selected.reverse();
+            }
+        }
+        let has_more = selected.len() > page.spec.limit;
+        if has_more {
+            match page.spec.direction {
+                PageDirection::Forward => {
+                    selected.pop();
+                }
+                PageDirection::Backward => {
+                    selected.remove(0);
+                }
+            }
+        }
+        let resumed = page.boundary.is_some();
+        let previous_cursor = if !selected.is_empty()
+            && (page.spec.direction == PageDirection::Forward && resumed
+                || page.spec.direction == PageDirection::Backward && has_more)
+        {
+            Some(self.cursor_for_row(page, PageDirection::Backward, &selected[0])?)
+        } else {
+            None
+        };
+        let next_cursor = if !selected.is_empty()
+            && (page.spec.direction == PageDirection::Forward && has_more
+                || page.spec.direction == PageDirection::Backward && resumed)
+        {
+            Some(self.cursor_for_row(page, PageDirection::Forward, selected.last().unwrap())?)
+        } else {
+            None
+        };
+        Ok((
+            selected,
+            PageInfo {
+                limit: page.spec.limit,
+                direction: page.spec.direction,
+                snapshot_sequence: self.sequence.to_string(),
+                next_cursor,
+                previous_cursor,
+                has_more,
+            },
+        ))
+    }
+
+    fn cursor_for_row(
+        &self,
+        page: &PreparedPage,
+        direction: PageDirection,
+        row: &BTreeMap<String, Value>,
+    ) -> Result<String> {
+        let keys = page
+            .order
+            .iter()
+            .map(|order| {
+                let value = row_field(row, &order.key.column).ok_or_else(|| {
+                    Error::new("E_CURSOR_CODEC", "page boundary field disappeared")
+                })?;
+                Ok(crate::pagination::CursorKey {
+                    field_path: order.field_path.clone(),
+                    column: order.key.column.clone(),
+                    descending: order.key.descending,
+                    value: crate::protocol::WireValue::from(value),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        crate::pagination::encode(
+            &self.cursor_identity,
+            &self.schema_info(),
+            self.sequence,
+            match direction {
+                PageDirection::Forward => &page.forward_digest,
+                PageDirection::Backward => &page.backward_digest,
+            },
+            direction,
+            page.spec.limit,
+            keys,
+        )
+    }
+
     fn explain(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
         let schema = self.prepare_pipeline(&mut pipeline)?;
+        let prepared_page = self.prepare_page(&pipeline)?;
         let access = self.plan_access(&pipeline)?.plan;
         let result_schema = schema
             .iter()
@@ -1804,15 +2263,36 @@ impl Database {
                     Stage::Select(_) => QueryStageKind::Select,
                     Stage::Sort(_) => QueryStageKind::Sort,
                     Stage::Take { .. } => QueryStageKind::Take,
+                    Stage::Page(_) => QueryStageKind::Page,
                 },
             })
             .collect();
         let mut response = QueryResponse::ok_message("query plan");
+        let page = prepared_page.as_ref().map(|page| PagePlan {
+            limit: page.spec.limit,
+            direction: page.spec.direction,
+            order: page
+                .order
+                .iter()
+                .map(|order| PageOrder {
+                    column: order.key.column.clone(),
+                    field_path: order.field_path.clone(),
+                    descending: order.key.descending,
+                })
+                .collect(),
+            resume_boundary: page.boundary.is_some(),
+            snapshot_sequence: self.sequence.to_string(),
+            access: PageAccessKind::SortedScan,
+            candidate_rows: access.estimated_rows,
+            read_limit: page.spec.limit.saturating_add(1),
+            max_cursor_bytes: crate::pagination::MAX_CURSOR_BYTES,
+        });
         response.plan = Some(QueryPlan {
             table: pipeline.from,
             access,
             stages,
             result_schema,
+            page,
         });
         Ok(response)
     }
@@ -1869,6 +2349,7 @@ impl Database {
     ) -> Result<QueryResponse> {
         check_deadline(deadline)?;
         let schema = self.prepare_pipeline(&mut pipeline)?;
+        let prepared_page = self.prepare_page(&pipeline)?;
         let table = self.table(&pipeline.from)?;
         let candidates = self.plan_access(&pipeline)?.candidates;
         let working_rows = candidates
@@ -1903,6 +2384,8 @@ impl Database {
             }
         };
         let mut evaluation_budget = crate::expression::EvaluationBudget::new();
+        let mut deferred_selects = Vec::new();
+        let mut page_info = None;
         for stage in pipeline.stages {
             match stage {
                 Stage::Let(_) => {}
@@ -1972,17 +2455,11 @@ impl Database {
                     rows = self.aggregate_rows(rows, &aggregate, deadline)?;
                 }
                 Stage::Select(columns) => {
-                    rows = rows
-                        .into_iter()
-                        .map(|row| {
-                            columns
-                                .iter()
-                                .filter_map(|name| {
-                                    row_field(&row, name).map(|v| (name.clone(), v.clone()))
-                                })
-                                .collect()
-                        })
-                        .collect();
+                    if prepared_page.is_some() {
+                        deferred_selects.push(columns);
+                    } else {
+                        rows = project_rows(rows, &columns);
+                    }
                 }
                 Stage::Sort(keys) => {
                     check_deadline(deadline)?;
@@ -2008,7 +2485,19 @@ impl Database {
                 Stage::Take { offset, limit } => {
                     rows = rows.into_iter().skip(offset).take(limit).collect()
                 }
+                Stage::Page(_) => {
+                    let page = prepared_page
+                        .as_ref()
+                        .expect("page stage has prepared page metadata");
+                    (rows, page_info) = {
+                        let (rows, info) = self.apply_page(rows, page, deadline)?;
+                        (rows, Some(info))
+                    };
+                }
             }
+        }
+        for columns in deferred_selects {
+            rows = project_rows(rows, &columns);
         }
         check_deadline(deadline)?;
         if rows.len() > MAX_RESULT_ROWS {
@@ -2038,6 +2527,7 @@ impl Database {
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
+            page: page_info,
         })
     }
 
@@ -2348,6 +2838,8 @@ impl Database {
             schema_revision: self.schema_revision,
             next_catalog_id: self.catalog.next_id(),
             schema_hash: self.schema_info().hash,
+            cursor_instance_id: *self.cursor_identity.instance_id(),
+            cursor_secret: *self.cursor_identity.secret(),
         }
     }
 
@@ -2631,6 +3123,10 @@ impl Database {
             sequence: meta.sequence,
             schema_revision: meta.schema_revision,
             migration_history,
+            cursor_identity: crate::pagination::CursorIdentity::from_bytes(
+                meta.cursor_instance_id,
+                meta.cursor_secret,
+            ),
         };
         crate::migration::validate_history(&database.migration_history)?;
         if let Some(head) = database.migration_history.last()
