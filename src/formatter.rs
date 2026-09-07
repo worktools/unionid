@@ -190,15 +190,15 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             }
             for assignment in assignments {
                 match &assignment.value {
-                    SetValue::Expression(value) => line(
-                        output,
-                        depth,
-                        &format!("set {} = {}", assignment.path, boolean(value, 0, false)),
-                    ),
-                    SetValue::Match(value) => {
-                        line(output, depth, &format!("set {} =", assignment.path));
-                        match_value_arms(output, value, depth + 1);
+                    SetValue::Expression(value) => {
+                        expression(output, depth, &format!("set {} = ", assignment.path), value)
                     }
+                    SetValue::Match(value) => match_value_arms(
+                        output,
+                        &format!("set {} = ", assignment.path),
+                        value,
+                        depth,
+                    ),
                 }
             }
             returning_text(output, returning.as_ref(), depth);
@@ -238,18 +238,20 @@ fn returning_text(output: &mut String, returning: Option<&crate::query::Returnin
     if returning.fields.is_empty() {
         line(output, depth, "returning");
     } else {
-        line(
-            output,
-            depth,
-            &format!("returning {}", returning.fields.join(", ")),
-        );
+        let fields = if returning.fields.len() == 1 {
+            returning.fields[0].clone()
+        } else {
+            format!("{{{}}}", returning.fields.join(", "))
+        };
+        line(output, depth, &format!("returning {fields}"));
     }
 }
 
 fn row_write(output: &mut String, operation: &str, table: &str, value: &Value, depth: usize) {
     if let Value::Record(fields) = value {
-        line(output, depth, &format!("{operation} {table}"));
+        line(output, depth, &format!("{operation} {table} {{"));
         record_lines(output, fields, depth + 1);
+        line(output, depth, "}");
     } else {
         line(
             output,
@@ -273,9 +275,8 @@ fn many_write(output: &mut String, operation: &str, table: &str, value: &Value, 
         return;
     }
     line(output, depth, &format!("{operation} many {table} ["));
-    for (position, row) in rows.iter().enumerate() {
-        let comma = if position + 1 == rows.len() { "" } else { "," };
-        line(output, depth + 1, &format!("{}{comma}", row.source_text()));
+    for row in rows {
+        line(output, depth + 1, &format!("{},", row.source_text()));
     }
     line(output, depth, "]");
 }
@@ -287,10 +288,11 @@ fn record_lines(
 ) {
     for (name, value) in fields {
         if let Value::Record(nested) = value {
-            line(output, depth, &format!("{name} ="));
+            line(output, depth, &format!("{name} = {{"));
             record_lines(output, nested, depth + 1);
+            line(output, depth, "},");
         } else {
-            line(output, depth, &format!("{name} = {}", value.source_text()));
+            line(output, depth, &format!("{name} = {},", value.source_text()));
         }
     }
 }
@@ -298,20 +300,22 @@ fn record_lines(
 fn type_definition(output: &mut String, prefix: &str, name: &str, ty: &ScalarType, depth: usize) {
     match ty {
         ScalarType::Record(fields) => {
-            line(output, depth, &format!("{prefix} {name} ="));
+            line(output, depth, &format!("{prefix} {name} = {{"));
             for field in fields {
-                line(output, depth + 1, &column(field));
+                line(output, depth + 1, &format!("{},", column(field)));
             }
+            line(output, depth, "}");
         }
         ScalarType::Enum(EnumType { variants }) => {
             line(output, depth, &format!("{prefix} {name} ="));
             for (index, variant) in variants.iter().enumerate() {
                 let lead = if index == 0 { "" } else { "| " };
                 if let [ScalarType::Record(fields)] = variant.args.as_slice() {
-                    line(output, depth + 1, &format!("{lead}{}", variant.name));
+                    line(output, depth + 1, &format!("{lead}{} {{", variant.name));
                     for field in fields {
-                        line(output, depth + 2, &column(field));
+                        line(output, depth + 2, &format!("{},", column(field)));
                     }
+                    line(output, depth + 1, "}");
                 } else {
                     line(
                         output,
@@ -339,24 +343,24 @@ fn pipeline_text(output: &mut String, pipeline: &Pipeline, depth: usize) {
 fn stage_text(output: &mut String, stage: &Stage, depth: usize) {
     match stage {
         Stage::Let(binding) => line(output, depth, &local_binding(binding)),
-        Stage::Filter(expression) => line(
-            output,
-            depth,
-            &format!("filter {}", boolean(expression, 0, false)),
-        ),
+        Stage::Filter(value) => expression(output, depth, "filter ", value),
         Stage::FilterMatch(predicate) => match_predicate(output, predicate, depth),
-        Stage::Derive(derive) => line(
+        Stage::Derive(derive) => expression(
             output,
             depth,
-            &format!(
-                "derive {} = {}",
-                derive.name,
-                boolean(&derive.expression, 0, false)
-            ),
+            &format!("derive {} = ", derive.name),
+            &derive.expression,
         ),
         Stage::DeriveMatch(derive) => derive_match(output, derive, depth),
         Stage::Aggregate(aggregate) => aggregate_text(output, aggregate, depth),
-        Stage::Select(fields) => line(output, depth, &format!("select {{{}}}", fields.join(", "))),
+        Stage::Select(fields) => {
+            let fields = if fields.len() == 1 {
+                fields[0].clone()
+            } else {
+                format!("{{{}}}", fields.join(", "))
+            };
+            line(output, depth, &format!("select {fields}"));
+        }
         Stage::Sort(keys) => {
             let keys = keys
                 .iter()
@@ -388,6 +392,111 @@ fn stage_text(output: &mut String, stage: &Stage, depth: usize) {
             }
             line(output, depth, &text);
         }
+    }
+}
+
+const MAX_EXPRESSION_LINE: usize = 96;
+
+fn expression(output: &mut String, depth: usize, prefix: &str, value: &BoolExpression) {
+    let inline = boolean(value, 0, false);
+    if depth * 2 + prefix.len() + inline.len() <= MAX_EXPRESSION_LINE {
+        line(output, depth, &format!("{prefix}{inline}"));
+        return;
+    }
+    line(output, depth, &format!("{prefix}("));
+    boolean_lines(output, depth + 1, value);
+    line(output, depth, ")");
+}
+
+fn boolean_lines(output: &mut String, depth: usize, value: &BoolExpression) {
+    match value {
+        BoolExpression::And(..) => boolean_chain(output, depth, value, true),
+        BoolExpression::Or(..) => boolean_chain(output, depth, value, false),
+        BoolExpression::Any {
+            collection,
+            binding,
+            predicate,
+        }
+        | BoolExpression::All {
+            collection,
+            binding,
+            predicate,
+        } if boolean(value, 0, false).len() + depth * 2 > MAX_EXPRESSION_LINE => {
+            let function = if matches!(value, BoolExpression::All { .. }) {
+                "all"
+            } else {
+                "any"
+            };
+            line(
+                output,
+                depth,
+                &format!("{function} {} (", scalar_argument(collection)),
+            );
+            line(output, depth + 1, &format!("{binding} ->"));
+            boolean_lines(output, depth + 2, predicate);
+            line(output, depth, ")");
+        }
+        _ => line(output, depth, &boolean(value, 0, false)),
+    }
+}
+
+fn boolean_chain(output: &mut String, depth: usize, value: &BoolExpression, and: bool) {
+    let mut values = Vec::new();
+    collect_boolean_chain(value, and, &mut values);
+    let operator = if and { "and" } else { "or" };
+    let precedence = if and { 2 } else { 1 };
+    for (index, value) in values.into_iter().enumerate() {
+        let prefix = if index == 0 {
+            String::new()
+        } else {
+            format!("{operator} ")
+        };
+        let inline = boolean(value, precedence, index > 0);
+        match value {
+            BoolExpression::Any {
+                collection,
+                binding,
+                predicate,
+            }
+            | BoolExpression::All {
+                collection,
+                binding,
+                predicate,
+            } if prefix.len() + inline.len() + depth * 2 > MAX_EXPRESSION_LINE => {
+                let function = if matches!(value, BoolExpression::All { .. }) {
+                    "all"
+                } else {
+                    "any"
+                };
+                line(
+                    output,
+                    depth,
+                    &format!("{prefix}{function} {} (", scalar_argument(collection)),
+                );
+                line(output, depth + 1, &format!("{binding} ->"));
+                boolean_lines(output, depth + 2, predicate);
+                line(output, depth, ")");
+            }
+            _ => line(output, depth, &format!("{prefix}{inline}")),
+        }
+    }
+}
+
+fn collect_boolean_chain<'a>(
+    value: &'a BoolExpression,
+    and: bool,
+    output: &mut Vec<&'a BoolExpression>,
+) {
+    match value {
+        BoolExpression::And(left, right) if and => {
+            collect_boolean_chain(left, and, output);
+            collect_boolean_chain(right, and, output);
+        }
+        BoolExpression::Or(left, right) if !and => {
+            collect_boolean_chain(left, and, output);
+            collect_boolean_chain(right, and, output);
+        }
+        _ => output.push(value),
     }
 }
 
@@ -426,67 +535,72 @@ fn local_binding(binding: &LocalBinding) -> String {
 }
 
 fn match_predicate(output: &mut String, predicate: &MatchPredicate, depth: usize) {
-    line(output, depth, &format!("filter match {}", predicate.column));
+    line(output, depth, "filter (");
+    line(output, depth + 1, &format!("match {} {{", predicate.column));
     for arm in &predicate.arms {
         line(
             output,
-            depth + 1,
+            depth + 2,
             &format!(
-                "{} => {}",
+                "{} => {},",
                 pattern(&arm.pattern, false),
                 boolean(&arm.condition, 0, false)
             ),
         );
     }
+    line(output, depth + 1, "}");
+    line(output, depth, ")");
 }
 
 fn derive_match(output: &mut String, derive: &DeriveMatch, depth: usize) {
     line(
         output,
         depth,
-        &format!("derive {} = match {}", derive.name, derive.source),
+        &format!("derive {} = match {} {{", derive.name, derive.source),
     );
     for arm in &derive.arms {
         line(
             output,
             depth + 1,
             &format!(
-                "{} => {}",
+                "{} => {},",
                 pattern(&arm.pattern, false),
                 match_value(&arm.result, false)
             ),
         );
     }
+    line(output, depth, "}");
 }
 
-fn match_value_arms(output: &mut String, value: &DeriveMatch, depth: usize) {
-    line(output, depth, &format!("match {}", value.source));
+fn match_value_arms(output: &mut String, prefix: &str, value: &DeriveMatch, depth: usize) {
+    line(output, depth, &format!("{prefix}match {} {{", value.source));
     for arm in &value.arms {
         line(
             output,
             depth + 1,
             &format!(
-                "{} => {}",
+                "{} => {},",
                 pattern(&arm.pattern, false),
                 match_value(&arm.result, false)
             ),
         );
     }
+    line(output, depth, "}");
 }
 
 fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
-    let assignment_depth = if aggregate.group_by.is_empty() {
-        line(output, depth, "aggregate");
-        depth + 1
+    let (assignment_depth, closing_depth) = if aggregate.group_by.is_empty() {
+        line(output, depth, "aggregate {");
+        (depth + 1, depth)
     } else {
         let keys = if aggregate.group_by.len() == 1 {
             aggregate.group_by[0].clone()
         } else {
             format!("{{{}}}", aggregate.group_by.join(", "))
         };
-        line(output, depth, &format!("group {keys}"));
-        line(output, depth + 1, "aggregate");
-        depth + 2
+        line(output, depth, &format!("group {keys} ("));
+        line(output, depth + 1, "aggregate {");
+        (depth + 2, depth + 1)
     };
     for assignment in &aggregate.assignments {
         let function = match assignment.function {
@@ -503,8 +617,12 @@ fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
         line(
             output,
             assignment_depth,
-            &format!("{} = {function}{input}", assignment.name),
+            &format!("{} = {function}{input},", assignment.name),
         );
+    }
+    line(output, closing_depth, "}");
+    if !aggregate.group_by.is_empty() {
+        line(output, depth, ")");
     }
 }
 

@@ -1,131 +1,171 @@
 # A nested ADT job queue with deterministic multi-key paging.
 type Failure =
-  Network {message text}
-  | InvalidData {field text, message text}
+  Network {
+    message text,
+  }
+  | InvalidData {
+    field text,
+    message text,
+  }
 
 type Payload =
-  Sync {source text, target text}
-  | Webhook {url text, body text}
+  Sync {
+    source text,
+    target text,
+  }
+  | Webhook {
+    url text,
+    body text,
+  }
 
 type AttemptOutcome =
   Accepted
-  | Rejected {code int}
+  | Rejected {
+    code int,
+  }
 
-type AttemptLog =
-  worker text
-  outcome AttemptOutcome
-  checkpoints list int
-  note option text = None
+type AttemptLog = {
+  worker text,
+  outcome AttemptOutcome,
+  checkpoints list int,
+  note option text = None,
+}
 
 type JobState =
-  Queued {scheduled_at int, attempt int = 0}
-  | Running {worker text, started_at int}
-  | Succeeded {finished_at int}
-  | Failed {error Failure, retry_at option int = None}
+  Queued {
+    scheduled_at int,
+    attempt int = 0,
+  }
+  | Running {
+    worker text,
+    started_at int,
+  }
+  | Succeeded {
+    finished_at int,
+  }
+  | Failed {
+    error Failure,
+    retry_at option int = None,
+  }
 
-type Job =
-  id text
-  priority int = 0
-  created_at int
-  tags list text = []
-  history list AttemptLog = []
-  payload Payload
-  state JobState
+type Job = {
+  id text,
+  priority int = 0,
+  created_at int,
+  tags list text = [],
+  history list AttemptLog = [],
+  payload Payload,
+  state JobState,
+}
 
 table jobs Job
   key id
 
-insert jobs
-  id = "job-a"
-  priority = 10
-  created_at = 100
-  tags = ["sync", "local"]
-  history = [{worker = "worker-0", outcome = Rejected {code = 503}, checkpoints = [1, 3], note = Some "retry"}]
-  payload = Sync {source = "inbox", target = "archive"}
-  state = Queued {scheduled_at = 180}
+insert jobs {
+  created_at = 100,
+  history = [{checkpoints = [1, 3], note = Some("retry"), outcome = Rejected {code = 503}, worker = "worker-0"}],
+  id = "job-a",
+  payload = Sync {source = "inbox", target = "archive"},
+  priority = 10,
+  state = Queued {scheduled_at = 180},
+  tags = ["sync", "local"],
+}
 
-insert jobs
-  id = "job-b"
-  priority = 20
-  created_at = 120
-  payload = Webhook {url = "https://example.test/hook", body = "{}"}
-  state = Queued {scheduled_at = 300}
+insert jobs {
+  created_at = 120,
+  id = "job-b",
+  payload = Webhook {body = "{}", url = "https://example.test/hook"},
+  priority = 20,
+  state = Queued {scheduled_at = 300},
+}
 
-insert jobs
-  id = "job-c"
-  priority = 10
-  created_at = 90
-  tags = ["sync"]
-  payload = Sync {source = "drafts", target = "outbox"}
-  state = Queued {scheduled_at = 160, attempt = 1}
+insert jobs {
+  created_at = 90,
+  id = "job-c",
+  payload = Sync {source = "drafts", target = "outbox"},
+  priority = 10,
+  state = Queued {attempt = 1, scheduled_at = 160},
+  tags = ["sync"],
+}
 
-insert jobs
-  id = "job-d"
-  priority = 50
-  created_at = 80
-  payload = Sync {source = "remote", target = "local"}
-  state = Running {worker = "worker-1", started_at = 150}
+insert jobs {
+  created_at = 80,
+  id = "job-d",
+  payload = Sync {source = "remote", target = "local"},
+  priority = 50,
+  state = Running {started_at = 150, worker = "worker-1"},
+}
 
-insert jobs
-  id = "job-e"
-  priority = 5
-  created_at = 130
-  payload = Webhook {url = "https://example.test/retry", body = "{}"}
-  state = Failed {error = Network {message = "timeout"}, retry_at = Some 240}
+insert jobs {
+  created_at = 130,
+  id = "job-e",
+  payload = Webhook {body = "{}", url = "https://example.test/retry"},
+  priority = 5,
+  state = Failed {error = Network {message = "timeout"}, retry_at = Some(240)},
+}
 
 from jobs
-derive has_retryable_history = any history (attempt ->
-  attempt.outcome == AttemptOutcome.Rejected {code = 503}
-  and any attempt.checkpoints (checkpoint -> checkpoint >= 3)
-  and is_some attempt.note
+derive has_retryable_history = (
+  any history (
+    attempt ->
+      attempt.outcome == AttemptOutcome.Rejected {code = 503}
+      and any attempt.checkpoints (checkpoint -> checkpoint >= 3)
+      and is_some attempt.note
+  )
 )
 derive weighted_priority = priority + length history
 filter has_retryable_history
 select {id, weighted_priority}
 
 from jobs
-filter match state
-  Failed {error = Network {message}, retry_at = Some at} => at >= 200
-  _ => false
-derive retry_at =
-  match state
-    Failed {retry_at = Some at, ..} => Some at
-    _ => None
+filter (
+  match state {
+    Failed {error = Network {message}, retry_at = Some at} => at >= 200,
+    _ => false,
+  }
+)
+derive retry_at = match state {
+  Failed {retry_at = Some at, ..} => Some at,
+  _ => None,
+}
 select {id, state, retry_at}
 
 from jobs
-derive state_label =
-  match state
-    Queued {..} => "queued"
-    Running {..} => "running"
-    Succeeded {..} => "succeeded"
-    Failed {..} => "failed"
-group state_label
-  aggregate
-    jobs = count
-    total_priority = sum priority
-    earliest = min created_at
+derive state_label = match state {
+  Queued {..} => "queued",
+  Running {..} => "running",
+  Succeeded {..} => "succeeded",
+  Failed {..} => "failed",
+}
+group state_label (
+  aggregate {
+    jobs = count,
+    total_priority = sum priority,
+    earliest = min created_at,
+  }
+)
 sort state_label
 
 from jobs
 let important = value -> value >= 10
 let has_tag = (values list text, tag text) -> contains values tag
-filter
-  important priority
-  and has_tag tags "sync"
-filter match state
-  Queued {scheduled_at, ..} => scheduled_at <= 200
-  _ => false
-derive state_label =
-  match state
-    Queued {..} => "queued"
-    Running {..} => "running"
-    Succeeded {..} => "succeeded"
-    Failed {..} => "failed"
-derive next_attempt =
-  match state
-    Queued {attempt, ..} => Some (attempt + 1)
-    _ => None
+filter important priority and has_tag tags "sync"
+filter (
+  match state {
+    Queued {scheduled_at, ..} => scheduled_at <= 200,
+    _ => false,
+  }
+)
+derive state_label = match state {
+  Queued {..} => "queued",
+  Running {..} => "running",
+  Succeeded {..} => "succeeded",
+  Failed {..} => "failed",
+}
+derive next_attempt = match state {
+  Queued {attempt, ..} => Some (attempt + 1),
+  _ => None,
+}
 sort {-priority, created_at, id}
-take 1..2
+take 2
 select {id, state_label, next_attempt, payload, state}

@@ -1,26 +1,40 @@
-type Mode = Development | Production
-type Endpoint =
-  host text
-  port int
-type Config =
-  name text
-  endpoint Endpoint
-  mode Mode = Development
-  tags list text = []
-  owner option text = None
+type Mode =
+  Development
+  | Production
+
+type Endpoint = {
+  host text,
+  port int,
+}
+
+type Config = {
+  name text,
+  endpoint Endpoint,
+  mode Mode = Development,
+  tags list text = [],
+  owner option text = None,
+}
 
 table config Config
   key name
 
-upsert config
-  name = "worker"
-  endpoint = {host = "localhost", port = 8080}
+upsert config {
+  endpoint = {
+    host = "localhost",
+    port = 8080,
+  },
+  name = "worker",
+}
 
 # The same business key replaces the complete typed value without adding a row.
-upsert config
-  name = "worker"
-  endpoint = {host = "worker.internal", port = 9000}
-  tags = ["sync", "durable"]
+upsert config {
+  endpoint = {
+    host = "worker.internal",
+    port = 9000,
+  },
+  name = "worker",
+  tags = ["sync", "durable"],
+}
 
 from config
 filter endpoint.port >= 8000

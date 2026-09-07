@@ -42,11 +42,11 @@ type Job =
 
 - 查找可运行任务：解构 `Queued`，比较 `scheduled_at`，按 priority、时间和 id 排序后取一页，并把状态派生为统一的 text 标签。失败任务可直接用 `Failed {error = Network {message}, retry_at = Some at}` 解构嵌套失败原因和重试时间。当前完整示例见 [job_queue.uid](../examples/job_queue.uid)。
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行；`explain from jobs | filter id == "job-a" | take 1` 可验证 lookup、候选数和结果 schema。
-- 原子 claim：按旧状态筛选，`sort {-priority, scheduled_at, id} | take 1` 稳定选出下一条，再用 `set state = match state` 把 `Queued` 改成 `Running`。末尾 `returning id, state` 在同一请求中返回命中的新状态；没有候选时得到稳定 columns、空 rows 和 affected_rows 0，无需先查询 ID。
-- 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter match state` 组合即可限定状态。
+- 原子 claim：按旧状态筛选，`sort {-priority, scheduled_at, id} | take 1` 稳定选出下一条，再用 `set state = match state {...}` 把 `Queued` 改成 `Running`。末尾 `returning {id, state}` 在同一请求中返回命中的新状态；没有候选时得到稳定 columns、空 rows 和 affected_rows 0，无需先查询 ID。
+- 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter (match state {...})` 组合即可限定状态。
 - 复用业务判断：`let important = value -> value >= 10` 和 `let has_tag = (values list text, tag text) -> contains values tag` 可在当前 pipeline 后续的 filter、derive 与 aggregate 输入中重复调用，避免复制长条件。
 - 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
-- 按状态计数：`derive match` 把 sum 分支归一为状态名，再用 `group state_label` 与 `aggregate` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.uid](../examples/job_queue.uid)。
+- 按状态计数：`derive state_label = match state {...}` 把 sum 分支归一为状态名，再用 `group state_label (aggregate {...})` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.uid](../examples/job_queue.uid)。
 
 列表查询必须提供唯一的最终排序键，例如 `sort {-priority, created_at, id}`。只按 priority 分页会让相同优先级的跨请求边界不稳定。
 
@@ -85,7 +85,7 @@ type ServiceConfig =
 
 - 按 environment、owner 和固定 record 路径筛选；普通 record 路径当前已支持，option 需要 #35 显式解构。
 - 只列出 HTTP 服务并投影 `base_url`；需要 #35 的 match expression，因为字段只存在于 `Http` 分支。
-- 判断某个完整 header 或 validation issue 是否存在可用 `contains`；按元素字段筛选可用 `any headers (header -> header.name == "authorization")`。若 `headers` 位于 sum payload 中，先用 `filter match` 建立 list binding，再在 condition 中使用 `any/all`。
+- 判断某个完整 header 或 validation issue 是否存在可用 `contains`；按元素字段筛选可用 `any headers (header -> header.name == "authorization")`。若 `headers` 位于 sum payload 中，先用 `filter (match ... {...})` 建立 list binding，再在 condition 中使用 `any/all`。
 - 整体 upsert 一份配置并校验嵌套类型；当前按主键插入或完整替换，示例见 [`config.uid`](../examples/config.uid)。
 - 把 `Bearer` 改名或给 `Http` 增加字段；身份保留、回填和转换属于 #17–#19。
 
@@ -119,7 +119,7 @@ type Event =
   delivery DeliveryState = Pending
 ```
 
-常见工作流包括批量接收事件、筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。`insert many events $rows` 可从 Rust/TCP 一次提交 typed `list Event`，逐行补默认 delivery 并在整批主键验证后原子写入；literal 示例见 [events.uid](../examples/events.uid)。当前 `filter match` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，来源统计可用 `group source` 后接 count/sum/min/max。
+常见工作流包括批量接收事件、筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。`insert many events $rows` 可从 Rust/TCP 一次提交 typed `list Event`，逐行补默认 delivery 并在整批主键验证后原子写入；literal 示例见 [events.uid](../examples/events.uid)。当前 `filter (match ... {...})` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，来源统计可用 `group source (aggregate {...})`。
 
 ## 4. 离线同步与冲突状态
 

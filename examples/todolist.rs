@@ -326,9 +326,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let claim = Request::query(
         "claim-todo",
         r#"update todos
-filter match status
-  Inbox => true
-  _ => false
+filter (
+  match status {
+    Inbox => true,
+    _ => false,
+  }
+)
 set status = InProgress {attempt = 1, device = "worker-1"}
 set reminder = On {retry = {attempts = 3, delay_ms = 2000}, channel = "slack"}
 returning"#,

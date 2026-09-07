@@ -220,6 +220,9 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "type Task =\n  id int",
         "from tasks\ngroup id\n  aggregate\n    rows = count",
         "from tasks\nfilter match state\n  Pending => true",
+        "type Task = {\n  id int,\n}",
+        "from tasks\nfilter (\n  match state {\n    Pending => true,\n  }\n)",
+        "from tasks\ngroup state (\n  aggregate {\n    rows = count,\n  }\n)",
         "delete tasks\nreturning",
         "insert many tasks []\nreturning id",
     ] {
@@ -234,6 +237,9 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "from tasks\nfilter match state",
         "from tasks\nfilter match state\n  Pending =>",
         "from tasks\ngroup state",
+        "type Task = {\n  id int,",
+        "from tasks\nfilter (\n  match state {\n    Pending => true,",
+        "from tasks\ngroup state (\n  aggregate {\n    rows = count,\n  }",
         "explain\n",
         "migration initial\n",
         "update rows\nset state =\n",
@@ -256,6 +262,8 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "from tasks\n\tfilter id == 1",
         "type Task =\n  id int\n name text",
         "from tasks | filter id == 1)",
+        "from tasks\nfilter (match state { Pending => true Done => false })",
+        "from tasks\ngroup state (aggregate {rows = count total = sum score})",
         "type Task =\n  id",
     ] {
         let InputStatus::Invalid(error) = input_status(source) else {
@@ -263,6 +271,22 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         };
         assert_eq!(error.code, "E_SYNTAX", "{source:?}");
         assert!(error.span.is_some(), "{source:?}");
+    }
+
+    for (source, message) in [
+        (
+            "from tasks\nfilter (match state { Pending => true Done => false })",
+            "expected ',' between match branches",
+        ),
+        (
+            "from tasks\ngroup state (aggregate {rows = count total = sum score})",
+            "expected ',' between aggregate fields",
+        ),
+    ] {
+        let InputStatus::Invalid(error) = input_status(source) else {
+            panic!("expected invalid source: {source:?}");
+        };
+        assert_eq!(error.message, message, "{source:?}");
     }
 }
 

@@ -49,7 +49,7 @@ fn formatter_preserves_comments_at_stable_statement_boundaries() {
     let formatted = format_source(source).unwrap();
     assert_eq!(
         formatted,
-        "# schema\ntype Task =\n  id int\n\n# row type\n# query\nfrom tasks\ntake 1\n\n# trailing note\n"
+        "# schema\ntype Task = {\n  id int,\n}\n\n# row type\n# query\nfrom tasks\ntake 1\n\n# trailing note\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
     assert_eq!(
@@ -80,12 +80,12 @@ fn formatter_covers_statements_stages_patterns_values_and_migrations() {
 }
 
 #[test]
-fn formatter_uses_low_punctuation_returning_layout() {
+fn formatter_uses_structured_record_and_returning_layout() {
     let source = "insert tasks {id = 1, state = Pending} | returning {id, state}\ninsert many tasks [{id = 2, state = Pending}, {id = 3, state = Done}] | returning {id}\nupdate tasks | set state = Done | returning {id, state}\ndelete tasks\nreturning";
     let formatted = format_source(source).unwrap();
     assert_eq!(
         formatted,
-        "insert tasks\n  id = 1\n  state = Pending\nreturning id, state\n\ninsert many tasks [\n  {id = 2, state = Pending},\n  {id = 3, state = Done}\n]\nreturning id\n\nupdate tasks\nset state = Done\nreturning id, state\n\ndelete tasks\nreturning\n"
+        "insert tasks {\n  id = 1,\n  state = Pending,\n}\nreturning {id, state}\n\ninsert many tasks [\n  {id = 2, state = Pending},\n  {id = 3, state = Done},\n]\nreturning id\n\nupdate tasks\nset state = Done\nreturning {id, state}\n\ndelete tasks\nreturning\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
 }
@@ -96,7 +96,18 @@ fn formatter_preserves_boolean_match_results_and_update_precedence() {
     let formatted = format_source(source).unwrap();
     assert_eq!(
         formatted,
-        "from jobs\nderive retryable = match state\n  Pending {retry_at} => is_some retry_at and true\n  Running {attempt} => attempt < $limit or false\n\nupdate jobs\nset ready = id > 0 and (not ready or contains tags \"active\")\n"
+        "from jobs\nderive retryable = match state {\n  Pending {retry_at} => is_some retry_at and true,\n  Running {attempt} => attempt < $limit or false,\n}\n\nupdate jobs\nset ready = id > 0 and (not ready or contains tags \"active\")\n"
+    );
+    assert_eq!(format_source(&formatted).unwrap(), formatted);
+}
+
+#[test]
+fn formatter_wraps_long_boolean_expressions_at_structural_boundaries() {
+    let source = "from jobs | derive retryable = any history (attempt -> attempt.outcome == Rejected {code = 503} and any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)";
+    let formatted = format_source(source).unwrap();
+    assert_eq!(
+        formatted,
+        "from jobs\nderive retryable = (\n  any history (\n    attempt ->\n      attempt.outcome == Rejected {code = 503}\n      and any attempt.checkpoints (checkpoint -> checkpoint >= 3)\n      and is_some attempt.note\n  )\n)\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
 }
@@ -122,4 +133,89 @@ from tasks | filter state == Pending or score > 3 | derive doubled = score * (1 
         serde_json::to_value(canonical_response).unwrap()
     );
     assert_eq!(original.schema_info(), canonical.schema_info());
+}
+
+#[test]
+fn structured_query_syntax_matches_legacy_layout_and_executes() {
+    let legacy = r#"type State =
+  Pending
+  | Running
+    attempt int
+  | Done
+type Task =
+  id int
+  priority int
+  state State
+table tasks Task
+  key id
+insert tasks
+  id = 1
+  priority = 10
+  state = Running {attempt = 2}
+from tasks
+filter match state
+  Pending => true
+  Running {attempt} => attempt < 3
+  Done => false
+derive label = match state
+  Pending => "pending"
+  Running {..} => "running"
+  Done => "done"
+group label
+  aggregate
+    rows = count
+    total = sum priority"#;
+    let structured = r#"type State =
+  Pending
+  | Running {
+      attempt int,
+    }
+  | Done
+type Task = {
+  id int,
+  priority int,
+  state State,
+}
+table tasks Task
+  key id
+insert tasks {
+  id = 1,
+  priority = 10,
+  state = Running {attempt = 2},
+}
+from tasks
+filter (
+  match state {
+    Pending => true,
+    Running {attempt} => attempt < 3,
+    Done => false,
+  }
+)
+derive label = match state {
+  Pending => "pending",
+  Running {..} => "running",
+  Done => "done",
+}
+group label (
+  aggregate {
+    rows = count,
+    total = sum priority,
+  }
+)"#;
+
+    let canonical = format_source(structured).unwrap();
+    assert_eq!(format_source(legacy).unwrap(), canonical);
+    assert_eq!(format_source(&canonical).unwrap(), canonical);
+
+    let mut legacy_engine = Engine::memory();
+    let mut structured_engine = Engine::memory();
+    let legacy_response = legacy_engine.execute(legacy);
+    let structured_response = structured_engine.execute(structured);
+    assert!(legacy_response.ok, "{}", legacy_response.message);
+    assert!(structured_response.ok, "{}", structured_response.message);
+    assert_eq!(
+        serde_json::to_value(legacy_response).unwrap(),
+        serde_json::to_value(structured_response).unwrap()
+    );
+    assert_eq!(legacy_engine.schema_info(), structured_engine.schema_info());
 }

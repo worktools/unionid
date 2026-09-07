@@ -12,6 +12,7 @@
 
 ## 已实现
 
+- PRQL 风格结构语法已扩展到当前可执行子集：命名 record 与 constructor record payload、insert/upsert record、match branch、aggregate field 和 group inner pipeline 使用有语义的 `{}`／`()` 与逗号边界；旧缩进 record/match/group 继续解析以兼容 migration 与过渡 WAL。canonical formatter 输出新布局，过长布尔表达式会在括号与 `and`／`or` 边界换行，缺少 branch/aggregate 逗号时返回带上下文的源码诊断。
 - 共享 Rust `Engine`，本地 CLI 与 TCP 复用同一个执行、类型校验和原子提交边界。
 - Lexer、源码位置、缩进与换行 AST；命名 sum/record、tuple、option/list、有限直接自递归 ADT、完整值构造和严格校验。自递归类型必须至少有一个有限值，互递归与用户泛型仍延后。
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。

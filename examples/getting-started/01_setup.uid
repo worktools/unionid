@@ -1,39 +1,47 @@
-type Contact =
-  email text
-  nickname option text
+type Contact = {
+  email text,
+  nickname option text,
+}
 
 type State =
   Pending
-  | Running
-    worker text
-    attempt int
-  | Done
-    result text
+  | Running {
+    worker text,
+    attempt int,
+  }
+  | Done {
+    result text,
+  }
 
-type Task =
-  id int
-  title text
-  owner Contact
-  tags list text
-  state State
+type Task = {
+  id int,
+  title text,
+  owner Contact,
+  tags list text,
+  state State,
+}
 
 table tasks Task
   key id
 
-insert tasks
-  id = 1
-  owner =
-    email = "alice@example.com"
-    nickname = None
-  state = Running {attempt = 1, worker = "desktop"}
-  tags = ["sync", "local"]
-  title = "sync files"
+insert tasks {
+  id = 1,
+  owner = {
+    email = "alice@example.com",
+    nickname = None,
+  },
+  state = Running {attempt = 1, worker = "desktop"},
+  tags = ["sync", "local"],
+  title = "sync files",
+}
 
-insert tasks
-  id = 2
-  owner =
-    email = "bob@example.com"
-    nickname = Some("Bob")
-  state = Pending
-  tags = ["config"]
-  title = "refresh config"
+insert tasks {
+  id = 2,
+  owner = {
+    email = "bob@example.com",
+    nickname = Some("Bob"),
+  },
+  state = Pending,
+  tags = ["config"],
+  title = "refresh config",
+}

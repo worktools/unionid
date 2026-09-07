@@ -33,29 +33,34 @@ The schema below combines the product type `Task` with the sum type `State`. Eac
 ```text
 type State =
   Pending
-  | Running
-    worker text
-    attempt int
-  | Done
-    result text
-  | Failed
-    message text
-    retryable bool
+  | Running {
+    worker text,
+    attempt int,
+  }
+  | Done {
+    result text,
+  }
+  | Failed {
+    message text,
+    retryable bool,
+  }
 
-type Task =
-  id int
-  title text
-  tags list text
-  state State
+type Task = {
+  id int,
+  title text,
+  tags list text,
+  state State,
+}
 
 table tasks Task
   key id
 
-insert tasks
-  id = 1
-  title = "sync directory"
-  tags = ["sync", "local"]
-  state = Running {worker = "worker-1", attempt = 2}
+insert tasks {
+  id = 1,
+  title = "sync directory",
+  tags = ["sync", "local"],
+  state = Running {worker = "worker-1", attempt = 2},
+}
 ```
 
 查询从上到下组合，并直接解构 `State`。match 必须覆盖所有可能形态，因此新增 variant 时不会被旧查询静默忽略。
@@ -64,15 +69,19 @@ Queries compose from top to bottom and destructure `State` directly. A match mus
 
 ```text
 from tasks
-filter match state
-  Running {attempt, ..} => attempt >= 2
-  Failed {retryable, ..} => retryable
-  _ => false
-derive state_label = match state
-  Pending => "pending"
-  Running {worker, ..} => worker
-  Done {result} => result
-  Failed {message, ..} => message
+filter (
+  match state {
+    Running {attempt, ..} => attempt >= 2,
+    Failed {retryable, ..} => retryable,
+    _ => false,
+  }
+)
+derive state_label = match state {
+  Pending => "pending",
+  Running {worker, ..} => worker,
+  Done {result} => result,
+  Failed {message, ..} => message,
+}
 select {id, title, state, state_label}
 sort id
 take 20
@@ -82,11 +91,14 @@ take 20
 
 ```text
 update tasks
-filter match state
-  Pending => true
-  _ => false
+filter (
+  match state {
+    Pending => true,
+    _ => false,
+  }
+)
 set state = Running {worker = "worker-1", attempt = 1}
-returning id, state
+returning {id, state}
 ```
 
 `filter`、`select`、`sort`、`take`、`page`、`derive`、`group`、`aggregate` 和查询局部 `let` 都是可组合 stage。稳定跨请求分页使用 `sort {-priority, id} | page 100`，并通过响应中的 opaque cursor 继续；排序必须以主键收尾。`explain from tasks | filter id == 1` 返回主键／索引访问方式、候选行数、stage 顺序和结果 schema，但不读取结果行。完整语法见 [QUERY.md](docs/QUERY.md)。
@@ -149,7 +161,16 @@ struct Task {
 }
 
 let mut db = Engine::memory();
-db.execute("type State = Pending | Running {worker text, attempt int}\ntype Task =\n  id int\n  title text\n  state State\ntable tasks Task\n  key id");
+db.execute(r#"type State =
+  Pending
+  | Running {worker text, attempt int}
+type Task = {
+  id int,
+  title text,
+  state State,
+}
+table tasks Task
+  key id"#);
 
 let row = Task {
     id: 1,

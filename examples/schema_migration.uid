@@ -1,32 +1,35 @@
 type State =
   Pending
-  | Failed {message text}
+  | Failed {
+    message text,
+  }
 
-type Task =
-  id int
-  title text
-  state State
+type Task = {
+  id int,
+  title text,
+  state State,
+}
 
 table tasks Task
   key id
 
-insert tasks
-  id = 1
-  title = "同步目录"
-  state = Failed {message = "network timeout"}
+insert tasks {
+  id = 1,
+  state = Failed {message = "network timeout"},
+  title = "同步目录",
+}
 
 migration task_state_v2
   rename variant State.Failed to Rejected
   rename field Task.title to summary
   add field Task.priority int = 0
-  change variant State.Rejected to {code int, message text}
-    using old -> {
-      code = 500
-      message = old.message
-    }
+  change variant State.Rejected to {code int, message text} using old -> {code = 500, message = old.message}
 
 from tasks
-filter match state
-  Rejected {code, ..} => code >= 500
-  Pending => false
+filter (
+  match state {
+    Rejected {code, ..} => code >= 500,
+    Pending => false,
+  }
+)
 select {id, summary, priority, state}
