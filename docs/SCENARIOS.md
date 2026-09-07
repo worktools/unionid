@@ -199,12 +199,12 @@ table documents Document
 
 ```text
 type Payment = {
-  invoice_id uuid
-  issued_on date
-  received_at timestamp
-  retry_after duration
-  amount decimal 18 2
-  payload_hash bytes
+  invoice_id uuid,
+  issued_on date,
+  received_at timestamp,
+  retry_after duration,
+  amount decimal 18 2,
+  payload_hash bytes,
 }
 
 table payments Payment

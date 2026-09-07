@@ -2,7 +2,7 @@
 
 日期：2026-09-06。状态：完整目标设计，部分子集已实现；当前可执行范围见 [LANGUAGE.md](LANGUAGE.md)，查询语义和能力状态见 [QUERY.md](QUERY.md)，实现与验证见 [开发记录](DEVELOPMENT.md)。其余语法由 M0 的语言设计 issue 继续收敛。用户已明确：类型定义也采用 PRQL 风格，不使用没有语义价值的分号，不采用 TypeScript 风格的密集类型注解；花括号等能明确结构和层级的符号正常使用。
 
-本文说明设计理由与目标体验；执行顺序、依赖和完成状态以 [GitHub issues](https://github.com/worktools/unionid/issues) 为准，入口见 [路线图](ROADMAP.md)。当前可运行语法见 [语言文档](LANGUAGE.md)，当前查询行为见 [查询语言参考](QUERY.md)，UUID、时间、定点 decimal 和 bytes 的兼容设计见 [生产标量 RFC](rfc/0004-production-scalars.md)。
+本文说明设计理由与目标体验；执行顺序、依赖和完成状态以 [GitHub issues](https://github.com/worktools/unionid/issues) 为准，入口见 [路线图](ROADMAP.md)。当前可运行语法见 [语言文档](LANGUAGE.md)，当前查询行为见 [查询语言参考](QUERY.md)，结构化 query 的 canonical 目标见 [RFC 0005](rfc/0005-structured-prql-query-syntax.md)，UUID、时间、定点 decimal 和 bytes 的兼容设计见 [生产标量 RFC](rfc/0004-production-scalars.md)。
 
 ## 1. 产品定位
 
@@ -40,16 +40,17 @@ SQLite 的本地应用定位与 Redis 的可选持久化分别提供使用方式
 PRQL 本身使用空格调用函数，并允许换行连接 pipeline；我们借鉴这些习惯。[PRQL 函数调用与 pipeline](https://prql-lang.org/book/reference/syntax/function-calls.html) PRQL 的类型设计页也讨论 sum/product 组合，但下面的 `field type`、缩进声明和带 tag 的构造器是 unionid 的提案，不能当作现有 PRQL 语法或编译器能力。[PRQL 类型设计](https://prql-lang.org/book/reference/spec/type-system.html)
 
 - 字段写成 `email text`；类型应用写成 `option text`、`list text`，嵌套时写成 `option (list text)`。
-- 多行 record 可以用缩进组织；当它嵌套在其他结构中、需要明确起止位置或能让层级更容易扫描时，使用 `{ ... }`。紧凑的内联 record 使用 `{worker text, attempt int}`，同一行的相邻字段用逗号分隔。字段后的冒号和语句末尾分号仍不承担必要语义。
+- record、projection 和 field set 使用 `{ ... }` 明确起止位置；相邻项以逗号分隔，可保留 trailing comma。字段后的冒号和语句末尾分号不承担必要语义。旧缩进 record 继续作为兼容输入，canonical formatter 输出 braces。
 - 和类型用 `|` 表示分支；这是区分“任选其一”和“同时包含字段”的必要符号。
 - 多行查询每行一个 transform；单行查询可用 `|`，不再引入 `|>`。类型与表达式由语法上下文区分。
-- 值字段与派生列统一用 `=`，函数与构造器用空格应用。圆括号表达 precedence、tuple 或嵌套调用，花括号表达 record/projection 的边界，方括号表达 list，逗号分隔同一行的相邻项。注释使用 `#`。
+- 值字段与派生列统一用 `=`，函数与构造器用空格应用。圆括号表达 precedence、tuple、嵌套调用或 group inner pipeline，花括号表达 record/projection/field set 的边界，方括号表达 list，逗号分隔 delimiter 内的相邻项。注释使用 `#`。
 - 复杂表达式优先按逻辑项换行；混用 `and` 与 `or` 时用括号明确分组。括号、record/list/tuple 边界等能直接消除歧义的符号属于可读性设计的一部分，不以机械减少符号数量为目标。
 
 ```text
-type Contact =
-  email text
-  nickname option text = None
+type Contact = {
+  email text,
+  nickname option text = None,
+}
 
 type State =
   Pending
@@ -57,38 +58,44 @@ type State =
   | Done {result text}
   | Failed {message text, retryable bool}
 
-type Task =
-  id int
-  title text
-  owner Contact
-  tags list text
-  state State
+type Task = {
+  id int,
+  title text,
+  owner Contact,
+  tags list text,
+  state State,
+}
 
 table tasks Task
   key id
 
-insert tasks
-  id = 1
-  title = "同步目录"
-  owner =
-    email = "alice@example.com"
-  tags = ["local", "sync"]
-  state = Running {worker = "local", attempt = 2}
+insert tasks {
+  id = 1,
+  title = "同步目录",
+  owner = {
+    email = "alice@example.com",
+  },
+  tags = ["local", "sync"],
+  state = Running {worker = "local", attempt = 2},
+}
 ```
 
 命名类型可复用于多张表和嵌套字段。表是“以 record 为行”的集合，积类型不止表这一层：还支持 `type Point = (float, float)`，以及变体中的 record／tuple 负载。需要展开变体负载时，也可在 `| Running` 下面缩进书写 `worker text`、`attempt int`；内联与多行布局必须生成同一 AST，格式化器只选择一套规范输出。
 
 ```text
 from tasks
-filter match state
-  Running {attempt, ..} => attempt >= $min_attempt
-  _ => false
-derive
-  summary = match state
-    Pending => "pending"
-    Running {worker, ..} => worker
-    Done {result} => result
-    Failed {message, ..} => message
+filter (
+  match state {
+    Running {attempt, ..} => attempt >= $min_attempt,
+    _ => false,
+  }
+)
+derive summary = match state {
+  Pending => "pending",
+  Running {worker, ..} => worker,
+  Done {result} => result,
+  Failed {message, ..} => message,
+}
 select {id, title, summary}
 sort id
 take 20
@@ -97,10 +104,10 @@ take 20
 `$min_attempt` 是 API／CLI 绑定的类型化参数，不通过拼接查询字符串传递。模式中的绑定仅在对应分支内有效；不同分支必须有统一结果类型。`select` 之后访问已移除字段应在执行前报错；空表上也必须检查。未穷尽的 `match` 报错，通配分支显式处理剩余情况。后续可以增加 `filter_map`／`filter case` 简写，先不让新的作用域规则拖延首版。
 
 ```text
-let retryable = s ->
-  match s
-    State.Failed {retryable, ..} => retryable
-    _ => false
+let retryable = s -> match s {
+  State.Failed {retryable, ..} => retryable,
+  _ => false,
+}
 
 from tasks
 filter (retryable state)
@@ -120,7 +127,7 @@ upsert tasks $task
 
 ### 无分号的边界规则
 
-无分号需要明确解析边界，不能简单把所有换行删掉或按空行切割。提案使用换行、缩进与语法上下文共同决定边界：声明体和嵌套 record/match 通过缩进进入与退出；`from/update/delete` 后续同层 transform 继续当前 pipeline，遇到新的顶层声明／数据操作起始词或文件末尾结束。`type`、`table`、`let`、`insert`、`upsert` 等顶层形式分别有确定的结束规则，空行和注释本身不提交语句。
+无分号需要明确解析边界，不能简单把所有换行删掉或按空行切割。提案使用换行、delimiter 与语法上下文共同决定边界：pipeline 顶层换行连接 transform，`{}`/`[]`/`()` 内的换行只负责布局；`from/update/delete` 后续同层 transform 继续当前 pipeline，遇到新的顶层声明／数据操作起始词或文件末尾结束。`type`、`table`、`let`、`insert`、`upsert` 等顶层形式分别有确定的结束规则，空行和注释本身不提交语句。旧缩进 record/match/group 作为持久源码兼容入口保留。
 
 括号内及操作数尚未完整时的跨行、相邻多条查询、嵌套 match 后恢复外层 pipeline、不同缩进宽度和混用 tab/空格，都要写入 parser 的正反例。文件以 EOF 结束；REPL 已通过 [#66](https://github.com/worktools/unionid/issues/66) 暴露 complete/incomplete/invalid 判断，在 AST 完整且无开放布局时由空行提交，尚未完整则保留缓冲区续写，明确非法则立即报告。提交手势属于交互行为，不成为文件语言中的分号替代物；规范格式化与补全由 [#67](https://github.com/worktools/unionid/issues/67) 跟踪。
 

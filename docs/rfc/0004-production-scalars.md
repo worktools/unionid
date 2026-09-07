@@ -11,34 +11,35 @@
 
 unionid 选择六个原生生产标量：`uuid`、`date`、`timestamp`、`duration`、`decimal P S` 和 `bytes`。它们是 `ScalarType` 与 `Value` 的独立成员，不伪装成 `text`、`int` 或命名 record。这样 schema、参数、查询结果、索引、migration 和持久 codec 都能保留值的实际含义。
 
-类型声明继续采用 PRQL 风格的空格应用，不增加语句末尾分号或 TypeScript 风格的密集标注。花括号不是要消除的符号：它在 record、projection 或嵌套层级中明确结构边界时应当使用；圆括号用于 precedence、tuple 和嵌套调用，方括号用于 list，逗号分隔同一行的相邻项。换行已经能清楚分隔字段时可省略逗号。formatter 以清晰且唯一的输出为准，不以符号数最少为目标。
+类型声明继续采用 PRQL 风格的空格应用，不增加语句末尾分号或 TypeScript 风格的密集标注。花括号不是要消除的符号：它明确 record、projection 或嵌套层级；圆括号用于 precedence、tuple 和嵌套调用，方括号用于 list，逗号分隔 delimiter 内的相邻项并允许 trailing comma。formatter 以清晰且唯一的输出为准，不以符号数最少为目标。
 
 下面使用花括号明确 `Invoice` 的 product type 边界，同时保留无分号字段和空格式类型应用：
 
 ```text
 type Invoice = {
-  id uuid
-  issued_on date
-  created_at timestamp
-  payment_window duration
-  amount decimal 18 2
-  receipt bytes
+  id uuid,
+  issued_on date,
+  created_at timestamp,
+  payment_window duration,
+  amount decimal 18 2,
+  receipt bytes,
 }
 
 table invoices Invoice
   key id
 ```
 
-值使用“类型名 + 一个字符串”的统一形态。引号在这里是必要边界：它避免 UUID 中的连字符、时间的时区、十进制小数点和二进制编码改变普通表达式的词法规则。
+日期和 timestamp 使用 PRQL 风格 `@` literal，精确 duration 使用 number-unit literal；UUID、decimal 与 bytes 使用“类型名 + 字符串”，因为引号能避免它们改变普通 identifier/number 的词法规则。完整 query 结构约定见 [RFC 0005](0005-structured-prql-query-syntax.md)。
 
 ```text
-insert invoices
-  id = uuid "0191d78a-32d8-7c2f-8f31-4c499bf64d9a"
-  issued_on = date "2026-09-07"
-  created_at = timestamp "2026-09-07T09:30:15.123456+08:00"
-  payment_window = duration "PT24H"
-  amount = decimal "199.90"
-  receipt = bytes "89504e470d0a1a0a"
+insert invoices {
+  id = uuid "0191d78a-32d8-7c2f-8f31-4c499bf64d9a",
+  issued_on = @2026-09-07,
+  created_at = @2026-09-07T09:30:15.123456+08:00,
+  payment_window = 24hours,
+  amount = decimal "199.90",
+  receipt = bytes "89504e470d0a1a0a",
+}
 ```
 
 formatter 输出规范值，但 parser 可以接受下表明确列出的等价输入。类型不做隐式 text/int/float 转换；迁移必须写出 parse 或精度转换。
@@ -54,9 +55,9 @@ formatter 输出规范值，但 parser 可以接受下表明确列出的等价�
 | 类型 | 逻辑值域 | 规范源码/展示 | 持久 payload | 相等与顺序 |
 | --- | --- | --- | --- | --- |
 | `uuid` | 任意 128 bits；不限制 RFC version | 36 字符、小写、带连字符 | 16 bytes，network byte order | 无符号 byte lexicographic |
-| `date` | proleptic Gregorian `0001-01-01` 至 `9999-12-31` | `YYYY-MM-DD` | Unix epoch 起的 signed `i32` 日数 | chronological |
-| `timestamp` | 上述日期范围内的 UTC instant，微秒精度 | RFC 3339 UTC，后缀 `Z` | Unix epoch 起的 signed `i64` 微秒 | chronological instant |
-| `duration` | signed `i64` 微秒 | ISO 8601 的精确 day/time 子集 | signed `i64` 微秒 | elapsed length |
+| `date` | proleptic Gregorian `0001-01-01` 至 `9999-12-31` | `@YYYY-MM-DD` | Unix epoch 起的 signed `i32` 日数 | chronological |
+| `timestamp` | 上述日期范围内的 UTC instant，微秒精度 | `@` + RFC 3339；展示规范为 UTC `Z` | Unix epoch 起的 signed `i64` 微秒 | chronological instant |
+| `duration` | signed `i64` 微秒 | integer + exact unit，例如 `30seconds` | signed `i64` 微秒 | elapsed length |
 | `decimal P S` | `1 <= P <= 38`、`0 <= S <= P` 的定点十进制 | 无指数的十进制文本，固定输出 S 位 | signed `i128` coefficient；scale 来自类型 | mathematical value；同字段固定 scale |
 | `bytes` | 0 至 16 MiB 的 octet sequence | 小写、偶数长度 hexadecimal | `u32` 长度和原 bytes | unsigned byte lexicographic |
 
@@ -64,9 +65,9 @@ UUID 遵循 [RFC 9562](https://www.rfc-editor.org/rfc/rfc9562.html) 的 16-octet
 
 `date` 是不带时区的 civil day。它不代表午夜 instant，也不会受夏令时影响。首版不提供 `time`、local datetime、时区名称或 calendar interval；这些概念不能从 `date`/`timestamp` 猜出。
 
-`timestamp` 输入接受 [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339.html) 的 `Z` 或 numeric offset，立即规范化为 UTC。小数秒最多六位，不足补零，展示时移除无意义的尾随零；闰秒 `:60`、未知本地时区和超过微秒精度的非零数字被拒绝。两个不同 offset 的输入只要表示同一 instant 就相等并产生相同字节。
+`timestamp` 的 `@` 输入接受 [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339.html) 的 `Z` 或 numeric offset，立即规范化为 UTC。小数秒最多六位，不足补零，展示时移除无意义的尾随零；闰秒 `:60`、无 offset timestamp、未知本地时区和超过微秒精度的非零数字被拒绝。两个不同 offset 的输入只要表示同一 instant 就相等并产生相同字节。
 
-`duration` 只接受可精确映射到微秒的 ISO 8601 day/time 子集：可选负号、`P`、days，以及 `T` 后的 hours/minutes/seconds；seconds 最多六位小数。year、month、week 和小数 day/hour/minute 被拒绝，因为它们需要 calendar 上下文。规范输出使用一个前置负号，并把值拆为 day/hour/minute/second；零为 `PT0S`。
+`duration` 只接受整数与精确单位组成的 token：`microsecond(s)`、`millisecond(s)`、`second(s)`、`minute(s)`、`hour(s)`、`day(s)` 和 `week(s)`。例如 `30seconds`、`1500milliseconds` 与 `7days`。compound value 使用普通算术 `1day + 2hours`；负 compound value 用 `-(1day + 2hours)` 明确 grouping。year/month 和小数单位被拒绝，因为前者需要 calendar context，后者可无损改写为更小的整数单位。零规范为 `0microseconds`。
 
 `decimal P S` 使用 coefficient × 10^-S。源码值不接受指数、前置 `+`、digit separator、NaN 或 infinity；`-0` 规范为零。目标类型可为较少的小数位补零，但不会静默舍入非零数字。precision 计算 coefficient 的十进制位数，零按一位计算；超出 P 返回 `E_DECIMAL_RANGE`。
 
@@ -177,9 +178,9 @@ value codec 2 的 payload 分别为本 RFC 第 3 节列出的固定表示；现�
 | Type | Source input | Canonical logical value | Durable payload |
 | --- | --- | --- | --- |
 | uuid | `uuid "F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6"` | `f81d4fae-7dec-11d0-a765-00a0c91e6bf6` | RFC-order 16 bytes |
-| date | `date "1970-01-01"` | `1970-01-01` | i32 `0` |
-| timestamp | `timestamp "1970-01-01T08:00:00.000001+08:00"` | `1970-01-01T00:00:00.000001Z` | i64 `1` |
-| duration | `duration "-PT1.5S"` | `-PT1.5S` | i64 `-1500000` |
+| date | `@1970-01-01` | `@1970-01-01` | i32 `0` |
+| timestamp | `@1970-01-01T08:00:00.000001+08:00` | `@1970-01-01T00:00:00.000001Z` | i64 `1` |
+| duration | `-1500milliseconds` | `-1500milliseconds` | i64 `-1500000` |
 | decimal 18 2 | `decimal "19.9"` | coefficient `1990`, scale `2` | i128 `1990` |
 | bytes | `bytes "deadbeef"` | bytes `de ad be ef` | length `4` + raw bytes |
 
@@ -189,7 +190,7 @@ value codec 2 的 payload 分别为本 RFC 第 3 节列出的固定表示；现�
 
 1. 兼容基础：protocol v1/v2 dispatch、format-4 upgrader、codec version、Rust wrapper 与全部 golden roundtrip。
 2. 标识与 binary：`uuid`/`bytes` 语法、主键、比较、index、`length/contains` 与同步/content-address 场景。
-3. 时间：`date`/`timestamp`/`duration` parse、规范化、比较、算术、汇总与 migration。
+3. 时间：`@` date/timestamp 与 number-unit duration parse、规范化、比较、算术、汇总与 migration。
 4. 定点数：`decimal P S` 类型检查、精确算术、汇总、rescale 与账单场景。
 
 每个实现任务都必须更新 LANGUAGE/QUERY/PROTOCOL/CODEC/MIGRATIONS 的“当前可运行”范围；不能因只完成 model enum 就把 #115 标为完成。
@@ -200,9 +201,9 @@ value codec 2 的 payload 分别为本 RFC 第 3 节列出的固定表示；现�
 
 unionid will add six native production scalars: `uuid`, `date`, `timestamp`, `duration`, `decimal P S`, and `bytes`. They remain distinct throughout schema identity, values, query binding, indexes, migrations, Rust adapters, wire values, and durable codecs. Named wrappers still add domain identity, such as `type UserId = uuid`; money remains an ADT containing a decimal amount and an explicit currency.
 
-Declarations keep PRQL-style space application and omit statement-terminating semicolons. This is not a blanket punctuation-minimization rule: braces should mark record, projection, and nested structural boundaries when they improve scanning; parentheses express precedence, tuples, and nested calls; brackets express lists; commas separate adjacent inline items. Newlines may separate fields without commas. The formatter optimizes for one clear representation rather than the fewest symbols.
+Declarations keep PRQL-style space application and omit statement-terminating semicolons. This is not a blanket punctuation-minimization rule: braces mark record, projection, and nested structural boundaries; parentheses express precedence, tuples, and nested calls; brackets express lists; commas separate adjacent delimited items and may trail. The formatter optimizes for one clear representation rather than the fewest symbols.
 
-Values use one necessary quoted boundary: `uuid "..."`, `date "..."`, `timestamp "..."`, `duration "..."`, `decimal "..."`, and `bytes "..."`. UUID text follows RFC 9562 and normalizes to lowercase. Dates are proleptic Gregorian civil days. Timestamps accept RFC 3339 offsets, normalize to UTC, reject leap seconds, and retain microsecond precision. Durations are signed microseconds expressed through the exact ISO day/time subset, without calendar years or months. Decimal uses a signed i128 coefficient with precision 1–38 and a schema-fixed scale. Source bytes use lowercase hex, while wire bytes use canonical unpadded base64url.
+Dates and timestamps use PRQL-style `@` literals. Exact durations use integer-unit literals such as `30seconds`; compound durations use ordinary arithmetic. UUID, decimal, and bytes retain a necessary typed quoted boundary. UUID text follows RFC 9562 and normalizes to lowercase. Dates are proleptic Gregorian civil days. Timestamps accept RFC 3339 offsets, normalize to UTC, reject leap seconds, and retain microsecond precision. Durations exclude calendar years/months. Decimal uses a signed i128 coefficient with precision 1–38 and a schema-fixed scale. Source bytes use lowercase hex, while wire bytes use canonical unpadded base64url.
 
 All six values have total equality and ordering, grouping, min/max, equality indexes, and cursor support. UUID becomes an eligible primary key. Decimal and duration support checked addition, subtraction, negation, and sum. Timestamp supports exact duration addition/subtraction and timestamp difference. Decimal multiplication/division/average, calendar arithmetic, local time, named time zones, and implicit cross-type conversions are deferred until their result and rounding semantics are explicit.
 
