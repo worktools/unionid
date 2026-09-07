@@ -1,14 +1,14 @@
 # unionid 路线图
 
-规划日期：2026-09-07。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
+规划日期：2026-09-08。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
-[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
+[当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[结构化查询语法 RFC](rfc/0005-structured-prql-query-syntax.md)收敛 PRQL 风格的 delimiter、field set、match expression 与 group inner pipeline；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
 v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。当前进入 [M5 总览 #111](https://github.com/worktools/unionid/issues/111)：先收紧真实生产边界，再改善大结果集、标量类型和 CLI 诊断，最后按独立需求验证语言扩展；join、window 和分布式仍不混入这一轮。
 
-用户已明确语言方向：类型定义与查询都采用 PRQL 风格，无分号、减少标点。本轮草案采用 `field type`、`option text`／`list text`、缩进式声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不再沿用 TypeScript 风格字段注解或逐行 `|>`。
+用户已明确语言方向：类型定义与查询都采用 PRQL 风格，不使用没有意义的语句末尾分号；花括号、圆括号、方括号和逗号在能明确结构、层级或 precedence 时正常使用。本轮草案采用 `field type`、`option text`／`list text`、结构化声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不沿用 TypeScript 风格的密集字段注解或逐行 `|>`。
 
 ## 阶段与验收
 
@@ -105,16 +105,22 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#132](https://github.com/worktools/unionid/issues/132) | [接口] Rust/TCP/HTTP 分页与取消旅程 | P1 | [#131](https://github.com/worktools/unionid/issues/131) |
 | [#135](https://github.com/worktools/unionid/issues/135) | [服务] 显式取消与有背压的流式读取 | P2 | [#116](https://github.com/worktools/unionid/issues/116)；由 #132 拆出 |
 | [#115](https://github.com/worktools/unionid/issues/115) | [类型] 生产标量契约 | P1 | 先冻结时间、十进制与二进制编码边界 |
+| [#137](https://github.com/worktools/unionid/issues/137) | [类型] 生产标量兼容与 codec 基础 | P1 | [#115](https://github.com/worktools/unionid/issues/115) RFC；后续标量共同前置 |
+| [#138](https://github.com/worktools/unionid/issues/138) | [类型] UUID 与 bytes 端到端能力 | P1 | [#137](https://github.com/worktools/unionid/issues/137) |
+| [#139](https://github.com/worktools/unionid/issues/139) | [类型] date、timestamp 与 duration | P1 | [#137](https://github.com/worktools/unionid/issues/137)、[#142](https://github.com/worktools/unionid/issues/142) |
+| [#140](https://github.com/worktools/unionid/issues/140) | [类型] 固定精度 decimal | P1 | [#137](https://github.com/worktools/unionid/issues/137) |
 | [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | P1 | [#112](https://github.com/worktools/unionid/issues/112)、[#114](https://github.com/worktools/unionid/issues/114) |
 | [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | P1 | 核心错误协议稳定 |
 | [#122](https://github.com/worktools/unionid/issues/122) | [文档] 中英双语 README 与 ADT/query 产品入口 | P1 | 使用已发布 v0.1.0 和 [#112](https://github.com/worktools/unionid/issues/112) 的真实入口 |
 | [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | P2 | 以真实 schema 复用需求单独验证 |
-| [#119](https://github.com/worktools/unionid/issues/119) | [语言] match 查询简写 | P2 | 不引入第二套 match 语义 |
+| [#119](https://github.com/worktools/unionid/issues/119) | [语言] PRQL 风格结构化查询语法 RFC | P1 | 当前 typed IR 与持久源码兼容契约 |
+| [#142](https://github.com/worktools/unionid/issues/142) | [语言] 结构化 delimiter 与 canonical formatter | P1 | [#119](https://github.com/worktools/unionid/issues/119) RFC；[#143](https://github.com/worktools/unionid/issues/143) 和 [#139](https://github.com/worktools/unionid/issues/139) 的语法前置 |
+| [#143](https://github.com/worktools/unionid/issues/143) | [查询] field-set transforms 与 computed select | P1 | [#142](https://github.com/worktools/unionid/issues/142) |
 | [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | P2 | 先定义 schema identity 与参数契约 |
 
 ## 当前执行顺序
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect 和 #131 的有界 page 已完成；当前由 #132 验证完整 Rust/TCP/HTTP 旅程。显式取消与 streaming 已拆到 #135，等待 #116 的一致性读快照。随后继续 #115、#116 和 #117。#118–#120 是从已关闭的宽泛 #25 拆出的独立探索，不作为生产正确性的前置条件。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect 以及 #130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程已完成。当前一起接受 [RFC 0005](rfc/0005-structured-prql-query-syntax.md) 与 [RFC 0004](rfc/0004-production-scalars.md)：先完成 #142 的结构 parser/formatter，再推进 #143 field-set transforms 与 #137–#140 生产标量；#139 的 temporal literal 复用 #142 的 token/delimiter 基础。随后继续 #116 和 #117。显式取消与 streaming 已拆到 #135，等待 #116 的一致性读快照。#118 与 #120 仍是独立 P2 探索。
 
 ## 维护约定
 
