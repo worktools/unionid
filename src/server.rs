@@ -483,6 +483,18 @@ fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
 /// `ProtocolRequest` and serialize the returned `ProtocolResponse` without
 /// duplicating version, parameter, schema, or introspection semantics.
 pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -> ProtocolResponse {
+    execute_protocol_request_until(engine, request, Instant::now() + EXECUTION_TIMEOUT)
+}
+
+/// Execute a versioned protocol request with an adapter-owned deadline.
+///
+/// HTTP adapters can use a shorter service budget while retaining the exact
+/// validation, page, typed-value, and error semantics used by the TCP server.
+pub fn execute_protocol_request_until(
+    engine: &mut Engine,
+    request: ProtocolRequest,
+    deadline: Instant,
+) -> ProtocolResponse {
     if request.version != VERSION {
         return ProtocolResponse::failure(
             request.request_id,
@@ -605,7 +617,7 @@ pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -
             &request.query,
             parameters,
             request.schema.as_ref(),
-            Instant::now() + EXECUTION_TIMEOUT,
+            deadline,
         ) {
             Ok(result) => ProtocolResponse::from_idempotent(request.request_id, key, result),
             Err(error) => {
@@ -619,14 +631,14 @@ pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -
             parameters,
             request.schema.as_ref(),
             page,
-            Instant::now() + EXECUTION_TIMEOUT,
+            deadline,
         )
     } else {
         engine.execute_with_params_until(
             &request.query,
             parameters,
             request.schema.as_ref(),
-            Instant::now() + EXECUTION_TIMEOUT,
+            deadline,
         )
     };
     ProtocolResponse::from_query(request.request_id, response)

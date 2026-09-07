@@ -20,6 +20,7 @@ unionid server --db ./data/app.redb --read-only
 | ADT value | 16 MiB encoded / 64 层 / 1,000,000 collection items | codec、恢复或写入拒绝超限值 |
 | 查询 working rows | 250,000 | 返回 <code>E_LIMIT</code>；应增加选择性 indexed filter |
 | 查询结果 rows | 100,000 | 返回 <code>E_LIMIT</code>；应增加 filter 或 take |
+| 单个稳定 page | 1,000 rows / 16 sort keys / 8 KiB cursor | 返回 `E_PAGE_SHAPE`、`E_PAGE_ORDER` 或 `E_CURSOR_LIMIT`；应用应续页 |
 | DML returning rows | 100,000 / 8 MiB typed wire rows | 提交候选状态前返回 <code>E_LIMIT</code>；应增加选择性 filter 或缩小投影 |
 | Introspection payload | 1 MiB | version 1 请求返回带 request ID 与 schema 的 <code>E_LIMIT</code> |
 | Version 1 request ID | 1 KiB UTF-8 | 在进入 Engine 前返回 <code>E_LIMIT</code>，避免写入提交后才发现响应元数据过大 |
@@ -47,6 +48,8 @@ TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON by
 优雅关闭完成后可以立即以同一路径重新打开 redb。强制终止、掉电和 commit 结果不确定的恢复边界见 [存储说明](STORAGE.md)；正常 signal 测试不替代那些故障测试。
 
 客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；带 `idempotency_key` 的 version 1 mutation 通过“数据效果与回执同事务”提供 exactly-once effect，但网络仍只是 best-effort delivery。未收到响应时，重开连接并原样重发 query、wire params、schema precondition 和 key；不要改变内容或猜测结果。规范 digest 和 commit uncertain 恢复见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)。
+
+分页读取没有 effect。客户端断开后，已进入串行 Engine 的读取可能继续到内置 25 秒 deadline；working rows、排序内存、page 大小和响应编码仍然有界，连接 worker 随执行或 socket write 结束而释放。HTTP adapter 可调用 `execute_protocol_request_until` 使用更短的绝对 deadline；超时返回 `E_TIMEOUT`，不发布半页或 cursor。关闭连接不是显式取消协议。需要 request registry、operation ID、读 snapshot 生命周期和 NDJSON 背压的长期读取由 [#135](https://github.com/worktools/unionid/issues/135) 跟踪，并依赖 [#116](https://github.com/worktools/unionid/issues/116)。
 
 receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明确 cutoff、最多 1000 条的单次边界和 confirm 原子清理。清理意味着旧 key 可以再次执行，保留窗口必须覆盖所有自动与人工重试。receipt 运维端点与数据库写入权限等价，HTTP adapter 必须鉴权并审计。
 

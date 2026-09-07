@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::db::{PageInfo, QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, UpsertAction};
+use crate::db::{
+    PageInfo, QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, TypedPage, UpsertAction,
+};
 use crate::error::Error;
 use crate::idempotency::{
     IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyStatus,
@@ -409,6 +411,18 @@ impl Response {
                 })
             })
             .collect()
+    }
+
+    /// Decode one successful protocol page and retain its continuation.
+    pub fn typed_page<T: serde::de::DeserializeOwned>(&self) -> Result<TypedPage<T>, Error> {
+        let rows = self.typed_rows()?;
+        let page = self.page.clone().ok_or_else(|| {
+            Error::new(
+                "E_PAGE_SHAPE",
+                "cannot decode a typed page from a response without page metadata",
+            )
+        })?;
+        Ok(TypedPage { rows, page })
     }
 
     pub fn from_query(request_id: impl Into<String>, response: QueryResponse) -> Self {

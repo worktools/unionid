@@ -501,6 +501,29 @@ pub struct PageInfo {
     pub has_more: bool,
 }
 
+impl PageInfo {
+    /// Build the structured page spec that continues after this page.
+    pub fn next_page(&self) -> Option<PageSpec> {
+        self.next_cursor
+            .as_ref()
+            .map(|cursor| PageSpec::after(self.limit, cursor))
+    }
+
+    /// Build the structured page spec that continues before this page.
+    pub fn previous_page(&self) -> Option<PageSpec> {
+        self.previous_cursor
+            .as_ref()
+            .map(|cursor| PageSpec::before(self.limit, cursor))
+    }
+}
+
+/// Application-native rows paired with the cursor metadata for one page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedPage<T> {
+    pub rows: Vec<T>,
+    pub page: PageInfo,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpsertAction {
@@ -557,6 +580,18 @@ impl QueryResponse {
                 })
             })
             .collect()
+    }
+
+    /// Decode one successful page and retain its structured continuation.
+    pub fn typed_page<T: serde::de::DeserializeOwned>(&self) -> Result<TypedPage<T>> {
+        let rows = self.typed_rows()?;
+        let page = self.page.clone().ok_or_else(|| {
+            Error::new(
+                "E_PAGE_SHAPE",
+                "cannot decode a typed page from a response without page metadata",
+            )
+        })?;
+        Ok(TypedPage { rows, page })
     }
 
     pub fn ok_message(message: impl Into<String>) -> Self {
