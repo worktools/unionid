@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use common::TempDir;
 use unionid::protocol::{Request, Response, VERSION, WireValue};
+use unionid::server::execute_protocol_request;
 use unionid::{Engine, IntrospectionKind, QueryAccessKind, StorageMode, Value};
 
 fn setup() -> Engine {
@@ -26,6 +27,39 @@ insert tasks
     );
     assert!(response.ok, "{}", response.message);
     engine
+}
+
+#[derive(Debug, serde::Deserialize, PartialEq)]
+struct TaskView {
+    id: i64,
+    title: String,
+}
+
+#[test]
+fn transport_neutral_protocol_uses_serde_params_and_typed_rows() {
+    let mut engine = setup();
+    let request = Request::query(
+        "http-task",
+        "from tasks | filter id == $id | select {id, title}",
+    )
+    .with_serde_param("id", &9_007_199_254_740_993_i64)
+    .unwrap();
+    assert_eq!(
+        request.params["id"],
+        WireValue::Int {
+            value: "9007199254740993".into()
+        }
+    );
+
+    let response = execute_protocol_request(&mut engine, request);
+    assert_eq!(response.request_id, "http-task");
+    assert_eq!(
+        response.typed_rows::<TaskView>().unwrap(),
+        vec![TaskView {
+            id: 9_007_199_254_740_993,
+            title: "quoted \"text\"\nwith | pipe".into(),
+        }]
+    );
 }
 
 #[test]

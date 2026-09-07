@@ -2,6 +2,8 @@
 
 unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和响应各占一个物理行。<code>query</code> 是 JSON string，因此源码中的换行、缩进、引号和管道符都作为数据传输，不参与协议分帧。服务仍暂时接受旧的 <code>{"query":"..."}</code> 和纯文本单行请求，新的客户端应使用本页协议。
 
+version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。内置服务使用 JSON Lines；HTTP adapter 应在 `POST /v1/query` 的 JSON body 中直接使用同一结构，并调用 `server::execute_protocol_request`。这样 TCP、HTTP 和嵌入式 adapter 共享版本检查、参数解码、schema identity、deadline、introspection、错误与返回行语义，而不是各自解释 query。
+
 ## 请求
 
 ~~~json
@@ -50,6 +52,23 @@ Introspection 使用同一版本请求，返回完整的类型化快照，客户
 
 客户端构造上下文明确的 ADT 参数时可以将 <code>type_id</code> / <code>variant_id</code> 设为 "0"，由目标字段类型解析名称。查询结果总是返回 catalog 中的稳定 ID，因此不同命名类型下的同名 constructor 不会混淆。普通 JSON 的 number/null/array/object 没有足够信息表达这些区别，不作为 version 1 typed value 的替代格式。
 
+### 源码、Rust 与协议的共同数据形态
+
+协议不把 query AST JSON 化。查询结构仍由同一份可格式化源码表达，应用数据则通过 `$param` 进入 typed binder。三层形态按下面的规则对应：
+
+| unionid 源码 | Rust serde | version 1 wire |
+| --- | --- | --- |
+| `{id = 1, title = "x"}` | `struct { id: i64, title: String }` | `record.fields` |
+| `Running {attempt = 2}` | `enum::Running { attempt: i64 }` | `variant {name, variant_id, args}` |
+| `Some value` / `None` | `Option<T>` | `option.value` |
+| `[a, b]` | `Vec<T>` | `list.items` |
+| `(a, b)` | Rust tuple | `tuple.items` |
+| 命名 ADT | 应用 struct/enum | `named {type_id, value}` |
+
+Rust 客户端无需手工构造这些标签：`Request::query(...).with_serde_param("row", &row)` 把普通 serde struct/enum 编码为无损参数；服务端根据 prepared query 的目标 schema 补齐 nominal identity 并完成完整类型检查。`Response::typed_rows::<T>()` 将 wire rows 直接解码回应用类型。由此，源码的 constructor/record 形态和 Rust 的 enum/struct 保持接近，而 wire 层仍保存跨语言所需的 ID、数值精度和容器区别。
+
+HTTP 适配、生命周期 endpoint 和完整 todo 场景见 [HTTP 数据协议示例](HTTP.md)。
+
 ## 响应
 
 ~~~json
@@ -77,3 +96,5 @@ cargo run --example parameters
 ~~~
 
 TCP 客户端可直接构造 <code>ProtocolRequest</code> 并调用 <code>cli::send_request</code>。<code>WireValue</code> 与 <code>Value</code> 之间提供无损转换；网络 codec、redb 的版本化 binary value codec 和内部 Rust enum 布局彼此独立。连接、执行与响应限制以及优雅关闭行为见[服务运行边界](SERVICE.md)。
+
+HTTP/TCP Rust adapter 还可使用 `Request::query`、`Request::with_serde_param` 和 `Response::typed_rows`，避免应用代码手工拆装 `WireValue`。`server::execute_protocol_request` 是 transport adapter 的统一执行入口；它不启动 listener，也不规定认证、TLS、路由或部署策略。
