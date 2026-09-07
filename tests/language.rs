@@ -2522,6 +2522,91 @@ fn returning_limits_are_checked_before_publishing_mutations() {
 }
 
 #[test]
+fn sorted_bounded_mutations_select_rows_atomically() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type State =
+  Queued {attempt int}
+  | Running {worker text, attempt int}
+  | Done
+
+type Job =
+  id int
+  priority int
+  scheduled int
+  state State
+
+table jobs Job
+  key id
+
+insert jobs {id = 1, priority = 5, scheduled = 1, state = Queued {attempt = 0}}
+insert jobs {id = 2, priority = 10, scheduled = 4, state = Queued {attempt = 1}}
+insert jobs {id = 3, priority = 10, scheduled = 2, state = Queued {attempt = 2}}
+insert jobs {id = 4, priority = 20, scheduled = 0, state = Done}"#,
+    );
+
+    let claim = r#"update jobs
+filter match state
+  Queued {..} => true
+  _ => false
+sort {-priority, scheduled, id}
+take 1
+set state =
+  match state
+    Queued {attempt} => Running {worker = $worker, attempt = attempt + 1}
+    current => current
+returning id, state"#;
+    let first = engine.execute_with_params(
+        claim,
+        std::collections::BTreeMap::from([("worker".into(), Value::Text("one".into()))]),
+    );
+    assert!(first.ok, "{}", first.message);
+    assert_eq!(first.affected_rows, Some(1));
+    assert!(first.rows[0]["id"].cmp_eq(&Value::Int(3)));
+
+    let second = engine.execute_with_params(
+        claim,
+        std::collections::BTreeMap::from([("worker".into(), Value::Text("two".into()))]),
+    );
+    assert!(second.ok, "{}", second.message);
+    assert!(second.rows[0]["id"].cmp_eq(&Value::Int(2)));
+
+    let deleted = ok(
+        &mut engine,
+        "delete jobs\nsort {-priority, id}\ntake 2..3\nreturning id, state",
+    );
+    assert_eq!(deleted.affected_rows, Some(2));
+    assert!(deleted.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(deleted.rows[1]["id"].cmp_eq(&Value::Int(3)));
+    let remaining = ok(&mut engine, "from jobs | sort id");
+    assert_eq!(remaining.rows.len(), 2);
+    assert!(remaining.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(remaining.rows[1]["id"].cmp_eq(&Value::Int(4)));
+
+    let before = serde_json::to_value(&remaining.rows).unwrap();
+    for (source, code) in [
+        (
+            "update jobs\nsort state\ntake 1\nset priority = 0",
+            "E_TYPE",
+        ),
+        (
+            "update jobs\nsort missing\ntake 1\nset priority = 0",
+            "E_FIELD",
+        ),
+        ("update jobs\nset priority = 0\ntake 1", "E_SYNTAX"),
+    ] {
+        let failed = engine.execute(source);
+        assert!(!failed.ok, "accepted {source}");
+        assert_eq!(failed.error.unwrap().code, code);
+        assert_eq!(
+            serde_json::to_value(ok(&mut engine, "from jobs | sort id").rows).unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
 fn failed_multi_row_updates_preserve_rows_constraints_and_indexes() {
     let setup = "type Item =\n  id int\n  divisor int\n  value int\ntable items Item\n  key id\ninsert items {id = 1, divisor = 2, value = 5}\ninsert items {id = 2, divisor = 0, value = 6}";
     let mut engine = Engine::memory();

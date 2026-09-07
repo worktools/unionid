@@ -18,6 +18,8 @@ update tasks
 filter match state
   Pending => true
   _ => false
+sort id
+take 1
 set attempts = attempts + 1
 set state =
   match state

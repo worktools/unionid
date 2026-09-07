@@ -502,11 +502,11 @@ impl Database {
                 mut target,
                 mut assignments,
                 returning,
-            } => self.update(&mut target, &mut assignments, returning.as_ref()),
+            } => self.update(&mut target, &mut assignments, returning.as_ref(), deadline),
             Statement::Delete {
                 mut target,
                 returning,
-            } => self.delete(&mut target, returning.as_ref()),
+            } => self.delete(&mut target, returning.as_ref(), deadline),
             Statement::Migration {
                 name,
                 parent: _,
@@ -748,6 +748,7 @@ impl Database {
         target: &mut Pipeline,
         assignments: &mut [SetAssignment],
         returning: Option<&Returning>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<QueryResponse> {
         let returning = self.bind_returning(&target.from, returning)?;
         let table = self.table(&target.from)?;
@@ -788,9 +789,9 @@ impl Database {
                 }
             }
         }
-        let target_ids = self.mutation_target_ids(target)?;
+        let target_order = self.mutation_target_ids(target, deadline)?;
         let mut rows = table.rows.clone();
-        let target_ids = target_ids.into_iter().collect::<BTreeSet<_>>();
+        let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
         for row in rows.iter_mut().filter(|row| target_ids.contains(&row.id)) {
             let original = row.fields.clone();
             let mut values = Vec::with_capacity(assignments.len());
@@ -826,10 +827,13 @@ impl Database {
         }
         self.validate_primary_keys(&target.from, &rows)?;
         let affected = target_ids.len();
-        let returned_fields = rows
+        let returned_fields = target_order
             .iter()
-            .filter(|row| target_ids.contains(&row.id))
-            .map(|row| &row.fields)
+            .filter_map(|id| {
+                rows.binary_search_by_key(id, |row| row.id)
+                    .ok()
+                    .map(|position| &rows[position].fields)
+            })
             .collect::<Vec<_>>();
         let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
         self.replace_rows_and_indexes(&target.from, rows)?;
@@ -844,19 +848,21 @@ impl Database {
         &mut self,
         target: &mut Pipeline,
         returning: Option<&Returning>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<QueryResponse> {
         let returning = self.bind_returning(&target.from, returning)?;
         let schema = self.table(&target.from)?.schema.clone();
         self.bind_mutation_target(target, &schema)?;
-        let target_ids = self
-            .mutation_target_ids(target)?
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let target_order = self.mutation_target_ids(target, deadline)?;
+        let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
         let mut rows = self.table(&target.from)?.rows.clone();
-        let returned_fields = rows
+        let returned_fields = target_order
             .iter()
-            .filter(|row| target_ids.contains(&row.id))
-            .map(|row| &row.fields)
+            .filter_map(|id| {
+                rows.binary_search_by_key(id, |row| row.id)
+                    .ok()
+                    .map(|position| &rows[position].fields)
+            })
             .collect::<Vec<_>>();
         let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
         rows.retain(|row| !target_ids.contains(&row.id));
@@ -962,10 +968,26 @@ impl Database {
                 Stage::FilterMatch(predicate) => {
                     crate::matching::bind(&self.catalog, schema, predicate)?
                 }
-                _ => {
+                Stage::Sort(keys) => {
+                    for key in keys {
+                        let ty = self.catalog.field_type(schema, &key.column)?;
+                        if !self.orderable(ty)? {
+                            return Err(Error::new(
+                                "E_TYPE",
+                                format!("field '{}' has no ordering", key.column),
+                            ));
+                        }
+                    }
+                }
+                Stage::Take { .. } => {}
+                Stage::Let(_)
+                | Stage::Derive(_)
+                | Stage::DeriveMatch(_)
+                | Stage::Aggregate(_)
+                | Stage::Select(_) => {
                     return Err(Error::new(
                         "E_QUERY",
-                        "update and delete targets currently support only filter stages",
+                        "update and delete targets support only filter, sort, and take stages",
                     ));
                 }
             }
@@ -973,9 +995,25 @@ impl Database {
         Ok(())
     }
 
-    fn mutation_target_ids(&self, target: &Pipeline) -> Result<Vec<RowId>> {
+    fn mutation_target_ids(
+        &self,
+        target: &Pipeline,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<RowId>> {
+        check_deadline(deadline)?;
         let table = self.table(&target.from)?;
         let candidates = self.plan_access(target)?.candidates;
+        let working_rows = candidates
+            .as_ref()
+            .map_or(table.rows.len(), std::vec::Vec::len);
+        if working_rows > MAX_QUERY_WORKING_ROWS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "mutation needs {working_rows} working rows; limit is {MAX_QUERY_WORKING_ROWS}; add a selective indexed filter"
+                ),
+            ));
+        }
         let mut rows = match candidates {
             Some(ids) => ids
                 .into_iter()
@@ -991,29 +1029,69 @@ impl Database {
         };
         let mut evaluation_budget = crate::expression::EvaluationBudget::new();
         for stage in &target.stages {
-            let mut filtered = Vec::with_capacity(rows.len());
-            for row in rows {
-                let keep = match stage {
-                    Stage::Filter(expression) => crate::expression::evaluate(
-                        &self.catalog,
-                        expression,
-                        |path| row_field(&row.fields, path),
-                        &mut evaluation_budget,
-                    )?,
-                    Stage::FilterMatch(predicate) => crate::matching::evaluate(
-                        &self.catalog,
-                        &row.fields,
-                        predicate,
-                        &mut evaluation_budget,
-                    )?,
-                    _ => false,
-                };
-                if keep {
-                    filtered.push(row);
+            match stage {
+                Stage::Filter(expression) => {
+                    let mut filtered = Vec::with_capacity(rows.len());
+                    for (position, row) in rows.into_iter().enumerate() {
+                        check_deadline_periodically(deadline, position)?;
+                        if crate::expression::evaluate(
+                            &self.catalog,
+                            expression,
+                            |path| row_field(&row.fields, path),
+                            &mut evaluation_budget,
+                        )? {
+                            filtered.push(row);
+                        }
+                    }
+                    rows = filtered;
                 }
+                Stage::FilterMatch(predicate) => {
+                    let mut filtered = Vec::with_capacity(rows.len());
+                    for (position, row) in rows.into_iter().enumerate() {
+                        check_deadline_periodically(deadline, position)?;
+                        if crate::matching::evaluate(
+                            &self.catalog,
+                            &row.fields,
+                            predicate,
+                            &mut evaluation_budget,
+                        )? {
+                            filtered.push(row);
+                        }
+                    }
+                    rows = filtered;
+                }
+                Stage::Sort(keys) => {
+                    check_deadline(deadline)?;
+                    rows.sort_by(|a, b| {
+                        for key in keys {
+                            let order = row_field(&a.fields, &key.column)
+                                .zip(row_field(&b.fields, &key.column))
+                                .and_then(|(a, b)| a.cmp_ord(b))
+                                .unwrap_or(std::cmp::Ordering::Equal);
+                            let order = if key.descending {
+                                order.reverse()
+                            } else {
+                                order
+                            };
+                            if order != std::cmp::Ordering::Equal {
+                                return order;
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                    check_deadline(deadline)?;
+                }
+                Stage::Take { offset, limit } => {
+                    rows = rows.into_iter().skip(*offset).take(*limit).collect();
+                }
+                Stage::Let(_)
+                | Stage::Derive(_)
+                | Stage::DeriveMatch(_)
+                | Stage::Aggregate(_)
+                | Stage::Select(_) => unreachable!("mutation target stages were bound"),
             }
-            rows = filtered;
         }
+        check_deadline(deadline)?;
         Ok(rows.into_iter().map(|row| row.id).collect())
     }
 

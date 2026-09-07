@@ -785,19 +785,23 @@ fn versioned_tcp_updates_adts_with_match_and_parameters() {
 
 type Job =
   id int
+  priority int
   state State
 
 table jobs Job
   key id
 
-insert jobs {id = 1, state = Queued {attempt = 2}}"#;
+insert jobs {id = 1, priority = 1, state = Queued {attempt = 2}}
+insert jobs {id = 2, priority = 2, state = Queued {attempt = 5}}"#;
     assert!(cli::send_one(&server.addr, setup).unwrap().ok);
 
     let request = ProtocolRequest {
         version: unionid::protocol::VERSION,
         request_id: "match-update".into(),
         query: r#"update jobs
-filter id == $id
+filter id >= $id
+sort {-priority, id}
+take 1
 set state =
   match state
     Queued {attempt} => Running {worker = $worker, attempt = attempt + 1}
@@ -825,11 +829,18 @@ returning id, state"#
     assert!(matches!(response.rows[0]["id"], WireValue::Int { .. }));
     assert!(matches!(response.rows[0]["state"], WireValue::Named { .. }));
 
-    let rows = cli::send_one(&server.addr, "from jobs | filter id == 1").unwrap();
+    assert!(matches!(response.rows[0]["id"], WireValue::Int { ref value } if value == "2"));
+
+    let rows = cli::send_one(&server.addr, "from jobs | filter id == 2").unwrap();
     assert!(rows.ok, "{}", rows.message);
     assert_eq!(
         rows.rows[0]["state"].source_text(),
-        "Running {attempt = 3, worker = \"tcp-worker\"}"
+        "Running {attempt = 6, worker = \"tcp-worker\"}"
+    );
+    let untouched = cli::send_one(&server.addr, "from jobs | filter id == 1").unwrap();
+    assert_eq!(
+        untouched.rows[0]["state"].source_text(),
+        "Queued {attempt = 2}"
     );
 }
 

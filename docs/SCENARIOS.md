@@ -42,7 +42,7 @@ type Job =
 
 - 查找可运行任务：解构 `Queued`，比较 `scheduled_at`，按 priority、时间和 id 排序后取一页，并把状态派生为统一的 text 标签。失败任务可直接用 `Failed {error = Network {message}, retry_at = Some at}` 解构嵌套失败原因和重试时间。当前完整示例见 [job_queue.uid](../examples/job_queue.uid)。
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行；`explain from jobs | filter id == "job-a" | take 1` 可验证 lookup、候选数和结果 schema。
-- 原子 claim：按 id 和旧状态筛选，并用 `set state = match state` 把 `Queued` 改成 `Running`；最后的 `current => current` 保留其他状态。末尾 `returning id, state` 在同一请求中返回命中的新状态，未命中时得到稳定 columns、空 rows 和 affected_rows 0，无需额外读取。
+- 原子 claim：按旧状态筛选，`sort {-priority, scheduled_at, id} | take 1` 稳定选出下一条，再用 `set state = match state` 把 `Queued` 改成 `Running`。末尾 `returning id, state` 在同一请求中返回命中的新状态；没有候选时得到稳定 columns、空 rows 和 affected_rows 0，无需先查询 ID。
 - 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter match state` 组合即可限定状态。
 - 复用业务判断：`let important = value -> value >= 10` 和 `let has_tag = (values list text, tag text) -> contains values tag` 可在当前 pipeline 后续的 filter、derive 与 aggregate 输入中重复调用，避免复制长条件。
 - 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
@@ -206,7 +206,7 @@ table documents Document
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none | 通用高阶函数延后 | 已满足 v0.1 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take、类型化索引访问计划与 explain 已实现 | cursor 分页延后 | #34/#16，已满足 v0.1 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec 与 schema-aware prepared query | option helper/元素谓词可继续扩展 | #10/#22/#36 |
-| 原子状态转换、upsert、delete | update/delete 已实现 filter/match target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 扩大工作集时直接生成 mutation set | #15/#83/#85 |
+| 原子状态转换、upsert、delete | update/delete 已实现 filter/match/sort/take target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 多写者／skip-locked 不在当前单写模型内 | #15/#83/#85/#87 |
 | count/sum/min/max 与分组 | 已实现 typed 空输入、命名数值、完整 ADT key、后续 stage 与有界资源 | distinct aggregate、window 和用户定义 aggregate 延后 | #60，P0 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |
 | 持久提交、恢复和备份 | redb Engine、原子提交、完整性检查、进程退出恢复、备份还原与三条端到端升级恢复场景已实现 | 物理设备故障不在当前测试声明内 | #13/#14/#20/#74，P0 |
