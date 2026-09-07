@@ -362,7 +362,7 @@ fn local_cli_reports_affected_rows_for_mutations() {
         .args([
             "run",
             "--query",
-            "create table tasks (id int, attempts int)\ninsert tasks {id: 1, attempts: 2}\nupdate tasks\nfilter id == 1\nset attempts = attempts + 1",
+            "create table tasks (id int, attempts int)\ninsert tasks {id: 1, attempts: 2}\nupdate tasks\nfilter id == 1\nset attempts = attempts + 1\nreturning id, attempts",
             "--format",
             "json",
         ])
@@ -375,6 +375,8 @@ fn local_cli_reports_affected_rows_for_mutations() {
     );
     let response: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response.affected_rows, Some(1));
+    assert_eq!(response.rows.len(), 1);
+    assert!(response.rows[0]["attempts"].cmp_eq(&Value::Int(3)));
 }
 
 #[test]
@@ -799,7 +801,8 @@ filter id == $id
 set state =
   match state
     Queued {attempt} => Running {worker = $worker, attempt = attempt + 1}
-    current => current"#
+    current => current
+returning id, state"#
             .into(),
         introspect: None,
         params: BTreeMap::from([
@@ -817,6 +820,10 @@ set state =
     assert!(response.ok, "{}", response.message);
     assert_eq!(response.request_id, "match-update");
     assert_eq!(response.affected_rows, Some(1));
+    assert_eq!(response.columns.len(), 2);
+    assert_eq!(response.rows.len(), 1);
+    assert!(matches!(response.rows[0]["id"], WireValue::Int { .. }));
+    assert!(matches!(response.rows[0]["state"], WireValue::Named { .. }));
 
     let rows = cli::send_one(&server.addr, "from jobs | filter id == 1").unwrap();
     assert!(rows.ok, "{}", rows.message);

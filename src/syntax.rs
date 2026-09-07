@@ -10,7 +10,7 @@ use crate::query::{
     Aggregate, AggregateAssignment, AggregateFunction, ArithmeticOp, BoolExpression, CmpOp,
     DeriveExpression, DeriveMatch, LocalBinding, LocalParameter, LocatedStatement, MatchArm,
     MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
-    MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
+    MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, Returning, ScalarExpression,
     SchemaMigration, SetAssignment, SetValue, SortKey, Stage, Statement,
 };
 
@@ -1031,10 +1031,20 @@ impl Parser {
         let table = self.identifier()?;
         if let Kind::Parameter(parameter) = self.kind().clone() {
             self.bump();
-            return Ok(Statement::InsertParameter { table, parameter });
+            let returning = self.optional_returning()?;
+            return Ok(Statement::InsertParameter {
+                table,
+                parameter,
+                returning,
+            });
         }
         let values = self.row_value()?;
-        Ok(Statement::Insert { table, values })
+        let returning = self.optional_returning()?;
+        Ok(Statement::Insert {
+            table,
+            values,
+            returning,
+        })
     }
 
     fn upsert(&mut self) -> Result<Statement> {
@@ -1042,10 +1052,20 @@ impl Parser {
         let table = self.identifier()?;
         if let Kind::Parameter(parameter) = self.kind().clone() {
             self.bump();
-            return Ok(Statement::UpsertParameter { table, parameter });
+            let returning = self.optional_returning()?;
+            return Ok(Statement::UpsertParameter {
+                table,
+                parameter,
+                returning,
+            });
         }
         let values = self.row_value()?;
-        Ok(Statement::Upsert { table, values })
+        let returning = self.optional_returning()?;
+        Ok(Statement::Upsert {
+            table,
+            values,
+            returning,
+        })
     }
 
     fn row_value(&mut self) -> Result<Value> {
@@ -1064,6 +1084,7 @@ impl Parser {
         let mut assignments = Vec::new();
         let mut seen = BTreeSet::new();
         let mut setting = false;
+        let mut returning = None;
         loop {
             let piped = self.eat(Kind::Pipe);
             let newline = self.eat(Kind::Newline);
@@ -1098,9 +1119,14 @@ impl Parser {
                 assignments.push(SetAssignment { path, value });
             } else if self.word("filter") {
                 return Err(self.error("update filters must appear before set assignments"));
+            } else if self.word("returning") {
+                returning = Some(self.returning_clause()?);
+                break;
             } else {
                 if piped {
-                    return Err(self.error("expected filter or set after '|' in update"));
+                    return Err(
+                        self.error("expected filter, set, or returning after '|' in update")
+                    );
                 }
                 break;
             }
@@ -1111,6 +1137,7 @@ impl Parser {
         Ok(Statement::Update {
             target: Pipeline { from, stages },
             assignments,
+            returning,
         })
     }
 
@@ -1118,6 +1145,7 @@ impl Parser {
         self.expect_word("delete")?;
         let from = self.identifier()?;
         let mut stages = Vec::new();
+        let mut returning = None;
         loop {
             let piped = self.eat(Kind::Pipe);
             let newline = self.eat(Kind::Newline);
@@ -1129,15 +1157,19 @@ impl Parser {
             }
             if self.word("filter") {
                 stages.push(self.filter_stage()?);
+            } else if self.word("returning") {
+                returning = Some(self.returning_clause()?);
+                break;
             } else {
                 if piped {
-                    return Err(self.error("expected filter after '|' in delete"));
+                    return Err(self.error("expected filter or returning after '|' in delete"));
                 }
                 break;
             }
         }
         Ok(Statement::Delete {
             target: Pipeline { from, stages },
+            returning,
         })
     }
 
@@ -1159,7 +1191,51 @@ impl Parser {
     }
 
     fn is_update_stage(&self) -> bool {
-        self.word("filter") || self.word("set")
+        self.word("filter") || self.word("set") || self.word("returning")
+    }
+
+    fn optional_returning(&mut self) -> Result<Option<Returning>> {
+        let piped = self.eat(Kind::Pipe);
+        let newline = self.eat(Kind::Newline);
+        self.newlines();
+        let after_layout = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
+        if self.word("returning") && (piped || newline || after_layout) {
+            return self.returning_clause().map(Some);
+        }
+        if piped {
+            return Err(self.error("expected returning after '|' in row write"));
+        }
+        Ok(None)
+    }
+
+    fn returning_clause(&mut self) -> Result<Returning> {
+        self.expect_word("returning")?;
+        if matches!(self.kind(), Kind::Newline | Kind::Dedent | Kind::End) {
+            return Ok(Returning { fields: Vec::new() });
+        }
+        let braced = self.eat(Kind::Open('{'));
+        self.newlines();
+        let mut fields = Vec::new();
+        let mut seen = BTreeSet::new();
+        loop {
+            let field = self.path()?;
+            if !seen.insert(field.clone()) {
+                return Err(self.error(format!("duplicate returning field '{field}'")));
+            }
+            fields.push(field);
+            self.newlines();
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+            self.newlines();
+            if braced && *self.kind() == Kind::Close('}') {
+                break;
+            }
+        }
+        if braced {
+            self.expect(Kind::Close('}'))?;
+        }
+        Ok(Returning { fields })
     }
 
     fn record(&mut self, end: Kind, depth: usize) -> Result<Value> {

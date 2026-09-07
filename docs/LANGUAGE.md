@@ -2,7 +2,7 @@
 
 本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)。
 
-当前包含类型与表声明、insert/upsert/update/delete、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort、take，以及结构化 `explain`。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、insert/upsert/update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort、take，以及结构化 `explain`。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
 ## 类型、表与值
 
@@ -122,8 +122,9 @@ set state =
   match state
     Pending => Done {result = "ok"}
     current => current
+returning id, state
 
-delete tasks | filter id == 2
+delete tasks | filter id == 2 | returning
 ```
 
 - `update table` 与 `delete table` 不带 filter 时作用于整张表；这是显式有效操作。
@@ -133,7 +134,8 @@ delete tasks | filter id == 2
 - 顶层小写 binding 是带类型的不可反驳 pattern，必须是最后一支；`current => current` 可保留其余 constructor 的完整原值。分支可使用 typed 参数和自己的 pattern bindings。
 - 可直接设置 record 的嵌套路径，如 `set owner.email = "new@example.com"`。路径不能穿过 sum/option；修改 variant 时设置完整值。父路径与子路径不能在同一 update 中同时赋值，避免依赖隐含顺序。
 - 每条候选 row 更新完成后重新检查完整 row 类型；全表重新检查主键唯一性，再原子替换 rows 与派生 indexes。任一行除零、溢出、类型或约束失败时，该请求不修改任何行。
-- 成功 insert/update/delete 的 JSON 响应包含 `affected_rows`；update/delete 未命中时返回 0。内部稳定 RowId 不出现在用户 record 中，删除后不会被后续插入复用。
+- 成功 insert/upsert/update/delete 的 JSON 响应包含 `affected_rows`；update/delete 未命中时返回 0。末尾的 `returning` 返回完整受影响行，`returning id, state` 按给定顺序投影字段：insert/upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像。空命中仍返回稳定 columns 和空 rows。
+- returning 字段在扫描前按表 schema 检查，行数和 8 MiB typed wire 预算也在提交前检查；失败不会发布 row 或索引。内部稳定 RowId 不出现在用户 record 中，删除后不会被后续插入复用。
 
 单行形式可用必要的 pipeline 分隔符，例如 `update tasks | filter id == 1 | set attempts = attempts + 1`。多项修改推荐换行，避免长表达式掩盖目标范围。
 
@@ -209,4 +211,4 @@ cargo run -- cli --addr 127.0.0.1:7878 --file examples/tasks.uid
 
 TCP 的稳定客户端入口是 [JSON Lines version 1](PROTOCOL.md)：请求包含 `version/request_id/query/params` 和可选 schema 前置条件，响应回显 ID，并以独立 wire codec 无损编码 ADT 与 i64。JSON 中的换行不会被压平。服务暂时兼容 `{"query":"..."}` 和旧纯文本单行请求。
 
-响应包含 `ok/message/columns/rows/error/warnings/schema`，成功 DML 还包含 `affected_rows`，upsert 额外包含 `upsert_action`。`schema` 提供当前应用 schema 的 revision 与 SHA-256 hash；原子 schema 脚本只推进一次 revision，行写入与失败请求不推进，完整规则见 [Schema 身份与演进契约](SCHEMA.md)。`columns` 保留投影顺序和类型描述；version 1 的 `rows` 使用与内部 serde/存储 codec 分离的 typed wire value，i64 和稳定 ID 以十进制 string 传输。服务默认本机监听；连接、frame、working/result rows、response bytes、execution deadline、socket timeout、SIGINT/SIGTERM 关闭和重试语义见[服务运行边界](SERVICE.md)。
+响应包含 `ok/message/columns/rows/error/warnings/schema`，成功 DML 还包含 `affected_rows`，upsert 额外包含 `upsert_action`；带 returning 的 DML 同时填充 typed `columns/rows`。`schema` 提供当前应用 schema 的 revision 与 SHA-256 hash；原子 schema 脚本只推进一次 revision，行写入与失败请求不推进，完整规则见 [Schema 身份与演进契约](SCHEMA.md)。`columns` 保留投影顺序和类型描述；version 1 的 `rows` 使用与内部 serde/存储 codec 分离的 typed wire value，i64 和稳定 ID 以十进制 string 传输。服务默认本机监听；连接、frame、working/result rows、response bytes、execution deadline、socket timeout、SIGINT/SIGTERM 关闭和重试语义见[服务运行边界](SERVICE.md)。

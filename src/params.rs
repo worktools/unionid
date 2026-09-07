@@ -102,6 +102,7 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
         Statement::Update {
             target,
             assignments,
+            ..
         } => {
             visit_pipeline(target, visitor);
             for assignment in assignments {
@@ -115,9 +116,9 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
                 }
             }
         }
-        Statement::Delete { target } | Statement::Explain(target) | Statement::Pipeline(target) => {
-            visit_pipeline(target, visitor)
-        }
+        Statement::Delete { target, .. }
+        | Statement::Explain(target)
+        | Statement::Pipeline(target) => visit_pipeline(target, visitor),
         Statement::Migration { steps, .. } => {
             for step in steps {
                 visit_migration(step, visitor);
@@ -144,6 +145,7 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
         Statement::Update {
             target,
             assignments,
+            ..
         } => {
             visit_pipeline_mut(target, visitor);
             for assignment in assignments {
@@ -157,28 +159,40 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
                 }
             }
         }
-        Statement::Delete { target } | Statement::Explain(target) | Statement::Pipeline(target) => {
-            visit_pipeline_mut(target, visitor)
-        }
+        Statement::Delete { target, .. }
+        | Statement::Explain(target)
+        | Statement::Pipeline(target) => visit_pipeline_mut(target, visitor),
         Statement::Migration { steps, .. } => {
             for step in steps {
                 visit_migration_mut(step, visitor);
             }
         }
-        Statement::InsertParameter { table, parameter } => {
+        Statement::InsertParameter {
+            table,
+            parameter,
+            returning,
+        } => {
             let table = std::mem::take(table);
             let parameter = std::mem::take(parameter);
+            let returning = returning.take();
             *statement = Statement::Insert {
                 table,
                 values: parameters_value(visitor, &parameter),
+                returning,
             };
         }
-        Statement::UpsertParameter { table, parameter } => {
+        Statement::UpsertParameter {
+            table,
+            parameter,
+            returning,
+        } => {
             let table = std::mem::take(table);
             let parameter = std::mem::take(parameter);
+            let returning = returning.take();
             *statement = Statement::Upsert {
                 table,
                 values: parameters_value(visitor, &parameter),
+                returning,
             };
         }
         Statement::DefineType { .. }

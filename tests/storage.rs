@@ -75,10 +75,16 @@ insert jobs {id = 1, state = Queued {attempt = 0}}"#,
 set state =
   match state
     Queued {attempt} => Running {worker = "disk", attempt = attempt + 1}
-    current => current"#,
+    current => current
+returning id, state"#,
         );
         assert!(updated.ok, "{}", updated.message);
         assert_eq!(updated.affected_rows, Some(1));
+        assert_eq!(updated.rows.len(), 1);
+        assert_eq!(
+            updated.rows[0]["state"].source_text(),
+            "Running {attempt = 1, worker = \"disk\"}"
+        );
     }
 
     let mut reopened = Engine::open_redb(&path).unwrap();

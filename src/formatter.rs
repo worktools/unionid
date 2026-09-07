@@ -94,21 +94,42 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
         Statement::CreateIndex { table, column } => {
             line(output, depth, &format!("create index {table} ({column})"));
         }
-        Statement::Insert { table, values } => {
+        Statement::Insert {
+            table,
+            values,
+            returning,
+        } => {
             row_write(output, "insert", table, values, depth);
+            returning_text(output, returning.as_ref(), depth);
         }
-        Statement::InsertParameter { table, parameter } => {
+        Statement::InsertParameter {
+            table,
+            parameter,
+            returning,
+        } => {
             line(output, depth, &format!("insert {table} ${parameter}"));
+            returning_text(output, returning.as_ref(), depth);
         }
-        Statement::Upsert { table, values } => {
+        Statement::Upsert {
+            table,
+            values,
+            returning,
+        } => {
             row_write(output, "upsert", table, values, depth);
+            returning_text(output, returning.as_ref(), depth);
         }
-        Statement::UpsertParameter { table, parameter } => {
+        Statement::UpsertParameter {
+            table,
+            parameter,
+            returning,
+        } => {
             line(output, depth, &format!("upsert {table} ${parameter}"));
+            returning_text(output, returning.as_ref(), depth);
         }
         Statement::Update {
             target,
             assignments,
+            returning,
         } => {
             line(output, depth, &format!("update {}", target.from));
             for stage in &target.stages {
@@ -127,12 +148,14 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
                     }
                 }
             }
+            returning_text(output, returning.as_ref(), depth);
         }
-        Statement::Delete { target } => {
+        Statement::Delete { target, returning } => {
             line(output, depth, &format!("delete {}", target.from));
             for stage in &target.stages {
                 stage_text(output, stage, depth);
             }
+            returning_text(output, returning.as_ref(), depth);
         }
         Statement::Migration {
             name,
@@ -152,6 +175,21 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             pipeline_text(output, pipeline, depth + 1);
         }
         Statement::Pipeline(pipeline) => pipeline_text(output, pipeline, depth),
+    }
+}
+
+fn returning_text(output: &mut String, returning: Option<&crate::query::Returning>, depth: usize) {
+    let Some(returning) = returning else {
+        return;
+    };
+    if returning.fields.is_empty() {
+        line(output, depth, "returning");
+    } else {
+        line(
+            output,
+            depth,
+            &format!("returning {}", returning.fields.join(", ")),
+        );
     }
 }
 

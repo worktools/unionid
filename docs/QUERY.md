@@ -41,8 +41,8 @@ take 20
 | 查询局部定义 | `let retryable = attempt -> attempt < 3` | 已实现常量、单/多参数非递归纯函数、有限推断、词法遮蔽与展开预算 | — |
 | 有限自递归 ADT | `type Tree = Leaf text \| Branch {children list Tree}` | 已实现声明、严格值、match coverage、精确索引、持久化与 migration；运行时值仍是有限树 | #81 |
 | 执行计划 | `explain from tasks \| filter id == 1` | 已实现 full scan、主键／二级索引 lookup、候选行估计、stage 顺序与结果 schema | — |
-| 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、穷尽 match assignment、嵌套 record 路径、filter/match、affected rows、原子约束与增量持久维护 | #15/#83 |
-| Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId、结构化 action 与增量持久维护 | #15 |
+| 更新与删除 | `update table ... set`、`delete table ...` | 已实现 typed set、穷尽 match assignment、嵌套 record 路径、filter/match、typed returning、原子约束与增量持久维护 | #15/#83/#85 |
+| Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId、结构化 action、typed returning 与增量持久维护 | #15/#85 |
 | schema migration | `migration name` | 已实现显式 ADT schema 操作、typed conversion、全引用路径重写、版本化 runner/ledger 与原子索引维护 | #19 继续补声明式 diff 与更细 plan 报告 |
 | join、window、递归查询函数和高阶函数 | — | 延后；自递归数据类型已实现，不包含任意深度 fold/map | #25 |
 
@@ -208,8 +208,9 @@ set state =
   match state
     Queued {attempt, ..} => Running {worker = "local", attempt = attempt + 1}
     current => current
+returning id, state
 
-delete jobs | filter archived == true
+delete jobs | filter archived == true | returning
 ```
 
 不写 filter 时作用于整表。当前 mutation target 只接受 filter，不接受 derive/select/sort/take；update 的全部 filter 必须位于 set 之前。单行形式使用 `|`，例如 `update jobs | filter id == 1 | set attempts = attempts + 1`。多项 set 推荐逐行写，目标范围和赋值更容易检查。
@@ -220,7 +221,9 @@ match assignment 的顶层小写 binding 是不可反驳 pattern，必须放在�
 
 同一 update 的多个 set 同时求值，右侧全部读取修改前的行。父路径与子路径不能同时赋值，例如 `set owner = {...}` 与 `set owner.email = ...` 会返回 `E_QUERY`。每行形成完整候选 record 后重新类型检查，全部候选形成后检查主键唯一性，再一起替换 rows 和 indexes。任何 filter、算术、类型或约束错误都会由 Engine 丢弃整个请求的候选状态；redb 模式在同一事务提交。
 
-insert/upsert/update/delete 成功时响应包含 `affected_rows`；未匹配 update/delete 返回 0。upsert 还返回结构化 `upsert_action: inserted|updated`。upsert 输入是一份按 schema 默认值补齐的完整 row：命中主键时替换整个值并保留 RowId，未命中时分配新 RowId。局部修改仍使用 update，删除后的 RowId 不复用。当前执行器会重建受影响表的内存索引；redb 在请求提交时只删除或写入前后状态中变化的 catalog/row/index 稳定键。
+末尾可写 `returning` 返回完整受影响行，或写 `returning id, state` 返回有序字段路径投影。insert/upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像；未匹配 update/delete 仍提供投影 columns、空 rows 和 `affected_rows = 0`。返回顺序使用稳定 RowId。字段绑定、100,000 行上限和 8 MiB typed wire rows 预算均在候选状态提交前检查，失败不发布修改。
+
+insert/upsert/update/delete 成功时响应包含 `affected_rows`；upsert 还返回结构化 `upsert_action: inserted|updated`。upsert 输入是一份按 schema 默认值补齐的完整 row：命中主键时替换整个值并保留 RowId，未命中时分配新 RowId。局部修改仍使用 update，删除后的 RowId 不复用。当前执行器会重建受影响表的内存索引；redb 在请求提交时只删除或写入前后状态中变化的 catalog/row/index 稳定键。
 
 ## 执行模型
 
@@ -525,7 +528,7 @@ take 20
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |
 
-查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。insert/upsert/update/delete 成功响应包含 `affected_rows`；upsert 还包含 `upsert_action`。DML 响应的 rows/columns 为空。当前 indexed query、full scan、写入和 migration 的 10k/100k 实测边界见[工作负载成本记录](benchmarks/workload-2026-09-07.md)。
+查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。insert/upsert/update/delete 成功响应包含 `affected_rows`；upsert 还包含 `upsert_action`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。当前 indexed query、full scan、写入和 migration 的 10k/100k 实测边界见[工作负载成本记录](benchmarks/workload-2026-09-07.md)。
 
 以下片段是故意失败的反例：
 

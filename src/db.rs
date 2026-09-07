@@ -9,8 +9,8 @@ use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
 };
 use crate::query::{
-    Aggregate, AggregateAssignment, AggregateFunction, Pipeline, SetAssignment, SetValue, Stage,
-    Statement,
+    Aggregate, AggregateAssignment, AggregateFunction, Pipeline, Returning, SetAssignment,
+    SetValue, Stage, Statement,
 };
 
 mod migration;
@@ -19,6 +19,7 @@ type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<RowId>>>>;
 
 pub const MAX_QUERY_WORKING_ROWS: usize = 250_000;
 pub const MAX_RESULT_ROWS: usize = 100_000;
+pub const MAX_RETURNING_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_GROUPS: usize = 100_000;
 pub const MAX_AGGREGATE_OUTPUTS: usize = 256;
 pub const MAX_AGGREGATE_CELLS: usize = 1_000_000;
@@ -27,6 +28,11 @@ pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
 struct PlannedAccess {
     plan: QueryAccessPlan,
     candidates: Option<Vec<RowId>>,
+}
+
+struct BoundReturning {
+    fields: Vec<String>,
+    columns: Vec<ResponseColumn>,
 }
 
 struct GroupAccumulator {
@@ -477,18 +483,30 @@ impl Database {
                 self.create_table(table, columns.clone(), Some(def.id), key)
             }
             Statement::CreateIndex { table, column } => self.create_index(&table, &column),
-            Statement::Insert { table, values } => self.insert(&table, values),
+            Statement::Insert {
+                table,
+                values,
+                returning,
+            } => self.insert(&table, values, returning.as_ref()),
             Statement::InsertParameter { parameter, .. }
             | Statement::UpsertParameter { parameter, .. } => Err(Error::new(
                 "E_PARAM_MISSING",
                 format!("parameter '${parameter}' was not bound"),
             )),
-            Statement::Upsert { table, values } => self.upsert(&table, values),
+            Statement::Upsert {
+                table,
+                values,
+                returning,
+            } => self.upsert(&table, values, returning.as_ref()),
             Statement::Update {
                 mut target,
                 mut assignments,
-            } => self.update(&mut target, &mut assignments),
-            Statement::Delete { mut target } => self.delete(&mut target),
+                returning,
+            } => self.update(&mut target, &mut assignments, returning.as_ref()),
+            Statement::Delete {
+                mut target,
+                returning,
+            } => self.delete(&mut target, returning.as_ref()),
             Statement::Migration {
                 name,
                 parent: _,
@@ -600,15 +618,29 @@ impl Database {
         Ok(build_posting(&table.rows, column))
     }
 
-    fn insert(&mut self, name: &str, values: Value) -> Result<QueryResponse> {
+    fn insert(
+        &mut self,
+        name: &str,
+        values: Value,
+        returning: Option<&Returning>,
+    ) -> Result<QueryResponse> {
+        let returning = self.bind_returning(name, returning)?;
         let fields = self.coerce_row(name, &values, "insert")?;
+        let returned = self.returning_rows(returning.as_ref(), &[&fields])?;
         self.insert_fields(name, fields)?;
         let mut response = QueryResponse::ok_message(format!("inserted into '{name}'"));
         response.affected_rows = Some(1);
+        apply_returning(&mut response, returning, returned);
         Ok(response)
     }
 
-    fn upsert(&mut self, name: &str, values: Value) -> Result<QueryResponse> {
+    fn upsert(
+        &mut self,
+        name: &str,
+        values: Value,
+        returning: Option<&Returning>,
+    ) -> Result<QueryResponse> {
+        let returning = self.bind_returning(name, returning)?;
         let table = self.table(name)?;
         let key = table.primary_key.clone().ok_or_else(|| {
             Error::new(
@@ -617,6 +649,7 @@ impl Database {
             )
         })?;
         let fields = self.coerce_row(name, &values, "upsert")?;
+        let returned = self.returning_rows(returning.as_ref(), &[&fields])?;
         let key_value = row_field(&fields, &key)
             .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
         let existing_id = self
@@ -649,6 +682,7 @@ impl Database {
         let mut response = QueryResponse::ok_message(message);
         response.affected_rows = Some(1);
         response.upsert_action = Some(action);
+        apply_returning(&mut response, returning, returned);
         Ok(response)
     }
 
@@ -713,7 +747,9 @@ impl Database {
         &mut self,
         target: &mut Pipeline,
         assignments: &mut [SetAssignment],
+        returning: Option<&Returning>,
     ) -> Result<QueryResponse> {
+        let returning = self.bind_returning(&target.from, returning)?;
         let table = self.table(&target.from)?;
         let schema = table.schema.clone();
         let row_type = table
@@ -789,15 +825,27 @@ impl Database {
             row.fields = fields.clone();
         }
         self.validate_primary_keys(&target.from, &rows)?;
-        self.replace_rows_and_indexes(&target.from, rows)?;
         let affected = target_ids.len();
+        let returned_fields = rows
+            .iter()
+            .filter(|row| target_ids.contains(&row.id))
+            .map(|row| &row.fields)
+            .collect::<Vec<_>>();
+        let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
+        self.replace_rows_and_indexes(&target.from, rows)?;
         let mut response =
             QueryResponse::ok_message(format!("updated {affected} row(s) in '{}'", target.from));
         response.affected_rows = Some(affected);
+        apply_returning(&mut response, returning, returned);
         Ok(response)
     }
 
-    fn delete(&mut self, target: &mut Pipeline) -> Result<QueryResponse> {
+    fn delete(
+        &mut self,
+        target: &mut Pipeline,
+        returning: Option<&Returning>,
+    ) -> Result<QueryResponse> {
+        let returning = self.bind_returning(&target.from, returning)?;
         let schema = self.table(&target.from)?.schema.clone();
         self.bind_mutation_target(target, &schema)?;
         let target_ids = self
@@ -805,13 +853,104 @@ impl Database {
             .into_iter()
             .collect::<BTreeSet<_>>();
         let mut rows = self.table(&target.from)?.rows.clone();
+        let returned_fields = rows
+            .iter()
+            .filter(|row| target_ids.contains(&row.id))
+            .map(|row| &row.fields)
+            .collect::<Vec<_>>();
+        let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
         rows.retain(|row| !target_ids.contains(&row.id));
         self.replace_rows_and_indexes(&target.from, rows)?;
         let affected = target_ids.len();
         let mut response =
             QueryResponse::ok_message(format!("deleted {affected} row(s) from '{}'", target.from));
         response.affected_rows = Some(affected);
+        apply_returning(&mut response, returning, returned);
         Ok(response)
+    }
+
+    fn bind_returning(
+        &self,
+        table_name: &str,
+        returning: Option<&Returning>,
+    ) -> Result<Option<BoundReturning>> {
+        let Some(returning) = returning else {
+            return Ok(None);
+        };
+        let table = self.table(table_name)?;
+        let fields = if returning.fields.is_empty() {
+            table
+                .schema
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()
+        } else {
+            returning.fields.clone()
+        };
+        let columns = fields
+            .iter()
+            .map(|field| {
+                self.catalog
+                    .field_type(&table.schema, field)
+                    .map(|ty| ResponseColumn {
+                        name: field.clone(),
+                        ty: self.catalog.describe(ty),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(BoundReturning { fields, columns }))
+    }
+
+    fn returning_rows(
+        &self,
+        returning: Option<&BoundReturning>,
+        rows: &[&BTreeMap<String, Value>],
+    ) -> Result<Vec<BTreeMap<String, Value>>> {
+        let Some(returning) = returning else {
+            return Ok(Vec::new());
+        };
+        if rows.len() > MAX_RESULT_ROWS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "mutation returns {} rows; limit is {MAX_RESULT_ROWS}; add a selective filter",
+                    rows.len()
+                ),
+            ));
+        }
+        let returned = rows
+            .iter()
+            .map(|row| {
+                returning
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let value = row_field(row, field).expect("returning field was bound");
+                        (field.clone(), value.clone())
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .collect::<Vec<_>>();
+        let wire = returned
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|(name, value)| (name, crate::protocol::WireValue::from(value)))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .collect::<Vec<_>>();
+        let encoded = serde_json::to_vec(&wire)
+            .map_err(|error| Error::new("E_PROTOCOL", error.to_string()))?;
+        if encoded.len() > MAX_RETURNING_BYTES {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "mutation returning rows encode to {} bytes; limit is {MAX_RETURNING_BYTES}",
+                    encoded.len()
+                ),
+            ));
+        }
+        Ok(returned)
     }
 
     fn bind_mutation_target(&self, target: &mut Pipeline, schema: &[Column]) -> Result<()> {
@@ -2115,6 +2254,17 @@ fn type_reaches(catalog: &Catalog, ty: &ScalarType, target: u64, seen: &mut BTre
         | ScalarType::Bool
         | ScalarType::Text
         | ScalarType::Named(_) => false,
+    }
+}
+
+fn apply_returning(
+    response: &mut QueryResponse,
+    returning: Option<BoundReturning>,
+    rows: Vec<BTreeMap<String, Value>>,
+) {
+    if let Some(returning) = returning {
+        response.columns = returning.columns;
+        response.rows = rows;
     }
 }
 

@@ -11,6 +11,7 @@ use crate::model::{EnumValue, Value};
 
 pub const VERSION: u32 = 1;
 pub const MAX_INTROSPECTION_BYTES: usize = 1024 * 1024;
+pub const MAX_REQUEST_ID_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
