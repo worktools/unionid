@@ -49,7 +49,11 @@ HTTP response 直接序列化 `unionid::ProtocolResponse`。Rust 客户端可用
 
 ```bash
 cargo run --example todolist
+# 或指定一个不会覆盖既有目标文件的工作目录
+cargo run --example todolist -- /path/to/empty-work-directory
 ```
+
+指定目录中若已经存在 `todos.redb`、`todos-restored.redb` 或 `todos.backup.json`，示例会拒绝启动，不会删除或覆盖这些文件。
 
 示例启动真实本地 HTTP listener，客户端只持有 HTTP 地址，不接触 `Engine` 或数据库路径。它通过 HTTP 完成：
 

@@ -181,7 +181,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let archive = root.join("todos.backup.json");
     for path in [&database, &restored, &archive] {
         if path.exists() {
-            std::fs::remove_file(path)?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "refusing to overwrite {}; choose an empty work directory",
+                    path.display()
+                ),
+            )
+            .into());
         }
     }
 
@@ -413,8 +420,15 @@ fn ensure_admin_ok(response: &AdminResponse) -> Result<(), Error> {
 
 async fn query(State(state): State<Shared>, Json(request): Json<Request>) -> Json<Response> {
     let mut service = state.lock().await;
-    let engine = service.engine.as_mut().expect("source engine is open");
-    Json(execute_protocol_request(engine, request))
+    let response = match service.engine.as_mut() {
+        Some(engine) => execute_protocol_request(engine, request),
+        None => Response::failure(
+            request.request_id,
+            engine_unavailable(),
+            unavailable_schema(),
+        ),
+    };
+    Json(response)
 }
 
 async fn restored_query(
@@ -479,10 +493,12 @@ async fn admin_with_engine<T: Serialize>(
         Err(error) => return Json(admin_error(request.request_id, error)),
     };
     let mut service = state.lock().await;
-    let engine = service.engine.as_mut().expect("source engine is open");
-    Json(match operation(engine, &files) {
-        Ok(result) => admin_ok(request.request_id, result),
-        Err(error) => admin_error(request.request_id, error),
+    Json(match service.engine.as_mut() {
+        Some(engine) => match operation(engine, &files) {
+            Ok(result) => admin_ok(request.request_id, result),
+            Err(error) => admin_error(request.request_id, error),
+        },
+        None => admin_error(request.request_id, engine_unavailable()),
     })
 }
 
@@ -512,10 +528,12 @@ async fn check(
         return Json(response);
     }
     let mut service = state.lock().await;
-    let engine = service.engine.as_mut().expect("source engine is open");
-    Json(match engine.check_integrity() {
-        Ok(result) => admin_ok(request.request_id, result),
-        Err(error) => admin_error(request.request_id, error),
+    Json(match service.engine.as_mut() {
+        Some(engine) => match engine.check_integrity() {
+            Ok(result) => admin_ok(request.request_id, result),
+            Err(error) => admin_error(request.request_id, error),
+        },
+        None => admin_error(request.request_id, engine_unavailable()),
     })
 }
 
@@ -530,12 +548,16 @@ async fn create_backup(
     service.engine.take();
     let result = backup::create(&service.database, &service.archive);
     let reopen = Engine::open_redb(&service.database);
-    if let Ok(engine) = reopen {
-        service.engine = Some(engine);
-    }
-    Json(match result {
-        Ok(result) => admin_ok(request.request_id, result),
-        Err(error) => admin_error(request.request_id, error),
+    Json(match (result, reopen) {
+        (_, Err(error)) => admin_error(request.request_id, error),
+        (Ok(result), Ok(engine)) => {
+            service.engine = Some(engine);
+            admin_ok(request.request_id, result)
+        }
+        (Err(error), Ok(engine)) => {
+            service.engine = Some(engine);
+            admin_error(request.request_id, error)
+        }
     })
 }
 
@@ -606,6 +628,20 @@ fn admin_error(request_id: String, error: Error) -> AdminResponse {
         ok: false,
         result: None,
         error: Some(error),
+    }
+}
+
+fn engine_unavailable() -> Error {
+    Error::new(
+        "E_STORAGE",
+        "source database is unavailable; retry the restart operation",
+    )
+}
+
+fn unavailable_schema() -> SchemaInfo {
+    SchemaInfo {
+        revision: 0,
+        hash: String::new(),
     }
 }
 

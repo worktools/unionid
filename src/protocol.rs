@@ -45,7 +45,7 @@ impl Request {
     /// The source language still declares where the value is used (`$name`).
     /// The prepared binder supplies nominal type identity and validates the
     /// complete value before any row is scanned or mutation is committed.
-    pub fn with_serde_param<T: Serialize>(
+    pub fn with_serde_param<T: Serialize + ?Sized>(
         mut self,
         name: impl Into<String>,
         value: &T,
