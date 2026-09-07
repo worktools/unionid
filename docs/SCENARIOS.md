@@ -203,7 +203,7 @@ table documents Document
 | 按 sum/option constructor 筛选 | 已实现 unit、record、位置负载、record/tuple/sum/option 嵌套 pattern，以及同 constructor 多分支的完整覆盖分析 | — | #35，P0 |
 | 派生普通值或从 ADT 分支归一结果 | 已实现 scalar/bool 普通 derive、递归 pattern，以及从 binding/typed arithmetic 构造 option/sum/record/tuple/list | — | #59，已满足 |
 | 复用重复业务表达式 | 已实现查询局部常量、单/多参数非递归纯函数、有限推断、词法遮蔽和展开预算 | 泛型、高阶与递归函数延后 | #61，P0 |
-| 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none | 通用高阶函数延后 | 已满足 v0.1 |
+| 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none；filter、普通／match derive、typed set 和 migration conversion 共享这些 bool 结果 | 通用高阶函数延后 | #36/#100，已满足核心 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take、类型化索引访问计划与 explain 已实现 | cursor 分页延后 | #34/#16，已满足 v0.1 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | option helper/元素谓词可继续扩展 | #10/#22/#36/#91 |
 | 批量写入 typed row list | `insert many` 与 `upsert many` 已实现默认值、嵌套 ADT、输入内主键去重、整批主键／unique index 验证、稳定 RowId/returning/action 顺序和 memory/redb/TCP 原子提交 | 流式导入单独设计 | #89/#97，P1 核心 |

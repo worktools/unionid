@@ -2,7 +2,7 @@
 
 本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)。
 
-当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort、take，以及结构化 `explain`。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort、take，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`not/and/or`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
 ## 类型、表与值
 
@@ -121,7 +121,7 @@ take 20
 
 支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减，复杂算术可在括号内换行。运算数必须归一为同一个 int 或 float 类型；整数除法向零截断，溢出、除零或非有限 float 返回 `E_ARITH`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 提供有类型、可嵌套且有预算的元素字段谓词，`is_some`/`is_none` 显式检查 Option。函数使用空格传参。复杂条件可放在 `filter` 或 match 分支 `=>` 后的缩进块中，括号内部也可跨行；混用 `and` 与 `or` 时规范写法加括号明确分组。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；跨请求分页应以唯一主键结束排序。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。
 
-模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。match condition 与普通 filter 共用布尔、集合和数值表达式。`derive name = expression` 直接追加 scalar 或 bool 列；结果保留命名类型，typed 参数在扫描前推导，后续 filter/derive/select/sort 可立即引用。`derive match` 分支还可返回 binding/literal/算术表达式，或用 binding 和算术结果构造 `Some (attempt + 1)`、`State.Done`、`Summary {label = message}`、tuple、record 和 list。
+模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。match condition 与普通 filter 共用布尔、集合和数值表达式。`derive name = expression` 直接追加 scalar 或 bool 列；结果保留命名类型，typed 参数在扫描前推导，后续 filter/derive/select/sort 可立即引用。`derive match` 分支可返回 binding/literal/算术或完整 bool 表达式，也可用 binding 和算术结果构造 `Some (attempt + 1)`、`State.Done`、`Summary {label = message}`、tuple、record 和 list。复杂分支结果可在 `=>` 后换行缩进。
 
 查询局部定义使用 `let name = expression` 或 `let name = argument -> expression`。多个参数写成 `(left, right) ->`；通常从调用字段推断类型，歧义时使用 `let missing option int = None`、`let present = (value option int) -> is_some value` 这样的字段式注解。调用使用空格，嵌套调用加括号。定义只作用于当前 pipeline 的后续 stage，只能调用更早定义的函数，不支持递归、泛型或函数值；详见[查询局部 let 与纯函数](QUERY.md#查询局部-let-与纯函数)。
 
@@ -177,7 +177,7 @@ delete tasks | filter id == 2 | returning
 - `update table` 与 `delete table` 不带 filter 时作用于整张表；这是显式有效操作。
 - mutation target 接受 `filter`、`filter match`、`sort` 和 `take`，严格按书写顺序选择稳定 RowId；sort 并列时保持输入顺序，生产语句仍应以唯一键结束排序。`select`、`derive` 和 aggregate 不属于修改目标。
 - 所有 target stage 必须写在第一个 `set` 前。`take n` 与一基闭区间 `take start..end` 沿用查询语义。多个 `set` 同时求值：每个右侧读取该行修改前的值，因此 `set left = right` 和 `set right = left` 会交换两列。
-- `set` 右侧接受字段、literal、ADT constructor、`length` 和有类型算术，也可在下一层写 `match source`，使用与 `derive match` 相同的递归 pattern 和 option/sum/product/list 构造。目标字段给出分支结果类型，未知字段、非穷尽／不可达分支和错误结果即使目标表为空也报错。
+- `set` 右侧接受字段、literal、ADT constructor、`length`、有类型算术和完整 bool 表达式，也可在下一层写 `match source`，使用与 `derive match` 相同的递归 pattern、bool 结果和 option/sum/product/list 构造。目标字段给出结果类型；bool 表达式只能写入 bool 字段。未知字段、非穷尽／不可达分支和错误结果即使目标表为空也报错。
 - 顶层小写 binding 是带类型的不可反驳 pattern，必须是最后一支；`current => current` 可保留其余 constructor 的完整原值。分支可使用 typed 参数和自己的 pattern bindings。
 - 可直接设置 record 的嵌套路径，如 `set owner.email = "new@example.com"`。路径不能穿过 sum/option；修改 variant 时设置完整值。父路径与子路径不能在同一 update 中同时赋值，避免依赖隐含顺序。
 - 每条候选 row 更新完成后重新检查完整 row 类型；全表重新检查主键与 unique indexes，再原子替换 rows 与派生 indexes。任一行除零、溢出、类型或约束失败时，该请求不修改任何行。

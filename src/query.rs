@@ -195,7 +195,7 @@ pub struct Returning {
 
 #[derive(Debug, Clone)]
 pub enum SetValue {
-    Expression(ScalarExpression),
+    Expression(BoolExpression),
     Match(DeriveMatch),
 }
 
@@ -357,7 +357,7 @@ pub struct MatchValueArm {
 pub enum MatchValue {
     Binding(String),
     Literal(Value),
-    Expression(ScalarExpression),
+    Expression(BoolExpression),
     Constructor {
         name: String,
         payload: MatchValuePayload,

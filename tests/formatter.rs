@@ -90,6 +90,17 @@ fn formatter_uses_low_punctuation_returning_layout() {
 }
 
 #[test]
+fn formatter_preserves_boolean_match_results_and_update_precedence() {
+    let source = "from jobs | derive retryable = match state\n  Pending {retry_at} => is_some retry_at and true\n  Running {attempt} => attempt < $limit or false\nupdate jobs | set ready = id > 0 and (not ready or contains tags \"active\")";
+    let formatted = format_source(source).unwrap();
+    assert_eq!(
+        formatted,
+        "from jobs\nderive retryable = match state\n  Pending {retry_at} => is_some retry_at and true\n  Running {attempt} => attempt < $limit or false\n\nupdate jobs\nset ready = id > 0 and (not ready or contains tags \"active\")\n"
+    );
+    assert_eq!(format_source(&formatted).unwrap(), formatted);
+}
+
+#[test]
 fn formatting_preserves_execution_and_schema_identity() {
     let source = r#"type State = Pending | Done text
 type Task = {id int, state State, score int}

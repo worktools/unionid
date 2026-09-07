@@ -645,10 +645,10 @@ impl LocalScope {
     ) -> Result<()> {
         match value {
             MatchValue::Expression(expression) => {
-                *expression = self.expand_scalar_in(
+                self.expand_bool_in(
                     catalog,
                     schema,
-                    expression.clone(),
+                    expression,
                     visible,
                     substitutions,
                     shadowed,
