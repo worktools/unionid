@@ -6,6 +6,10 @@ use serde::Serialize;
 
 use crate::db::{Database, QueryResponse};
 use crate::error::{Error, Result};
+use crate::idempotency::{
+    IdempotencyDurability, IdempotencyReceipt, IdempotentExecution, ReceiptMap, validate_digest,
+    validate_key, validate_new_receipt,
+};
 use crate::introspection::{Introspection, StorageMode};
 use crate::migration::{
     MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
@@ -22,6 +26,7 @@ use crate::wal::Wal;
 #[derive(Default)]
 pub struct Engine {
     db: Database,
+    receipts: ReceiptMap,
     wal: Option<Wal>,
     snapshot: Option<SnapshotStore>,
     snapshot_every: usize,
@@ -76,8 +81,9 @@ trait DurableBackend: Send {
         &mut self,
         previous: &Database,
         database: &Database,
+        receipts: &ReceiptMap,
     ) -> std::result::Result<(), CommitFailure>;
-    fn check_integrity(&mut self) -> Result<(bool, Database)>;
+    fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)>;
 }
 
 impl DurableBackend for RedbStore {
@@ -85,13 +91,20 @@ impl DurableBackend for RedbStore {
         &mut self,
         previous: &Database,
         database: &Database,
+        receipts: &ReceiptMap,
     ) -> std::result::Result<(), CommitFailure> {
-        RedbStore::commit(self, previous, database)
+        RedbStore::commit(self, previous, database, receipts)
     }
 
-    fn check_integrity(&mut self) -> Result<(bool, Database)> {
+    fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
         RedbStore::check_integrity(self)
     }
+}
+
+#[derive(Clone, Copy)]
+struct PendingIdempotency<'a> {
+    key: &'a str,
+    digest: &'a str,
 }
 
 impl Engine {
@@ -173,6 +186,7 @@ impl Engine {
         };
         Ok(Self {
             db,
+            receipts: ReceiptMap::new(),
             wal,
             snapshot,
             snapshot_every,
@@ -188,9 +202,10 @@ impl Engine {
     /// Open the durable redb backend. Every mutating source request is
     /// committed as one synchronous, two-phase redb transaction.
     pub fn open_redb(path: impl Into<PathBuf>) -> Result<Self> {
-        let (redb, db) = RedbStore::open(path)?;
+        let (redb, db, receipts) = RedbStore::open(path)?;
         Ok(Self {
             db,
+            receipts,
             durable: Some(Box::new(redb)),
             storage_mode: StorageMode::Redb,
             ..Self::default()
@@ -266,6 +281,106 @@ impl Engine {
             expected_schema,
             Some(deadline),
         )
+    }
+
+    /// Execute one mutation with an already-computed canonical request digest.
+    /// Protocol adapters are responsible for constructing that digest from the
+    /// exact source, wire parameters, and schema precondition.
+    pub fn execute_idempotent_with_params(
+        &mut self,
+        key: &str,
+        digest: &str,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+    ) -> Result<IdempotentExecution> {
+        self.execute_idempotent_with_deadline(
+            key,
+            digest,
+            source,
+            parameters,
+            expected_schema,
+            None,
+        )
+    }
+
+    pub fn execute_idempotent_with_params_until(
+        &mut self,
+        key: &str,
+        digest: &str,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        deadline: std::time::Instant,
+    ) -> Result<IdempotentExecution> {
+        self.execute_idempotent_with_deadline(
+            key,
+            digest,
+            source,
+            parameters,
+            expected_schema,
+            Some(deadline),
+        )
+    }
+
+    fn execute_idempotent_with_deadline(
+        &mut self,
+        key: &str,
+        digest: &str,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<IdempotentExecution> {
+        validate_key(key)?;
+        validate_digest(digest)?;
+        let durability = if self.durable.is_some() {
+            IdempotencyDurability::Durable
+        } else {
+            IdempotencyDurability::ProcessLocal
+        };
+        if let Some(receipt) = self.receipts.get(key) {
+            if receipt.digest != digest {
+                return Err(Error::new(
+                    "E_IDEMPOTENCY_CONFLICT",
+                    format!(
+                        "idempotency key has digest {}; new request has digest {digest}",
+                        receipt.digest
+                    ),
+                ));
+            }
+            return Ok(IdempotentExecution {
+                response: receipt.response.clone(),
+                replayed: true,
+                digest: receipt.digest.clone(),
+                committed_sequence: receipt.committed_sequence,
+                durability,
+            });
+        }
+        if self.wal.is_some() {
+            return Err(Error::new(
+                "E_CONFIG",
+                "idempotent writes require redb or memory mode; the transitional WAL cannot store receipts",
+            ));
+        }
+        let response = self.try_execute_with_params_and_idempotency(
+            source,
+            parameters,
+            expected_schema,
+            deadline,
+            Some(PendingIdempotency { key, digest }),
+        )?;
+        let receipt = self
+            .receipts
+            .get(key)
+            .expect("successful idempotent execution publishes its receipt");
+        Ok(IdempotentExecution {
+            response,
+            replayed: false,
+            digest: receipt.digest.clone(),
+            committed_sequence: receipt.committed_sequence,
+            durability,
+        })
     }
 
     fn execute_with_params_at_schema_and_deadline(
@@ -416,7 +531,7 @@ impl Engine {
         }
         let mut statements = prepared.statements.clone();
         let result = crate::params::bind(&mut statements, &parameters)
-            .and_then(|()| self.try_execute_statements(statements, None, deadline));
+            .and_then(|()| self.try_execute_statements(statements, None, deadline, None));
         match result {
             Ok(response) => response,
             Err(error) => self.with_schema(QueryResponse::failure(error)),
@@ -447,6 +562,23 @@ impl Engine {
         expected_schema: Option<&crate::db::SchemaInfo>,
         deadline: Option<std::time::Instant>,
     ) -> Result<QueryResponse> {
+        self.try_execute_with_params_and_idempotency(
+            source,
+            parameters,
+            expected_schema,
+            deadline,
+            None,
+        )
+    }
+
+    fn try_execute_with_params_and_idempotency(
+        &mut self,
+        source: &str,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        deadline: Option<std::time::Instant>,
+        idempotency: Option<PendingIdempotency<'_>>,
+    ) -> Result<QueryResponse> {
         if let Some(expected) = expected_schema
             && expected != &self.db.schema_info()
         {
@@ -467,13 +599,19 @@ impl Engine {
         let mutating = statements
             .iter()
             .any(|statement| statement.statement.is_mutating());
+        if idempotency.is_some() && !mutating {
+            return Err(Error::new(
+                "E_IDEMPOTENCY_NOT_MUTATION",
+                "idempotency keys are only valid for scripts containing a mutation",
+            ));
+        }
         if contains_parameters && mutating && self.wal.is_some() {
             return Err(Error::new(
                 "E_CONFIG",
                 "parameterized writes require redb or memory mode; the transitional WAL stores source text",
             ));
         }
-        self.try_execute_statements(statements, Some(source), deadline)
+        self.try_execute_statements(statements, Some(source), deadline, idempotency)
     }
 
     fn try_execute_statements(
@@ -481,6 +619,7 @@ impl Engine {
         statements: Vec<LocatedStatement>,
         wal_source: Option<&str>,
         deadline: Option<std::time::Instant>,
+        idempotency: Option<PendingIdempotency<'_>>,
     ) -> Result<QueryResponse> {
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
         let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
@@ -525,7 +664,22 @@ impl Engine {
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
-            self.commit_candidate(candidate, wal_source, &mut response)?;
+            let receipt_state = if let Some(idempotency) = idempotency {
+                response.schema = Some(candidate.schema_info());
+                let receipt = IdempotencyReceipt {
+                    digest: idempotency.digest.to_owned(),
+                    committed_sequence: candidate.sequence,
+                    completed_at_unix_ms: unix_time_ms()?,
+                    response: response.clone(),
+                };
+                validate_new_receipt(&self.receipts, &receipt)?;
+                let mut receipts = self.receipts.clone();
+                receipts.insert(idempotency.key.to_owned(), receipt);
+                Some(receipts)
+            } else {
+                None
+            };
+            self.commit_candidate(candidate, wal_source, &mut response, receipt_state)?;
         }
         Ok(self.with_schema(response))
     }
@@ -668,7 +822,7 @@ impl Engine {
             applied_at_unix_ms,
         })?;
         let mut response = QueryResponse::ok_message(format!("migration '{}' applied", file.id));
-        self.commit_candidate(candidate, None, &mut response)
+        self.commit_candidate(candidate, None, &mut response, None)
     }
 
     fn commit_candidate(
@@ -676,9 +830,11 @@ impl Engine {
         candidate: Database,
         wal_source: Option<&str>,
         response: &mut QueryResponse,
+        receipt_state: Option<ReceiptMap>,
     ) -> Result<()> {
         if let Some(durable) = &mut self.durable {
-            match durable.commit(&self.db, &candidate) {
+            let receipts = receipt_state.as_ref().unwrap_or(&self.receipts);
+            match durable.commit(&self.db, &candidate, receipts) {
                 Ok(()) => {}
                 Err(CommitFailure::Definite(error)) => {
                     return Err(Error::new(
@@ -719,6 +875,9 @@ impl Engine {
             }
         }
         self.db = candidate;
+        if let Some(receipts) = receipt_state {
+            self.receipts = receipts;
+        }
         self.writes_since_snapshot += 1;
         if self.snapshot_every > 0
             && self.writes_since_snapshot >= self.snapshot_every
@@ -761,8 +920,9 @@ impl Engine {
                 "integrity check requires a database opened with Engine::open_redb",
             )
         })?;
-        let (backend_clean, database) = durable.check_integrity()?;
+        let (backend_clean, database, receipts) = durable.check_integrity()?;
         self.db = database;
+        self.receipts = receipts;
         Ok(StorageIntegrity {
             backend: "redb",
             backend_clean,
@@ -807,7 +967,15 @@ impl Engine {
         self.db.clone()
     }
 
-    pub(crate) fn restore_redb(path: PathBuf, database: Database) -> Result<Self> {
+    pub(crate) fn logical_snapshot(&self) -> (Database, ReceiptMap) {
+        (self.db.clone(), self.receipts.clone())
+    }
+
+    pub(crate) fn restore_redb(
+        path: PathBuf,
+        database: Database,
+        receipts: ReceiptMap,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .map_err(|error| Error::new("E_IO", error.to_string()))?;
@@ -831,7 +999,7 @@ impl Engine {
         let result = (|| {
             let mut engine = Self::open_redb(path.clone())?;
             let mut response = QueryResponse::ok_message("backup restored");
-            engine.commit_candidate(database, None, &mut response)?;
+            engine.commit_candidate(database, None, &mut response, Some(receipts))?;
             Ok(engine)
         })();
         if result.is_err() {
@@ -868,6 +1036,15 @@ fn ensure_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn unix_time_ms() -> Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| Error::new("E_TIME", error.to_string()))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| Error::new("E_LIMIT", "timestamp exceeds u64"))
 }
 
 fn migration_file_error(file: &MigrationFile, error: Error) -> Error {
@@ -914,7 +1091,12 @@ mod tests {
     }
 
     impl DurableBackend for FailOnce {
-        fn commit(&mut self, _: &Database, _: &Database) -> std::result::Result<(), CommitFailure> {
+        fn commit(
+            &mut self,
+            _: &Database,
+            _: &Database,
+            _: &ReceiptMap,
+        ) -> std::result::Result<(), CommitFailure> {
             match self.uncertain.take() {
                 Some(false) => Err(CommitFailure::Definite(Error::new(
                     "E_STORAGE",
@@ -928,7 +1110,7 @@ mod tests {
             }
         }
 
-        fn check_integrity(&mut self) -> Result<(bool, Database)> {
+        fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
             unreachable!()
         }
     }
@@ -940,6 +1122,161 @@ mod tests {
             })),
             ..Engine::default()
         }
+    }
+
+    const DIGEST_A: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn memory_idempotency_replays_original_response_and_rejects_conflicts() {
+        let mut engine = Engine::memory();
+        assert!(engine.execute("create table entries (id int)").ok);
+        let first = engine
+            .execute_idempotent_with_params(
+                "entry-1",
+                DIGEST_A,
+                "insert entries {id = 1}\nreturning id",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.durability, IdempotencyDurability::ProcessLocal);
+        assert_eq!(first.response.rows.len(), 1);
+
+        let replay = engine
+            .execute_idempotent_with_params(
+                "entry-1",
+                DIGEST_A,
+                "this source is deliberately not parsed during replay",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.committed_sequence, first.committed_sequence);
+        assert_eq!(replay.response.schema, first.response.schema);
+        assert_eq!(engine.execute("from entries").rows.len(), 1);
+
+        let conflict = engine
+            .execute_idempotent_with_params(
+                "entry-1",
+                DIGEST_B,
+                "insert entries {id = 2}",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, "E_IDEMPOTENCY_CONFLICT");
+        assert_eq!(engine.execute("from entries").rows.len(), 1);
+    }
+
+    #[test]
+    fn failed_and_read_only_idempotent_requests_do_not_consume_keys() {
+        let mut engine = Engine::memory();
+        assert!(engine.execute("create table entries (id int)").ok);
+        let failed = engine
+            .execute_idempotent_with_params(
+                "retryable",
+                DIGEST_A,
+                "insert missing {id = 1}",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(failed.code, "E_TABLE");
+        let retried = engine
+            .execute_idempotent_with_params(
+                "retryable",
+                DIGEST_B,
+                "insert entries {id = 1}",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!retried.replayed);
+
+        let read = engine
+            .execute_idempotent_with_params("read", DIGEST_A, "from entries", BTreeMap::new(), None)
+            .unwrap_err();
+        assert_eq!(read.code, "E_IDEMPOTENCY_NOT_MUTATION");
+
+        let mut read_only = engine.with_read_only(true);
+        let rejected = read_only
+            .execute_idempotent_with_params(
+                "read-only",
+                DIGEST_A,
+                "insert entries {id = 2}",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(rejected.code, "E_READ_ONLY");
+
+        let mut engine = read_only.with_read_only(false);
+        let timed_out = engine
+            .execute_idempotent_with_params_until(
+                "timed-out",
+                DIGEST_A,
+                "insert entries {id = 2}",
+                BTreeMap::new(),
+                None,
+                std::time::Instant::now(),
+            )
+            .unwrap_err();
+        assert_eq!(timed_out.code, "E_TIMEOUT");
+        let retry = engine
+            .execute_idempotent_with_params(
+                "timed-out",
+                DIGEST_B,
+                "insert entries {id = 2}",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!retry.replayed);
+    }
+
+    #[test]
+    fn storage_failures_do_not_publish_receipts_before_commit_success() {
+        let mut definite = engine_with_failure(false);
+        let failed = definite
+            .execute_idempotent_with_params(
+                "retry",
+                DIGEST_A,
+                "create table entries (id int)",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(failed.code, "E_STORAGE");
+        assert!(definite.receipts.is_empty());
+        let retry = definite
+            .execute_idempotent_with_params(
+                "retry",
+                DIGEST_B,
+                "create table entries (id int)",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!retry.replayed);
+
+        let mut uncertain = engine_with_failure(true);
+        let failed = uncertain
+            .execute_idempotent_with_params(
+                "uncertain",
+                DIGEST_A,
+                "create table entries (id int)",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(failed.code, "E_STORAGE");
+        assert!(uncertain.receipts.is_empty());
+        assert!(uncertain.write_failed);
     }
 
     #[test]

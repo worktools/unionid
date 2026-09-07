@@ -135,12 +135,13 @@ fn print_lifecycle(info: &crate::BackupInfo, message: &str, json: bool) -> Resul
         );
     } else {
         println!(
-            "{message}\nformat {}\nchecksum {}\nschema revision {}\nschema hash {}\n{} migration(s)",
+            "{message}\nformat {}\nchecksum {}\nschema revision {}\nschema hash {}\n{} migration(s)\n{} idempotency receipt(s)",
             info.format_version,
             info.checksum,
             info.schema.revision,
             info.schema.hash,
-            info.migration_count
+            info.migration_count,
+            info.receipt_count
         );
     }
     Ok(())

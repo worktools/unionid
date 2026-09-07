@@ -1,7 +1,8 @@
 mod common;
 use common::TempDir;
 use redb::{
-    Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
+    Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata,
+    TableDefinition,
 };
 use std::process::Command;
 use unionid::{Engine, MigrationFile, QueryAccessKind, UpsertAction, Value};
@@ -11,6 +12,8 @@ const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalo
 const REDB_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
 const REDB_SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("secondary_index");
 const REDB_MIGRATION_LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("migration_ledger");
+const REDB_IDEMPOTENCY_RECEIPTS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("idempotency_receipts");
 const CRASH_PATH_ENV: &str = "UNIONID_TEST_REDB_CRASH_PATH";
 const CRASH_MODE_ENV: &str = "UNIONID_TEST_REDB_CRASH_MODE";
 const DISK_LIMIT_PATH_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_PATH";
@@ -18,6 +21,157 @@ const DISK_LIMIT_RESULT_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_RESULT";
 const CRASH_BEFORE_COMMIT: i32 = 91;
 const CRASH_AFTER_COMMIT: i32 = 92;
 const DISK_LIMIT_FAILURE: i32 = 93;
+const TEST_IDEMPOTENCY_DIGEST: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const TEST_IDEMPOTENCY_DIGEST_B: &str =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[test]
+fn idempotent_effect_and_receipt_commit_together_and_survive_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("idempotency.redb");
+    let original_schema;
+    let committed_sequence;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(
+            engine
+                .execute("type Entry =\n  id int\n  label text\ntable entries Entry\n  key id")
+                .ok
+        );
+        let first = engine
+            .execute_idempotent_with_params(
+                "create-entry-1",
+                TEST_IDEMPOTENCY_DIGEST,
+                "insert entries {id = 1, label = \"first\"}\nreturning id, label",
+                std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!first.replayed);
+        assert_eq!(first.durability, unionid::IdempotencyDurability::Durable);
+        committed_sequence = first.committed_sequence;
+        original_schema = first.response.schema.unwrap();
+    }
+
+    {
+        let database = RedbDatabase::open(&path).unwrap();
+        let transaction = database.begin_read().unwrap();
+        let meta = transaction.open_table(REDB_META).unwrap();
+        assert_eq!(
+            meta.get("storage_format_version").unwrap().unwrap().value(),
+            2_u32.to_be_bytes()
+        );
+        let receipts = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
+        assert_eq!(receipts.len().unwrap(), 1);
+    }
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert!(reopened.execute("create table later (id int)").ok);
+    let replay = reopened
+        .execute_idempotent_with_params(
+            "create-entry-1",
+            TEST_IDEMPOTENCY_DIGEST,
+            "invalid source is ignored for a matching durable receipt",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.committed_sequence, committed_sequence);
+    assert_eq!(replay.response.schema.unwrap(), original_schema);
+    let conflict = reopened
+        .execute_idempotent_with_params(
+            "create-entry-1",
+            TEST_IDEMPOTENCY_DIGEST_B,
+            "insert entries {id = 2, label = \"conflict\"}",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(conflict.code, "E_IDEMPOTENCY_CONFLICT");
+    let failed = reopened
+        .execute_idempotent_with_params(
+            "retry-after-constraint",
+            TEST_IDEMPOTENCY_DIGEST,
+            "insert entries {id = 1, label = \"duplicate\"}",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(failed.code, "E_CONSTRAINT");
+    let retry = reopened
+        .execute_idempotent_with_params(
+            "retry-after-constraint",
+            TEST_IDEMPOTENCY_DIGEST_B,
+            "insert entries {id = 2, label = \"second\"}",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(!retry.replayed);
+    assert_eq!(reopened.execute("from entries").rows.len(), 2);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn corrupt_idempotency_receipt_codec_fails_closed_on_open() {
+    let dir = TempDir::new();
+    let path = dir.0.join("corrupt-receipt.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let result = engine
+            .execute_idempotent_with_params(
+                "create-table",
+                TEST_IDEMPOTENCY_DIGEST,
+                "create table entries (id int)",
+                std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!result.replayed);
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        let (key, mut value) = {
+            let table = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
+            let (key, value) = table.iter().unwrap().next().unwrap().unwrap();
+            (key.value().to_vec(), value.value().to_vec())
+        };
+        value[0] ^= 0xff;
+        let mut table = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
+        table.insert(key.as_slice(), value.as_slice()).unwrap();
+        drop(table);
+        transaction.commit().unwrap();
+    }
+    drop(database);
+    let error = Engine::open_redb(path).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("receipt codec magic"));
+}
+
+#[test]
+fn storage_format_one_without_a_receipt_table_remains_readable() {
+    let dir = TempDir::new();
+    let path = dir.0.join("legacy-no-receipts.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(engine.execute("create table entries (id int)").ok);
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let transaction = database.begin_write().unwrap();
+        assert!(transaction.delete_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap());
+        transaction.commit().unwrap();
+    }
+    drop(database);
+
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(engine.execute("insert entries {id = 1}").ok);
+    assert_eq!(engine.execute("from entries").rows.len(), 1);
+}
 
 #[test]
 fn typed_unique_indexes_survive_redb_reopen_and_integrity_checks() {
@@ -331,8 +485,16 @@ fn redb_crash_transaction_child() {
     }
     if mode == "after" {
         let mut engine = Engine::open_redb(path).unwrap();
-        let response = engine.execute("insert entries {id = 2, value = \"committed\"}");
-        assert!(response.ok, "{}", response.message);
+        let result = engine
+            .execute_idempotent_with_params(
+                "crash-after-commit",
+                TEST_IDEMPOTENCY_DIGEST,
+                "insert entries {id = 2, value = \"committed\"}",
+                std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!result.replayed);
         std::process::exit(CRASH_AFTER_COMMIT);
     }
     panic!("unknown crash mode '{mode}'");
@@ -464,6 +626,16 @@ fn redb_recovers_complete_state_across_process_exit_boundaries() {
     }
     run_crash_child(&path, "after", CRASH_AFTER_COMMIT);
     let mut reopened = Engine::open_redb(path).unwrap();
+    let replay = reopened
+        .execute_idempotent_with_params(
+            "crash-after-commit",
+            TEST_IDEMPOTENCY_DIGEST,
+            "this must replay without parsing after the child exits",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(replay.replayed);
     let rows = reopened.execute("from entries | sort id");
     assert!(rows.ok, "{}", rows.message);
     assert_eq!(rows.rows.len(), 2);

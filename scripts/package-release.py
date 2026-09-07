@@ -83,12 +83,15 @@ def main():
         "target": target,
         "rust_toolchain": command("rustc", "--version"),
         "redb": redb,
-        "storage_format": 1,
-        "catalog_codec": 1,
+        "storage_format": 2,
+        "storage_formats_readable": [1, 2],
+        "catalog_codec": 2,
         "value_codec": 1,
         "index_key_codec": 1,
         "migration_codec": 1,
-        "backup_format": 1,
+        "receipt_codec": 1,
+        "backup_format": 2,
+        "backup_formats_readable": [1, 2],
         "protocol": 1,
     }
     files[f"{package}/RELEASE.json"] = (

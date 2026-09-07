@@ -9,11 +9,11 @@ unionid 0.1.0 把应用 schema migration 与数据库内部格式升级视为两
 | 层 | v0.1 值 |
 | --- | --- |
 | unionid / redb | 0.1.0 / 4.1.0 |
-| storage / catalog / ADT value | 1 / 1 / 1 |
-| index key / migration ledger | 1 / 1 |
-| logical backup / JSON Lines protocol | 1 / 1 |
+| storage / catalog / ADT value | 1 或 2 / 2 / 1 |
+| index key / migration ledger / receipt | 1 / 1 / 1 |
+| logical backup / JSON Lines protocol | 1 或 2 / 1 |
 
-当前二进制只打开已知的 version 1 持久结构。未知 storage、catalog、value、index 或 migration codec 会在修改文件前失败；不会猜测或静默重写。命名类型、字段、变体、表和索引用稳定 ID 编码，应用侧重命名必须通过 migration，不能直接编辑数据库文件。
+当前二进制打开 storage format 1（无 receipt）和 format 2（含 durable idempotency receipt）。第一次成功提交持久幂等写入时会在同一事务选择 format 2；此后不能降级到只认识 format 1 的旧二进制。逻辑备份相应使用无 receipt 的 format 1 或含 receipt 的 format 2。未知 storage、catalog、value、index、migration 或 receipt codec 会在修改文件前失败；不会猜测或静默重写。命名类型、字段、变体、表和索引用稳定 ID 编码，应用侧重命名必须通过 migration，不能直接编辑数据库文件。
 
 ## 升级应用 schema
 
