@@ -26,6 +26,18 @@ cargo test --locked --test release_scenarios
 
 它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。1 万／10 万行的 query、write 与 migration p50/p95 由 #75 的[工作负载成本记录](benchmarks/workload-2026-09-07.md)单独测量；安装产物和五分钟教程由 #76 验收。
 
+## crates.io 与 GitHub Release 发布
+
+正式版本只由 `.github/workflows/release.yml` 发布，不在开发者工作站运行 `cargo publish`。workflow 的手动非 tag 运行会在双平台原生包验证之外执行：
+
+```bash
+cargo publish --dry-run --locked --registry crates-io
+```
+
+所有 Release workflow 运行还会只检查仓库 Actions secret `CARGO_REGISTRY_TOKEN` 是否可见且非空，不打印或使用其内容。随后，`v*` tag 运行在 Ubuntu runner 执行 `cargo publish --locked --registry crates-io`；crate 发布成功后，才汇总 macOS/Linux artifacts 并创建 GitHub Release。tag 版本仍由原生包脚本校验为与 `Cargo.toml` 一致。缺少 token、crate dry-run 或实际发布失败都会阻止 GitHub Release job。
+
+参考的 `command-pool` 流程使用 `katyo/publish-crates@v2`。该 action 当前声明 Node 20 runtime，因此 unionid 保留相同的 GitHub Actions + registry token 模型，但在固定 Rust 1.94.0 runner 中直接调用 Cargo，避免重新引入已在 #105 消除的 Node runtime 警告。
+
 ## English Description
 
 `tests/release_scenarios.rs` launches real `unionid` child processes from fresh temporary directories for three representative application-state journeys: a conditional task claim and upsert, a deep named-ADT configuration migration, and a session key lifecycle with upsert and delete. Every journey applies an initial migration, performs typed writes and queries, reopens after process exit, applies a second migration, checks integrity, creates a logical backup, and restores it to a new database.
@@ -33,3 +45,7 @@ cargo test --locked --test release_scenarios
 The source and restored databases are compared for canonical schema, revision/hash, immutable migration ledger, typed query results, and structured explain access paths. The nested configuration case also prevents migration bindings from erasing the identity of a named record contained inside an outer sum payload.
 
 Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. #75 records workload latency in the [workload cost report](benchmarks/workload-2026-09-07.md), and #76 owns installable release artifacts and the five-minute tutorial.
+
+Official versions are published only by `.github/workflows/release.yml`; developers do not run `cargo publish` from a workstation. A manual non-tag run executes `cargo publish --dry-run --locked --registry crates-io` alongside the native artifact checks, then safely checks only that `CARGO_REGISTRY_TOKEN` is visible and non-empty without printing or using its contents. On a `v*` tag, the Ubuntu runner publishes with that secret; only after publication succeeds does the workflow assemble the macOS/Linux assets and create the GitHub Release. Missing credentials or any crate validation/publication failure blocks the GitHub Release job.
+
+The reference `command-pool` workflow uses `katyo/publish-crates@v2`. Because that action currently declares a Node 20 runtime, unionid preserves its GitHub Actions plus registry-token model but invokes Cargo directly on the pinned Rust 1.94.0 runner, avoiding the runtime warning removed in #105.

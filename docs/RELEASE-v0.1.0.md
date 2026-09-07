@@ -12,7 +12,7 @@ v0.1.0 是第一个面向日常本地应用状态的可用版本。它提供无�
 
 ## 获取与验证
 
-GitHub Release 为 macOS 和 Linux 的 CI 原生 Rust target 生成 `unionid-v0.1.0-<target>.tar.gz`。目标三元组同时写入文件名和包内 `RELEASE.json`，因此使用者可以明确选择与机器匹配的产物。每个压缩包旁有独立 `.sha256`：
+`unionid` crate 由 tag 触发的 GitHub Actions 使用 crates.io token 发布，不从开发者工作站发布。GitHub Release 同时为 macOS 和 Linux 的 CI 原生 Rust target 生成 `unionid-v0.1.0-<target>.tar.gz`。目标三元组同时写入文件名和包内 `RELEASE.json`，因此使用者可以明确选择与机器匹配的产物。每个压缩包旁有独立 `.sha256`：
 
 ```bash
 sha256sum -c unionid-v0.1.0-<target>.tar.gz.sha256
@@ -46,6 +46,6 @@ v0.1.0 is the first daily-usable release for local application state. It combine
 
 The core includes finite self-recursive ADTs, nested defaults, typed equality and unique indexes, stable schema identities, scalar and Boolean expressions, local non-recursive functions, grouping and aggregates, typed bulk insert/upsert, bounded mutation targets, typed returning, and request-atomic redb commits. Schema-aware prepared query/DML accepts native Rust serde ADTs and returns typed rows through the same lossless version 1 wire model used by TCP and reusable HTTP adapters. Versioned migration history supports deep ADT conversion, schema diff, logical backup/restore, and explicit legacy import.
 
-The final candidate passes 237 regressions, strict Clippy, formatting and diff checks, plus the real HTTP todo journey on Rust 1.94.0. Tag workflows build locked native macOS and Linux artifacts, then verify SHA-256, version metadata, local CLI, TCP, and the packaged tutorial from an empty directory. Each archive also contains the complete documentation and examples.
+The final candidate passes 237 regressions, strict Clippy, formatting and diff checks, plus the real HTTP todo journey on Rust 1.94.0. Tag workflows validate and publish the `unionid` crate to crates.io from a GitHub runner using a repository secret; no developer workstation performs publication. They also build locked native macOS and Linux artifacts, then verify SHA-256, version metadata, local CLI, TCP, and the packaged tutorial from an empty directory. Each archive contains the complete documentation and examples.
 
 A 10k-row database is the current comfortable range; 100k rows is a tested ceiling with materially higher write, migration, and memory costs. The service is for trusted local use and has no authentication or TLS. Internal version-1 codecs fail closed on unknown versions, and future format conversion must be explicit.
