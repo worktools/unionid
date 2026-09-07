@@ -61,17 +61,21 @@ fn adt_match_updates_persist_rows_and_secondary_indexes() {
 
 type Job =
   id int
+  priority int
   state State
 
 table jobs Job
   key id
 
 create index jobs (state)
-insert jobs {id = 1, state = Queued {attempt = 0}}"#,
+insert jobs {id = 1, priority = 1, state = Queued {attempt = 0}}
+insert jobs {id = 2, priority = 2, state = Queued {attempt = 4}}"#,
         );
         assert!(setup.ok, "{}", setup.message);
         let updated = engine.execute(
             r#"update jobs
+sort {-priority, id}
+take 1
 set state =
   match state
     Queued {attempt} => Running {worker = "disk", attempt = attempt + 1}
@@ -81,17 +85,25 @@ returning id, state"#,
         assert!(updated.ok, "{}", updated.message);
         assert_eq!(updated.affected_rows, Some(1));
         assert_eq!(updated.rows.len(), 1);
+        assert!(updated.rows[0]["id"].cmp_eq(&Value::Int(2)));
         assert_eq!(
             updated.rows[0]["state"].source_text(),
-            "Running {attempt = 1, worker = \"disk\"}"
+            "Running {attempt = 5, worker = \"disk\"}"
         );
     }
 
     let mut reopened = Engine::open_redb(&path).unwrap();
-    let value = "State.Running {worker = \"disk\", attempt = 1}";
+    let value = "State.Running {worker = \"disk\", attempt = 5}";
     let rows = reopened.execute(&format!("from jobs | filter state == {value}"));
     assert!(rows.ok, "{}", rows.message);
     assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    let untouched = reopened.execute("from jobs | filter id == 1");
+    assert!(untouched.ok, "{}", untouched.message);
+    assert_eq!(
+        untouched.rows[0]["state"].source_text(),
+        "Queued {attempt = 0}"
+    );
     let plan = reopened.execute(&format!("explain from jobs | filter state == {value}"));
     assert!(plan.ok, "{}", plan.message);
     assert_eq!(

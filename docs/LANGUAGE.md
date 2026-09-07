@@ -110,13 +110,15 @@ take 20
 
 ## 更新与删除
 
-`update` 和 `delete` 从目标表开始，后续 `filter` 与查询使用相同的 bool 或穷尽 match 语义。多行更新先写完筛选，再写一个或多个 `set`：
+`update` 和 `delete` 从目标表开始，后续 `filter` 与查询使用相同的 bool 或穷尽 match 语义。多行更新先写完目标选择，再写一个或多个 `set`：
 
 ```text
 update tasks
 filter match state
   Pending => true
   _ => false
+sort {-attempts, id}
+take 1
 set attempts = attempts + 1
 set state =
   match state
@@ -128,8 +130,8 @@ delete tasks | filter id == 2 | returning
 ```
 
 - `update table` 与 `delete table` 不带 filter 时作用于整张表；这是显式有效操作。
-- 当前 mutation target 只接受 `filter` 与 `filter match`，并保持书写顺序。`select`、`derive`、`sort` 和 `take` 不属于修改目标。
-- 所有 filter 必须写在第一个 `set` 前。多个 `set` 同时求值：每个右侧读取该行修改前的值，因此 `set left = right` 和 `set right = left` 会交换两列。
+- mutation target 接受 `filter`、`filter match`、`sort` 和 `take`，严格按书写顺序选择稳定 RowId；sort 并列时保持输入顺序，生产语句仍应以唯一键结束排序。`select`、`derive` 和 aggregate 不属于修改目标。
+- 所有 target stage 必须写在第一个 `set` 前。`take n` 与一基闭区间 `take start..end` 沿用查询语义。多个 `set` 同时求值：每个右侧读取该行修改前的值，因此 `set left = right` 和 `set right = left` 会交换两列。
 - `set` 右侧接受字段、literal、ADT constructor、`length` 和有类型算术，也可在下一层写 `match source`，使用与 `derive match` 相同的递归 pattern 和 option/sum/product/list 构造。目标字段给出分支结果类型，未知字段、非穷尽／不可达分支和错误结果即使目标表为空也报错。
 - 顶层小写 binding 是带类型的不可反驳 pattern，必须是最后一支；`current => current` 可保留其余 constructor 的完整原值。分支可使用 typed 参数和自己的 pattern bindings。
 - 可直接设置 record 的嵌套路径，如 `set owner.email = "new@example.com"`。路径不能穿过 sum/option；修改 variant 时设置完整值。父路径与子路径不能在同一 update 中同时赋值，避免依赖隐含顺序。
@@ -172,7 +174,7 @@ migration task_state_v2
 
 ## 脚本边界与错误
 
-同层的 `from` / `explain` / `type` / `table` / `insert` / `upsert` / `update` / `delete` / `migration` / `create` 开始新语句；查询中的同层 `let/filter/derive/aggregate/group/select/sort/take/limit` 延续读取 pipeline，update 中的同层 `filter/set` 延续修改语句，delete 中的同层 `filter` 延续删除语句。声明体、explain 查询、insert/upsert 的多行 record、migration、嵌套 record、变体负载、filter 条件、filter/derive/set 的 match 分支和 group/aggregate block 通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
+同层的 `from` / `explain` / `type` / `table` / `insert` / `upsert` / `update` / `delete` / `migration` / `create` 开始新语句；查询中的同层 `let/filter/derive/aggregate/group/select/sort/take/limit` 延续读取 pipeline，update 中的同层 `filter/sort/take/set/returning` 延续修改语句，delete 中的同层 `filter/sort/take/returning` 延续删除语句。声明体、explain 查询、insert/upsert 的多行 record、migration、嵌套 record、变体负载、filter 条件、filter/derive/set 的 match 分支和 group/aggregate block 通过缩进确定范围；退格必须回到已有缩进层级，缩进不能使用 tab。括号内允许换行，字符串中的管道和逗号不是语法分隔符。
 
 空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。局部函数只复用当前纯 expression IR；当前不支持全局函数、递归、泛型、高阶函数或持久化闭包。`any/all` 的元素 predicate 与 let 函数都不产生可存储的函数值。
 

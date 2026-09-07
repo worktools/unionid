@@ -1096,6 +1096,10 @@ impl Parser {
             }
             if self.word("filter") && !setting {
                 stages.push(self.filter_stage()?);
+            } else if self.word("sort") && !setting {
+                stages.push(self.sort_stage()?);
+            } else if self.word("take") && !setting {
+                stages.push(self.take_stage()?);
             } else if self.word("set") {
                 setting = true;
                 self.bump();
@@ -1119,14 +1123,18 @@ impl Parser {
                 assignments.push(SetAssignment { path, value });
             } else if self.word("filter") {
                 return Err(self.error("update filters must appear before set assignments"));
+            } else if self.word("sort") || self.word("take") {
+                return Err(
+                    self.error("update sort and take stages must appear before set assignments")
+                );
             } else if self.word("returning") {
                 returning = Some(self.returning_clause()?);
                 break;
             } else {
                 if piped {
-                    return Err(
-                        self.error("expected filter, set, or returning after '|' in update")
-                    );
+                    return Err(self.error(
+                        "expected filter, sort, take, set, or returning after '|' in update",
+                    ));
                 }
                 break;
             }
@@ -1150,19 +1158,25 @@ impl Parser {
             let piped = self.eat(Kind::Pipe);
             let newline = self.eat(Kind::Newline);
             self.newlines();
-            let after_layout =
-                self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent && self.word("filter");
+            let after_layout = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent
+                && self.is_mutation_selection_stage();
             if !piped && !newline && !after_layout {
                 break;
             }
             if self.word("filter") {
                 stages.push(self.filter_stage()?);
+            } else if self.word("sort") {
+                stages.push(self.sort_stage()?);
+            } else if self.word("take") {
+                stages.push(self.take_stage()?);
             } else if self.word("returning") {
                 returning = Some(self.returning_clause()?);
                 break;
             } else {
                 if piped {
-                    return Err(self.error("expected filter or returning after '|' in delete"));
+                    return Err(
+                        self.error("expected filter, sort, take, or returning after '|' in delete")
+                    );
                 }
                 break;
             }
@@ -1191,7 +1205,11 @@ impl Parser {
     }
 
     fn is_update_stage(&self) -> bool {
-        self.word("filter") || self.word("set") || self.word("returning")
+        self.is_mutation_selection_stage() || self.word("set") || self.word("returning")
+    }
+
+    fn is_mutation_selection_stage(&self) -> bool {
+        self.word("filter") || self.word("sort") || self.word("take")
     }
 
     fn optional_returning(&mut self) -> Result<Option<Returning>> {
@@ -1421,69 +1439,9 @@ impl Parser {
                 }
                 Stage::Select(fields)
             } else if self.word("sort") {
-                self.bump();
-                let braced = self.eat(Kind::Open('{'));
-                self.newlines();
-                let mut keys = Vec::new();
-                let mut seen = BTreeSet::new();
-                loop {
-                    let descending = self.eat(Kind::Minus);
-                    let column = self.path()?;
-                    if !seen.insert(column.clone()) {
-                        return Err(self.error(format!("duplicate sort field '{column}'")));
-                    }
-                    keys.push(SortKey { column, descending });
-                    if !braced {
-                        break;
-                    }
-                    self.newlines();
-                    if !self.eat(Kind::Comma) {
-                        break;
-                    }
-                    self.newlines();
-                    if *self.kind() == Kind::Close('}') {
-                        break;
-                    }
-                }
-                if braced {
-                    self.expect(Kind::Close('}'))?;
-                }
-                Stage::Sort(keys)
+                self.sort_stage()?
             } else if self.word("take") || self.word("limit") {
-                self.bump();
-                let token = self.bump();
-                let Kind::Number(n) = token.kind else {
-                    return Err(syntax("expected a nonnegative row count", token.span));
-                };
-                let normalized = n.replace('_', "");
-                if let Some((start, end)) = normalized.split_once("..") {
-                    let start = start
-                        .parse::<usize>()
-                        .map_err(|_| syntax("invalid take range start", token.span))?;
-                    let end = end
-                        .parse::<usize>()
-                        .map_err(|_| syntax("invalid take range end", token.span))?;
-                    if start == 0 {
-                        return Err(syntax("take ranges start at 1", token.span));
-                    }
-                    let limit = end
-                        .checked_sub(start)
-                        .and_then(|distance| distance.checked_add(1))
-                        .ok_or_else(|| {
-                            syntax("take range end must not precede its start", token.span)
-                        })?;
-                    Stage::Take {
-                        offset: start - 1,
-                        limit,
-                    }
-                } else {
-                    Stage::Take {
-                        offset: 0,
-                        limit: normalized
-                            .parse()
-                            .map_err(|_| syntax("invalid row count", token.span))?,
-                    }
-                }
+                self.take_stage()?
             } else {
                 if piped {
                     return Err(self.error(
@@ -1511,6 +1469,72 @@ impl Parser {
         ]
         .iter()
         .any(|word| self.word(word))
+    }
+
+    fn sort_stage(&mut self) -> Result<Stage> {
+        self.expect_word("sort")?;
+        let braced = self.eat(Kind::Open('{'));
+        self.newlines();
+        let mut keys = Vec::new();
+        let mut seen = BTreeSet::new();
+        loop {
+            let descending = self.eat(Kind::Minus);
+            let column = self.path()?;
+            if !seen.insert(column.clone()) {
+                return Err(self.error(format!("duplicate sort field '{column}'")));
+            }
+            keys.push(SortKey { column, descending });
+            if !braced {
+                break;
+            }
+            self.newlines();
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+            self.newlines();
+            if *self.kind() == Kind::Close('}') {
+                break;
+            }
+        }
+        if braced {
+            self.expect(Kind::Close('}'))?;
+        }
+        Ok(Stage::Sort(keys))
+    }
+
+    fn take_stage(&mut self) -> Result<Stage> {
+        self.bump();
+        let token = self.bump();
+        let Kind::Number(n) = token.kind else {
+            return Err(syntax("expected a nonnegative row count", token.span));
+        };
+        let normalized = n.replace('_', "");
+        if let Some((start, end)) = normalized.split_once("..") {
+            let start = start
+                .parse::<usize>()
+                .map_err(|_| syntax("invalid take range start", token.span))?;
+            let end = end
+                .parse::<usize>()
+                .map_err(|_| syntax("invalid take range end", token.span))?;
+            if start == 0 {
+                return Err(syntax("take ranges start at 1", token.span));
+            }
+            let limit = end
+                .checked_sub(start)
+                .and_then(|distance| distance.checked_add(1))
+                .ok_or_else(|| syntax("take range end must not precede its start", token.span))?;
+            Ok(Stage::Take {
+                offset: start - 1,
+                limit,
+            })
+        } else {
+            Ok(Stage::Take {
+                offset: 0,
+                limit: normalized
+                    .parse()
+                    .map_err(|_| syntax("invalid row count", token.span))?,
+            })
+        }
     }
 
     fn path_list(&mut self, context: &str, item: &str) -> Result<Vec<String>> {
