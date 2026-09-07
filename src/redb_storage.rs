@@ -5,24 +5,33 @@ use std::path::PathBuf;
 
 use redb::{
     Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
+    TableHandle,
 };
 
 use crate::codec::VALUE_CODEC_VERSION;
 use crate::db::{Database, DurableCatalogEntry, DurableMeta};
 use crate::error::{Error, Result};
+use crate::idempotency::{
+    IdempotencyReceipt, MAX_IDEMPOTENCY_RECEIPT_BYTES, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap,
+    encoded_receipt, validate_receipts,
+};
 use crate::migration::MigrationEntry;
 
-const STORAGE_FORMAT_VERSION: u32 = 1;
+const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
+const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
 const MIGRATION_CODEC_VERSION: u16 = 1;
+const RECEIPT_CODEC_VERSION: u16 = 1;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
 const ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
 const SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("secondary_index");
 const MIGRATION_LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("migration_ledger");
+const IDEMPOTENCY_RECEIPTS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("idempotency_receipts");
 
 const FORMAT_KEY: &str = "storage_format_version";
 const CATALOG_CODEC_KEY: &str = "catalog_codec_version";
@@ -35,6 +44,7 @@ const SCHEMA_HASH_KEY: &str = "schema_hash";
 const CATALOG_MAGIC: &[u8; 4] = b"UIDC";
 const INDEX_MAGIC: &[u8; 4] = b"UIDI";
 const MIGRATION_MAGIC: &[u8; 4] = b"UIDM";
+const RECEIPT_MAGIC: &[u8; 4] = b"UIDR";
 
 pub(crate) struct RedbStore {
     database: RedbDatabase,
@@ -63,7 +73,7 @@ impl CommitFailure {
 }
 
 impl RedbStore {
-    pub(crate) fn open(path: impl Into<PathBuf>) -> Result<(Self, Database)> {
+    pub(crate) fn open(path: impl Into<PathBuf>) -> Result<(Self, Database, ReceiptMap)> {
         let path = resolve_path(path.into())?;
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|error| {
@@ -75,24 +85,36 @@ impl RedbStore {
         let empty = Database::default();
         let mut store = Self {
             database,
-            committed: PreparedState::new(&empty)?,
+            committed: PreparedState::new(
+                &empty,
+                &ReceiptMap::new(),
+                LEGACY_STORAGE_FORMAT_VERSION,
+            )?,
         };
         if fresh {
             store
-                .commit(&empty, &empty)
+                .commit(&empty, &empty, &ReceiptMap::new())
                 .map_err(CommitFailure::into_error)?;
         }
-        let (loaded, committed) = store.load()?;
+        let (loaded, receipts, committed) = store.load()?;
         store.committed = committed;
-        Ok((store, loaded))
+        Ok((store, loaded, receipts))
     }
 
     pub(crate) fn commit(
         &mut self,
         _previous: &Database,
         database: &Database,
+        receipts: &ReceiptMap,
     ) -> std::result::Result<(), CommitFailure> {
-        let next = PreparedState::new(database).map_err(CommitFailure::Definite)?;
+        validate_receipts(receipts, database.sequence).map_err(CommitFailure::Definite)?;
+        let format_version = if receipts.is_empty() {
+            self.committed.format_version
+        } else {
+            RECEIPT_STORAGE_FORMAT_VERSION
+        };
+        let next = PreparedState::new(database, receipts, format_version)
+            .map_err(CommitFailure::Definite)?;
         let prepared = PreparedDelta::between(&self.committed, &next);
         let mut transaction = self
             .database
@@ -106,7 +128,8 @@ impl RedbStore {
             let mut table = transaction
                 .open_table(META)
                 .map_err(|error| CommitFailure::definite("open meta table", error))?;
-            write_meta(&mut table, &prepared.meta).map_err(CommitFailure::Definite)?;
+            write_meta(&mut table, &prepared.meta, prepared.format_version)
+                .map_err(CommitFailure::Definite)?;
         }
         {
             let mut table = transaction
@@ -136,6 +159,15 @@ impl RedbStore {
             apply_ledger_delta(&mut table, &prepared.migrations)
                 .map_err(CommitFailure::Definite)?;
         }
+        {
+            let mut table = transaction
+                .open_table(IDEMPOTENCY_RECEIPTS)
+                .map_err(|error| {
+                    CommitFailure::definite("open idempotency receipt table", error)
+                })?;
+            apply_bytes_delta(&mut table, &prepared.receipts, "idempotency receipt")
+                .map_err(CommitFailure::Definite)?;
+        }
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit redb transaction", error))?;
@@ -143,22 +175,22 @@ impl RedbStore {
         Ok(())
     }
 
-    pub(crate) fn check_integrity(&mut self) -> Result<(bool, Database)> {
+    pub(crate) fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
         let backend_clean = self
             .database
             .check_integrity()
             .map_err(|error| storage_error("check redb integrity", error))?;
-        let (database, committed) = self.load()?;
+        let (database, receipts, committed) = self.load()?;
         self.committed = committed;
-        Ok((backend_clean, database))
+        Ok((backend_clean, database, receipts))
     }
 
-    fn load(&self) -> Result<(Database, PreparedState)> {
+    fn load(&self) -> Result<(Database, ReceiptMap, PreparedState)> {
         let transaction = self
             .database
             .begin_read()
             .map_err(|error| storage_error("begin redb read transaction", error))?;
-        let meta = {
+        let (meta, format_version) = {
             let table = transaction
                 .open_table(META)
                 .map_err(|error| storage_error("open meta table", error))?;
@@ -244,7 +276,64 @@ impl RedbStore {
             }
             (migrations, stored)
         };
+        let (receipts, stored_receipts) = if transaction
+            .list_tables()
+            .map_err(|error| storage_error("list redb tables", error))?
+            .any(|table| table.name() == IDEMPOTENCY_RECEIPTS.name())
+        {
+            let table = transaction
+                .open_table(IDEMPOTENCY_RECEIPTS)
+                .map_err(|error| storage_error("open idempotency receipt table", error))?;
+            let mut receipts = ReceiptMap::new();
+            let mut stored = BTreeMap::new();
+            let mut stored_bytes = 0usize;
+            for entry in table
+                .iter()
+                .map_err(|error| storage_error("iterate idempotency receipts", error))?
+            {
+                let (key, value) =
+                    entry.map_err(|error| storage_error("read idempotency receipt", error))?;
+                let key_bytes = key.value().to_vec();
+                let key = String::from_utf8(key_bytes.clone()).map_err(|error| {
+                    Error::new(
+                        "E_STORAGE",
+                        format!("idempotency key is not UTF-8: {error}"),
+                    )
+                })?;
+                let value = value.value().to_vec();
+                if value.len() > MAX_IDEMPOTENCY_RECEIPT_BYTES {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "stored idempotency receipt exceeds the supported encoded size",
+                    ));
+                }
+                stored_bytes = stored_bytes
+                    .checked_add(value.len())
+                    .ok_or_else(|| Error::new("E_STORAGE", "idempotency receipt size overflow"))?;
+                if stored_bytes > MAX_IDEMPOTENCY_TOTAL_BYTES {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "stored idempotency receipt total exceeds the supported limit",
+                    ));
+                }
+                let receipt = decode_receipt(&value)?;
+                if receipts.insert(key, receipt).is_some() {
+                    return Err(Error::new("E_STORAGE", "duplicate idempotency receipt key"));
+                }
+                stored.insert(key_bytes, value);
+            }
+            (receipts, stored)
+        } else {
+            (ReceiptMap::new(), BTreeMap::new())
+        };
         let database = Database::from_durable(meta.clone(), entries, rows, migrations)?;
+        validate_receipts(&receipts, database.sequence)?;
+        if format_version == LEGACY_STORAGE_FORMAT_VERSION && !receipts.is_empty() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "storage format 1 must not contain idempotency receipts",
+            ));
+        }
         let expected_indexes = database
             .durable_secondary_indexes()?
             .into_iter()
@@ -257,26 +346,30 @@ impl RedbStore {
             ));
         }
         let committed = PreparedState {
+            format_version,
             meta,
             catalog: stored_catalog,
             rows: stored_rows,
             secondary_indexes: stored_indexes,
             migrations: stored_migrations,
+            receipts: stored_receipts,
         };
-        Ok((database, committed))
+        Ok((database, receipts, committed))
     }
 }
 
 struct PreparedState {
+    format_version: u32,
     meta: DurableMeta,
     catalog: BTreeMap<Vec<u8>, Vec<u8>>,
     rows: BTreeMap<Vec<u8>, Vec<u8>>,
     secondary_indexes: BTreeSet<Vec<u8>>,
     migrations: BTreeMap<u64, Vec<u8>>,
+    receipts: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 impl PreparedState {
-    fn new(database: &Database) -> Result<Self> {
+    fn new(database: &Database, receipts: &ReceiptMap, format_version: u32) -> Result<Self> {
         let mut catalog = BTreeMap::new();
         for entry in database.durable_catalog_entries() {
             catalog.insert(
@@ -307,34 +400,44 @@ impl PreparedState {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let receipts = receipts
+            .iter()
+            .map(|(key, receipt)| Ok((key.as_bytes().to_vec(), encode_receipt(receipt)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(Self {
+            format_version,
             meta: database.durable_meta(),
             catalog,
             rows,
             secondary_indexes,
             migrations,
+            receipts,
         })
     }
 }
 
 struct PreparedDelta {
+    format_version: u32,
     meta: DurableMeta,
     catalog: BytesDelta,
     rows: BytesDelta,
     secondary_indexes: SetDelta,
     migrations: LedgerDelta,
+    receipts: BytesDelta,
 }
 
 impl PreparedDelta {
     #[cfg(test)]
     fn new(previous: &Database, database: &Database) -> Result<Self> {
-        let previous = PreparedState::new(previous)?;
-        let next = PreparedState::new(database)?;
+        let previous =
+            PreparedState::new(previous, &ReceiptMap::new(), LEGACY_STORAGE_FORMAT_VERSION)?;
+        let next = PreparedState::new(database, &ReceiptMap::new(), LEGACY_STORAGE_FORMAT_VERSION)?;
         Ok(Self::between(&previous, &next))
     }
 
     fn between(previous: &PreparedState, next: &PreparedState) -> Self {
         Self {
+            format_version: next.format_version,
             meta: next.meta.clone(),
             catalog: BytesDelta::between(&previous.catalog, &next.catalog),
             rows: BytesDelta::between(&previous.rows, &next.rows),
@@ -343,6 +446,7 @@ impl PreparedDelta {
                 &next.secondary_indexes,
             ),
             migrations: LedgerDelta::between(&previous.migrations, &next.migrations),
+            receipts: BytesDelta::between(&previous.receipts, &next.receipts),
         }
     }
 }
@@ -507,9 +611,13 @@ fn apply_set_delta(table: &mut redb::Table<'_, &[u8], u8>, delta: &SetDelta) -> 
     Ok(())
 }
 
-fn write_meta(table: &mut redb::Table<'_, &str, &[u8]>, meta: &DurableMeta) -> Result<()> {
+fn write_meta(
+    table: &mut redb::Table<'_, &str, &[u8]>,
+    meta: &DurableMeta,
+    format_version: u32,
+) -> Result<()> {
     for (key, value) in [
-        (FORMAT_KEY, STORAGE_FORMAT_VERSION.to_be_bytes().to_vec()),
+        (FORMAT_KEY, format_version.to_be_bytes().to_vec()),
         (
             CATALOG_CODEC_KEY,
             CATALOG_CODEC_VERSION.to_be_bytes().to_vec(),
@@ -537,12 +645,16 @@ fn write_meta(table: &mut redb::Table<'_, &str, &[u8]>, meta: &DurableMeta) -> R
     Ok(())
 }
 
-fn read_meta(table: &impl ReadableTable<&'static str, &'static [u8]>) -> Result<DurableMeta> {
-    expect_version(
-        FORMAT_KEY,
-        read_fixed::<4>(table, FORMAT_KEY)?,
-        STORAGE_FORMAT_VERSION.to_be_bytes(),
-    )?;
+fn read_meta(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+) -> Result<(DurableMeta, u32)> {
+    let format_version = u32::from_be_bytes(read_fixed::<4>(table, FORMAT_KEY)?);
+    if !matches!(
+        format_version,
+        LEGACY_STORAGE_FORMAT_VERSION | RECEIPT_STORAGE_FORMAT_VERSION
+    ) {
+        return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
+    }
     let catalog_version = u16::from_be_bytes(read_fixed::<2>(table, CATALOG_CODEC_KEY)?);
     if !matches!(
         catalog_version,
@@ -569,12 +681,40 @@ fn read_meta(table: &impl ReadableTable<&'static str, &'static [u8]>) -> Result<
     let hash = read_bytes(table, SCHEMA_HASH_KEY)?;
     let schema_hash = String::from_utf8(hash)
         .map_err(|error| Error::new("E_STORAGE", format!("schema hash is not UTF-8: {error}")))?;
-    Ok(DurableMeta {
-        sequence,
-        schema_revision,
-        next_catalog_id,
-        schema_hash,
-    })
+    Ok((
+        DurableMeta {
+            sequence,
+            schema_revision,
+            next_catalog_id,
+            schema_hash,
+        },
+        format_version,
+    ))
+}
+
+fn encode_receipt(receipt: &IdempotencyReceipt) -> Result<Vec<u8>> {
+    let mut value = Vec::from(RECEIPT_MAGIC.as_slice());
+    value.extend_from_slice(&RECEIPT_CODEC_VERSION.to_be_bytes());
+    value.extend(encoded_receipt(receipt)?);
+    Ok(value)
+}
+
+fn decode_receipt(value: &[u8]) -> Result<IdempotencyReceipt> {
+    if value.len() < 6 || &value[..4] != RECEIPT_MAGIC {
+        return Err(Error::new(
+            "E_STORAGE",
+            "invalid idempotency receipt codec magic",
+        ));
+    }
+    let version = u16::from_be_bytes(value[4..6].try_into().unwrap());
+    if version != RECEIPT_CODEC_VERSION {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported idempotency receipt codec version {version}"),
+        ));
+    }
+    serde_json::from_slice(&value[6..])
+        .map_err(|error| Error::new("E_STORAGE", format!("decode idempotency receipt: {error}")))
 }
 
 fn read_fixed<const N: usize>(

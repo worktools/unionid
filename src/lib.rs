@@ -9,6 +9,7 @@ pub mod engine;
 pub mod error;
 mod expression;
 pub mod formatter;
+pub mod idempotency;
 pub mod introspection;
 mod local;
 mod matching;
@@ -34,6 +35,7 @@ pub use db::{
 pub use engine::{Engine, PreparedQuery, StorageIntegrity};
 pub use error::{Error, Result, Span};
 pub use formatter::format_source;
+pub use idempotency::{IdempotencyDurability, IdempotencyReceipt, IdempotentExecution};
 pub use introspection::{Introspection, IntrospectionKind, StorageMode};
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};

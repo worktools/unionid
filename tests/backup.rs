@@ -6,6 +6,50 @@ use unionid::migration::load_directory;
 use unionid::{Engine, MigrationFile, Value};
 
 #[test]
+fn backup_v2_preserves_idempotency_receipts_and_replay_identity() {
+    const DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let dir = TempDir::new();
+    let source = dir.0.join("idempotency-source.redb");
+    let archive = dir.0.join("idempotency.backup.json");
+    let restored = dir.0.join("idempotency-restored.redb");
+    let committed_sequence;
+    {
+        let mut engine = Engine::open_redb(&source).unwrap();
+        assert!(engine.execute("create table entries (id int)").ok);
+        committed_sequence = engine
+            .execute_idempotent_with_params(
+                "entry-1",
+                DIGEST,
+                "insert entries {id = 1}\nreturning id",
+                std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap()
+            .committed_sequence;
+    }
+
+    let created = backup::create(&source, &archive).unwrap();
+    assert_eq!(created.format_version, 2);
+    assert_eq!(created.receipt_count, 1);
+    let recovered = backup::restore(&archive, &restored).unwrap();
+    assert_eq!(created, recovered);
+
+    let mut engine = Engine::open_redb(&restored).unwrap();
+    let replay = engine
+        .execute_idempotent_with_params(
+            "entry-1",
+            DIGEST,
+            "not parsed while replaying",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.committed_sequence, committed_sequence);
+    assert_eq!(engine.execute("from entries").rows.len(), 1);
+}
+
+#[test]
 fn backup_restore_preserves_typed_data_schema_indexes_and_history() {
     let dir = TempDir::new();
     let source = dir.0.join("source.redb");

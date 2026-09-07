@@ -1,6 +1,6 @@
 # RFC 0002：持久幂等写入回执
 
-状态：已接受设计，尚未实现。日期：2026-09-07。父任务 [#113](https://github.com/worktools/unionid/issues/113)，设计任务 [#124](https://github.com/worktools/unionid/issues/124)，实现任务 [#125](https://github.com/worktools/unionid/issues/125) 与 [#126](https://github.com/worktools/unionid/issues/126)。
+状态：已接受；Engine/redb/backup 核心由 #125 实现，version 1 协议与清理入口待 #126。日期：2026-09-07。父任务 [#113](https://github.com/worktools/unionid/issues/113)，设计任务 [#124](https://github.com/worktools/unionid/issues/124)，实现任务 [#125](https://github.com/worktools/unionid/issues/125) 与 [#126](https://github.com/worktools/unionid/issues/126)。
 
 ## 决策摘要
 
