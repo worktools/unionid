@@ -168,9 +168,13 @@ assert_eq!(response.typed_rows::<Task>().unwrap(), [row]);
 
 The wire protocol uses explicit typed values to preserve full `i64` precision, nominal type identity, and the distinction between `None` and `null`; Rust helpers normally avoid manual tag construction.
 
-可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
+Version 1 mutation 请求可通过 `with_idempotency_key` 获得跨 TCP/HTTP 重试的 exactly-once effect；服务端返回首次提交或 replay 元数据。回执不会自动过期，使用 `unionid receipts status/prune` 先预览、再显式有界清理。
 
-See runnable code in [`parameters.rs`](examples/parameters.rs). The complete HTTP/Axum todolist validates ADTs, migrations, restart, integrity checking, backup, and restore through the same version 1 data protocol; see [HTTP.md](docs/HTTP.md).
+Version-1 mutation requests can use `with_idempotency_key` for exactly-once effects across TCP/HTTP retries, with first-commit or replay metadata in the response. Receipts never expire automatically; inspect and explicitly prune a bounded preview with `unionid receipts status/prune`.
+
+可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、丢响应后的幂等重试、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
+
+See runnable code in [`parameters.rs`](examples/parameters.rs). The complete HTTP/Axum todolist validates ADTs, idempotent retry after a lost response, migrations, restart, integrity checking, backup, and restore through the same version 1 data protocol; see [HTTP.md](docs/HTTP.md).
 
 ## 当前边界 / Current boundaries
 

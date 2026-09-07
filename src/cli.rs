@@ -11,9 +11,9 @@ use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_dire
 pub use crate::repl::HistoryOptions;
 use crate::repl::{CompletionHelper, HistoryStore};
 use crate::{
-    Engine, Error, InputStatus, Introspection, IntrospectionKind, ProtocolRequest,
-    ProtocolResponse, QueryAccessKind, QueryResponse, QueryStageKind, SchemaCheck, StorageMode,
-    Value, backup, input_status,
+    Engine, Error, IdempotencyPruneOptions, InputStatus, Introspection, IntrospectionKind,
+    ProtocolRequest, ProtocolResponse, QueryAccessKind, QueryResponse, QueryStageKind, SchemaCheck,
+    StorageMode, Value, backup, input_status,
 };
 
 pub fn run_local(source: Option<String>, json: bool) -> Result<(), String> {
@@ -102,6 +102,75 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
             },
             report.schema.revision,
             report.schema.hash
+        );
+    }
+    Ok(())
+}
+
+pub fn receipt_status(path: PathBuf, json: bool) -> Result<(), String> {
+    let engine = Engine::open_redb(path).map_err(|error| error.to_string())?;
+    let status = engine
+        .idempotency_status()
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&status).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "receipts {}/{}\nencoded bytes {}/{}\ndurability {:?}",
+            status.count,
+            status.max_count,
+            status.encoded_bytes,
+            status.max_encoded_bytes,
+            status.durability
+        );
+        if let Some(oldest) = status.oldest {
+            println!(
+                "oldest {} sequence {} completed {}",
+                oldest.key, oldest.committed_sequence, oldest.completed_at_unix_ms
+            );
+        }
+        if let Some(newest) = status.newest {
+            println!(
+                "newest {} sequence {} completed {}",
+                newest.key, newest.committed_sequence, newest.completed_at_unix_ms
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn receipt_prune(
+    path: PathBuf,
+    options: IdempotencyPruneOptions,
+    confirm: bool,
+    json: bool,
+) -> Result<(), String> {
+    let mut engine = Engine::open_redb(path).map_err(|error| error.to_string())?;
+    let result = if confirm {
+        engine.prune_idempotency_receipts(options)
+    } else {
+        engine.plan_idempotency_prune(options)
+    }
+    .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&result).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{} {} receipt(s), {} encoded bytes; {} remain",
+            if result.applied {
+                "pruned"
+            } else {
+                "would prune"
+            },
+            result.selected_count,
+            result.selected_encoded_bytes,
+            result.remaining_count
         );
     }
     Ok(())

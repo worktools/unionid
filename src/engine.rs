@@ -7,8 +7,10 @@ use serde::Serialize;
 use crate::db::{Database, QueryResponse};
 use crate::error::{Error, Result};
 use crate::idempotency::{
-    IdempotencyDurability, IdempotencyReceipt, IdempotentExecution, ReceiptMap, validate_digest,
-    validate_key, validate_new_receipt,
+    IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyReceipt,
+    IdempotencyStatus, IdempotentExecution, MAX_IDEMPOTENCY_PRUNE_RECEIPTS,
+    MAX_IDEMPOTENCY_RECEIPTS, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap, boundary,
+    receipt_encoded_len, validate_digest, validate_key, validate_new_receipt, validate_receipts,
 };
 use crate::introspection::{Introspection, StorageMode};
 use crate::migration::{
@@ -381,6 +383,149 @@ impl Engine {
             committed_sequence: receipt.committed_sequence,
             durability,
         })
+    }
+
+    pub fn idempotency_status(&self) -> Result<IdempotencyStatus> {
+        let encoded_bytes = validate_receipts(&self.receipts, self.db.sequence)?;
+        let mut ordered = self.receipts.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|(key, receipt)| {
+            (
+                receipt.committed_sequence,
+                receipt.completed_at_unix_ms,
+                key.as_str(),
+            )
+        });
+        Ok(IdempotencyStatus {
+            count: self.receipts.len(),
+            encoded_bytes,
+            max_count: MAX_IDEMPOTENCY_RECEIPTS,
+            max_encoded_bytes: MAX_IDEMPOTENCY_TOTAL_BYTES,
+            oldest: ordered.first().map(|(key, receipt)| boundary(key, receipt)),
+            newest: ordered.last().map(|(key, receipt)| boundary(key, receipt)),
+            durability: self.idempotency_durability(),
+        })
+    }
+
+    pub fn plan_idempotency_prune(
+        &self,
+        options: IdempotencyPruneOptions,
+    ) -> Result<IdempotencyPruneResult> {
+        let selected = self.idempotency_prune_selection(&options)?;
+        let selected_encoded_bytes = selected.iter().try_fold(0usize, |total, key| {
+            total
+                .checked_add(receipt_encoded_len(&self.receipts[*key])?)
+                .ok_or_else(|| Error::new("E_IDEMPOTENCY_CAPACITY", "receipt size overflow"))
+        })?;
+        Ok(IdempotencyPruneResult {
+            options,
+            selected_count: selected.len(),
+            selected_encoded_bytes,
+            remaining_count: self.receipts.len().saturating_sub(selected.len()),
+            applied: false,
+            first_selected: selected
+                .first()
+                .map(|key| boundary(key, &self.receipts[*key])),
+            last_selected: selected
+                .last()
+                .map(|key| boundary(key, &self.receipts[*key])),
+        })
+    }
+
+    pub fn prune_idempotency_receipts(
+        &mut self,
+        options: IdempotencyPruneOptions,
+    ) -> Result<IdempotencyPruneResult> {
+        if self.read_only {
+            return Err(Error::new(
+                "E_READ_ONLY",
+                "idempotency receipts cannot be pruned through a read-only Engine",
+            ));
+        }
+        if self.wal.is_some() {
+            return Err(Error::new(
+                "E_CONFIG",
+                "idempotency receipt pruning requires redb or memory mode",
+            ));
+        }
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "receipt pruning is disabled after a storage failure; reopen the database",
+            ));
+        }
+        let keys = self
+            .idempotency_prune_selection(&options)?
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut result = self.plan_idempotency_prune(options)?;
+        if keys.is_empty() {
+            result.applied = true;
+            return Ok(result);
+        }
+        let mut receipts = self.receipts.clone();
+        for key in keys {
+            receipts.remove(&key);
+        }
+        let mut candidate = self.db.clone();
+        candidate.sequence = self
+            .db
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
+        let mut response = QueryResponse::ok_message("idempotency receipts pruned");
+        self.commit_candidate(candidate, None, &mut response, Some(receipts))?;
+        result.applied = true;
+        Ok(result)
+    }
+
+    fn idempotency_prune_selection(
+        &self,
+        options: &IdempotencyPruneOptions,
+    ) -> Result<Vec<&String>> {
+        if options.completed_before_unix_ms.is_none()
+            && options.committed_through_sequence.is_none()
+        {
+            return Err(Error::new(
+                "E_IDEMPOTENCY_PRUNE",
+                "receipt pruning requires a time or commit-sequence cutoff",
+            ));
+        }
+        if options.max_receipts == 0 || options.max_receipts > MAX_IDEMPOTENCY_PRUNE_RECEIPTS {
+            return Err(Error::new(
+                "E_IDEMPOTENCY_PRUNE",
+                format!("max_receipts must be between 1 and {MAX_IDEMPOTENCY_PRUNE_RECEIPTS}"),
+            ));
+        }
+        let mut selected = self
+            .receipts
+            .iter()
+            .filter(|(_, receipt)| {
+                options
+                    .completed_before_unix_ms
+                    .is_none_or(|cutoff| receipt.completed_at_unix_ms < cutoff)
+                    && options
+                        .committed_through_sequence
+                        .is_none_or(|cutoff| receipt.committed_sequence <= cutoff)
+            })
+            .collect::<Vec<_>>();
+        selected.sort_by_key(|(key, receipt)| {
+            (
+                receipt.committed_sequence,
+                receipt.completed_at_unix_ms,
+                key.as_str(),
+            )
+        });
+        selected.truncate(options.max_receipts);
+        Ok(selected.into_iter().map(|(key, _)| key).collect())
+    }
+
+    fn idempotency_durability(&self) -> IdempotencyDurability {
+        if self.durable.is_some() {
+            IdempotencyDurability::Durable
+        } else {
+            IdempotencyDurability::ProcessLocal
+        }
     }
 
     fn execute_with_params_at_schema_and_deadline(
@@ -1277,6 +1422,78 @@ mod tests {
         assert_eq!(failed.code, "E_STORAGE");
         assert!(uncertain.receipts.is_empty());
         assert!(uncertain.write_failed);
+    }
+
+    #[test]
+    fn receipt_pruning_is_bounded_previewed_and_explicit() {
+        let mut engine = Engine::memory();
+        assert!(
+            engine
+                .execute("type Entry =\n  id int\n  value text\ntable entries Entry\n  key id")
+                .ok
+        );
+        for (key, id) in [("first", 1), ("second", 2)] {
+            engine
+                .execute_idempotent_with_params(
+                    key,
+                    DIGEST_A,
+                    &format!("insert entries {{id = {id}, value = \"old\"}}"),
+                    BTreeMap::new(),
+                    None,
+                )
+                .unwrap();
+        }
+        let status = engine.idempotency_status().unwrap();
+        assert_eq!(status.count, 2);
+        assert!(status.encoded_bytes > 0);
+        assert_eq!(status.oldest.unwrap().key, "first");
+
+        let options = IdempotencyPruneOptions {
+            completed_before_unix_ms: None,
+            committed_through_sequence: Some(2),
+            max_receipts: 1,
+        };
+        let preview = engine.plan_idempotency_prune(options.clone()).unwrap();
+        assert_eq!(preview.selected_count, 1);
+        assert!(!preview.applied);
+        assert_eq!(engine.idempotency_status().unwrap().count, 2);
+
+        let applied = engine.prune_idempotency_receipts(options).unwrap();
+        assert!(applied.applied);
+        assert_eq!(engine.idempotency_status().unwrap().count, 1);
+        let reused = engine
+            .execute_idempotent_with_params(
+                "first",
+                DIGEST_B,
+                "update entries\nfilter id == 1\nset value = \"after-prune\"",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!reused.replayed);
+        assert!(
+            engine
+                .execute_idempotent_with_params(
+                    "second",
+                    DIGEST_A,
+                    "not parsed for retained receipt",
+                    BTreeMap::new(),
+                    None,
+                )
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(
+            engine
+                .plan_idempotency_prune(IdempotencyPruneOptions {
+                    completed_before_unix_ms: None,
+                    committed_through_sequence: None,
+                    max_receipts: 1,
+                })
+                .unwrap_err()
+                .code,
+            "E_IDEMPOTENCY_PRUNE"
+        );
     }
 
     #[test]

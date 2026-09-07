@@ -9,6 +9,16 @@ unionid cli --db app.redb --read-only
 unionid cli --addr 127.0.0.1:7878
 ```
 
+持久幂等回执使用独立运维命令。prune 默认只预览，至少需要一个 cutoff，只有 `--confirm` 才删除：
+
+```bash
+unionid receipts status --db app.redb --format json
+unionid receipts prune --db app.redb --through-sequence 1200 --max-receipts 500
+unionid receipts prune --db app.redb --through-sequence 1200 --max-receipts 500 --confirm
+```
+
+无 cutoff、`max-receipts` 不在 1–1000，或存储／只读边界不允许操作时返回稳定错误并以状态码 1 退出。清理后的 key 可以再次执行；命令不会按墙钟自动淘汰 receipt。
+
 `run`、本地 `cli` 和 `server` 都支持 `--db <path> --read-only`。该模式只打开已经存在的 redb 文件；路径不存在会返回 `E_CONFIG`，不会创建空数据库。查询、`explain` 和 introspection 正常工作，任何包含 DDL、DML 或待应用 migration 的请求都在构造候选状态或 durable transaction 前以 `E_READ_ONLY` 整批拒绝。远程 `cli` 是否只读取决于服务端配置，客户端参数不能替代服务端边界。
 
 REPL 使用 `unionid>` 开始新脚本，`..>` 表示语法还需继续，`ready>` 表示当前脚本完整。完整脚本在空行后提交；Ctrl-C 清空当前缓冲区，Ctrl-D 按当前完整性执行或报告未完成输入。

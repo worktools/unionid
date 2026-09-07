@@ -9,6 +9,7 @@ pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 pub const MAX_IDEMPOTENCY_RECEIPT_BYTES: usize = 1024 * 1024;
 pub const MAX_IDEMPOTENCY_RECEIPTS: usize = 10_000;
 pub const MAX_IDEMPOTENCY_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_IDEMPOTENCY_PRUNE_RECEIPTS: usize = 1_000;
 const DURABLE_CODEC_OVERHEAD: usize = 6;
 
 pub(crate) type ReceiptMap = BTreeMap<String, IdempotencyReceipt>;
@@ -35,6 +36,44 @@ pub struct IdempotentExecution {
     pub digest: String,
     pub committed_sequence: u64,
     pub durability: IdempotencyDurability,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdempotencyBoundary {
+    pub key: String,
+    pub committed_sequence: u64,
+    pub completed_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdempotencyStatus {
+    pub count: usize,
+    pub encoded_bytes: usize,
+    pub max_count: usize,
+    pub max_encoded_bytes: usize,
+    pub oldest: Option<IdempotencyBoundary>,
+    pub newest: Option<IdempotencyBoundary>,
+    pub durability: IdempotencyDurability,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdempotencyPruneOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_before_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_through_sequence: Option<u64>,
+    pub max_receipts: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdempotencyPruneResult {
+    pub options: IdempotencyPruneOptions,
+    pub selected_count: usize,
+    pub selected_encoded_bytes: usize,
+    pub remaining_count: usize,
+    pub applied: bool,
+    pub first_selected: Option<IdempotencyBoundary>,
+    pub last_selected: Option<IdempotencyBoundary>,
 }
 
 pub(crate) fn validate_key(key: &str) -> Result<()> {
@@ -145,6 +184,20 @@ pub(crate) fn validate_new_receipt(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn receipt_encoded_len(receipt: &IdempotencyReceipt) -> Result<usize> {
+    Ok(encoded_receipt(receipt)?
+        .len()
+        .saturating_add(DURABLE_CODEC_OVERHEAD))
+}
+
+pub(crate) fn boundary(key: &str, receipt: &IdempotencyReceipt) -> IdempotencyBoundary {
+    IdempotencyBoundary {
+        key: key.into(),
+        committed_sequence: receipt.committed_sequence,
+        completed_at_unix_ms: receipt.completed_at_unix_ms,
+    }
 }
 
 fn invalid_digest() -> Error {

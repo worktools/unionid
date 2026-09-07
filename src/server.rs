@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, Request as ProtocolRequest,
-    Response as ProtocolResponse, VERSION,
+    MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, ReceiptOperation, ReceiptOperationResult,
+    Request as ProtocolRequest, Response as ProtocolResponse, VERSION,
 };
 use crate::{Engine, Error, QueryResponse};
 
@@ -57,8 +57,8 @@ struct LegacyRequest {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum OutgoingResponse {
-    Legacy(QueryResponse),
-    Versioned(ProtocolResponse),
+    Legacy(Box<QueryResponse>),
+    Versioned(Box<ProtocolResponse>),
 }
 
 impl OutgoingResponse {
@@ -222,10 +222,10 @@ fn reject_busy(mut stream: TcpStream) -> Result<(), String> {
         .map_err(|e| format!("set rejection timeout: {e}"))?;
     write_response(
         &mut stream,
-        &OutgoingResponse::Legacy(QueryResponse::failure(Error::new(
+        &OutgoingResponse::Legacy(Box::new(QueryResponse::failure(Error::new(
             "E_BUSY",
             "active connection limit reached; retry after a connection closes",
-        ))),
+        )))),
     )?;
     // Closing with unread request bytes can reset the connection and discard
     // E_BUSY. Half-close first, then give the client a bounded chance to finish.
@@ -366,12 +366,12 @@ fn handle(
         stats.requests.fetch_add(1, Ordering::Relaxed);
         let quit = input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("exit");
         let response = if oversized {
-            OutgoingResponse::Legacy(QueryResponse::failure(Error::new(
+            OutgoingResponse::Legacy(Box::new(QueryResponse::failure(Error::new(
                 "E_LIMIT",
                 "request frame too large",
-            )))
+            ))))
         } else if quit {
-            OutgoingResponse::Legacy(QueryResponse::ok_message("bye"))
+            OutgoingResponse::Legacy(Box::new(QueryResponse::ok_message("bye")))
         } else {
             let mut engine = engine
                 .lock()
@@ -379,12 +379,12 @@ fn handle(
             if input.starts_with('{') {
                 execute_json_request(input, &mut engine)
             } else {
-                OutgoingResponse::Legacy(engine.execute_with_params_until(
+                OutgoingResponse::Legacy(Box::new(engine.execute_with_params_until(
                     input,
                     std::collections::BTreeMap::new(),
                     None,
                     Instant::now() + EXECUTION_TIMEOUT,
-                ))
+                )))
             }
         };
         let failed = !response.ok();
@@ -447,12 +447,12 @@ fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
         .is_some_and(|object| object.contains_key("version"));
     if !versioned {
         return match serde_json::from_value::<LegacyRequest>(decoded) {
-            Ok(request) => OutgoingResponse::Legacy(engine.execute_with_params_until(
+            Ok(request) => OutgoingResponse::Legacy(Box::new(engine.execute_with_params_until(
                 &request.query,
                 std::collections::BTreeMap::new(),
                 None,
                 Instant::now() + EXECUTION_TIMEOUT,
-            )),
+            ))),
             Err(error) => legacy_error(Error::new(
                 "E_PROTOCOL",
                 format!("expected JSON object with a query string: {error}"),
@@ -474,7 +474,7 @@ fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
             );
         }
     };
-    OutgoingResponse::Versioned(execute_protocol_request(engine, request))
+    OutgoingResponse::Versioned(Box::new(execute_protocol_request(engine, request)))
 }
 
 /// Execute the stable versioned data protocol independently of its transport.
@@ -506,7 +506,55 @@ pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -
             engine.schema_info(),
         );
     }
+    if let Some(operation) = request.receipts {
+        if !request.query.is_empty()
+            || !request.params.is_empty()
+            || request.schema.is_some()
+            || request.introspect.is_some()
+            || request.idempotency_key.is_some()
+        {
+            return ProtocolResponse::failure(
+                request.request_id,
+                Error::new(
+                    "E_PROTOCOL",
+                    "receipt operations cannot include query, params, schema, introspection, or an idempotency key",
+                ),
+                engine.schema_info(),
+            );
+        }
+        let result = match operation {
+            ReceiptOperation::Status => engine
+                .idempotency_status()
+                .map(ReceiptOperationResult::Status),
+            ReceiptOperation::Prune { options, confirm } if confirm => engine
+                .prune_idempotency_receipts(options)
+                .map(ReceiptOperationResult::Prune),
+            ReceiptOperation::Prune { options, .. } => engine
+                .plan_idempotency_prune(options)
+                .map(ReceiptOperationResult::Prune),
+        };
+        return match result {
+            Ok(result) => ProtocolResponse::from_receipt_operation(
+                request.request_id,
+                result,
+                engine.schema_info(),
+            ),
+            Err(error) => {
+                ProtocolResponse::failure(request.request_id, error, engine.schema_info())
+            }
+        };
+    }
     if request.introspect.is_some() {
+        if request.idempotency_key.is_some() {
+            return ProtocolResponse::failure(
+                request.request_id,
+                Error::new(
+                    "E_IDEMPOTENCY_NOT_MUTATION",
+                    "idempotency keys are not valid for introspection requests",
+                ),
+                engine.schema_info(),
+            );
+        }
         if !request.query.is_empty() || !request.params.is_empty() || request.schema.is_some() {
             return ProtocolResponse::failure(
                 request.request_id,
@@ -519,19 +567,46 @@ pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -
         }
         return introspection_protocol_response(request.request_id, engine.introspection());
     }
+    let digest = if request.idempotency_key.is_some() {
+        match request.canonical_digest() {
+            Ok(digest) => Some(digest),
+            Err(error) => {
+                return ProtocolResponse::failure(request.request_id, error, engine.schema_info());
+            }
+        }
+    } else {
+        None
+    };
     let parameters = match request.decode_params() {
         Ok(parameters) => parameters,
         Err(error) => {
             return ProtocolResponse::failure(request.request_id, error, engine.schema_info());
         }
     };
-    let response = engine.execute_with_params_until(
-        &request.query,
-        parameters,
-        request.schema.as_ref(),
-        Instant::now() + EXECUTION_TIMEOUT,
-    );
-    ProtocolResponse::from_query(request.request_id, response)
+    if let (Some(key), Some(digest)) = (request.idempotency_key, digest) {
+        return match engine.execute_idempotent_with_params_until(
+            &key,
+            &digest,
+            &request.query,
+            parameters,
+            request.schema.as_ref(),
+            Instant::now() + EXECUTION_TIMEOUT,
+        ) {
+            Ok(result) => ProtocolResponse::from_idempotent(request.request_id, key, result),
+            Err(error) => {
+                ProtocolResponse::failure(request.request_id, error, engine.schema_info())
+            }
+        };
+    }
+    ProtocolResponse::from_query(
+        request.request_id,
+        engine.execute_with_params_until(
+            &request.query,
+            parameters,
+            request.schema.as_ref(),
+            Instant::now() + EXECUTION_TIMEOUT,
+        ),
+    )
 }
 
 fn introspection_protocol_response(
@@ -560,15 +635,15 @@ fn introspection_protocol_response(
 }
 
 fn legacy_error(error: Error) -> OutgoingResponse {
-    OutgoingResponse::Legacy(QueryResponse::failure(error))
+    OutgoingResponse::Legacy(Box::new(QueryResponse::failure(error)))
 }
 
 fn protocol_error(request_id: String, error: Error, engine: &Engine) -> OutgoingResponse {
-    OutgoingResponse::Versioned(ProtocolResponse::failure(
+    OutgoingResponse::Versioned(Box::new(ProtocolResponse::failure(
         request_id,
         error,
         engine.schema_info(),
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -577,12 +652,12 @@ mod tests {
 
     #[test]
     fn response_encoder_stops_at_the_byte_limit() {
-        let small = OutgoingResponse::Legacy(QueryResponse::ok_message("ok"));
+        let small = OutgoingResponse::Legacy(Box::new(QueryResponse::ok_message("ok")));
         assert!(encode_limited(&small).is_ok());
-        let oversized = OutgoingResponse::Versioned(ProtocolResponse::from_query(
+        let oversized = OutgoingResponse::Versioned(Box::new(ProtocolResponse::from_query(
             "large-request",
             QueryResponse::ok_message("x".repeat(MAX_RESPONSE_BYTES)),
-        ));
+        )));
         assert!(encode_limited(&oversized).is_err());
         let fallback = oversized.limit_fallback();
         assert_eq!(fallback["request_id"], "large-request");

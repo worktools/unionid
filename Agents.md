@@ -54,7 +54,7 @@
 - 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，并已接入 redb `rows` 表。`insert many table <list>` 与 `upsert many table <list>` 可在同一事务校验并写入 typed row list；批量 upsert 拒绝输入内重复主键、保留更新行的 RowId，并返回逐项 action。insert/upsert/update/delete 可用 `returning` 返回完整行或字段投影；update/delete target 可按源码顺序组合 filter、sort 和 take，以稳定选择并修改有限行集。
 - 已通过 `docs/adr/0001-redb-storage.md` 选定 redb 作为长期事务后端；`Engine::open_redb`、`run/cli/server --db` 使用固定的 meta/catalog/rows/secondary_index/migration_ledger 表和同步 two-phase 原子提交。提交按稳定 ID/RowId 计算前后状态差异，只删除或写入变化的 catalog/row/index 键，并在覆盖前核对旧值；现有 WAL/snapshot 只保留为过渡兼容入口。
 - version 1 `Request`/`Response` 是与 transport 无关的数据协议；TCP 与 HTTP adapter 可复用同一执行入口。Rust 客户端可从 serde struct/enum 构造 typed params，并把无损 wire rows 直接解码回应用类型；`examples/todolist.rs` 通过真实 HTTP 服务验证该路径。
-- Engine 已实现 memory/redb 幂等 mutation 回执核心：相同 key/digest 重放原 QueryResponse，不同 digest 冲突，失败不占 key；redb 把数据效果与版本化 receipt 放入同一事务，首个持久回执将 storage format 1 升为 2。打开、完整性检查、进程退出恢复和逻辑 backup v2 均保留并验证回执；version 1 TCP/HTTP 字段、canonical digest builder 与显式清理由 #126 接入。
+- Engine、version 1 TCP/HTTP 和 Rust request builder 已接入幂等 mutation 回执：相同 key/canonical wire digest 重放原 QueryResponse，不同 digest 冲突，失败不占 key；redb 把数据效果与版本化 receipt 放入同一事务，首个持久回执将 storage format 1 升为 2。打开、完整性检查、进程退出恢复和逻辑 backup v2 均保留并验证回执。status 与按 time/sequence cutoff 的有界 prune 可通过 version 1 和 CLI 预览，只有显式 confirm 才原子删除；HTTP todolist 覆盖提交后丢响应与重试。
 - redb transaction commit 前的失败视为明确回滚并允许重试；commit 返回错误视为结果不确定，Engine 关闭句柄并阻止继续写。`check --db` 运行 redb 完整性检查后重新验证 unionid 逻辑状态；子进程测试覆盖提交前/成功提交后直接退出、未知版本、无效文件、索引不一致与跨进程 `E_BUSY`。
 - macOS/Linux 子进程使用 OS `RLIMIT_FSIZE` 注入真实 redb 文件增长失败，验证 Engine 的确定／不确定错误分类；重开后完整检查 typed rows、indexes、schema 与 migration ledger 只接受完整旧／新状态。
 - `tools/recovery-eval` 可重复生成 10k/100k ADT 工作集并在独立进程测量 open、完整 check、数据库大小和 peak RSS；100k 检查约 0.75 GiB 峰值，作为 v0.1 已测试上限而非日常目标。
@@ -65,7 +65,7 @@
 - v0.1 发布闭环使用 `scripts/package-release.py` 生成包含完整文档与示例的原生 target 压缩包、`RELEASE.json` 与 SHA-256；包内教程由 `scripts/verify-release.py` 从空目录验证本地 redb CLI 和 TCP，并由集成测试核对 Rust Engine 的 typed 语义。入门和升级契约分别见 `docs/GETTING_STARTED.md` 与 `docs/UPGRADING.md`；#103 跟踪实际 `v0.1.0` tag 与 GitHub Release。
 - README 是面向用户的中英双语产品入口，优先解释“直接用 ADT 描述数据库数据”和“query language 直接理解 ADT”两个核心特点，并保留最短可运行路径。实现历史、测试矩阵、原型兼容、存储内部结构和实时计划分别放在 `docs/DEVELOPMENT.md`、专题文档与 GitHub issues，避免重新堆回 README。
 - `Engine::open_redb_read_only`、`run/cli/server --db --read-only` 提供统一只读执行边界；完整解析和参数绑定后、创建候选状态或持久事务前以 `E_READ_ONLY` 拒绝 mutation，`introspection.read_only` 可验证实际状态。
-- 持久幂等写入契约见 `docs/rfc/0002-idempotent-write-receipts.md`：独立 key + canonical digest 保存完整成功回执，目标是 exactly-once effect；不自动 TTL/LRU，首次持久回执需要原子进入 storage format 2。#125/#126 完成前，version 1 尚未开放该字段，`request_id` 仍只用于关联。
+- 持久幂等写入契约见 `docs/rfc/0002-idempotent-write-receipts.md`：独立 key + canonical digest 保存完整成功回执，目标是 exactly-once effect；不自动 TTL/LRU，首次持久回执原子进入 storage format 2。`request_id` 仍只用于单次尝试关联。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）

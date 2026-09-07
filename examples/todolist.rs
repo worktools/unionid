@@ -280,8 +280,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
     let insert = Request::query("insert-todos", "insert many todos $rows\nreturning")
-        .with_serde_param("rows", &tasks)?;
-    let inserted: Response = post_json(address, "/v1/query", &insert).await?;
+        .with_serde_param("rows", &tasks)?
+        .with_idempotency_key("seed-todos-v1")?;
+    let lost = post_json_then_lose_response(address, "/v1/query", &insert).await;
+    assert!(lost.is_err(), "the example must inject a lost response");
+    let retry = Request {
+        request_id: "insert-todos-retry".into(),
+        ..insert.clone()
+    };
+    let inserted: Response = post_json(address, "/v1/query", &retry).await?;
+    assert!(inserted.idempotency.as_ref().unwrap().replayed);
     assert_eq!(inserted.typed_rows::<TaskV1>()?, tasks);
 
     let claim = Request::query(
@@ -386,6 +394,17 @@ returning"#,
     )
     .await?;
     assert_eq!(restored_rows.typed_rows::<TaskV2>()?, current_tasks);
+    let restored_replay: Response = post_json(
+        address,
+        "/v1/restored/query",
+        &Request {
+            request_id: "restored-idempotency-replay".into(),
+            ..insert
+        },
+    )
+    .await?;
+    assert!(restored_replay.idempotency.as_ref().unwrap().replayed);
+    assert_eq!(restored_replay.typed_rows::<TaskV1>()?, tasks);
 
     ensure_admin_ok(
         &post_json::<_, AdminResponse>(address, "/v1/admin/shutdown", &admin("shutdown", vec![]))
@@ -393,7 +412,7 @@ returning"#,
     )?;
     server.await??;
     println!(
-        "HTTP todo flow passed: typed ADTs, restart, migration, check, backup/restore ({})",
+        "HTTP todo flow passed: typed ADTs, lost-response replay, restart, migration, check, backup/restore ({})",
         archive.display()
     );
     Ok(())
@@ -666,4 +685,17 @@ async fn post_json<T: Serialize, R: DeserializeOwned>(
         .ok_or("HTTP response has no body")?
         + 4;
     Ok(serde_json::from_slice(&response[body_start..])?)
+}
+
+async fn post_json_then_lose_response<T: Serialize>(
+    address: std::net::SocketAddr,
+    path: &str,
+    value: &T,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _: JsonValue = post_json(address, path, value).await?;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::ConnectionReset,
+        "injected response loss after the server committed the request",
+    )
+    .into())
 }
