@@ -3,9 +3,14 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::db::{QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, UpsertAction};
 use crate::error::Error;
+use crate::idempotency::{
+    IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyStatus,
+    IdempotentExecution, validate_key as validate_idempotency_key,
+};
 use crate::introspection::{Introspection, IntrospectionKind};
 use crate::model::{EnumValue, Value};
 
@@ -25,6 +30,10 @@ pub struct Request {
     pub params: BTreeMap<String, WireValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<SchemaInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipts: Option<ReceiptOperation>,
 }
 
 impl Request {
@@ -37,6 +46,8 @@ impl Request {
             introspect: None,
             params: BTreeMap::new(),
             schema: None,
+            idempotency_key: None,
+            receipts: None,
         }
     }
 
@@ -71,6 +82,34 @@ impl Request {
             .collect()
     }
 
+    /// Attach a bounded idempotency key to a mutation request. The canonical
+    /// digest is computed from the complete wire request by the executor.
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Result<Self, Error> {
+        let key = key.into();
+        validate_idempotency_key(&key)?;
+        self.idempotency_key = Some(key);
+        Ok(self)
+    }
+
+    pub fn canonical_digest(&self) -> Result<String, Error> {
+        let document = CanonicalRequest {
+            params: &self.params,
+            query: &self.query,
+            schema: self.schema.as_ref().map(|schema| CanonicalSchema {
+                hash: &schema.hash,
+                revision: schema.revision.to_string(),
+            }),
+            version: self.version.to_string(),
+        };
+        let encoded = serde_json::to_vec(&document).map_err(|error| {
+            Error::new(
+                "E_PROTOCOL",
+                format!("encode canonical idempotency request: {error}"),
+            )
+        })?;
+        Ok(format!("sha256:{:x}", Sha256::digest(encoded)))
+    }
+
     pub fn introspection(request_id: impl Into<String>, kind: IntrospectionKind) -> Self {
         Self {
             version: VERSION,
@@ -79,8 +118,58 @@ impl Request {
             introspect: Some(kind),
             params: BTreeMap::new(),
             schema: None,
+            idempotency_key: None,
+            receipts: None,
         }
     }
+
+    pub fn receipt_status(request_id: impl Into<String>) -> Self {
+        let mut request = Self::query(request_id, "");
+        request.receipts = Some(ReceiptOperation::Status);
+        request
+    }
+
+    pub fn receipt_prune(
+        request_id: impl Into<String>,
+        options: IdempotencyPruneOptions,
+        confirm: bool,
+    ) -> Self {
+        let mut request = Self::query(request_id, "");
+        request.receipts = Some(ReceiptOperation::Prune { options, confirm });
+        request
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReceiptOperation {
+    Status,
+    Prune {
+        options: IdempotencyPruneOptions,
+        #[serde(default)]
+        confirm: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "operation", content = "result", rename_all = "snake_case")]
+pub enum ReceiptOperationResult {
+    Status(IdempotencyStatus),
+    Prune(IdempotencyPruneResult),
+}
+
+#[derive(Serialize)]
+struct CanonicalRequest<'a> {
+    params: &'a BTreeMap<String, WireValue>,
+    query: &'a str,
+    schema: Option<CanonicalSchema<'a>>,
+    version: String,
+}
+
+#[derive(Serialize)]
+struct CanonicalSchema<'a> {
+    hash: &'a str,
+    revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,6 +341,19 @@ pub struct Response {
     pub plan: Option<QueryPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection: Option<Introspection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency: Option<IdempotencyMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipts: Option<ReceiptOperationResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdempotencyMetadata {
+    pub key: String,
+    pub digest: String,
+    pub replayed: bool,
+    pub committed_sequence: String,
+    pub durability: IdempotencyDurability,
 }
 
 impl Response {
@@ -318,7 +420,26 @@ impl Response {
             upsert_actions: response.upsert_actions,
             plan: response.plan,
             introspection: None,
+            idempotency: None,
+            receipts: None,
         }
+    }
+
+    pub fn from_idempotent(
+        request_id: impl Into<String>,
+        key: impl Into<String>,
+        result: IdempotentExecution,
+    ) -> Self {
+        let metadata = IdempotencyMetadata {
+            key: key.into(),
+            digest: result.digest,
+            replayed: result.replayed,
+            committed_sequence: result.committed_sequence.to_string(),
+            durability: result.durability,
+        };
+        let mut response = Self::from_query(request_id, result.response);
+        response.idempotency = Some(metadata);
+        response
     }
 
     pub fn from_introspection(request_id: impl Into<String>, introspection: Introspection) -> Self {
@@ -337,7 +458,23 @@ impl Response {
             upsert_actions: Vec::new(),
             plan: None,
             introspection: Some(introspection),
+            idempotency: None,
+            receipts: None,
         }
+    }
+
+    pub fn from_receipt_operation(
+        request_id: impl Into<String>,
+        result: ReceiptOperationResult,
+        schema: SchemaInfo,
+    ) -> Self {
+        let mut response = Self::from_query(
+            request_id,
+            QueryResponse::ok_message("idempotency receipt operation complete"),
+        );
+        response.schema = Some(schema);
+        response.receipts = Some(result);
+        response
     }
 
     pub fn failure(request_id: impl Into<String>, error: Error, schema: SchemaInfo) -> Self {

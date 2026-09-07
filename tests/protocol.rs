@@ -656,6 +656,8 @@ fn protocol_response_uses_wire_values_and_echoes_request_id() {
             },
         )]),
         schema: Some(engine.schema_info()),
+        idempotency_key: None,
+        receipts: None,
     };
     let response = engine.execute_with_params_at_schema(
         &request.query,
@@ -700,4 +702,45 @@ fn version_one_introspection_request_and_response_round_trip() {
     )
     .unwrap();
     assert_eq!(legacy_v1.introspect, None);
+    assert_eq!(legacy_v1.idempotency_key, None);
+}
+
+#[test]
+fn canonical_idempotency_digest_matches_the_rfc_vector_and_excludes_attempt_identity() {
+    let first = Request::query("attempt-1", "insert tasks {id = 1}")
+        .with_idempotency_key("task-1")
+        .unwrap();
+    assert_eq!(
+        first.canonical_digest().unwrap(),
+        "sha256:b96dd4dc743653cc683dde69fb4133249107a2429c6b5f58b0dd9d228747b2e4"
+    );
+    let second = Request {
+        request_id: "attempt-2".into(),
+        idempotency_key: Some("another-key".into()),
+        ..first.clone()
+    };
+    assert_eq!(
+        first.canonical_digest().unwrap(),
+        second.canonical_digest().unwrap()
+    );
+
+    let differently_ordered = Request {
+        params: BTreeMap::from([
+            (
+                "z".into(),
+                WireValue::Record {
+                    fields: BTreeMap::from([
+                        ("b".into(), WireValue::Bool { value: true }),
+                        ("a".into(), WireValue::Int { value: "01".into() }),
+                    ]),
+                },
+            ),
+            ("a".into(), WireValue::Text { value: "x".into() }),
+        ]),
+        ..Request::query("ordered", "insert tasks $row")
+    };
+    let encoded_once = differently_ordered.canonical_digest().unwrap();
+    let decoded: Request =
+        serde_json::from_slice(&serde_json::to_vec(&differently_ordered).unwrap()).unwrap();
+    assert_eq!(encoded_once, decoded.canonical_digest().unwrap());
 }

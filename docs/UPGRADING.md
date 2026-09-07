@@ -15,6 +15,8 @@ unionid 0.1.0 把应用 schema migration 与数据库内部格式升级视为两
 
 当前二进制打开 storage format 1（无 receipt）和 format 2（含 durable idempotency receipt）。第一次成功提交持久幂等写入时会在同一事务选择 format 2；此后不能降级到只认识 format 1 的旧二进制。逻辑备份相应使用无 receipt 的 format 1 或含 receipt 的 format 2。未知 storage、catalog、value、index、migration 或 receipt codec 会在修改文件前失败；不会猜测或静默重写。命名类型、字段、变体、表和索引用稳定 ID 编码，应用侧重命名必须通过 migration，不能直接编辑数据库文件。
 
+升级前后的 backup/restore 必须保留 receipt count。不要为了降级而删除 receipt：显式 prune 会恢复旧 key 的可执行性，应只在确认所有客户端、队列和人工重试都已越过 cutoff 后执行。旧 version 1 请求继续可用；只有需要 exactly-once effect 的 mutation 才增加 `idempotency_key`。
+
 ## 升级应用 schema
 
 把 migration 文件纳入应用源码并按顺序部署：

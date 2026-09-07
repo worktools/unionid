@@ -2,7 +2,7 @@
 
 unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和响应各占一个物理行。<code>query</code> 是 JSON string，因此源码中的换行、缩进、引号和管道符都作为数据传输，不参与协议分帧。服务仍暂时接受旧的 <code>{"query":"..."}</code> 和纯文本单行请求，新的客户端应使用本页协议。
 
-持久幂等写入的 exactly-once effect、request digest、回执、容量、显式清理和格式升级契约已由 [RFC 0002](rfc/0002-idempotent-write-receipts.md) 冻结。协议字段将在 Engine/redb 能原子保存回执后由 #126 接入；当前 `request_id` 仍然只做关联，不能用于去重。
+持久幂等写入的 exactly-once effect、request digest、回执、容量、显式清理和格式升级契约见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)。`request_id` 仍然只做单次尝试的关联；安全重试必须复用独立的 `idempotency_key`。
 
 version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。内置服务使用 JSON Lines；HTTP adapter 应在 `POST /v1/query` 的 JSON body 中直接使用同一结构，并调用 `server::execute_protocol_request`。这样 TCP、HTTP 和嵌入式 adapter 共享版本检查、参数解码、schema identity、deadline、introspection、错误与返回行语义，而不是各自解释 query。
 
@@ -20,8 +20,32 @@ version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。�
 | <code>introspect</code> | 可选的 `schema`／`tables`／`types`／`storage`；使用时 query 必须为空且不能携带 params/schema |
 | <code>params</code> | 可省略的命名 typed value；源码以 <code>$name</code> 引用 |
 | <code>schema</code> | 可省略的 <code>{revision, hash}</code>；不等于当前 schema 时，在解析或扫描前返回 <code>E_SCHEMA_CHANGED</code> |
+| <code>idempotency_key</code> | mutation 可选，1–256 UTF-8 bytes；同 key 与规范 digest 重放原成功响应，不同 digest 返回 `E_IDEMPOTENCY_CONFLICT` |
+| <code>receipts</code> | 可选的独立 `status` / `prune` 运维操作；不能和 query、params、schema、introspection 或 idempotency key 混用 |
 
 参数名使用与标识符相同的 ASCII 规则，以字母或下划线开头。缺少参数返回 <code>E_PARAM_MISSING</code>，多余参数返回 <code>E_PARAM_EXTRA</code>，wire value 无法解码返回 <code>E_PARAM_TYPE</code>；参数解码后仍由查询上下文做普通类型检查，所以类型不匹配返回 <code>E_TYPE</code>。绑定发生在 AST 上，不通过文本替换，文本参数中的引号、换行、注释符或 pipeline 符号不会改变查询结构。参数也可直接作为 `derive match` 或 `set ... = match ...` 的分支结果及嵌套 constructor 负载，并由结果／目标字段类型检查。
+
+### 幂等 mutation
+
+Rust 客户端使用 `Request::with_idempotency_key`，不发送或手写 digest：统一执行入口会从 version、精确 query UTF-8、排序后的 typed wire params 和可选 schema precondition 计算 `sha256:<hex>`。request ID、key 本身和 deadline 不参与 digest，因此网络重试可使用新的 request ID。相同 key/digest 在参数解码和当前 schema 检查之前返回原回执；read、explain 或 introspection 携带 key 返回 `E_IDEMPOTENCY_NOT_MUTATION`。
+
+~~~json
+{"version":1,"request_id":"attempt-1","query":"insert tasks $row\nreturning","params":{"row":{"type":"record","fields":{"id":{"type":"int","value":"42"}}}},"idempotency_key":"create-task-42"}
+~~~
+
+成功响应增加以下结构；memory 为 `process_local`，redb 为 `durable`：
+
+~~~json
+{"idempotency":{"key":"create-task-42","digest":"sha256:...","replayed":false,"committed_sequence":"17","durability":"durable"}}
+~~~
+
+响应丢失后必须原样复用 query、wire params、schema precondition 和 key。只改变 request ID 会得到 `replayed: true`；改变源码空白、参数 wire 拼写或 schema 会产生不同 digest 并安全冲突。普通失败、timeout、read-only、容量错误和确定中止不会占用 key。commit 结果不确定时关闭连接／重开数据库，再用同一请求重试。
+
+### 回执状态与显式清理
+
+`Request::receipt_status` 返回 count、encoded bytes、固定容量以及最老／最新 sequence 和时间边界。`Request::receipt_prune` 必须给出 `completed_before_unix_ms`（严格早于）或 `committed_through_sequence`（包含该 sequence）；同时给出时两者取交集。`max_receipts` 为 1–1000，按 sequence、完成时间和 key 稳定排序后截断。`confirm: false` 只预览，`confirm: true` 才在一个事务中删除同一选择。
+
+清理后同 key 会重新成为可执行的新请求，因此保留窗口必须长于客户端、消息队列和人工重放的最大重试窗口。系统没有自动 TTL/LRU。CLI 对应 `unionid receipts status` 和默认预览的 `unionid receipts prune`；执行删除必须显式传 `--confirm`。
 
 参数可用于 filter、match condition、普通／match derive 的算术或 bool 结果，以及 update <code>set</code>；prepared 绑定会在扫描前从字段或分支结果推导类型。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>；<code>insert many tasks $rows</code> 与 <code>upsert many tasks $rows</code> 接受 <code>list Task</code>，按输入顺序原子写入并 returning。批量 upsert 要求主键，拒绝输入内重复主键，并返回与输入逐项对齐的 action。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
 
@@ -85,7 +109,7 @@ HTTP 适配、生命周期 endpoint 和完整 todo 场景见 [HTTP 数据协议�
 }
 ~~~
 
-<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；introspection 响应改为包含 <code>introspection</code>，两者都不执行数据行。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>；单行 upsert 使用 <code>upsert_action</code>，批量 upsert 使用按输入顺序排列的 <code>upsert_actions</code> array。`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。新增的 <code>upsert_actions</code> 在其他响应中省略，旧 version 1 response 反序列化时视为空 array。warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
+<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；introspection 响应改为包含 <code>introspection</code>，receipt 运维响应包含 `receipts`，这些操作都不执行数据查询。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>；单行 upsert 使用 <code>upsert_action</code>，批量 upsert 使用按输入顺序排列的 <code>upsert_actions</code> array。`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。旧 version 1 request 缺少新增字段时按 `None` 处理。warnings 不改变 <code>ok</code>。
 
 ## Rust 嵌入接口
 

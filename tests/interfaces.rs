@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use unionid::{
-    Engine, IntrospectionKind, MigrationApply, MigrationFile, MigrationPlan, MigrationStatus,
-    ProtocolRequest, QueryResponse, SchemaCheck, StorageMode, UpsertAction, Value, WireValue,
-    backup, cli,
+    Engine, IdempotencyPruneOptions, IntrospectionKind, MigrationApply, MigrationFile,
+    MigrationPlan, MigrationStatus, ProtocolRequest, QueryResponse, ReceiptOperationResult,
+    SchemaCheck, StorageMode, UpsertAction, Value, WireValue, backup, cli,
 };
 
 #[test]
@@ -33,6 +33,78 @@ fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
     assert!(!output.status.success());
     let response: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response.error.unwrap().code, "E_TABLE");
+}
+
+#[test]
+fn receipt_cli_previews_before_explicit_bounded_pruning() {
+    let dir = TempDir::new();
+    let path = dir.0.join("receipt-cli.redb");
+    let sequence;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        sequence = engine
+            .execute_idempotent_with_params(
+                "create-table",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "create table entries (id int)",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap()
+            .committed_sequence;
+    }
+    let status = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "receipts",
+            "status",
+            "--db",
+            path.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: unionid::IdempotencyStatus = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status.count, 1);
+
+    let prune = |confirm: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_unionid"));
+        command.args([
+            "receipts",
+            "prune",
+            "--db",
+            path.to_str().unwrap(),
+            "--through-sequence",
+            &sequence.to_string(),
+            "--max-receipts",
+            "1",
+            "--format",
+            "json",
+        ]);
+        if confirm {
+            command.arg("--confirm");
+        }
+        command.output().unwrap()
+    };
+    let preview = prune(false);
+    assert!(preview.status.success());
+    let preview: unionid::IdempotencyPruneResult = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview.selected_count, 1);
+    assert!(!preview.applied);
+
+    let applied = prune(true);
+    assert!(applied.status.success());
+    let applied: unionid::IdempotencyPruneResult = serde_json::from_slice(&applied.stdout).unwrap();
+    assert!(applied.applied);
+    assert_eq!(applied.remaining_count, 0);
+
+    let invalid = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["receipts", "prune", "--db", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("E_IDEMPOTENCY_PRUNE"));
 }
 
 #[test]
@@ -745,6 +817,8 @@ insert items
             },
         )]),
         schema: None,
+        idempotency_key: None,
+        receipts: None,
     };
     let response = cli::send_request(&server.addr, &request).unwrap();
     assert!(response.ok, "{}", response.message);
@@ -775,6 +849,8 @@ insert items
         introspect: None,
         params: BTreeMap::new(),
         schema: None,
+        idempotency_key: None,
+        receipts: None,
     };
     assert_eq!(
         cli::send_request(&server.addr, &missing)
@@ -801,6 +877,127 @@ insert items
             .code,
         "E_SCHEMA_CHANGED"
     );
+}
+
+#[test]
+fn versioned_tcp_idempotency_replays_after_restart_and_rejects_conflicts() {
+    let dir = TempDir::new();
+    let path = dir.0.join("tcp-idempotency.redb");
+    let path_arg = path.to_str().unwrap();
+    let mut server = Server::start(&["--db", path_arg]);
+    assert!(
+        cli::send_one(
+            &server.addr,
+            "type Entry =\n  id int\n  value text\ntable entries Entry\n  key id"
+        )
+        .unwrap()
+        .ok
+    );
+    let request = ProtocolRequest::query(
+        "attempt-1",
+        "insert entries {id = 1, value = \"once\"}\nreturning",
+    )
+    .with_idempotency_key("entry-1")
+    .unwrap();
+    let first = cli::send_request(&server.addr, &request).unwrap();
+    assert!(first.ok, "{}", first.message);
+    let first_idempotency = first.idempotency.unwrap();
+    assert!(!first_idempotency.replayed);
+    assert_eq!(
+        first_idempotency.durability,
+        unionid::IdempotencyDurability::Durable
+    );
+    server.shutdown();
+
+    let server = Server::start(&["--db", path_arg]);
+    let replay_request = ProtocolRequest {
+        request_id: "attempt-2".into(),
+        ..request.clone()
+    };
+    let replay = cli::send_request(&server.addr, &replay_request).unwrap();
+    assert!(replay.ok, "{}", replay.message);
+    assert_eq!(replay.request_id, "attempt-2");
+    let replay_idempotency = replay.idempotency.unwrap();
+    assert!(replay_idempotency.replayed);
+    assert_eq!(replay_idempotency.digest, first_idempotency.digest);
+    assert_eq!(
+        replay_idempotency.committed_sequence,
+        first_idempotency.committed_sequence
+    );
+
+    let conflict = ProtocolRequest::query(
+        "attempt-3",
+        "insert entries {id = 2, value = \"different\"}",
+    )
+    .with_idempotency_key("entry-1")
+    .unwrap();
+    let conflict = cli::send_request(&server.addr, &conflict).unwrap();
+    assert_eq!(conflict.error.unwrap().code, "E_IDEMPOTENCY_CONFLICT");
+    assert_eq!(
+        cli::send_one(&server.addr, "from entries")
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    let keyed_read = ProtocolRequest::query("read", "from entries")
+        .with_idempotency_key("read-key")
+        .unwrap();
+    assert_eq!(
+        cli::send_request(&server.addr, &keyed_read)
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "E_IDEMPOTENCY_NOT_MUTATION"
+    );
+    let keyed_introspection = ProtocolRequest {
+        idempotency_key: Some("inspect-key".into()),
+        ..ProtocolRequest::introspection("inspect", IntrospectionKind::Storage)
+    };
+    assert_eq!(
+        cli::send_request(&server.addr, &keyed_introspection)
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "E_IDEMPOTENCY_NOT_MUTATION"
+    );
+
+    let status = cli::send_request(
+        &server.addr,
+        &ProtocolRequest::receipt_status("receipt-status"),
+    )
+    .unwrap();
+    let ReceiptOperationResult::Status(status) = status.receipts.unwrap() else {
+        panic!("expected receipt status");
+    };
+    assert_eq!(status.count, 1);
+    let options = IdempotencyPruneOptions {
+        completed_before_unix_ms: None,
+        committed_through_sequence: Some(first_idempotency.committed_sequence.parse().unwrap()),
+        max_receipts: 1,
+    };
+    let preview = cli::send_request(
+        &server.addr,
+        &ProtocolRequest::receipt_prune("receipt-preview", options.clone(), false),
+    )
+    .unwrap();
+    let ReceiptOperationResult::Prune(preview) = preview.receipts.unwrap() else {
+        panic!("expected receipt prune preview");
+    };
+    assert_eq!(preview.selected_count, 1);
+    assert!(!preview.applied);
+    let applied = cli::send_request(
+        &server.addr,
+        &ProtocolRequest::receipt_prune("receipt-apply", options, true),
+    )
+    .unwrap();
+    let ReceiptOperationResult::Prune(applied) = applied.receipts.unwrap() else {
+        panic!("expected applied receipt prune");
+    };
+    assert!(applied.applied);
+    assert_eq!(applied.remaining_count, 0);
 }
 
 #[test]
@@ -831,6 +1028,8 @@ create index events (state)"#;
             },
         )]),
         schema: None,
+        idempotency_key: None,
+        receipts: None,
     };
     let response = cli::send_request(&server.addr, &request).unwrap();
     assert!(response.ok, "{}", response.message);
@@ -881,6 +1080,8 @@ insert items {id = 1, value = "old"}"#;
             },
         )]),
         schema: None,
+        idempotency_key: None,
+        receipts: None,
     };
     let response = cli::send_request(&server.addr, &request).unwrap();
     assert!(response.ok, "{}", response.message);
@@ -944,6 +1145,8 @@ returning id, state"#
             ),
         ]),
         schema: None,
+        idempotency_key: None,
+        receipts: None,
     };
     let response = cli::send_request(&server.addr, &request).unwrap();
     assert!(response.ok, "{}", response.message);
@@ -982,6 +1185,8 @@ returning id, ready"#
         introspect: None,
         params: BTreeMap::from([("threshold".into(), WireValue::Int { value: "5".into() })]),
         schema: None,
+        idempotency_key: None,
+        receipts: None,
     };
     let response = cli::send_request(&server.addr, &boolean_update).unwrap();
     assert!(response.ok, "{}", response.message);

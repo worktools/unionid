@@ -23,6 +23,8 @@ unionid server --db ./data/app.redb --read-only
 | DML returning rows | 100,000 / 8 MiB typed wire rows | 提交候选状态前返回 <code>E_LIMIT</code>；应增加选择性 filter 或缩小投影 |
 | Introspection payload | 1 MiB | version 1 请求返回带 request ID 与 schema 的 <code>E_LIMIT</code> |
 | Version 1 request ID | 1 KiB UTF-8 | 在进入 Engine 前返回 <code>E_LIMIT</code>，避免写入提交后才发现响应元数据过大 |
+| Idempotency key / receipt | 256 bytes / 1 MiB | 提交前返回 `E_IDEMPOTENCY_KEY` / `E_IDEMPOTENCY_LIMIT` |
+| Receipt store | 10,000 / 64 MiB | 新 key 返回 `E_IDEMPOTENCY_CAPACITY`；现有 key 仍可 replay |
 | TCP response | 16 MiB | 丢弃超限结果，发送小型结构化 <code>E_LIMIT</code> |
 | 服务执行 deadline | 25 秒 | 返回 <code>E_TIMEOUT</code>；候选写批次不提交 |
 | 空闲连接 / socket write | 30 秒 | 关闭空闲或不读取响应的客户端 |
@@ -44,9 +46,9 @@ TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON by
 
 优雅关闭完成后可以立即以同一路径重新打开 redb。强制终止、掉电和 commit 结果不确定的恢复边界见 [存储说明](STORAGE.md)；正常 signal 测试不替代那些故障测试。
 
-客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；在未收到响应时不能推断提交结果，也不能盲目把写入当作 exactly-once 重试。需要安全重试时使用应用主键、upsert 或业务幂等标识。
+客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；带 `idempotency_key` 的 version 1 mutation 通过“数据效果与回执同事务”提供 exactly-once effect，但网络仍只是 best-effort delivery。未收到响应时，重开连接并原样重发 query、wire params、schema precondition 和 key；不要改变内容或猜测结果。规范 digest 和 commit uncertain 恢复见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)。
 
-后续持久幂等写入不会改变网络只能 best-effort delivery 的事实，而是通过“数据效果与回执同事务”提供 exactly-once effect。规范 digest、commit uncertain 重开流程、有界保留和禁止自动 TTL 的决策见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)；在 #125/#126 完成前，生产客户端仍必须遵守上一段的现有边界。
+receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明确 cutoff、最多 1000 条的单次边界和 confirm 原子清理。清理意味着旧 key 可以再次执行，保留窗口必须覆盖所有自动与人工重试。receipt 运维端点与数据库写入权限等价，HTTP adapter 必须鉴权并审计。
 
 只读模式限制 unionid 的查询执行入口，并不把 redb 文件改成操作系统级只读格式，也不允许同一路径绕过独占打开锁。部署仍应配合文件权限、独立运行身份和只向受限进程暴露的数据库路径；需要安全重试的写服务由 [#113](https://github.com/worktools/unionid/issues/113) 跟踪 durable idempotency receipt。
 

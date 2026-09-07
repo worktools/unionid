@@ -102,6 +102,11 @@ enum Command {
         #[command(subcommand)]
         command: MigrationCommand,
     },
+    /// Inspect or explicitly prune durable idempotency receipts.
+    Receipts {
+        #[command(subcommand)]
+        command: ReceiptCommand,
+    },
     /// Validate and print declarative schema files.
     Schema {
         #[command(subcommand)]
@@ -133,6 +138,32 @@ enum Command {
         wal: Option<PathBuf>,
         #[arg(long)]
         db: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReceiptCommand {
+    /// Show receipt capacity and oldest/newest retained boundaries.
+    Status {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Preview eligible receipts; pass --confirm to delete that exact bounded selection.
+    Prune {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        before_unix_ms: Option<u64>,
+        #[arg(long)]
+        through_sequence: Option<u64>,
+        #[arg(long, default_value_t = 1000)]
+        max_receipts: usize,
+        #[arg(long)]
+        confirm: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -318,6 +349,28 @@ fn run() -> Result<(), String> {
                 name,
                 format,
             } => cli::migration_diff(db, schema, dir, &name, matches!(format, Format::Json)),
+        },
+        Command::Receipts { command } => match command {
+            ReceiptCommand::Status { db, format } => {
+                cli::receipt_status(db, matches!(format, Format::Json))
+            }
+            ReceiptCommand::Prune {
+                db,
+                before_unix_ms,
+                through_sequence,
+                max_receipts,
+                confirm,
+                format,
+            } => cli::receipt_prune(
+                db,
+                unionid::IdempotencyPruneOptions {
+                    completed_before_unix_ms: before_unix_ms,
+                    committed_through_sequence: through_sequence,
+                    max_receipts,
+                },
+                confirm,
+                matches!(format, Format::Json),
+            ),
         },
         Command::Schema { command } => match command {
             SchemaCommand::Check { file, format } => {

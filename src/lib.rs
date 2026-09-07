@@ -35,11 +35,17 @@ pub use db::{
 pub use engine::{Engine, PreparedQuery, StorageIntegrity};
 pub use error::{Error, Result, Span};
 pub use formatter::format_source;
-pub use idempotency::{IdempotencyDurability, IdempotencyReceipt, IdempotentExecution};
+pub use idempotency::{
+    IdempotencyBoundary, IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult,
+    IdempotencyReceipt, IdempotencyStatus, IdempotentExecution,
+};
 pub use introspection::{Introspection, IntrospectionKind, StorageMode};
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};
-pub use protocol::{Request as ProtocolRequest, Response as ProtocolResponse, WireValue};
+pub use protocol::{
+    IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,
+    Response as ProtocolResponse, WireValue,
+};
 pub use schema::{
     SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation, SchemaDiffTableImpact,
 };
