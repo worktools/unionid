@@ -1,6 +1,7 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use common::TempDir;
 use unionid::protocol::{Request, Response, VERSION, WireValue};
@@ -78,7 +79,7 @@ fn missing_extra_and_wrong_typed_parameters_have_stable_codes() {
 }
 
 #[test]
-fn prepared_query_rejects_schema_changes_and_mutations() {
+fn prepared_queries_reject_schema_changes_and_unsupported_mutations() {
     let mut engine = setup();
     let prepared = engine.prepare("from tasks | filter id == $id").unwrap();
     assert_eq!(prepared.parameters(), &["id"]);
@@ -123,6 +124,82 @@ fn prepared_query_rejects_schema_changes_and_mutations() {
         engine.query(&prepared, params).error.unwrap().code,
         "E_SCHEMA_CHANGED"
     );
+}
+
+#[test]
+fn prepared_bulk_insert_infers_row_lists_and_honors_deadlines() {
+    let mut engine = setup();
+    let prepared = engine
+        .prepare("insert many tasks $rows\nreturning id, state")
+        .unwrap();
+    assert_eq!(prepared.parameters(), &["rows"]);
+    assert_eq!(prepared.parameter_types()["rows"], "list Task");
+
+    let task = |id, title: &str| {
+        Value::Record(BTreeMap::from([
+            ("id".into(), Value::Int(id)),
+            ("title".into(), Value::Text(title.into())),
+            (
+                "state".into(),
+                Value::Enum(unionid::model::EnumValue {
+                    id: 0,
+                    variant: "Pending".into(),
+                    args: Vec::new(),
+                }),
+            ),
+        ]))
+    };
+    let inserted = engine.execute_prepared(
+        &prepared,
+        BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![task(2, "second"), task(1, "first")]),
+        )]),
+    );
+    assert!(inserted.ok, "{}", inserted.message);
+    assert_eq!(inserted.affected_rows, Some(2));
+    assert!(inserted.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(inserted.rows[1]["id"].cmp_eq(&Value::Int(1)));
+
+    let expired = engine.execute_prepared_until(
+        &prepared,
+        BTreeMap::from([("rows".into(), Value::List(vec![task(3, "late")]))]),
+        Instant::now() - Duration::from_millis(1),
+    );
+    assert!(!expired.ok);
+    assert_eq!(expired.error.unwrap().code, "E_TIMEOUT");
+    assert!(
+        engine
+            .execute("from tasks | filter id == 3")
+            .rows
+            .is_empty()
+    );
+}
+
+#[test]
+fn prepared_bulk_insert_rejects_the_transitional_wal() {
+    let temp = TempDir::new();
+    let wal = temp.0.join("prepared-bulk.wal");
+    let mut engine = Engine::open(Some(wal), None, 0).unwrap();
+    assert!(
+        engine
+            .execute("type Item =\n  id int\ntable items Item\n  key id")
+            .ok
+    );
+    let prepared = engine.prepare("insert many items $rows").unwrap();
+    let response = engine.execute_prepared(
+        &prepared,
+        BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![Value::Record(BTreeMap::from([(
+                "id".into(),
+                Value::Int(1),
+            )]))]),
+        )]),
+    );
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "E_CONFIG");
+    assert!(engine.execute("from items").rows.is_empty());
 }
 
 #[test]
@@ -211,11 +288,32 @@ fn parameterized_rows_commit_and_reopen_through_redb() {
         let response =
             engine.execute_with_params("insert items $row", BTreeMap::from([("row".into(), row)]));
         assert!(response.ok, "{}", response.message);
+        let prepared = engine
+            .prepare("insert many items $rows\nreturning id")
+            .unwrap();
+        let response = engine.execute_prepared(
+            &prepared,
+            BTreeMap::from([(
+                "rows".into(),
+                Value::List(vec![
+                    Value::Record(BTreeMap::from([("id".into(), Value::Int(2))])),
+                    Value::Record(BTreeMap::from([("id".into(), Value::Int(1))])),
+                ]),
+            )]),
+        );
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(response.affected_rows, Some(2));
+        assert!(response.rows[0]["id"].cmp_eq(&Value::Int(2)));
+        assert!(response.rows[1]["id"].cmp_eq(&Value::Int(1)));
     }
     let mut reopened = Engine::open_redb(&path).unwrap();
-    let response = reopened.execute("from items | filter id == 9223372036854775807");
+    let response = reopened.execute("from items | sort id");
     assert!(response.ok, "{}", response.message);
-    assert_eq!(response.rows.len(), 1);
+    assert_eq!(response.rows.len(), 3);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(response.rows[1]["id"].cmp_eq(&Value::Int(2)));
+    assert!(response.rows[2]["id"].cmp_eq(&Value::Int(i64::MAX)));
+    assert!(reopened.check_integrity().unwrap().backend_clean);
 }
 
 #[test]

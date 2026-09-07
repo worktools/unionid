@@ -1028,13 +1028,44 @@ impl Parser {
 
     fn insert(&mut self) -> Result<Statement> {
         self.expect_word("insert")?;
+        // Keep a table literally named `many` usable for existing single-row
+        // writes; the bulk form always has another identifier for its table.
+        let many = self.word("many")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| matches!(token.kind, Kind::Ident(_)));
+        if many {
+            self.bump();
+        }
         let table = self.identifier()?;
         if let Kind::Parameter(parameter) = self.kind().clone() {
             self.bump();
             let returning = self.optional_returning()?;
-            return Ok(Statement::InsertParameter {
+            return Ok(if many {
+                Statement::InsertManyParameter {
+                    table,
+                    parameter,
+                    parameter_type: None,
+                    returning,
+                }
+            } else {
+                Statement::InsertParameter {
+                    table,
+                    parameter,
+                    returning,
+                }
+            });
+        }
+        if many {
+            let values = self.value(0)?;
+            if !matches!(values, Value::List(_)) {
+                return Err(self.error("insert many requires a list of rows"));
+            }
+            let returning = self.optional_returning()?;
+            return Ok(Statement::InsertMany {
                 table,
-                parameter,
+                values,
                 returning,
             });
         }
@@ -1291,6 +1322,9 @@ impl Parser {
         let mut values = Vec::new();
         self.newlines();
         while *self.kind() != Kind::Close(close) {
+            if *self.kind() == Kind::End {
+                return Err(self.error(format!("expected closing '{close}'")));
+            }
             values.push(self.value(depth + 1)?);
             self.newlines();
             if !self.eat(Kind::Comma) {

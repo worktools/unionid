@@ -110,6 +110,23 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             line(output, depth, &format!("insert {table} ${parameter}"));
             returning_text(output, returning.as_ref(), depth);
         }
+        Statement::InsertMany {
+            table,
+            values,
+            returning,
+        } => {
+            many_write(output, table, values, depth);
+            returning_text(output, returning.as_ref(), depth);
+        }
+        Statement::InsertManyParameter {
+            table,
+            parameter,
+            returning,
+            ..
+        } => {
+            line(output, depth, &format!("insert many {table} ${parameter}"));
+            returning_text(output, returning.as_ref(), depth);
+        }
         Statement::Upsert {
             table,
             values,
@@ -204,6 +221,27 @@ fn row_write(output: &mut String, operation: &str, table: &str, value: &Value, d
             &format!("{operation} {table} {}", value.source_text()),
         );
     }
+}
+
+fn many_write(output: &mut String, table: &str, value: &Value, depth: usize) {
+    let Value::List(rows) = value else {
+        line(
+            output,
+            depth,
+            &format!("insert many {table} {}", value.source_text()),
+        );
+        return;
+    };
+    if rows.is_empty() {
+        line(output, depth, &format!("insert many {table} []"));
+        return;
+    }
+    line(output, depth, &format!("insert many {table} ["));
+    for (position, row) in rows.iter().enumerate() {
+        let comma = if position + 1 == rows.len() { "" } else { "," };
+        line(output, depth + 1, &format!("{}{comma}", row.source_text()));
+    }
+    line(output, depth, "]");
 }
 
 fn record_lines(

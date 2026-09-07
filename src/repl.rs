@@ -47,6 +47,7 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "let",
     "limit",
     "match",
+    "many",
     "max",
     "migration",
     "min",
@@ -430,6 +431,7 @@ mod tests {
         let helper = CompletionHelper::new(Some(&engine.introspection()));
         for expected in [
             "from",
+            "many",
             "returning",
             ".schema",
             "Task",

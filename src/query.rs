@@ -30,6 +30,17 @@ pub enum Statement {
         parameter: String,
         returning: Option<Returning>,
     },
+    InsertMany {
+        table: String,
+        values: Value,
+        returning: Option<Returning>,
+    },
+    InsertManyParameter {
+        table: String,
+        parameter: String,
+        parameter_type: Option<ScalarType>,
+        returning: Option<Returning>,
+    },
     Upsert {
         table: String,
         values: Value,

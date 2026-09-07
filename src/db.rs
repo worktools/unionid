@@ -19,6 +19,7 @@ type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<RowId>>>>;
 
 pub const MAX_QUERY_WORKING_ROWS: usize = 250_000;
 pub const MAX_RESULT_ROWS: usize = 100_000;
+pub const MAX_BULK_INSERT_ROWS: usize = 100_000;
 pub const MAX_RETURNING_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_GROUPS: usize = 100_000;
 pub const MAX_AGGREGATE_OUTPUTS: usize = 256;
@@ -488,7 +489,13 @@ impl Database {
                 values,
                 returning,
             } => self.insert(&table, values, returning.as_ref()),
+            Statement::InsertMany {
+                table,
+                values,
+                returning,
+            } => self.insert_many(&table, values, returning.as_ref(), deadline),
             Statement::InsertParameter { parameter, .. }
+            | Statement::InsertManyParameter { parameter, .. }
             | Statement::UpsertParameter { parameter, .. } => Err(Error::new(
                 "E_PARAM_MISSING",
                 format!("parameter '${parameter}' was not bound"),
@@ -634,6 +641,74 @@ impl Database {
         Ok(response)
     }
 
+    fn insert_many(
+        &mut self,
+        name: &str,
+        values: Value,
+        returning: Option<&Returning>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<QueryResponse> {
+        check_deadline(deadline)?;
+        let returning = self.bind_returning(name, returning)?;
+        let Value::List(values) = values else {
+            return Err(Error::new(
+                "E_TYPE",
+                "insert many requires a list of complete records",
+            ));
+        };
+        if values.len() > MAX_BULK_INSERT_ROWS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "bulk insert contains {} rows; limit is {MAX_BULK_INSERT_ROWS}",
+                    values.len()
+                ),
+            ));
+        }
+
+        let mut fields = Vec::with_capacity(values.len());
+        for (position, value) in values.iter().enumerate() {
+            check_deadline_periodically(deadline, position)?;
+            fields.push(self.coerce_row(name, value, "insert many")?);
+        }
+        let returned_fields = fields.iter().collect::<Vec<_>>();
+        let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
+
+        let table = self.table(name)?;
+        let count = u64::try_from(fields.len())
+            .map_err(|_| Error::new("E_LIMIT", "bulk insert row count exceeds u64"))?;
+        let next_row_id = table
+            .next_row_id
+            .checked_add(count)
+            .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
+        let mut rows = table.rows.clone();
+        let first_row_id = table.next_row_id;
+        for (position, fields) in fields.into_iter().enumerate() {
+            check_deadline_periodically(deadline, position)?;
+            let offset = u64::try_from(position)
+                .map_err(|_| Error::new("E_LIMIT", "bulk insert row count exceeds u64"))?;
+            rows.push(Row {
+                id: first_row_id + offset,
+                fields,
+            });
+        }
+        self.validate_primary_keys(name, &rows)?;
+        check_deadline(deadline)?;
+        self.replace_rows_and_indexes(name, rows)?;
+        let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
+            unreachable!("bulk insert table was validated")
+        };
+        table.next_row_id = next_row_id;
+
+        let affected = usize::try_from(count)
+            .map_err(|_| Error::new("E_LIMIT", "bulk insert row count exceeds usize"))?;
+        let mut response =
+            QueryResponse::ok_message(format!("inserted {affected} rows into '{name}'"));
+        response.affected_rows = Some(affected);
+        apply_returning(&mut response, returning, returned);
+        Ok(response)
+    }
+
     fn upsert(
         &mut self,
         name: &str,
@@ -692,11 +767,7 @@ impl Database {
         values: &Value,
         operation: &str,
     ) -> Result<BTreeMap<String, Value>> {
-        let table = self.table(name)?;
-        let ty = table
-            .row_type
-            .map(ScalarType::Ref)
-            .unwrap_or_else(|| ScalarType::Record(table.schema.clone()));
+        let ty = self.table_row_type(name)?;
         let value = self.catalog.coerce(values, &ty, name)?;
         let Value::Record(fields) = value.unwrapped() else {
             return Err(Error::new(
@@ -705,6 +776,23 @@ impl Database {
             ));
         };
         Ok(fields.clone())
+    }
+
+    fn table_row_type(&self, name: &str) -> Result<ScalarType> {
+        let table = self.table(name)?;
+        Ok(table
+            .row_type
+            .map(ScalarType::Ref)
+            .unwrap_or_else(|| ScalarType::Record(table.schema.clone())))
+    }
+
+    pub(crate) fn prepare_bulk_insert_parameter(
+        &self,
+        table: &str,
+        returning: Option<&Returning>,
+    ) -> Result<ScalarType> {
+        self.bind_returning(table, returning)?;
+        Ok(ScalarType::List(Box::new(self.table_row_type(table)?)))
     }
 
     fn insert_fields(&mut self, name: &str, fields: BTreeMap<String, Value>) -> Result<RowId> {
@@ -2422,6 +2510,43 @@ mod tests {
     fn table<'a>(database: &'a Database, name: &str) -> &'a Table {
         let DbObject::Table(table) = database.objects.get(name).unwrap();
         table
+    }
+
+    #[test]
+    fn bulk_insert_validates_before_rows_indexes_or_cursor_change() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "type Entry =\n  id int\ntable entries Entry\n  key id\ninsert entries {id = 1}",
+        );
+        let before_rows = table(&database, "entries").rows.clone();
+        let before_cursor = table(&database, "entries").next_row_id;
+        let before_indexes = database.indexes.get("entries").cloned().unwrap();
+
+        let statement = crate::syntax::parse("insert many entries [{id = 2}, {id = 1}]")
+            .unwrap()
+            .remove(0)
+            .statement;
+        let error = database.execute(statement).unwrap_err();
+        assert_eq!(error.code, "E_CONSTRAINT");
+        assert_eq!(
+            serde_json::to_value(&table(&database, "entries").rows).unwrap(),
+            serde_json::to_value(&before_rows).unwrap()
+        );
+        assert_eq!(table(&database, "entries").next_row_id, before_cursor);
+        assert_eq!(database.indexes["entries"], before_indexes);
+
+        execute(&mut database, "insert many entries [{id = 2}, {id = 3}]");
+        assert_eq!(
+            table(&database, "entries")
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        assert_eq!(table(&database, "entries").next_row_id, 3);
+        assert_eq!(database.indexes["entries"]["id"].values().count(), 3);
     }
 
     #[test]

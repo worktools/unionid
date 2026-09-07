@@ -34,7 +34,7 @@
 - 服务使用 64 个活动连接的有界等待集合；达到上限时返回结构化 `E_BUSY`，拒绝过程不创建 worker。请求/源码/value/query working rows/result rows/response bytes 与 pattern analysis 都有明确上限，服务执行 deadline 返回 `E_TIMEOUT` 且不发布候选事务。response 通过限长 writer 直接编码，避免先创建无界 JSON byte buffer。
 - SIGINT/SIGTERM 停止 accept，关闭空闲连接，等待已进入 Engine 的请求完成或原子放弃，再释放 redb 锁；关闭时输出 accepted/rejected/requests/failed 统计。真实子进程测试验证 idle client 存在时仍能退出并立即 reopen。
 - JSON Lines version 1 请求包含 request ID、完整多行源码、typed params 与可选 schema 前置条件；也支持独立且 1 MiB 有界的 introspection 动作。响应回显 ID，并通过独立 wire codec 无损表示 i64、命名 sum/record、tuple、option/list。未知版本、缺少/多余/错误参数分别使用稳定错误码；旧 `{query}` 与纯文本入口保留兼容。
-- 查询语言支持 `$name` AST 参数，insert/upsert 可用完整 row 参数。Rust `prepare/query` 在准备时检查表、字段、stage 与参数上下文类型，记录 schema revision/hash；schema 改变后拒绝旧 plan，避免使用失效的字段或 constructor 位置。
+- 查询语言支持 `$name` AST 参数，insert/upsert 可用完整 row 参数，`insert many` 可用 `list RowType` 参数。Rust `prepare/query` 在准备时检查表、字段、stage 与参数上下文类型，记录 schema revision/hash；除只读 pipeline/explain 外，prepared operation 还支持 memory/redb 上的参数化批量 insert，并用 `execute_prepared_until` 传播 deadline。schema 改变后拒绝旧 plan，避免使用失效的字段或 constructor 位置；过渡 WAL 拒绝无法按原源码重放的 prepared 写入。
 - 五分钟教程用同一组 ADT 源码覆盖持久建库、穷尽匹配、嵌套字段、原子更新、关闭重开和完整检查；集成测试比较 Rust Engine、本地 redb CLI 与 TCP 返回的 typed rows、列和 schema identity。发布脚本构建带精确 target/codec 清单的原生压缩包和 SHA-256，包内验证器从空目录重跑教程；macOS/Linux CI 与 tag release workflow 均执行该自检。
 
 ## 现有持久化适配的修复
@@ -67,7 +67,7 @@ cargo run -- fmt --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 211 项测试通过：lib 单元测试 18 项、`tests/language.rs` 81 项、`tests/formatter.rs` 5 项、`tests/storage.rs` 32 项、`tests/migration.rs` 18 项、`tests/release_scenarios.rs` 3 项、`tests/getting_started.rs` 1 项、`tests/schema.rs` 9 项、`tests/backup.rs` 4 项、`tests/interfaces.rs` 21 项、`tests/codec.rs` 9 项、`tests/protocol.rs` 10 项，分别验证 Engine 注入提交失败、REPL complete/incomplete/invalid 状态与 EOF、安全历史／补全／introspection、formatter 全 AST 覆盖／幂等／语义 round-trip、真实磁盘增长失败分类与原子重开、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、穷尽 ADT match assignment、filter/sort/take 原子目标选择与 DML returning 的前后像／投影／默认值／参数／空命中／提交前错误及大小预算／索引与 redb/TCP 路径、基础汇总、局部纯函数及其预算、类型化索引计划/explain、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、有限自递归类型的终止性／默认值／match witness／深度预算／codec／索引／redb 重开／migration／schema diff／backup restore、嵌套命名类型 migration、版本化 migration 文件/ledger/断点续跑、端到端升级恢复场景、五分钟教程的三入口一致性、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发与优雅关闭、typed 参数/prepared query/deadline，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
+当前全部 216 项测试通过：lib 单元测试 19 项、`tests/language.rs` 82 项、`tests/formatter.rs` 5 项、`tests/storage.rs` 32 项、`tests/migration.rs` 18 项、`tests/release_scenarios.rs` 3 项、`tests/getting_started.rs` 1 项、`tests/schema.rs` 9 项、`tests/backup.rs` 4 项、`tests/interfaces.rs` 22 项、`tests/codec.rs` 9 项、`tests/protocol.rs` 12 项，分别验证 Engine 注入提交失败、REPL complete/incomplete/invalid 状态与 EOF、安全历史／补全／introspection、formatter 全 AST 覆盖／幂等／语义 round-trip、真实磁盘增长失败分类与原子重开、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、typed 批量 insert 的默认值／嵌套 ADT／批内约束／RowId 游标／prepared/redb/TCP／deadline／WAL 拒绝与 returning 顺序、穷尽 ADT match assignment、filter/sort/take 原子目标选择与 DML returning 的前后像／投影／默认值／参数／空命中／提交前错误及大小预算／索引与 redb/TCP 路径、基础汇总、局部纯函数及其预算、类型化索引计划/explain、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、有限自递归类型的终止性／默认值／match witness／深度预算／codec／索引／redb 重开／migration／schema diff／backup restore、嵌套命名类型 migration、版本化 migration 文件/ledger/断点续跑、端到端升级恢复场景、五分钟教程的三入口一致性、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发与优雅关闭、typed 参数/prepared query/deadline，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
@@ -78,6 +78,6 @@ cargo run --example embedded
 - #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出与真实文件增长失败矩阵、`check --db`、10k/100k 恢复成本、共享类型化索引访问计划与 explain 均已接入。
 - #17–#20：显式 schema/data migration、版本化 runner/ledger、声明式 schema diff、逻辑备份还原和显式旧原型导入已实现。
 - #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；#66 补齐 parser 驱动的 REPL 续写，#69 提供规范 formatter，#70 增加安全历史、补全和跨模式 introspection。#74 已走通三条端到端升级恢复场景，#75 已记录真实负载；#76 提供可校验产物、包内教程与三入口一致性验证。
-- #25/#81/#83/#85/#87：已实现有限直接自递归 named ADT、穷尽 `match` update assignment、DML typed returning 和原子 sort/take mutation target；互递归、用户泛型和递归查询函数继续根据实际场景分别设计。
+- #25/#81/#83/#85/#87/#89：已实现有限直接自递归 named ADT、穷尽 `match` update assignment、DML typed returning、原子 sort/take mutation target 和 typed 批量 insert；互递归、用户泛型和递归查询函数继续根据实际场景分别设计。
 
 GitHub issues 保留各自的完整验收范围；实现了部分能力不等于对应里程碑全部完成。
