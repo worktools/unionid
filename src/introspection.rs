@@ -29,6 +29,8 @@ pub struct Introspection {
     pub types: Vec<String>,
     pub fields: Vec<String>,
     pub storage: StorageMode,
+    #[serde(default)]
+    pub read_only: bool,
     pub migration_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_head: Option<String>,

@@ -49,13 +49,36 @@ pub fn run_local_redb(
     run_local_redb_with_options(path, source, json, HistoryOptions::default())
 }
 
+pub fn run_local_redb_read_only(
+    path: impl Into<std::path::PathBuf>,
+    source: Option<String>,
+    json: bool,
+) -> Result<(), String> {
+    run_local_redb_read_only_with_options(path, source, json, HistoryOptions::default(), true)
+}
+
 pub fn run_local_redb_with_options(
     path: impl Into<std::path::PathBuf>,
     source: Option<String>,
     json: bool,
     history: HistoryOptions,
 ) -> Result<(), String> {
-    let engine = Engine::open_redb(path).map_err(|error| error.to_string())?;
+    run_local_redb_read_only_with_options(path, source, json, history, false)
+}
+
+pub fn run_local_redb_read_only_with_options(
+    path: impl Into<std::path::PathBuf>,
+    source: Option<String>,
+    json: bool,
+    history: HistoryOptions,
+    read_only: bool,
+) -> Result<(), String> {
+    let engine = if read_only {
+        Engine::open_redb_read_only(path)
+    } else {
+        Engine::open_redb(path)
+    }
+    .map_err(|error| error.to_string())?;
     run_local_engine(engine, source, json, history)
 }
 
@@ -691,6 +714,10 @@ fn print_introspection(
                 StorageMode::LegacyWalSnapshot => "legacy_wal_snapshot",
             };
             println!("mode {mode}");
+            println!(
+                "read only {}",
+                if introspection.read_only { "yes" } else { "no" }
+            );
             println!("schema revision {}", introspection.schema.revision);
             println!("schema hash {}", introspection.schema.hash);
             println!("migrations {}", introspection.migration_count);

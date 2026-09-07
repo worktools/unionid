@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use unionid::{
-    Engine, IntrospectionKind, MigrationApply, MigrationPlan, MigrationStatus, ProtocolRequest,
-    QueryResponse, SchemaCheck, StorageMode, UpsertAction, Value, WireValue, cli,
+    Engine, IntrospectionKind, MigrationApply, MigrationFile, MigrationPlan, MigrationStatus,
+    ProtocolRequest, QueryResponse, SchemaCheck, StorageMode, UpsertAction, Value, WireValue,
+    backup, cli,
 };
 
 #[test]
@@ -1187,6 +1188,128 @@ fn sigterm_gracefully_closes_idle_clients_and_releases_redb() {
     let response = reopened.execute("from entries | filter id == 1");
     assert!(response.ok, "{}", response.message);
     assert_eq!(response.rows.len(), 1);
+}
+
+#[test]
+fn read_only_cli_and_server_allow_observation_without_publishing_writes() {
+    let temp = TempDir::new();
+    let db = temp.0.join("read-only.redb");
+    let before_backup = temp.0.join("before.json");
+    let after_backup = temp.0.join("after.json");
+    let db_arg = db.to_string_lossy().into_owned();
+    {
+        let mut engine = Engine::open_redb(&db).unwrap();
+        let migration = MigrationFile::parse(
+            "migration m0001_initial\n  add type Entry =\n    id int\n    value text\n  add table entries Entry key id\n  add index entries.value\n",
+        )
+        .unwrap();
+        engine.apply_migrations(&[migration]).unwrap();
+        assert!(
+            engine
+                .execute("insert entries {id = 1, value = \"original\"}")
+                .ok
+        );
+    }
+    let before = backup::create(&db, &before_backup).unwrap();
+
+    let mut server = Server::start(&["--db", &db_arg, "--read-only"]);
+    let read = cli::send_one(&server.addr, "from entries | filter id == 1").unwrap();
+    assert!(read.ok, "{}", read.message);
+    assert_eq!(read.rows.len(), 1);
+    let storage = cli::send_introspection(&server.addr, IntrospectionKind::Storage).unwrap();
+    assert_eq!(storage.storage, StorageMode::Redb);
+    assert!(storage.read_only);
+    let rejected = cli::send_one(
+        &server.addr,
+        "update entries\nfilter id == 1\nset value = \"changed\"",
+    )
+    .unwrap();
+    assert_eq!(rejected.error.unwrap().code, "E_READ_ONLY");
+    server.shutdown();
+
+    let read = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--db",
+            &db_arg,
+            "--read-only",
+            "--query",
+            "from entries | filter id == 1",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let read: QueryResponse = serde_json::from_slice(&read.stdout).unwrap();
+    assert_eq!(read.rows.len(), 1);
+
+    let rejected = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--db",
+            &db_arg,
+            "--read-only",
+            "--query",
+            "delete entries",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let rejected: QueryResponse = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(rejected.error.unwrap().code, "E_READ_ONLY");
+
+    let mut reopened = Engine::open_redb(&db).unwrap();
+    let rows = reopened.execute("from entries | sort id");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(reopened.migration_history().len(), 1);
+    let plan = reopened.execute("explain from entries | filter value == \"original\"");
+    assert!(plan.ok, "{}", plan.message);
+    assert_eq!(
+        plan.plan.unwrap().access.kind,
+        unionid::QueryAccessKind::SecondaryIndexLookup
+    );
+    drop(reopened);
+    let after = backup::create(&db, &after_backup).unwrap();
+    assert_eq!(
+        after, before,
+        "logical data, RowIds, indexes, and ledger changed"
+    );
+}
+
+#[test]
+fn read_only_mode_requires_an_existing_durable_database() {
+    let temp = TempDir::new();
+    let missing = temp.0.join("missing.redb");
+    let missing_arg = missing.to_string_lossy().into_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--db",
+            &missing_arg,
+            "--read-only",
+            "--query",
+            "from entries",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E_CONFIG"));
+    assert!(!missing.exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["run", "--read-only", "--query", "from entries"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--db"));
 }
 
 #[test]

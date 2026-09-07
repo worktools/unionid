@@ -27,6 +27,7 @@ pub struct Engine {
     snapshot_every: usize,
     writes_since_snapshot: usize,
     write_failed: bool,
+    read_only: bool,
     durable: Option<Box<dyn DurableBackend>>,
     storage_mode: StorageMode,
     _locks: Vec<File>,
@@ -177,6 +178,7 @@ impl Engine {
             snapshot_every,
             writes_since_snapshot: 0,
             write_failed: false,
+            read_only: false,
             durable: None,
             storage_mode,
             _locks: locks,
@@ -193,6 +195,36 @@ impl Engine {
             storage_mode: StorageMode::Redb,
             ..Self::default()
         })
+    }
+
+    /// Open an existing durable redb database behind a read-only execution
+    /// boundary. A missing path is rejected instead of creating an empty
+    /// database that could hide a deployment mistake.
+    pub fn open_redb_read_only(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        if !path.is_file() {
+            return Err(Error::new(
+                "E_CONFIG",
+                format!(
+                    "read-only database '{}' does not exist or is not a file",
+                    path.display()
+                ),
+            ));
+        }
+        Self::open_redb(path).map(|engine| engine.with_read_only(true))
+    }
+
+    /// Configure this Engine as a read-only execution boundary.
+    ///
+    /// Every mutating script or pending migration is rejected after validation
+    /// and before candidate state or a durable transaction is created.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn execute(&mut self, source: &str) -> QueryResponse {
@@ -452,6 +484,12 @@ impl Engine {
     ) -> Result<QueryResponse> {
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
         let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
+        if mutating && self.read_only {
+            return Err(Error::new(
+                "E_READ_ONLY",
+                "mutating scripts are disabled by the read-only execution boundary",
+            ));
+        }
         if schema_changing && !self.db.migration_history().is_empty() {
             return Err(Error::new(
                 "E_MIGRATION",
@@ -558,6 +596,12 @@ impl Engine {
             ));
         }
         let applied_count = validate_files_against_history(files, self.db.migration_history())?;
+        if self.read_only && applied_count < files.len() {
+            return Err(Error::new(
+                "E_READ_ONLY",
+                "pending migrations cannot be applied through a read-only Engine",
+            ));
+        }
         let skipped = files[..applied_count]
             .iter()
             .map(|file| file.id.clone())
@@ -741,6 +785,7 @@ impl Engine {
             types: self.db.type_names(),
             fields: self.db.field_names(),
             storage: self.storage_mode,
+            read_only: self.read_only,
             migration_count: self.db.migration_history().len(),
             migration_head: self
                 .db
@@ -862,6 +907,7 @@ fn canonical_existing_path(path: PathBuf) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     struct FailOnce {
         uncertain: Option<bool>,
@@ -925,5 +971,89 @@ mod tests {
         let blocked = engine.execute("create table later (id int)");
         assert!(!blocked.ok);
         assert!(blocked.message.contains("writes are disabled"));
+    }
+
+    #[test]
+    fn read_only_engine_allows_reads_and_atomically_rejects_mutations() {
+        let mut engine = Engine::memory();
+        assert!(
+            engine
+                .execute(
+                    "type Task =\n  id int\n  title text\ntable tasks Task\n  key id\ninsert tasks {id = 1, title = \"kept\"}"
+                )
+                .ok
+        );
+        let schema = engine.schema_info();
+        let mut engine = engine.with_read_only(true);
+
+        assert!(engine.is_read_only());
+        assert!(engine.introspection().read_only);
+        assert_eq!(engine.execute("from tasks").rows.len(), 1);
+        assert!(engine.execute("explain from tasks | filter id == 1").ok);
+
+        let rejected =
+            engine.execute("from tasks | take 1\ninsert tasks {id = 2, title = \"rejected\"}");
+        assert_eq!(rejected.error.unwrap().code, "E_READ_ONLY");
+        assert_eq!(engine.schema_info(), schema);
+        let rows = engine.execute("from tasks | sort id");
+        assert!(rows.ok, "{}", rows.message);
+        assert_eq!(rows.rows.len(), 1);
+    }
+
+    #[test]
+    fn read_only_prepared_writes_still_validate_parameters_before_rejection() {
+        let mut engine = Engine::memory();
+        assert!(
+            engine
+                .execute("type Task =\n  id int\ntable tasks Task\n  key id")
+                .ok
+        );
+        let prepared = engine.prepare("insert tasks $task").unwrap();
+        let mut engine = engine.with_read_only(true);
+
+        let missing = engine.execute_prepared(&prepared, BTreeMap::new());
+        assert_eq!(missing.error.unwrap().code, "E_PARAM_MISSING");
+        let rejected = engine.execute_prepared(
+            &prepared,
+            BTreeMap::from([(
+                "task".into(),
+                crate::Value::Record(BTreeMap::from([("id".into(), crate::Value::Int(1))])),
+            )]),
+        );
+        assert_eq!(rejected.error.unwrap().code, "E_READ_ONLY");
+        assert!(engine.execute("from tasks").rows.is_empty());
+    }
+
+    #[test]
+    fn read_only_engine_plans_but_does_not_apply_pending_migrations() {
+        let file = MigrationFile::parse(
+            "migration m0001_initial\n  add type Task =\n    id int\n  add table tasks Task key id\n",
+        )
+        .unwrap();
+        let mut read_only = Engine::memory().with_read_only(true);
+        assert_eq!(
+            read_only
+                .plan_migrations(std::slice::from_ref(&file))
+                .unwrap()
+                .pending
+                .len(),
+            1
+        );
+        assert_eq!(
+            read_only
+                .apply_migrations(std::slice::from_ref(&file))
+                .unwrap_err()
+                .code,
+            "E_READ_ONLY"
+        );
+
+        let mut writable = Engine::memory();
+        writable
+            .apply_migrations(std::slice::from_ref(&file))
+            .unwrap();
+        let mut read_only = writable.with_read_only(true);
+        let repeated = read_only.apply_migrations(&[file]).unwrap();
+        assert!(repeated.applied.is_empty());
+        assert_eq!(repeated.skipped, ["m0001_initial"]);
     }
 }

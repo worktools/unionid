@@ -1,12 +1,12 @@
 # unionid 路线图
 
-规划日期：2026-09-07。GitHub 使用一个总览、分阶段具体任务和 5 个里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
+规划日期：2026-09-07。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
-v0.1 的发布门槛 [#70](https://github.com/worktools/unionid/issues/70)、[#74](https://github.com/worktools/unionid/issues/74)–[#76](https://github.com/worktools/unionid/issues/76) 已闭环。发布基线后的核心使用路径 [#81](https://github.com/worktools/unionid/issues/81)、[#83](https://github.com/worktools/unionid/issues/83)、[#85](https://github.com/worktools/unionid/issues/85)、[#87](https://github.com/worktools/unionid/issues/87)、[#89](https://github.com/worktools/unionid/issues/89)、[#91](https://github.com/worktools/unionid/issues/91)、[#93](https://github.com/worktools/unionid/issues/93)、[#95](https://github.com/worktools/unionid/issues/95)、[#97](https://github.com/worktools/unionid/issues/97)、[#100](https://github.com/worktools/unionid/issues/100) 和 [#101](https://github.com/worktools/unionid/issues/101) 也已完成。[#105](https://github.com/worktools/unionid/issues/105) 的 Node 24 Actions 升级已由 #107 完成；当前先完成 [#108](https://github.com/worktools/unionid/issues/108) 的 GitHub Actions crates.io 发布，再由 [#103](https://github.com/worktools/unionid/issues/103) 从最终 `main` 候选公开 v0.1.0；join、window、分布式和更广泛高阶语言工作不混入这一轮。
+v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。当前进入 [M5 总览 #111](https://github.com/worktools/unionid/issues/111)：先收紧真实生产边界，再改善大结果集、标量类型和 CLI 诊断，最后按独立需求验证语言扩展；join、window 和分布式仍不混入这一轮。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，无分号、减少标点。本轮草案采用 `field type`、`option text`／`list text`、缩进式声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不再沿用 TypeScript 风格字段注解或逐行 `|>`。
 
@@ -19,8 +19,9 @@ v0.1 的发布门槛 [#70](https://github.com/worktools/unionid/issues/70)、[#7
 | [M2 · 可靠读写与持久化](https://github.com/worktools/unionid/milestone/3) | 原子持久提交、恢复、主键/CRUD/upsert/批次、索引 | 提交/恢复边界经过故障验证，有无索引结果一致 |
 | [M3 · Schema migration 与数据生命周期](https://github.com/worktools/unionid/milestone/4) | Schema/数据转换、runner、diff、备份还原、旧格式导入 | 真实旧库可升级，失败迁移不留下半个新 schema |
 | [M4 · v0.1 日常可用版本](https://github.com/worktools/unionid/milestone/5) | CLI/REPL、Rust API、协议、服务限额、基准与发布 | 日常操作、恢复和升级均通过端到端验收 |
+| [M5 · 生产边界与应用体验](https://github.com/worktools/unionid/milestone/6) | 只读边界、幂等写入、游标分页、生产标量、并发读快照与 CLI 诊断 | 核心风险有显式协议和故障测试，应用无需依赖隐式约定 |
 
-P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 范围；P2 为后续探索。里程碑不填写未经验证的工期承诺，先完成 M0 后再按范围和实际速度估算。
+P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力；P2 为后续语言探索。里程碑不填写未经验证的工期承诺。
 
 ## 任务与依赖
 
@@ -88,22 +89,24 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 | [#108](https://github.com/worktools/unionid/issues/108) | [发布] 通过 GitHub Actions 发布 unionid crate | P0 | [#105](https://github.com/worktools/unionid/issues/105) |
 | [#103](https://github.com/worktools/unionid/issues/103) | [发布] 发布可校验的 v0.1.0 产物 | P0 | [#24](https://github.com/worktools/unionid/issues/24)、[#76](https://github.com/worktools/unionid/issues/76)、[#101](https://github.com/worktools/unionid/issues/101)、[#105](https://github.com/worktools/unionid/issues/105)、[#108](https://github.com/worktools/unionid/issues/108) |
 
-### 后续探索
+### M5 · 生产边界与应用体验
 
-上述已选定的后续核心切片完成了有限自递归 ADT、prepared DML、typed unique index、Rust serde ADT、typed bulk upsert、统一 bool result expression 和 HTTP 数据边界。当前核心不再增加语言范围；[#105](https://github.com/worktools/unionid/issues/105) 的 Actions runtime 升级已经完成，当前顺序为 [#108](https://github.com/worktools/unionid/issues/108) 的 Actions crates.io 发布，再完成 [#103](https://github.com/worktools/unionid/issues/103) 的可校验 v0.1.0 公开发布。
+| Issue | 任务 | 优先级 | 前置依赖 |
+| --- | --- | --- | --- |
+| [#111](https://github.com/worktools/unionid/issues/111) | [路线图] M5 总览与验收顺序 | P0 | v0.1.0 发布基线 |
+| [#112](https://github.com/worktools/unionid/issues/112) | [核心] 只读执行边界与可观测状态 | P0 | 无；首个实现切片 |
+| [#113](https://github.com/worktools/unionid/issues/113) | [协议] 持久幂等写入 receipt | P0 | [#112](https://github.com/worktools/unionid/issues/112) |
+| [#114](https://github.com/worktools/unionid/issues/114) | [查询] 稳定 cursor 分页与取消 | P1 | [#113](https://github.com/worktools/unionid/issues/113) 的请求身份契约 |
+| [#115](https://github.com/worktools/unionid/issues/115) | [类型] 生产标量契约 | P1 | 先冻结时间、十进制与二进制编码边界 |
+| [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | P1 | [#112](https://github.com/worktools/unionid/issues/112)、[#114](https://github.com/worktools/unionid/issues/114) |
+| [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | P1 | 核心错误协议稳定 |
+| [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | P2 | 以真实 schema 复用需求单独验证 |
+| [#119](https://github.com/worktools/unionid/issues/119) | [语言] match 查询简写 | P2 | 不引入第二套 match 语义 |
+| [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | P2 | 先定义 schema identity 与参数契约 |
 
-[#25](https://github.com/worktools/unionid/issues/25)：用户定义泛型与递归 ADT、模式查询简写、函数组合。P2，不阻塞当前核心；[#81](https://github.com/worktools/unionid/issues/81) 已交付有实际树／原因链场景支撑的有限直接自递归 ADT，[#83](https://github.com/worktools/unionid/issues/83) 让原子 update 复用现有穷尽 match IR。互递归、用户泛型、递归查询函数和额外简写继续分别评估，避免一次引入批量 catalog 注册、参数化身份和新的执行语义。
+## 当前执行顺序
 
-## 建议从哪里开始
-
-[#3](https://github.com/worktools/unionid/issues/3)、[#4](https://github.com/worktools/unionid/issues/4) 和 [#5](https://github.com/worktools/unionid/issues/5) 已完成；实时状态和证据仍以 GitHub 为准。当前执行顺序是：
-
-1. [#6](https://github.com/worktools/unionid/issues/6)、[#7](https://github.com/worktools/unionid/issues/7) 与 [#28](https://github.com/worktools/unionid/issues/28) 已完成；继续用当前可执行规范、示例和实际反馈收敛 [#2](https://github.com/worktools/unionid/issues/2)。
-2. [#13](https://github.com/worktools/unionid/issues/13) 已交付 redb 原子提交、进程退出与真实文件增长失败验证；[#14](https://github.com/worktools/unionid/issues/14) 已记录 10k/100k ADT 工作集的 open/check 耗时、峰值内存和可重复环境。
-3. [#9](https://github.com/worktools/unionid/issues/9)、[#11](https://github.com/worktools/unionid/issues/11)、[#12](https://github.com/worktools/unionid/issues/12)、[#34](https://github.com/worktools/unionid/issues/34)–[#36](https://github.com/worktools/unionid/issues/36) 与 [#59](https://github.com/worktools/unionid/issues/59)–[#61](https://github.com/worktools/unionid/issues/61) 已完成；[#16](https://github.com/worktools/unionid/issues/16) 已补齐共享类型化索引访问计划与 explain。
-4. [#15](https://github.com/worktools/unionid/issues/15)、[#17](https://github.com/worktools/unionid/issues/17)–[#20](https://github.com/worktools/unionid/issues/20) 已完成，M2/M3 核心链路闭合。[#22](https://github.com/worktools/unionid/issues/22)、[#23](https://github.com/worktools/unionid/issues/23)、[#66](https://github.com/worktools/unionid/issues/66) 与 [#69](https://github.com/worktools/unionid/issues/69) 已完成。[#70](https://github.com/worktools/unionid/issues/70)、[#74](https://github.com/worktools/unionid/issues/74)–[#76](https://github.com/worktools/unionid/issues/76) 和上述后续核心切片已完成发布体验、数据正确性、负载测量、安装验收与核心应用边界；[#105](https://github.com/worktools/unionid/issues/105) 已完成，当前先执行 [#108](https://github.com/worktools/unionid/issues/108) 的 Actions crates.io 发布配置，再由 [#103](https://github.com/worktools/unionid/issues/103) 完成 v0.1.0 最终候选和公开发布。
-
-类型演进规则刻意放在 M0，避免 migration 被当作事后附加；完整 migration 执行要等原子存储与 DML 成熟。
+先完成 #112 的显式只读边界；随后以故障注入定义 #113 的 exactly-once 可观察结果，再推进 #114 的有界读取体验。#115、#116 和 #117 可在核心协议稳定后并行拆分。#118–#120 是从已关闭的宽泛 #25 拆出的独立探索，不作为生产正确性的前置条件。
 
 ## 维护约定
 
