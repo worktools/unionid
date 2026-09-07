@@ -240,7 +240,7 @@ set 的字段路径按表的完整 row schema 绑定。右侧可使用 scalar ex
 
 match assignment 的顶层小写 binding 是不可反驳 pattern，必须放在最后。`current => current` 同时绑定并返回完整源值，适合只转换部分 constructor；`_` 仍可用于不需要原值的最终分支。结果可引用该分支的嵌套 binding 与 typed 参数。嵌套更新路径只穿过 record；要修改 sum/option/list 内部内容，应匹配并构造完整目标值。
 
-同一 update 的多个 set 同时求值，右侧全部读取修改前的行。父路径与子路径不能同时赋值，例如 `set owner = {...}` 与 `set owner.email = ...` 会返回 `E_QUERY`。每行形成完整候选 record 后重新类型检查，全部候选形成后检查主键唯一性，再一起替换 rows 和 indexes。任何 filter、算术、类型或约束错误都会由 Engine 丢弃整个请求的候选状态；redb 模式在同一事务提交。
+同一 update 的多个 set 同时求值，右侧全部读取修改前的行。父路径与子路径不能同时赋值，例如 `set owner = {...}` 与 `set owner.email = ...` 会返回 `E_QUERY`。每行形成完整候选 record 后重新类型检查，全部候选形成后检查主键与 unique indexes，再一起替换 rows 和 indexes。unique index 使用完整 typed ADT 相等语义，`None` 也是一个受唯一约束的值。任何 filter、算术、类型或约束错误都会由 Engine 丢弃整个请求的候选状态；redb 模式在同一事务提交。
 
 末尾可写 `returning` 返回完整受影响行，或写 `returning id, state` 返回有序字段路径投影。单行／批量 insert 与 upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像；空批次或未匹配 update/delete 仍提供投影 columns、空 rows 和 `affected_rows = 0`。批量 insert 遵循输入顺序，update/delete 遵循 mutation target 选择顺序；没有 sort 时即稳定 RowId 顺序。字段绑定、100,000 行上限和 8 MiB typed wire rows 预算均在候选状态提交前检查，失败不发布修改。
 

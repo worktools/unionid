@@ -1,6 +1,6 @@
 # 声明式 Schema 与 Diff
 
-应用可以把期望结构保存在普通 `.uid` schema 文件中。文件只包含 `type`、`table` 和 `create index` 声明，沿用数据库语言的无分号、缩进式语法；不能包含数据写入、查询或 migration。为保证规范输出能以相同身份顺序重建，声明依次放置 named types、tables、secondary indexes。示例见 [`examples/schema.uid`](../examples/schema.uid)。
+应用可以把期望结构保存在普通 `.uid` schema 文件中。文件只包含 `type`、`table`、`create index` 和 `create unique index` 声明，沿用数据库语言的无分号、缩进式语法；不能包含数据写入、查询或 migration。为保证规范输出能以相同身份顺序重建，声明依次放置 named types、tables、secondary indexes。示例见 [`examples/schema.uid`](../examples/schema.uid)。
 
 ```text
 type State = Pending | Running | Complete
@@ -15,7 +15,7 @@ table tasks Task
   key id
 
 create index tasks (state)
-create index tasks (priority)
+create unique index tasks (priority)
 ```
 
 ## 检查和规范化
@@ -42,7 +42,7 @@ diff 读取 live schema 和 migration ledger，但不写数据库。数据库文
 
 以下确定性变化可直接生成可运行操作：
 
-- 增删命名类型、表、字段、变体和 secondary index
+- 增删命名类型、表、字段、变体和 ordinary/unique secondary index；同一路径约束 kind 的变化生成 drop 后 add
 - 有明确默认值的新字段和默认值变更
 - 主键增加、删除或替换
 - 从空库创建完整命名 ADT schema

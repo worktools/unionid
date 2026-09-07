@@ -3,7 +3,7 @@ mod common;
 use common::TempDir;
 use unionid::backup;
 use unionid::migration::load_directory;
-use unionid::{Engine, Value};
+use unionid::{Engine, MigrationFile, Value};
 
 #[test]
 fn backup_restore_preserves_typed_data_schema_indexes_and_history() {
@@ -11,7 +11,13 @@ fn backup_restore_preserves_typed_data_schema_indexes_and_history() {
     let source = dir.0.join("source.redb");
     let archive = dir.0.join("backup.json");
     let restored = dir.0.join("restored.redb");
-    let files = load_directory("examples/migrations").unwrap();
+    let mut files = load_directory("examples/migrations").unwrap();
+    files.push(
+        MigrationFile::parse(
+            "migration m0003_unique_title\n  parent m0002_add_priority\n  add unique index tasks.title",
+        )
+        .unwrap(),
+    );
     let expected_schema;
     {
         let mut engine = Engine::open_redb(&source).unwrap();
@@ -27,13 +33,22 @@ fn backup_restore_preserves_typed_data_schema_indexes_and_history() {
     let recovered = backup::restore(&archive, &restored).unwrap();
     assert_eq!(created, recovered);
     assert_eq!(recovered.schema, expected_schema);
-    assert_eq!(recovered.migration_count, 2);
+    assert_eq!(recovered.migration_count, 3);
 
     let mut engine = Engine::open_redb(&restored).unwrap();
-    assert_eq!(engine.migration_status(&files).unwrap().applied.len(), 2);
+    assert_eq!(engine.migration_status(&files).unwrap().applied.len(), 3);
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index tasks (title)")
+    );
     let rows = engine.execute("from tasks | filter priority == 0");
     assert_eq!(rows.rows.len(), 1);
     assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    let duplicate =
+        engine.execute("insert tasks {id = 2, title = \"saved\", state = Pending, priority = 1}");
+    assert!(!duplicate.ok);
+    assert_eq!(duplicate.error.unwrap().code, "E_CONSTRAINT");
 }
 
 #[test]

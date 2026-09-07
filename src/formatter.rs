@@ -91,8 +91,19 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
                 line(output, depth + 1, &format!("key {key}"));
             }
         }
-        Statement::CreateIndex { table, column } => {
-            line(output, depth, &format!("create index {table} ({column})"));
+        Statement::CreateIndex {
+            table,
+            column,
+            unique,
+        } => {
+            line(
+                output,
+                depth,
+                &format!(
+                    "create {}index {table} ({column})",
+                    if *unique { "unique " } else { "" }
+                ),
+            );
         }
         Statement::Insert {
             table,
@@ -571,9 +582,18 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
                 transform_text(transform)
             ),
         ),
-        SchemaMigration::AddIndex { table, column } => {
-            line(output, depth, &format!("add index {table}.{column}"))
-        }
+        SchemaMigration::AddIndex {
+            table,
+            column,
+            unique,
+        } => line(
+            output,
+            depth,
+            &format!(
+                "add {}index {table}.{column}",
+                if *unique { "unique " } else { "" }
+            ),
+        ),
         SchemaMigration::DropIndex { table, column } => {
             line(output, depth, &format!("drop index {table}.{column}"))
         }

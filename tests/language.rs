@@ -2734,6 +2734,161 @@ fn failed_multi_row_updates_preserve_rows_constraints_and_indexes() {
 }
 
 #[test]
+fn typed_unique_indexes_enforce_complete_adt_value_equality_atomically() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type Address =
+  city text
+  unit option int = None
+
+type Contact =
+  Email text
+  | Postal Address
+
+type Identity =
+  contact Contact
+  tags list text
+
+type Account =
+  id int
+  email text
+  alias option text = None
+  identity Identity
+
+table accounts Account
+  key id
+
+create unique index accounts (email)
+create unique index accounts (alias)
+create unique index accounts (identity)
+
+insert accounts
+  id = 1
+  email = "one@example.com"
+  identity = {contact = Email "one@example.com", tags = ["admin", "api"]}"#,
+    );
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index accounts (email)")
+    );
+
+    let duplicate_none = engine.execute(
+        r#"insert accounts
+  id = 2
+  email = "two@example.com"
+  identity = {contact = Postal {city = "Paris"}, tags = []}"#,
+    );
+    assert!(!duplicate_none.ok);
+    assert_eq!(duplicate_none.error.unwrap().code, "E_CONSTRAINT");
+    assert!(
+        ok(&mut engine, "from accounts | filter id == 2")
+            .rows
+            .is_empty()
+    );
+
+    ok(
+        &mut engine,
+        r#"insert accounts
+  id = 2
+  email = "two@example.com"
+  alias = Some "two"
+  identity = {contact = Postal {city = "Paris"}, tags = []}"#,
+    );
+    ok(
+        &mut engine,
+        r#"insert accounts
+  id = 3
+  email = "three@example.com"
+  alias = Some "three"
+  identity = {contact = Postal {city = "Paris", unit = Some 1}, tags = []}"#,
+    );
+    let lookup = ok(
+        &mut engine,
+        r#"from accounts
+filter identity == {contact = Postal {city = "Paris"}, tags = []}"#,
+    );
+    assert_eq!(lookup.rows.len(), 1);
+    let plan = ok(
+        &mut engine,
+        r#"explain from accounts
+filter identity == {contact = Postal {city = "Paris"}, tags = []}"#,
+    );
+    assert_eq!(
+        plan.plan.unwrap().access.kind,
+        QueryAccessKind::SecondaryIndexLookup
+    );
+    let before = serde_json::to_value(ok(&mut engine, "from accounts | sort id").rows).unwrap();
+
+    for source in [
+        "update accounts\nfilter id == 2\nset email = \"one@example.com\"",
+        r#"update accounts
+filter id == 3
+set identity = {contact = Postal {city = "Paris"}, tags = []}"#,
+        r#"upsert accounts
+  id = 2
+  email = "one@example.com"
+  alias = Some "two"
+  identity = {contact = Postal {city = "Paris"}, tags = []}"#,
+        r#"insert many accounts [
+  {id = 4, email = "four@example.com", alias = Some "four", identity = {contact = Email "four@example.com", tags = []}},
+  {id = 5, email = "four@example.com", alias = Some "five", identity = {contact = Email "five@example.com", tags = []}}
+]"#,
+    ] {
+        let failed = engine.execute(source);
+        assert!(!failed.ok, "accepted {source}");
+        assert_eq!(failed.error.unwrap().code, "E_CONSTRAINT");
+    }
+    let unchanged = ok(&mut engine, "from accounts | sort id");
+    assert_eq!(unchanged.rows.len(), 3);
+    assert_eq!(serde_json::to_value(unchanged.rows).unwrap(), before);
+}
+
+#[test]
+fn creating_or_migrating_a_unique_index_over_duplicates_is_atomic() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Entry =\n  id int\n  value text\ntable entries Entry\n  key id\ninsert entries {id = 1, value = \"same\"}\ninsert entries {id = 2, value = \"same\"}",
+    );
+    let before = engine.schema_info();
+    let direct = engine.execute("create unique index entries (value)");
+    assert!(!direct.ok);
+    assert_eq!(direct.error.unwrap().code, "E_CONSTRAINT");
+    assert_eq!(engine.schema_info(), before);
+    assert!(!engine.schema().contains("unique index"));
+
+    let migration =
+        engine.execute("migration m0001_unique_value\n  add unique index entries.value");
+    assert!(!migration.ok);
+    assert_eq!(migration.error.unwrap().code, "E_CONSTRAINT");
+    assert_eq!(engine.schema_info(), before);
+
+    ok(
+        &mut engine,
+        "update entries\nfilter id == 2\nset value = \"other\"",
+    );
+    ok(
+        &mut engine,
+        "migration m0001_unique_value\n  add unique index entries.value",
+    );
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index entries (value)")
+    );
+    let unique_schema = engine.schema_info();
+    let conversion = engine.execute(
+        "migration m0002_collapse_values\n  change field Entry.value to text using old -> \"same\"",
+    );
+    assert!(!conversion.ok);
+    assert_eq!(conversion.error.unwrap().code, "E_CONSTRAINT");
+    assert_eq!(engine.schema_info(), unique_schema);
+    assert_eq!(ok(&mut engine, "from entries | sort id").rows.len(), 2);
+}
+
+#[test]
 fn update_and_delete_validate_before_scanning_empty_tables() {
     let mut engine = Engine::memory();
     ok(

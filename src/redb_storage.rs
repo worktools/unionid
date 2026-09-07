@@ -13,7 +13,8 @@ use crate::error::{Error, Result};
 use crate::migration::MigrationEntry;
 
 const STORAGE_FORMAT_VERSION: u32 = 1;
-const CATALOG_CODEC_VERSION: u16 = 1;
+const CATALOG_CODEC_VERSION: u16 = 2;
+const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
 const MIGRATION_CODEC_VERSION: u16 = 1;
 
@@ -542,11 +543,16 @@ fn read_meta(table: &impl ReadableTable<&'static str, &'static [u8]>) -> Result<
         read_fixed::<4>(table, FORMAT_KEY)?,
         STORAGE_FORMAT_VERSION.to_be_bytes(),
     )?;
-    expect_version(
-        CATALOG_CODEC_KEY,
-        read_fixed::<2>(table, CATALOG_CODEC_KEY)?,
-        CATALOG_CODEC_VERSION.to_be_bytes(),
-    )?;
+    let catalog_version = u16::from_be_bytes(read_fixed::<2>(table, CATALOG_CODEC_KEY)?);
+    if !matches!(
+        catalog_version,
+        LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION
+    ) {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported {CATALOG_CODEC_KEY}"),
+        ));
+    }
     expect_version(
         VALUE_CODEC_KEY,
         read_fixed::<2>(table, VALUE_CODEC_KEY)?,
@@ -644,8 +650,22 @@ fn decode_migration_entry(value: &[u8]) -> Result<MigrationEntry> {
 fn encode_catalog_entry(entry: &DurableCatalogEntry) -> Result<Vec<u8>> {
     let mut value = Vec::from(CATALOG_MAGIC.as_slice());
     value.extend_from_slice(&CATALOG_CODEC_VERSION.to_be_bytes());
+    let mut json = serde_json::to_value(entry)
+        .map_err(|error| Error::new("E_STORAGE", format!("encode catalog entry: {error}")))?;
+    if let DurableCatalogEntry::Index { definition, .. } = entry {
+        let kind = if definition.kind.is_unique() {
+            "unique"
+        } else {
+            "ordinary"
+        };
+        json.get_mut("value")
+            .and_then(|value| value.get_mut("definition"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("index catalog JSON has a definition object")
+            .insert("kind".into(), serde_json::Value::String(kind.into()));
+    }
     value.extend(
-        serde_json::to_vec(entry)
+        serde_json::to_vec(&json)
             .map_err(|error| Error::new("E_STORAGE", format!("encode catalog entry: {error}")))?,
     );
     Ok(value)
@@ -659,7 +679,10 @@ fn decode_catalog_entry(key: &[u8], value: &[u8]) -> Result<DurableCatalogEntry>
         return Err(Error::new("E_STORAGE", "invalid catalog codec magic"));
     }
     let version = u16::from_be_bytes(value[4..6].try_into().unwrap());
-    if version != CATALOG_CODEC_VERSION {
+    if !matches!(
+        version,
+        LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION
+    ) {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported catalog codec version {version}"),

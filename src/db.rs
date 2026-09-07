@@ -245,12 +245,32 @@ fn check_deadline_periodically(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexKind {
+    #[default]
+    Ordinary,
+    Unique,
+}
+
+impl IndexKind {
+    pub(crate) fn is_ordinary(&self) -> bool {
+        *self == Self::Ordinary
+    }
+
+    pub(crate) fn is_unique(&self) -> bool {
+        *self == Self::Unique
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexDefinition {
     pub id: u64,
     pub table_id: u64,
     pub column: String,
     pub field_path: Vec<u64>,
+    #[serde(default, skip_serializing_if = "IndexKind::is_ordinary")]
+    pub kind: IndexKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,7 +503,11 @@ impl Database {
                 };
                 self.create_table(table, columns.clone(), Some(def.id), key)
             }
-            Statement::CreateIndex { table, column } => self.create_index(&table, &column),
+            Statement::CreateIndex {
+                table,
+                column,
+                unique,
+            } => self.create_index(&table, &column, unique),
             Statement::Insert {
                 table,
                 values,
@@ -576,12 +600,12 @@ impl Database {
             }),
         );
         if let Some(key) = key {
-            self.create_index(&name, &key)?;
+            self.create_index(&name, &key, false)?;
         }
         Ok(QueryResponse::ok_message(format!("table '{name}' created")))
     }
 
-    fn create_index(&mut self, name: &str, column: &str) -> Result<QueryResponse> {
+    fn create_index(&mut self, name: &str, column: &str, unique: bool) -> Result<QueryResponse> {
         let (table_id, field_path) = {
             let table = self.table(name)?;
             self.catalog.field_type(&table.schema, column)?;
@@ -601,11 +625,22 @@ impl Database {
             ));
         }
         let posting = self.build_index(name, column)?;
+        if unique && posting.values().any(|rows| rows.len() > 1) {
+            return Err(Error::new(
+                "E_CONSTRAINT",
+                format!("duplicate value for unique index '{name}.{column}'"),
+            ));
+        }
         let definition = IndexDefinition {
             id: self.catalog.allocate()?,
             table_id,
             column: column.into(),
             field_path,
+            kind: if unique {
+                IndexKind::Unique
+            } else {
+                IndexKind::Ordinary
+            },
         };
         self.index_definitions
             .entry(name.into())
@@ -616,7 +651,8 @@ impl Database {
             .or_default()
             .insert(column.into(), posting);
         Ok(QueryResponse::ok_message(format!(
-            "index created on '{name}.{column}'"
+            "{}index created on '{name}.{column}'",
+            if unique { "unique " } else { "" }
         )))
     }
 
@@ -834,6 +870,33 @@ impl Database {
                     "E_CONSTRAINT",
                     format!("duplicate primary key '{name}.{key}'"),
                 ));
+            }
+        }
+        if let Some(definitions) = self.index_definitions.get(name) {
+            for definition in definitions
+                .values()
+                .filter(|definition| definition.kind.is_unique())
+            {
+                let value = row_field(&fields, &definition.column).ok_or_else(|| {
+                    Error::new(
+                        "E_FIELD",
+                        format!("missing unique field '{name}.{}'", definition.column),
+                    )
+                })?;
+                if self
+                    .indexes
+                    .get(name)
+                    .and_then(|columns| columns.get(&definition.column))
+                    .is_some_and(|posting| posting.contains_key(&value.index_key()))
+                {
+                    return Err(Error::new(
+                        "E_CONSTRAINT",
+                        format!(
+                            "duplicate value for unique index '{name}.{}'",
+                            definition.column
+                        ),
+                    ));
+                }
             }
         }
         let id = table.next_row_id;
@@ -1260,7 +1323,39 @@ impl Database {
         Ok(())
     }
 
+    fn validate_unique_indexes(&self, name: &str, rows: &[Row]) -> Result<()> {
+        let Some(definitions) = self.index_definitions.get(name) else {
+            return Ok(());
+        };
+        for definition in definitions
+            .values()
+            .filter(|definition| definition.kind.is_unique())
+        {
+            let mut seen = BTreeSet::new();
+            for row in rows {
+                let value = row_field(&row.fields, &definition.column).ok_or_else(|| {
+                    Error::new(
+                        "E_FIELD",
+                        format!("missing unique field '{name}.{}'", definition.column),
+                    )
+                })?;
+                if !seen.insert(value.index_key()) {
+                    return Err(Error::new(
+                        "E_CONSTRAINT",
+                        format!(
+                            "duplicate value for unique index '{name}.{}'",
+                            definition.column
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn replace_rows_and_indexes(&mut self, name: &str, rows: Vec<Row>) -> Result<()> {
+        self.validate_primary_keys(name, &rows)?;
+        self.validate_unique_indexes(name, &rows)?;
         let columns = self
             .indexes
             .get(name)
@@ -1830,6 +1925,7 @@ impl Database {
                     table_id,
                     column: column.clone(),
                     field_path,
+                    kind: IndexKind::Ordinary,
                 };
                 self.index_definitions
                     .entry(table.clone())
@@ -1837,6 +1933,19 @@ impl Database {
                     .insert(column.clone(), definition);
             }
             let posting = self.build_index(&table, &column)?;
+            if self
+                .index_definitions
+                .get(&table)
+                .and_then(|definitions| definitions.get(&column))
+                .is_some_and(|definition| {
+                    definition.kind.is_unique() && posting.values().any(|rows| rows.len() > 1)
+                })
+            {
+                return Err(Error::new(
+                    "E_CONSTRAINT",
+                    format!("duplicate value for unique index '{table}.{column}'"),
+                ));
+            }
             self.indexes
                 .entry(table)
                 .or_default()
@@ -2442,7 +2551,15 @@ impl Database {
             {
                 continue;
             }
-            lines.push(format!("create index {table} ({})", definition.column));
+            lines.push(format!(
+                "create {}index {table} ({})",
+                if definition.kind.is_unique() {
+                    "unique "
+                } else {
+                    ""
+                },
+                definition.column
+            ));
         }
         lines.join("\n")
     }

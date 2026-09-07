@@ -55,6 +55,7 @@ change variant Sum.Variant to {field type-expression, ...}
   using old -> value-expression
 
 add index table.field
+add unique index table.field
 drop index table.field
 set key table.field
 drop key table
@@ -73,6 +74,7 @@ drop key table
 - `drop field` 明确丢弃该字段的数据。若主键或 secondary index 仍引用它，操作会失败；先显式 `drop key` 和 `drop index`。
 - `set key` 在扫描全部行并确认 int/text 类型、字段存在且唯一后设置主键；缺少等值索引时自动创建。替换旧主键时保留旧索引，之后可显式删除。
 - `drop key` 只移除唯一约束，保留可继续服务查询的索引。`drop index` 不允许直接删除仍承担主键约束的索引。
+- `add unique index` 对 primitive、sum/product、tuple、option 与 list 的完整 typed value 施加唯一约束；`None` 不作例外。应用前扫描已有行，重复值使整个 migration 回滚。普通索引与 unique index 互换时，声明式 diff 生成先 drop、再 add 的显式步骤。
 - 修改命名 ADT 会扫描所有表及其 record/tuple/list/option/sum 嵌套路径。所有稳定 RowId 均保留；受影响的 secondary indexes 在提交前重建并验证。
 - 直接自递归命名 ADT 使用相同的全引用路径重写。rename、默认回填和 typed conversion 会遍历每个实际存在的有限值，并受 64 层 migration value 深度预算约束。删除最后一个终止变体或把类型改成无法构造有限值的循环会在提交前返回 `E_SCHEMA`，整个 migration 回滚。
 - 被其他类型或表直接／间接引用的 named type 不能删除。新增、删除或改名后的类型与变体仍遵守大写名称规则。

@@ -79,9 +79,11 @@ impl Database {
                 args,
                 transform,
             } => self.change_variant(&owner, &variant, args, transform),
-            SchemaMigration::AddIndex { table, column } => {
-                self.create_index(&table, &column).map(|_| ())
-            }
+            SchemaMigration::AddIndex {
+                table,
+                column,
+                unique,
+            } => self.create_index(&table, &column, unique).map(|_| ()),
             SchemaMigration::DropIndex { table, column } => self.drop_index(&table, &column),
             SchemaMigration::SetKey { table, column } => self.set_key(&table, &column),
             SchemaMigration::DropKey { table } => self.drop_key(&table),
@@ -562,7 +564,7 @@ impl Database {
             .get(table)
             .is_some_and(|definitions| definitions.contains_key(column))
         {
-            self.create_index(table, column)?;
+            self.create_index(table, column, false)?;
         }
         let Some(DbObject::Table(source)) = self.objects.get_mut(table) else {
             unreachable!()
@@ -691,6 +693,7 @@ impl Database {
         self.rebuild_indexes()?;
         for name in self.table_names() {
             self.validate_primary_keys(&name, &self.table(&name)?.rows)?;
+            self.validate_unique_indexes(&name, &self.table(&name)?.rows)?;
         }
         Ok(())
     }

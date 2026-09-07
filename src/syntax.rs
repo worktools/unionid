@@ -737,12 +737,22 @@ impl Parser {
             let columns = self.fields(Kind::Close(')'), 0)?;
             Ok(Statement::CreateTable { table, columns })
         } else {
+            let unique = if self.word("unique") {
+                self.bump();
+                true
+            } else {
+                false
+            };
             self.expect_word("index")?;
             let table = self.identifier()?;
             self.expect(Kind::Open('('))?;
             let column = self.path()?;
             self.expect(Kind::Close(')'))?;
-            Ok(Statement::CreateIndex { table, column })
+            Ok(Statement::CreateIndex {
+                table,
+                column,
+                unique,
+            })
         }
     }
 
@@ -823,7 +833,20 @@ impl Parser {
             } else if self.word("index") {
                 self.bump();
                 let (table, column) = self.migration_table_path()?;
-                Ok(SchemaMigration::AddIndex { table, column })
+                Ok(SchemaMigration::AddIndex {
+                    table,
+                    column,
+                    unique: false,
+                })
+            } else if self.word("unique") {
+                self.bump();
+                self.expect_word("index")?;
+                let (table, column) = self.migration_table_path()?;
+                Ok(SchemaMigration::AddIndex {
+                    table,
+                    column,
+                    unique: true,
+                })
             } else {
                 self.expect_word("variant")?;
                 let (owner, name) = self.migration_member("variant")?;

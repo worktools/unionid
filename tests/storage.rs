@@ -20,6 +20,126 @@ const CRASH_AFTER_COMMIT: i32 = 92;
 const DISK_LIMIT_FAILURE: i32 = 93;
 
 #[test]
+fn typed_unique_indexes_survive_redb_reopen_and_integrity_checks() {
+    let dir = TempDir::new();
+    let path = dir.0.join("unique.redb");
+    let schema;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(
+            "type User =\n  id int\n  email text\ntable users User\n  key id\ncreate unique index users (email)\ninsert users {id = 1, email = \"one@example.com\"}\ninsert users {id = 2, email = \"two@example.com\"}",
+        );
+        assert!(setup.ok, "{}", setup.message);
+        schema = engine.schema_info();
+    }
+
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert_eq!(engine.schema_info(), schema);
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index users (email)")
+    );
+    for source in [
+        "insert users {id = 3, email = \"one@example.com\"}",
+        "update users\nfilter id == 2\nset email = \"one@example.com\"",
+    ] {
+        let failed = engine.execute(source);
+        assert!(!failed.ok, "accepted {source}");
+        assert_eq!(failed.error.unwrap().code, "E_CONSTRAINT");
+    }
+    assert_eq!(engine.execute("from users").rows.len(), 2);
+    assert!(engine.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn redb_v1_catalog_indexes_open_as_ordinary_and_upgrade_on_commit() {
+    let dir = TempDir::new();
+    let path = dir.0.join("legacy-index.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "type Entry =\n  id int\n  value text\ntable entries Entry\n  key id\ncreate index entries (value)\ninsert entries {id = 1, value = \"same\"}"
+                )
+                .ok
+        );
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    let mut legacy_catalog = Vec::new();
+    {
+        let transaction = database.begin_read().unwrap();
+        let catalog = transaction.open_table(REDB_CATALOG).unwrap();
+        for entry in catalog.iter().unwrap() {
+            let (key, value) = entry.unwrap();
+            let mut bytes = value.value().to_vec();
+            bytes[4..6].copy_from_slice(&1_u16.to_be_bytes());
+            let mut json: serde_json::Value = serde_json::from_slice(&bytes[6..]).unwrap();
+            if json["kind"] == "Index" {
+                json["value"]["definition"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("kind");
+                bytes.truncate(6);
+                bytes.extend(serde_json::to_vec(&json).unwrap());
+            }
+            legacy_catalog.push((key.value().to_vec(), bytes));
+        }
+    }
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        transaction
+            .open_table(REDB_META)
+            .unwrap()
+            .insert("catalog_codec_version", 1_u16.to_be_bytes().as_slice())
+            .unwrap();
+        let mut catalog = transaction.open_table(REDB_CATALOG).unwrap();
+        for (key, value) in legacy_catalog {
+            catalog.insert(key.as_slice(), value.as_slice()).unwrap();
+        }
+        drop(catalog);
+        transaction.commit().unwrap();
+    }
+    drop(database);
+
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(engine.schema().contains("create index entries (value)"));
+        assert!(!engine.schema().contains("create unique index"));
+        assert!(
+            engine
+                .execute("insert entries {id = 2, value = \"same\"}")
+                .ok
+        );
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    let transaction = database.begin_read().unwrap();
+    let meta = transaction.open_table(REDB_META).unwrap();
+    assert_eq!(
+        meta.get("catalog_codec_version").unwrap().unwrap().value(),
+        2_u16.to_be_bytes()
+    );
+    let catalog = transaction.open_table(REDB_CATALOG).unwrap();
+    let kinds = catalog
+        .iter()
+        .unwrap()
+        .filter_map(|entry| {
+            let (_, value) = entry.ok()?;
+            let json: serde_json::Value = serde_json::from_slice(&value.value()[6..]).ok()?;
+            (json["kind"] == "Index").then(|| {
+                json["value"]["definition"]["kind"]
+                    .as_str()
+                    .map(str::to_owned)
+            })?
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["ordinary", "ordinary"]);
+}
+
+#[test]
 fn recursive_adt_rows_indexes_and_schema_survive_redb_reopen() {
     let dir = TempDir::new();
     let path = dir.0.join("recursive.redb");

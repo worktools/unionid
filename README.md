@@ -187,13 +187,14 @@ create table events (
 
 ```text
 create index <table> (<col>)
+create unique index <table> (<col>)
 ```
 
 示例：
 
 ```text
 create index users (id)
-create index users (name)
+create unique index users (name)
 ```
 
 插入：
