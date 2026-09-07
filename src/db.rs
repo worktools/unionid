@@ -409,6 +409,31 @@ pub struct QueryResponse {
 }
 
 impl QueryResponse {
+    /// Decode result rows into application-native serde records.
+    pub fn typed_rows<T: serde::de::DeserializeOwned>(&self) -> Result<Vec<T>> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        if !self.ok {
+            return Err(Error::new(
+                "E_QUERY",
+                "cannot decode rows from a failed response",
+            ));
+        }
+        self.rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                Value::Record(row.clone()).to_serde().map_err(|error| {
+                    Error::new(
+                        error.code.as_str(),
+                        format!("decode result row {}: {}", index + 1, error.message),
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub fn ok_message(message: impl Into<String>) -> Self {
         Self {
             ok: true,

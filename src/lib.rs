@@ -20,6 +20,7 @@ pub mod query;
 mod redb_storage;
 mod repl;
 pub mod schema;
+mod serde_value;
 pub mod server;
 pub mod snapshot;
 pub mod syntax;

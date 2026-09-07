@@ -43,6 +43,7 @@ cargo run -- migration diff --db app.redb --schema examples/schema.uid --name sy
 cargo run -- backup --db app.redb --output app.backup.json
 cargo run -- restore --backup app.backup.json --db restored.redb
 cargo run --example embedded
+cargo run --example parameters
 ```
 
 [tasks.uid](examples/tasks.uid) 包含类型定义、建表、插入与查询，最后返回：
