@@ -1,6 +1,12 @@
-# 第一轮开发记录
+# 开发与验证记录
 
-日期：2026-09-06。目标是交付无分号 ADT 语言的可运行预览；完整 v0.1 路线图仍在实施。当前语法见 [LANGUAGE.md](LANGUAGE.md)，查询的详细语义见 [QUERY.md](QUERY.md)，运行入口见 [README](../README.md)。
+本文保留 v0.1 开发期间的实现与验证细节，不承担实时状态导航。v0.1.0 已通过 GitHub Actions 发布；发布后的生产边界与应用体验工作由 [ROADMAP.md](ROADMAP.md) 和 GitHub issues 跟踪。当前语法见 [LANGUAGE.md](LANGUAGE.md)，查询的详细语义见 [QUERY.md](QUERY.md)，面向用户的入口见 [README](../README.md)。
+
+## 发布后进展
+
+- v0.1.0 crate、原生 target 包、校验清单和 GitHub Release 已由 tag workflow 发布。
+- Engine、本地 run/CLI 和 TCP 服务已提供统一只读执行边界；`introspection.read_only` 可验证实际状态，mutation 在创建候选状态或持久事务前返回 `E_READ_ONLY`。
+- 后续工作按生产正确性、用户体验和语言探索拆分，不再把宽泛目标或已完成发布步骤保留为“当前任务”。
 
 ## 已实现
 
@@ -67,17 +73,10 @@ cargo run -- fmt --file examples/tasks.uid
 cargo run --example embedded
 ```
 
-当前全部 237 项测试通过：lib 单元测试 20 项、`tests/language.rs` 88 项、`tests/formatter.rs` 6 项、`tests/storage.rs` 35 项、`tests/migration.rs` 19 项、`tests/release_scenarios.rs` 3 项、`tests/getting_started.rs` 1 项、`tests/schema.rs` 10 项、`tests/backup.rs` 4 项、`tests/interfaces.rs` 24 项、`tests/codec.rs` 9 项、`tests/protocol.rs` 16 项、`tests/serde_api.rs` 2 项，分别验证 Engine 注入提交失败、REPL complete/incomplete/invalid 状态与 EOF、安全历史／补全／introspection、formatter 全 AST 覆盖／幂等／语义 round-trip、真实磁盘增长失败分类与原子重开、稳定 RowId 与过渡 snapshot 升级、增量持久差异、语言/类型/查询及原子 update/delete/upsert、typed 批量 insert/upsert 的默认值／嵌套 ADT／批内约束／RowId 游标／prepared/redb/CLI/TCP／deadline／WAL 拒绝／逐项 action 与 returning 顺序、prepared insert/upsert/update/delete 的 row/list/filter/set/match 参数推导／空表预检／schema 失效／deadline／WAL 拒绝／redb 重开、原生 Rust serde ADT 编解码、穷尽 ADT match assignment、filter/sort/take 原子目标选择与 DML returning 的前后像／投影／默认值／参数／空命中／提交前错误及大小预算／索引与 redb/TCP 路径、基础汇总、局部纯函数及其预算、类型化索引计划/explain、WAL 与 redb 的失败原子性/恢复、多表 schema+DML、ADT schema/data conversion、有限自递归类型的终止性／默认值／match witness／深度预算／codec／索引／redb 重开／migration／schema diff／backup restore、嵌套命名类型 migration、版本化 migration 文件/ledger/断点续跑、端到端升级恢复场景、五分钟教程的三入口一致性、schema 规范化/diff/影响报告、备份还原/旧格式导入、真实 CLI/TCP/并发与优雅关闭、transport-neutral typed serde/wire 协议，以及 ADT 的稳定存储与网络编码。TCP 测试实际启动服务，自动分配端口，并在结束时停止进程；所有持久化测试只使用隔离临时数据库；HTTP todo 示例另行覆盖 typed ADT、重启、migration、完整性检查与备份还原。
+测试矩阵验证 Engine 注入提交失败、REPL 状态、安全历史与补全、formatter round-trip、真实磁盘增长失败分类、稳定 RowId、语言和类型检查、prepared DML、原生 Rust serde ADT、索引计划、原子恢复、schema migration、备份还原、真实 CLI/TCP 与优雅关闭，以及 transport-neutral typed wire 协议。TCP 测试使用动态端口；持久化测试只使用隔离临时数据库；HTTP todolist 另行覆盖 typed ADT、重启、migration、完整性检查与备份还原。具体数量随功能增长，以当前测试运行和 CI 为准，不在文档中维护易过时的固定计数。
 
 本机验证环境为 Rust 1.94.0、macOS。仓库包含 macOS/Linux CI 配置；远端验证状态以对应提交和 PR 的 workflow 结果为准。
 
 ## 后续工作
 
-- #2：以当前查询参考完善完整语言 RFC；更广泛的泛型/高阶函数与 migration 表面语法尚未冻结。#7 已形成 [Schema 身份与演进契约](SCHEMA.md)，实现稳定 table/index ID、原子 revision/hash 和响应元数据。
-- #8/#10/#11/#34–#36/#91：已实现默认值、版本化 value codec、完整嵌套 ADT 覆盖分析、普通 scalar/bool derive、typed arithmetic/value construction、多键 sort、范围 take、布尔组合、`contains/length/any/all`、Option helper、typed 参数、schema-aware prepared query/DML、有界的 group/aggregate 与查询局部纯函数。#9/#11/#12/#34–#36 和 #59–#61 已完成。
-- #13/#14/#15/#16：redb 固定内部表、版本化 codec、稳定键增量提交、单写事务、稳定 RowId、原子 update/delete/upsert、明确／不确定提交错误、进程退出与真实文件增长失败矩阵、`check --db`、10k/100k 恢复成本、共享类型化索引访问计划与 explain 均已接入。
-- #17–#20：显式 schema/data migration、版本化 runner/ledger、声明式 schema diff、逻辑备份还原和显式旧原型导入已实现。
-- #21–#24：#22 的版本化协议与 Rust 参数 API、#23 的服务预算与优雅关闭已实现；#66 补齐 parser 驱动的 REPL 续写，#69 提供规范 formatter，#70 增加安全历史、补全和跨模式 introspection。#74 已走通三条端到端升级恢复场景，#75 已记录真实负载；#76 提供可校验产物、包内教程与三入口一致性验证。
-- #25/#81/#83/#85/#87/#89/#91：已实现有限直接自递归 named ADT、穷尽 `match` update assignment、DML typed returning、原子 sort/take mutation target、typed 批量 insert 和 schema-aware prepared DML；互递归、用户泛型和递归查询函数继续根据实际场景分别设计。
-
-GitHub issues 保留各自的完整验收范围；实现了部分能力不等于对应里程碑全部完成。
+实时执行顺序、依赖和验收范围统一维护在 [ROADMAP.md](ROADMAP.md) 与 GitHub issues。本文只记录已经实现并验证过的事实，避免复制 issue 状态后再次过时。
