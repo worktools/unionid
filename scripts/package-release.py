@@ -65,13 +65,16 @@ def main():
     files = {
         f"{package}/bin/{executable}": (binary.read_bytes(), 0o755),
         f"{package}/README.md": ((ROOT / "README.md").read_bytes(), 0o644),
-        f"{package}/docs/GETTING_STARTED.md": ((ROOT / "docs/GETTING_STARTED.md").read_bytes(), 0o644),
-        f"{package}/docs/UPGRADING.md": ((ROOT / "docs/UPGRADING.md").read_bytes(), 0o644),
-        f"{package}/docs/LANGUAGE.md": ((ROOT / "docs/LANGUAGE.md").read_bytes(), 0o644),
-        f"{package}/docs/QUERY.md": ((ROOT / "docs/QUERY.md").read_bytes(), 0o644),
-        f"{package}/docs/RELEASE-v0.1.0.md": ((ROOT / "docs/RELEASE-v0.1.0.md").read_bytes(), 0o644),
         f"{package}/tutorial/validate.py": ((ROOT / "scripts/validate-tutorial.py").read_bytes(), 0o755),
     }
+    for source in sorted((ROOT / "docs").rglob("*")):
+        if source.is_file():
+            relative = source.relative_to(ROOT).as_posix()
+            files[f"{package}/{relative}"] = (source.read_bytes(), 0o644)
+    for source in sorted((ROOT / "examples").rglob("*")):
+        if source.is_file():
+            relative = source.relative_to(ROOT).as_posix()
+            files[f"{package}/{relative}"] = (source.read_bytes(), 0o644)
     for source in sorted((ROOT / "examples/getting-started").glob("*.uid")):
         files[f"{package}/tutorial/{source.name}"] = (source.read_bytes(), 0o644)
     release = {

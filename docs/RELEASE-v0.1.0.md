@@ -2,6 +2,14 @@
 
 v0.1.0 是第一个面向日常本地应用状态的可用版本。它提供无分号的 PRQL 风格语言、原生命名和类型与积类型、嵌套 option/list、穷尽 pattern matching、类型化 pipeline、原子 CRUD/upsert、redb 持久化、显式 schema migration、备份还原、本地 CLI、Rust Engine 和有界 TCP 服务。
 
+## 核心能力
+
+- 有限自递归 ADT、嵌套默认值、完整 typed equality/unique index，以及稳定 type/field/variant/table/index ID。
+- filter/match/derive/group/aggregate/select/sort/take，统一的数值、布尔、Option 和 list 表达式，以及查询局部非递归纯函数。
+- 单行和 typed 批量 insert/upsert、update/delete、排序截取 mutation target、typed returning、逐行 upsert action 和请求级原子提交。
+- schema-aware prepared query/DML、原生 Rust serde ADT 参数与 typed rows、无损 version 1 wire values，以及可供 HTTP adapter 复用的 transport-neutral 执行入口。
+- 版本化 migration runner/ledger、声明式 schema diff、深层 ADT 数据转换、逻辑备份还原和旧原型格式显式导入。
+
 ## 获取与验证
 
 GitHub Release 为 macOS 和 Linux 的 CI 原生 Rust target 生成 `unionid-v0.1.0-<target>.tar.gz`。目标三元组同时写入文件名和包内 `RELEASE.json`，因此使用者可以明确选择与机器匹配的产物。每个压缩包旁有独立 `.sha256`：
@@ -12,7 +20,11 @@ tar -xzf unionid-v0.1.0-<target>.tar.gz
 unionid-v0.1.0-<target>/bin/unionid --version
 ```
 
-macOS 可用 `shasum -a 256 -c` 校验。压缩包包含五分钟教程和验证器，见 [GETTING_STARTED.md](GETTING_STARTED.md)。
+macOS 可用 `shasum -a 256 -c` 校验。压缩包包含完整文档、可执行示例、五分钟教程和验证器，见 [GETTING_STARTED.md](GETTING_STARTED.md)。
+
+## 发布验证
+
+最终候选在 Rust 1.94.0 上通过 237 项回归、严格 Clippy、formatter/diff 检查和真实 HTTP todo 场景。macOS/Linux workflow 从 tag 执行 locked release build，再从空目录校验 SHA-256、版本信息、本地 CLI、TCP 和包内五分钟教程。HTTP adapter 示例另行覆盖 typed ADT bulk write、条件更新、redb 重开、migration、schema mismatch、explain/check 与 backup/restore。
 
 ## 容量证据与边界
 
@@ -32,4 +44,8 @@ v0.1.0 固定使用 redb 4.1.0，并使用 version 1 storage、catalog、ADT val
 
 v0.1.0 is the first daily-usable release for local application state. It combines semicolon-free PRQL-style declarations and pipelines with named sum/product types, nested option/list values, exhaustive matching, typed queries, atomic CRUD/upsert, redb durability, explicit schema migrations, verified backup/restore, a local CLI, an embeddable Rust Engine, and a bounded TCP service.
 
-GitHub Releases contain native macOS and Linux artifacts named with their exact Rust target, an adjacent SHA-256 file, `RELEASE.json`, and an executable tutorial. A 10k-row database is the current comfortable range; 100k rows is a tested ceiling with materially higher write, migration, and memory costs. The service is for trusted local use and has no authentication or TLS. Internal version-1 codecs fail closed on unknown versions, and future format conversion must be explicit.
+The core includes finite self-recursive ADTs, nested defaults, typed equality and unique indexes, stable schema identities, scalar and Boolean expressions, local non-recursive functions, grouping and aggregates, typed bulk insert/upsert, bounded mutation targets, typed returning, and request-atomic redb commits. Schema-aware prepared query/DML accepts native Rust serde ADTs and returns typed rows through the same lossless version 1 wire model used by TCP and reusable HTTP adapters. Versioned migration history supports deep ADT conversion, schema diff, logical backup/restore, and explicit legacy import.
+
+The final candidate passes 237 regressions, strict Clippy, formatting and diff checks, plus the real HTTP todo journey on Rust 1.94.0. Tag workflows build locked native macOS and Linux artifacts, then verify SHA-256, version metadata, local CLI, TCP, and the packaged tutorial from an empty directory. Each archive also contains the complete documentation and examples.
+
+A 10k-row database is the current comfortable range; 100k rows is a tested ceiling with materially higher write, migration, and memory costs. The service is for trusted local use and has no authentication or TLS. Internal version-1 codecs fail closed on unknown versions, and future format conversion must be explicit.
