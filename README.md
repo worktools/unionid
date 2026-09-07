@@ -1,310 +1,200 @@
 # unionid
 
-一个基于 Rust、原生支持代数类型的轻量数据库语言预览：
+[中文](#中文介绍) · [English](#english-introduction) · [快速开始 / Quick start](#快速开始--quick-start) · [文档 / Documentation](#文档--documentation)
 
-- 无分号的命名和类型、嵌套 record/tuple、`option`、`list` 与有限直接自递归 ADT
-- PRQL 风格换行查询与修改：`let/filter/filter match/derive/derive match/group/aggregate/select/sort/take/set`，包括穷尽的 `set ... = match ...` 状态转换与结构化 `explain`
-- 可组合的有类型表达式：int/float 算术、`not/and/or`、字段间比较、Option helper、`contains/length/any/all`
-- 共享 Rust 引擎、本地 CLI 与 TCP 服务
-- version 1 JSON Lines 协议、无损 ADT/i64 wire values、typed 参数与 schema-aware prepared query/DML
-- 有界连接/请求/查询/结果、执行 deadline、运行统计与 SIGINT/SIGTERM 优雅关闭
-- 严格类型检查、字段默认值、主键、typed 单行／批量 insert/upsert、update/delete、typed returning、等值索引及原子脚本
-- 稳定 catalog 身份、原子 schema revision 与可校验 hash
-- 独立于 serde/Rust enum 布局的版本化 ADT value codec
-- redb 增量原子持久模式，可由本地命令、REPL 与 TCP 服务共同使用
-- 面向查询副本和受限应用的 redb 只读执行边界，可由 introspection 验证
-- 显式 ADT schema migration：稳定身份 rename、默认回填、typed conversion、约束与索引变更
-- 版本化 migration runner：`new/plan/apply/status`、不可变 checksum 与 redb ledger
-- 可校验逻辑备份、只还原到新路径，以及显式原型 WAL/snapshot 导入
+## 中文介绍
 
-## 五分钟开始使用
+unionid 是一个用 Rust 编写、直接支持代数数据类型（Algebraic Data Types，ADT）和 pipeline 查询的轻量数据库。它可以作为嵌入式 Rust Engine、本地 redb 数据库或 TCP 服务运行。
 
-从空目录创建持久 ADT 数据库、查询和类型化解构、原子更新、关闭重开、完整性检查，以及切换到 TCP/Rust API 的完整路径见[五分钟教程](docs/GETTING_STARTED.md)。发布压缩包自带相同脚本和自动验证器。
+它围绕两个核心特点设计：
 
-## 先运行一个完整例子
+1. **数据库直接用 ADT 描述数据。** `struct` 对应的积类型、`enum` 对应的和类型，以及 `option`、`list`、tuple 和有限递归类型都是 schema 的一部分，而不是藏在无类型 JSON 中的应用约定。数据库会检查 constructor、payload、默认值、主键、索引和 migration。
+2. **查询语言直接理解 ADT。** PRQL 风格的 pipeline 可以对 variant 做穷尽模式匹配、解构嵌套字段并构造新的 typed value；查询、更新、参数绑定和 `returning` 共用相同类型语义。
 
-需要 Rust 1.94 或更高版本（Cargo 已声明 `rust-version`，CI 使用 1.94.0）：
+因此，一个任务状态不必由 `status = "running"` 和若干 nullable 字段模拟。schema 能准确表达每种合法形态，query 也能直接匹配这些形态。
+
+## English introduction
+
+unionid is a lightweight Rust database with algebraic data types (ADTs) and pipeline queries built directly into its data model. It runs as an embedded Rust Engine, a local redb database, or a TCP service.
+
+It is designed around two defining ideas:
+
+1. **Describe database data directly with ADTs.** Product types corresponding to Rust structs, sum types corresponding to Rust enums, plus options, lists, tuples, and finite recursive types are part of the schema—not application conventions hidden in untyped JSON. The database validates constructors, payloads, defaults, keys, indexes, and migrations.
+2. **Query ADTs as ADTs.** The PRQL-style pipeline language can exhaustively match variants, destructure nested fields, and construct new typed values. Reads, updates, parameter binding, and `returning` share the same type semantics.
+
+A task state therefore does not need to be simulated with `status = "running"` and nullable payload columns. The schema describes every valid shape precisely, and queries match those shapes directly.
+
+## ADT 数据模型与查询 / ADT data model and queries
+
+下面的 schema 同时使用积类型 `Task` 和和类型 `State`。`Running`、`Done`、`Failed` 各自拥有不同 payload；不属于该 variant 的字段根本不存在。
+
+The schema below combines the product type `Task` with the sum type `State`. Each of `Running`, `Done`, and `Failed` has a distinct payload; fields that do not belong to a variant do not exist.
+
+```text
+type State =
+  Pending
+  | Running
+    worker text
+    attempt int
+  | Done
+    result text
+  | Failed
+    message text
+    retryable bool
+
+type Task =
+  id int
+  title text
+  tags list text
+  state State
+
+table tasks Task
+  key id
+
+insert tasks
+  id = 1
+  title = "sync directory"
+  tags = ["sync", "local"]
+  state = Running {worker = "worker-1", attempt = 2}
+```
+
+查询从上到下组合，并直接解构 `State`。match 必须覆盖所有可能形态，因此新增 variant 时不会被旧查询静默忽略。
+
+Queries compose from top to bottom and destructure `State` directly. A match must cover every possible shape, so a newly added variant cannot be silently ignored by an old query.
+
+```text
+from tasks
+filter match state
+  Running {attempt, ..} => attempt >= 2
+  Failed {retryable, ..} => retryable
+  _ => false
+derive state_label = match state
+  Pending => "pending"
+  Running {worker, ..} => worker
+  Done {result} => result
+  Failed {message, ..} => message
+select {id, title, state, state_label}
+sort id
+take 20
+```
+
+同一套 typed expression 可以执行原子状态转换。The same typed expressions drive atomic state transitions:
+
+```text
+update tasks
+filter match state
+  Pending => true
+  _ => false
+set state = Running {worker = "worker-1", attempt = 1}
+returning id, state
+```
+
+`filter`、`select`、`sort`、`take`、`derive`、`group`、`aggregate` 和查询局部 `let` 都是可组合 stage。`explain from tasks | filter id == 1` 返回主键／索引访问方式、候选行数、stage 顺序和结果 schema，但不读取结果行。完整语法见 [QUERY.md](docs/QUERY.md)。
+
+`filter`, `select`, `sort`, `take`, `derive`, `group`, `aggregate`, and query-local `let` are composable stages. `explain from tasks | filter id == 1` reports primary-key/index access, candidate rows, stage order, and result schema without reading result rows. See [QUERY.md](docs/QUERY.md) for the complete executable surface.
+
+## 快速开始 / Quick start
+
+需要 Rust 1.94 或更高版本。Rust 1.94 or newer is required.
 
 ```bash
-cargo run -- run --file examples/tasks.uid
-cargo run -- run --file examples/job_queue.uid
-cargo run -- run --file examples/config.uid --format json
-cargo run -- run --file examples/events.uid
-cargo run -- run --file examples/sync_conflicts.uid
-cargo run -- run --file examples/recursive_tree.uid
-cargo run -- run --file examples/task_mutations.uid
-cargo run -- run --file examples/schema_migration.uid
-
-# apply the versioned example history to a durable database
-cargo run -- migration plan --db app.redb --dir examples/migrations
-cargo run -- migration apply --db app.redb --dir examples/migrations
-cargo run -- migration status --db app.redb --dir examples/migrations
-cargo run -- schema check --file examples/schema.uid
-cargo run -- migration diff --db app.redb --schema examples/schema.uid --name sync_schema
-cargo run -- backup --db app.redb --output app.backup.json
-cargo run -- restore --backup app.backup.json --db restored.redb
-cargo run --example embedded
-cargo run --example parameters
-cargo run --example todolist
+cargo install unionid --version 0.1.0 --locked
+git clone https://github.com/worktools/unionid.git
+cd unionid
+unionid run --file examples/tasks.uid
 ```
 
-[tasks.uid](examples/tasks.uid) 包含类型定义、建表、插入与查询，最后返回：
+`run` 默认使用临时内存库；传入 redb 路径即可持久化。一个源码请求是一个原子批次。
 
-```text
-id | title | owner.email | state
-1 | "同步目录" | "alice@example.com" | Running {attempt = 2, worker = "local"}
-1 row(s)
-```
-
-`run` 默认每次创建一个新的内存库；一次文件或请求是一个原子批次，成功返回最后一条语句的结果，失败不保留该批次的任何写入。需要保存数据时指定同一个 redb 文件：
+`run` uses a fresh in-memory database by default; pass a redb path for durable use. One source request is one atomic batch.
 
 ```bash
-cargo run -- run --db ./data/unionid.redb --file examples/tasks.uid
-cargo run -- run --db ./data/unionid.redb --query 'from tasks | filter id == 1'
-cargo run -- run --db ./data/unionid.redb --query 'explain from tasks | filter id == 1'
-cargo run -- run --db ./data/unionid.redb --read-only --query 'from tasks | take 10'
-cargo run -- cli --db ./data/unionid.redb
-cargo run -- check --db ./data/unionid.redb
-cargo run -- fmt --file examples/tasks.uid
-cargo run -- fmt --file examples/tasks.uid --check
+unionid run --db ./data/app.redb --file examples/tasks.uid
+unionid run --db ./data/app.redb --query 'from tasks | filter id == 1'
+unionid cli --db ./data/app.redb
+unionid check --db ./data/app.redb
 ```
 
-开启保留会话状态的本地 REPL：
+启动普通 TCP 服务或明确的只读查询服务。Start a regular TCP service or an explicit read-only query service:
 
 ```bash
-cargo run -- cli --memory
+unionid server --db ./data/app.redb --addr 127.0.0.1:7878
+unionid server --db ./data/app.redb --read-only --addr 127.0.0.1:7878
 ```
 
-REPL 用 `unionid>` 表示新输入、`..>` 表示语法仍需续写、`ready>` 表示当前脚本已经完整。只在 `ready>` 后用空行提交；不完整时空行会保留缓冲区，明确非法的输入会立即显示源码位置并重新开始。Tab 补全语言关键字和当前 catalog 的表／类型／字段；`.schema`、`.tables`、`.types`、`.storage` 在 memory、redb 和 TCP 模式返回一致 introspection。交互历史默认只持久化不含写入或字面量的安全输入，可用 `--history <path>` 改路径或 `--no-history` 关闭。详细行为见 [CLI 与交互式 REPL](docs/CLI.md)。
+只读模式只打开已有 redb，并在进入持久事务前以 `E_READ_ONLY` 拒绝整个 mutation 批次。Read-only mode opens an existing redb database and rejects the complete mutation batch with `E_READ_ONLY` before entering a durable transaction.
 
-[HTTP 数据协议示例](docs/HTTP.md)展示 Rust serde 数据如何经 version 1 协议进入真实 HTTP 服务，并完成 migration、typed DML、重启、检查和备份还原。
+## Rust typed API
 
-当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，[version 1 协议与参数](docs/PROTOCOL.md)描述无损 ADT/i64 wire codec 和 Rust prepared query/DML，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)，声明式目标结构与草稿生成见 [SCHEMA-DIFF.md](docs/SCHEMA-DIFF.md)，跨版本操作见[升级与格式兼容](docs/UPGRADING.md)。类型可直接引用自身来表达有限树、原因链和规则 AST；catalog 会拒绝没有终止路径的循环，值仍受 64 层预算约束，详细契约见 [RFC 0001](docs/rfc/0001-finite-recursive-adts.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。普通／match derive、typed set 和 migration conversion 共享有类型算术与 bool 表达式；分支可直接返回比较、`not/and/or`、`contains`、Option helper 或嵌套 `any/all` 的结果，也可从 binding 构造 option、sum、record、tuple 和 list。查询局部 `let` 可定义常量和有类型、非递归纯函数，以空格调用并在 filter、derive、match 与 aggregate 输入中复用。`group ... aggregate` 与未分组 `aggregate` 提供 count/sum/min/max，并保留命名字段和 ADT group key 的类型。`explain` 返回 full scan／主键或二级索引 lookup、当前候选数、stage 顺序和结果 schema，不执行数据行。`update`/`delete` 可按源码顺序组合 filter、sort 和 take；多个 typed `set` 同时求值，`set field = match source` 可穷尽解构并重建 ADT 或产生 bool，最后用 `current => current` 保留其余 constructor。insert/upsert/update/delete 可用 `returning` 原子返回完整 typed 行或有序字段投影；单行与批量 upsert 按主键插入或整行替换，批量响应返回逐项 action。所有写入都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/diff/apply/status` 管理不可变迁移历史。
+Rust 应用可以把自己的 `struct`、`enum`、`Option`、tuple 和 `Vec` 直接绑定到 prepared operation，再把结果解码回应用类型。
 
-`fmt` 从文件或 stdin 读取并把规范源码写到 stdout，不会隐式覆盖文件。`fmt --check` 在输入不是规范格式或存在语法错误时返回非零，适合 CI。
+Rust applications can bind their own structs, enums, options, tuples, and vectors directly to prepared operations, then decode rows back into application types.
 
-[服务边界](docs/SERVICE.md)单独记录连接、请求、查询、响应和 deadline 限制，以及 SIGINT/SIGTERM 关闭与重试语义。
+```rust
+use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
+use unionid::{Engine, Value};
 
-[恢复成本记录](docs/benchmarks/recovery-2026-09-07.md)给出可重复的 1 万／10 万行 ADT 数据库 open/check 时间、数据库大小和峰值内存；10 万行是 v0.1 已测试上限，完整检查在当前实现上约需 0.75 GiB 峰值内存。
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum State {
+    Pending,
+    Running { worker: String, attempt: i64 },
+}
 
-[工作负载成本记录](docs/benchmarks/workload-2026-09-07.md)给出主键／二级索引查询、受控扫描、条件 update、upsert、原子批写和深层 ADT migration 的 p50/p95 与峰值内存。当前约 1 万行是较舒适的操作范围；10 万行只作为已测试上限，频繁写入和 migration 不建议接近该上限。
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Task {
+    id: i64,
+    title: String,
+    state: State,
+}
 
-[端到端发布验收](docs/RELEASE-VALIDATION.md)记录任务队列、嵌套配置和 session/cache 三条持久链路；它们通过真实 CLI 子进程走完查询与写入、重启、深层 ADT migration、完整检查和 backup/restore。
+let mut db = Engine::memory();
+db.execute("type State = Pending | Running {worker text, attempt int}\ntype Task =\n  id int\n  title text\n  state State\ntable tasks Task\n  key id");
 
-复杂条件推荐在 `filter` 或 match 分支的 `=>` 后换行并缩进；混用 `and` 与 `or` 时用括号写清分组。语言会减少无助于理解的标点，同时保留括号和集合边界等必要符号。
-
-## 后续方向与计划
-
-计划将原型演进为原生支持命名和类型、积类型、模式匹配及 schema migration 的轻量数据库。
-
-新语言的类型声明与查询都朝 PRQL 风格收敛：无分号、少标点，优先用空格、换行和清晰的布局表达结构。
-
-- [设计草案](docs/DESIGN.md)：定位、目标语法、类型语义、存储取舍与 migration 流程。
-- [查询语言参考](docs/QUERY.md)：当前可执行的 pipeline grammar、stage 语义、模式和错误。
-- [CLI 与交互式 REPL](docs/CLI.md)：历史安全策略、Tab 补全和本地／远程 introspection。
-- [实际场景与覆盖矩阵](docs/SCENARIOS.md)：任务队列、配置、事件、同步和 key/value 用法所需的 ADT 与查询缺口。
-- [Schema 身份与演进契约](docs/SCHEMA.md)：类型／字段／变体／表／索引身份、版本与兼容矩阵。
-- [Schema migration 语言](docs/MIGRATIONS.md)：当前可执行的显式演进、typed conversion 与约束边界。
-- [声明式 Schema 与 Diff](docs/SCHEMA-DIFF.md)：规范化 schema、影响报告和不可猜测的迁移草稿。
-- [备份、还原与旧格式导入](docs/BACKUP.md)：逻辑备份校验、新路径恢复和显式原型转换。
-- [ADT value codec](docs/CODEC.md)：稳定 ID 驱动的持久值格式、限制与 schema evolution 边界。
-- [有限自递归 ADT RFC](docs/rfc/0001-finite-recursive-adts.md)：树形值、有限性、匹配覆盖、codec、索引和 migration 边界。
-- [redb 持久模式](docs/STORAGE.md)：本地／服务入口、事务承诺、内部表与当前限制。
-- [路线图与 GitHub issues](docs/ROADMAP.md)：阶段、依赖、验收条件及执行入口。
-- [存储 ADR](docs/adr/0001-redb-storage.md)：redb 选型、ADT 存储边界、实验和限制。
-- [原型基线与已知问题](docs/PROTOTYPE-AUDIT.md)：早期原型的验证结果和故障证据。
-- [第一轮开发记录](docs/DEVELOPMENT.md)：已实现能力、验证方法与尚未完成的范围。
-
-设计草案描述完整目标，部分语法已实现；整体能力边界以 LANGUAGE.md 为准，查询行为以 QUERY.md 为准。长期持久化入口使用 redb；当前 WAL／snapshot 仅为旧原型兼容入口，不与 redb 双写，也不能直接当作 redb 数据库打开。显式导入由 #20 跟踪。
-
-## 运行
-
-启动服务：
-
-```bash
-cargo run -- server --addr 127.0.0.1:7878
+let row = Task {
+    id: 1,
+    title: "ship it".into(),
+    state: State::Running { worker: "local".into(), attempt: 1 },
+};
+let insert = db.prepare("insert tasks $row\nreturning").unwrap();
+let response = db.execute_prepared(
+    &insert,
+    BTreeMap::from([("row".into(), Value::from_serde(&row).unwrap())]),
+);
+assert_eq!(response.typed_rows::<Task>().unwrap(), [row]);
 ```
 
-使用 redb 持久化启动服务：
+网络协议使用显式 typed wire values，保留完整 `i64` 精度、命名类型身份和 `None`/`null` 的区别；Rust helper 通常不需要应用手写标签。
 
-```bash
-cargo run -- server --addr 127.0.0.1:7878 --db ./data/unionid.redb
-cargo run -- server --addr 127.0.0.1:7878 --db ./data/unionid.redb --read-only
-```
+The wire protocol uses explicit typed values to preserve full `i64` precision, nominal type identity, and the distinction between `None` and `null`; Rust helpers normally avoid manual tag construction.
 
-过渡 WAL 兼容入口：
+可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
 
-```bash
-cargo run -- server --addr 127.0.0.1:7878 --wal-path ./data/unionid.wal
-```
+See runnable code in [`parameters.rs`](examples/parameters.rs). The complete HTTP/Axum todolist validates ADTs, migrations, restart, integrity checking, backup, and restore through the same version 1 data protocol; see [HTTP.md](docs/HTTP.md).
 
-开启 WAL + snapshot 压缩：
+## 当前边界 / Current boundaries
 
-```bash
-cargo run -- server \
-	--addr 127.0.0.1:7878 \
-	--wal-path ./target/tmp/unionid.wal \
-	--snapshot-path ./target/tmp/unionid.snapshot.json \
-	--snapshot-every 200
-```
+v0.1.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。当前不提供内置认证、TLS、join、window 或分布式执行。
 
-执行单条命令：
+v0.1.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound, not the routine target. Built-in authentication, TLS, joins, windows, and distributed execution are currently out of scope.
 
-```bash
-cargo run -- cli --addr 127.0.0.1:7878 --query 'create table users (id int, name text, age int, active bool)'
-cargo run -- cli --addr 127.0.0.1:7878 --query 'create index users (id)'
-cargo run -- cli --addr 127.0.0.1:7878 --query 'insert users {id:1,name:"alice",age:30,active:true}'
-cargo run -- cli --addr 127.0.0.1:7878 --query 'from users | filter age >= 25 | select id,name | limit 10'
-```
+## 文档 / Documentation
 
-进入交互模式：
+| 主题 / Topic | 文档 / Document |
+| --- | --- |
+| 五分钟端到端教程 / Five-minute end-to-end guide | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
+| 当前语言与 query stage / Current language and query stages | [LANGUAGE.md](docs/LANGUAGE.md) · [QUERY.md](docs/QUERY.md) |
+| Rust、TCP 与 HTTP 数据协议 / Rust, TCP, and HTTP data protocol | [PROTOCOL.md](docs/PROTOCOL.md) · [HTTP.md](docs/HTTP.md) |
+| Schema 身份与 migration / Schema identity and migrations | [SCHEMA.md](docs/SCHEMA.md) · [MIGRATIONS.md](docs/MIGRATIONS.md) |
+| 持久化、备份与生产边界 / Storage, backup, and production boundaries | [STORAGE.md](docs/STORAGE.md) · [BACKUP.md](docs/BACKUP.md) · [SERVICE.md](docs/SERVICE.md) |
+| 实际场景与后续计划 / Real scenarios and roadmap | [SCENARIOS.md](docs/SCENARIOS.md) · [ROADMAP.md](docs/ROADMAP.md) |
+| 实现与验证记录 / Implementation and validation history | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
+| 贡献者与 agent 约定 / Contributor and agent conventions | [Agents.md](Agents.md) |
 
-```bash
-cargo run -- cli --addr 127.0.0.1:7878
-```
+原型兼容、存储内部结构、测试矩阵和历史进度不在 README 重复维护，统一由上述专题文档承载。
 
-## 兼容的原型语法
+Prototype compatibility, storage internals, the test matrix, and historical progress are maintained in the focused documents above instead of being duplicated here.
 
-以下入口仍可运行；新项目优先使用 [当前语言文档](docs/LANGUAGE.md) 的无分号命名类型和换行查询。
+## License
 
-### 1) DDL / DML
-
-建表：
-
-```text
-create table <table> (<col> <type>, ...)
-```
-
-示例：
-
-```text
-create table users (id int, name text, age int, active bool)
-```
-
-带参数的 Rust 风格 enum 列：
-
-```text
-create table events (
-  id int,
-  kind enum(Login, Logout, Purchase(int,float), Error(text))
-)
-```
-
-建索引（单列）：
-
-```text
-create index <table> (<col>)
-create unique index <table> (<col>)
-```
-
-示例：
-
-```text
-create index users (id)
-create unique index users (name)
-```
-
-插入：
-
-```text
-insert <table> {key:value,...}
-```
-
-示例：
-
-```text
-insert users {id:1,name:"alice",age:30,active:true}
-```
-
-插入 enum 值：
-
-```text
-insert events {id:1,kind:Login}
-insert events {id:2,kind:Purchase(42,19.9)}
-insert events {id:3,kind:Error("network")}
-```
-
-### 2) Pipeline 查询
-
-基础形态：
-
-```text
-from <table> | filter <col> <op> <value> | select <col,...> | limit <n>
-```
-
-说明：
-
-- `from` 必须是第一个 stage。
-- stage 从左到右执行。
-- 当前支持 stage：`filter` / `select` / `sort` / `take`，保留 `limit` 别名。
-
-示例：
-
-```text
-from users | filter age >= 20 | select id,name | limit 5
-from users | filter id = 1 | select id,name,age
-from events | filter kind = Purchase(42,19.9) | select id,kind
-```
-
-### 3) 类型与字面量
-
-列类型：
-
-- `int`
-- `float`
-- `bool`
-- `text`
-
-字面量：
-
-- 整数：`1`
-- 浮点：`3.14`
-- 布尔：`true` / `false`
-- 文本：`"alice"`
-- 可选值：使用 `option` 类型与显式 `None` / `Some value`；普通类型不接受 `null`。
-
-### 4) 运算符
-
-`filter` 支持：
-
-- `=` / `==`
-- `!=`
-- `>` / `>=`
-- `<` / `<=`
-
-### 5) 索引加速规则（当前实现）
-
-- 索引是单列倒排映射（内存结构）。
-- 仅当第一个有效数据 stage 是等值匹配（`=` 或 `==`）且命中已建索引列时走索引加速；前置 `let` 可以跳过。
-- 其他过滤条件仍走全表扫描。
-- 使用 `explain from ...` 检查实际访问方式、lookup 条件、候选行数、stage 顺序和结果 schema。
-
-### 6) Enum 约束规则（当前实现）
-
-- Enum 类型写法：`enum(VariantA, VariantB(type1,type2), ...)`。
-- 变体名必须以大写字母开头，其余字符为 ASCII 字母、数字或下划线。
-- 插入或过滤时，值写法为 `Variant` 或 `Variant(arg1,arg2)`。
-- 参数个数和参数类型必须与建表定义一致，否则写入会报错。
-- `filter kind = SomeVariant(...)` 支持等值比较；`>`/`<` 不适用于 enum 值。
-
-## 持久化说明
-
-- 默认不持久化（纯内存）。
-- [ADR 0001](docs/adr/0001-redb-storage.md) 已选定 redb 作为长期事务后端；`run/cli/server --db <path>` 均已接入同一 redb Engine。
-- 提供 `--wal-path` 后，每个成功的写批次以一条带版本与提交序号的 JSON 记录追加到 WAL；源码中的换行转义保存，同步后才发布内存状态。
-- 服务重启先加载 snapshot，再回放尚未包含的 WAL 提交；索引从数据重建。
-- `--snapshot-path` 要求同时配置 WAL；`--snapshot-every N` 表示每 `N` 个成功写批次保存一次快照。
-- 快照经临时文件、同步和原子替换发布后才清理 WAL；提交水位处理快照与旧 WAL 的重叠。
-- WAL 提交错误后禁用继续写入和 checkpoint，重新打开数据库以确认提交结果；已提交之后的快照维护失败以 warning 返回。
-- 当前有文件占用锁；数据库文件不应使用硬链接别名。正式 redb 路径已有版本化 codec、备份／还原、旧格式导入、进程退出与真实文件增长失败验证，并已记录恢复成本边界；机器掉电和更广的发布环境矩阵仍由 #24 跟踪，参见 [开发记录](docs/DEVELOPMENT.md)。
-
-## 开发验证
-
-```bash
-cargo fmt --check
-cargo check --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-```
-
-测试覆盖语言、索引一致性、原子性、恢复及真实 CLI/TCP。CI 配置包含 macOS/Linux；本轮本机实际验证为 macOS。
+MIT

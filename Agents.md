@@ -62,6 +62,8 @@
 - row 使用表内单调 `u64` 稳定 RowId，索引 posting 不再依赖 `Vec` 位置；每表持久化下一分配值，删除形成的缺口合法且 ID 不复用。旧 redb/snapshot 可从原连续顺序升级。
 - `docs/SCHEMA.md` 已定义类型演进契约；类型、字段、变体、表和索引使用统一稳定 ID，每次原子 schema 变更产生一个 revision 与 SHA-256 hash，Engine 响应携带版本信息。`migration name` 已支持 type/field/variant add/drop/rename、typed field/payload conversion、默认值及 key/index 变更，并在全部嵌套引用表中保留 RowId、重建索引和原子回滚；版本化文件 runner、不可变 checksum 和 redb ledger 已接入。
 - v0.1 发布闭环使用 `scripts/package-release.py` 生成包含完整文档与示例的原生 target 压缩包、`RELEASE.json` 与 SHA-256；包内教程由 `scripts/verify-release.py` 从空目录验证本地 redb CLI 和 TCP，并由集成测试核对 Rust Engine 的 typed 语义。入门和升级契约分别见 `docs/GETTING_STARTED.md` 与 `docs/UPGRADING.md`；#103 跟踪实际 `v0.1.0` tag 与 GitHub Release。
+- README 是面向用户的中英双语产品入口，优先解释“直接用 ADT 描述数据库数据”和“query language 直接理解 ADT”两个核心特点，并保留最短可运行路径。实现历史、测试矩阵、原型兼容、存储内部结构和实时计划分别放在 `docs/DEVELOPMENT.md`、专题文档与 GitHub issues，避免重新堆回 README。
+- `Engine::open_redb_read_only`、`run/cli/server --db --read-only` 提供统一只读执行边界；完整解析和参数绑定后、创建候选状态或持久事务前以 `E_READ_ONLY` 拒绝 mutation，`introspection.read_only` 可验证实际状态。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）

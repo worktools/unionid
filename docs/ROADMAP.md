@@ -100,6 +100,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#115](https://github.com/worktools/unionid/issues/115) | [类型] 生产标量契约 | P1 | 先冻结时间、十进制与二进制编码边界 |
 | [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | P1 | [#112](https://github.com/worktools/unionid/issues/112)、[#114](https://github.com/worktools/unionid/issues/114) |
 | [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | P1 | 核心错误协议稳定 |
+| [#122](https://github.com/worktools/unionid/issues/122) | [文档] 中英双语 README 与 ADT/query 产品入口 | P1 | 使用已发布 v0.1.0 和 [#112](https://github.com/worktools/unionid/issues/112) 的真实入口 |
 | [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | P2 | 以真实 schema 复用需求单独验证 |
 | [#119](https://github.com/worktools/unionid/issues/119) | [语言] match 查询简写 | P2 | 不引入第二套 match 语义 |
 | [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | P2 | 先定义 schema identity 与参数契约 |
