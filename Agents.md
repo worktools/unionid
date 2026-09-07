@@ -57,7 +57,8 @@
 - `tools/workload-eval` 在独立 release 进程测量 10k/100k 的 indexed query、scan、update、upsert、100-row batch 和深层 migration，保留完整 microsecond samples、p50/p95 与 peak RSS。实测表明约 10k 行是当前舒适范围；100k 写入接近 1 秒、migration 约 4 秒且峰值约 1.25 GiB，只作为已测试上限。
 - `tests/release_scenarios.rs` 以真实 CLI 子进程覆盖任务队列、嵌套配置和 session/cache 的 query/DML → restart → migration → check → backup/restore，并比较源库与还原库的 schema identity、ledger、typed rows 和 explain。migration transform 只展开 binding 的最外层 record，保留内部命名 ADT 身份。
 - row 使用表内单调 `u64` 稳定 RowId，索引 posting 不再依赖 `Vec` 位置；每表持久化下一分配值，删除形成的缺口合法且 ID 不复用。旧 redb/snapshot 可从原连续顺序升级。
-- `docs/SCHEMA.md` 已定义类型演进契约；类型、字段、变体、表和索引使用统一稳定 ID，每次原子 schema 变更产生一个 revision 与 SHA-256 hash，Engine 响应携带版本信息。`migration name` 已支持 type/field/variant add/drop/rename、typed field/payload conversion、默认值及 key/index 变更，并在全部嵌套引用表中保留 RowId、重建索引和原子回滚；版本化文件 runner 与 ledger 仍由 #18 实现。
+- `docs/SCHEMA.md` 已定义类型演进契约；类型、字段、变体、表和索引使用统一稳定 ID，每次原子 schema 变更产生一个 revision 与 SHA-256 hash，Engine 响应携带版本信息。`migration name` 已支持 type/field/variant add/drop/rename、typed field/payload conversion、默认值及 key/index 变更，并在全部嵌套引用表中保留 RowId、重建索引和原子回滚；版本化文件 runner、不可变 checksum 和 redb ledger 已接入。
+- v0.1 发布闭环使用 `scripts/package-release.py` 生成原生 target 压缩包、`RELEASE.json` 与 SHA-256；包内教程由 `scripts/verify-release.py` 从空目录验证本地 redb CLI 和 TCP，并由集成测试核对 Rust Engine 的 typed 语义。入门和升级契约分别见 `docs/GETTING_STARTED.md` 与 `docs/UPGRADING.md`。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）

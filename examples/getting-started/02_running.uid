@@ -1,0 +1,6 @@
+from tasks
+filter match state
+  Running {worker, attempt} => attempt >= 1
+  _ => false
+select {id, title, owner.email, state}
+sort id

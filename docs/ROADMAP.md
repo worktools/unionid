@@ -1,10 +1,12 @@
 # unionid 路线图
 
-规划日期：2026-09-06。已在 GitHub 创建 1 个总览、28 个具体任务和 5 个里程碑；第一轮语言预览已开始实施，见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
+规划日期：2026-09-06。GitHub 使用一个总览、分阶段具体任务和 5 个里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
+
+当前核心发布门槛收敛到 [#76](https://github.com/worktools/unionid/issues/76)：生成 macOS/Linux 可校验产物，并让包内五分钟教程在 Rust Engine、本地 redb CLI 和 TCP 三条入口保持相同 typed 语义。完成该门槛后再从总览 issue 选择 v0.2 能力，不把 join、window、分布式或更广泛高阶语言工作混入 v0.1 发布。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，无分号、减少标点。本轮草案采用 `field type`、`option text`／`list text`、缩进式声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不再沿用 TypeScript 风格字段注解或逐行 `|>`。
 

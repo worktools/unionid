@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Package native artifact
+        shell: bash
+        run: |
+          args=()
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            args+=(--expect-version "${GITHUB_REF_NAME#v}")
+          fi
+          python3 scripts/package-release.py --output dist "${args[@]}"
+      - name: Verify checksum, CLI and tutorial
+        run: python3 scripts/verify-release.py --dist dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unionid-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unionid-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: docs/RELEASE-v0.1.0.md
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
