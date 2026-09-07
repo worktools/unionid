@@ -272,10 +272,52 @@ impl Engine {
                     );
                     mutating = true;
                 }
+                Statement::InsertParameter {
+                    table,
+                    parameter_type,
+                    returning,
+                    ..
+                } => {
+                    *parameter_type = Some(
+                        self.db
+                            .prepare_insert_parameter(table, returning.as_ref())
+                            .map_err(|error| error.at(located.span))?,
+                    );
+                    mutating = true;
+                }
+                Statement::UpsertParameter {
+                    table,
+                    parameter_type,
+                    returning,
+                    ..
+                } => {
+                    *parameter_type = Some(
+                        self.db
+                            .prepare_upsert_parameter(table, returning.as_ref())
+                            .map_err(|error| error.at(located.span))?,
+                    );
+                    mutating = true;
+                }
+                Statement::Update {
+                    target,
+                    assignments,
+                    returning,
+                } => {
+                    self.db
+                        .prepare_update(target, assignments, returning.as_ref())
+                        .map_err(|error| error.at(located.span))?;
+                    mutating = true;
+                }
+                Statement::Delete { target, returning } => {
+                    self.db
+                        .prepare_delete(target, returning.as_ref())
+                        .map_err(|error| error.at(located.span))?;
+                    mutating = true;
+                }
                 _ => {
                     return Err(Error::new(
                         "E_PREPARE",
-                        "prepared operations support only read pipelines, explain, and 'insert many table $rows'",
+                        "prepared operations support read pipelines, explain, parameterized insert/upsert, and update/delete",
                     )
                     .at(located.span));
                 }

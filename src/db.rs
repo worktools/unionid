@@ -795,6 +795,30 @@ impl Database {
         Ok(ScalarType::List(Box::new(self.table_row_type(table)?)))
     }
 
+    pub(crate) fn prepare_insert_parameter(
+        &self,
+        table: &str,
+        returning: Option<&Returning>,
+    ) -> Result<ScalarType> {
+        self.bind_returning(table, returning)?;
+        self.table_row_type(table)
+    }
+
+    pub(crate) fn prepare_upsert_parameter(
+        &self,
+        table: &str,
+        returning: Option<&Returning>,
+    ) -> Result<ScalarType> {
+        let row_type = self.prepare_insert_parameter(table, returning)?;
+        if self.table(table)?.primary_key.is_none() {
+            return Err(Error::new(
+                "E_CONSTRAINT",
+                format!("upsert requires a primary key on table '{table}'"),
+            ));
+        }
+        Ok(row_type)
+    }
+
     fn insert_fields(&mut self, name: &str, fields: BTreeMap<String, Value>) -> Result<RowId> {
         let table = self.table(name)?;
         if let Some(key) = &table.primary_key {
@@ -839,44 +863,8 @@ impl Database {
         deadline: Option<std::time::Instant>,
     ) -> Result<QueryResponse> {
         let returning = self.bind_returning(&target.from, returning)?;
+        let (schema, row_type) = self.bind_update_operation(target, assignments)?;
         let table = self.table(&target.from)?;
-        let schema = table.schema.clone();
-        let row_type = table
-            .row_type
-            .map(ScalarType::Ref)
-            .unwrap_or_else(|| ScalarType::Record(schema.clone()));
-        self.bind_mutation_target(target, &schema)?;
-        let mut paths: Vec<String> = Vec::new();
-        for assignment in assignments.iter_mut() {
-            if let Some(earlier) = paths
-                .iter()
-                .find(|earlier| paths_overlap(earlier, &assignment.path))
-            {
-                return Err(Error::new(
-                    "E_QUERY",
-                    format!(
-                        "update fields '{}' and '{}' overlap",
-                        earlier, assignment.path
-                    ),
-                ));
-            }
-            paths.push(assignment.path.clone());
-            let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
-            match &mut assignment.value {
-                SetValue::Expression(value) => {
-                    crate::expression::bind_scalar(
-                        &self.catalog,
-                        &schema,
-                        value,
-                        Some(&expected),
-                        "field",
-                    )?;
-                }
-                SetValue::Match(value) => {
-                    crate::matching::bind_assignment(&self.catalog, &schema, &expected, value)?
-                }
-            }
-        }
         let target_order = self.mutation_target_ids(target, deadline)?;
         let mut rows = table.rows.clone();
         let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
@@ -932,6 +920,62 @@ impl Database {
         Ok(response)
     }
 
+    fn bind_update_operation(
+        &self,
+        target: &mut Pipeline,
+        assignments: &mut [SetAssignment],
+    ) -> Result<(Vec<Column>, ScalarType)> {
+        let table = self.table(&target.from)?;
+        let schema = table.schema.clone();
+        let row_type = table
+            .row_type
+            .map(ScalarType::Ref)
+            .unwrap_or_else(|| ScalarType::Record(schema.clone()));
+        self.bind_mutation_target(target, &schema)?;
+        let mut paths: Vec<String> = Vec::new();
+        for assignment in assignments.iter_mut() {
+            if let Some(earlier) = paths
+                .iter()
+                .find(|earlier| paths_overlap(earlier, &assignment.path))
+            {
+                return Err(Error::new(
+                    "E_QUERY",
+                    format!(
+                        "update fields '{}' and '{}' overlap",
+                        earlier, assignment.path
+                    ),
+                ));
+            }
+            paths.push(assignment.path.clone());
+            let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
+            match &mut assignment.value {
+                SetValue::Expression(value) => {
+                    crate::expression::bind_scalar(
+                        &self.catalog,
+                        &schema,
+                        value,
+                        Some(&expected),
+                        "field",
+                    )?;
+                }
+                SetValue::Match(value) => {
+                    crate::matching::bind_assignment(&self.catalog, &schema, &expected, value)?
+                }
+            }
+        }
+        Ok((schema, row_type))
+    }
+
+    pub(crate) fn prepare_update(
+        &self,
+        target: &mut Pipeline,
+        assignments: &mut [SetAssignment],
+        returning: Option<&Returning>,
+    ) -> Result<()> {
+        self.bind_returning(&target.from, returning)?;
+        self.bind_update_operation(target, assignments).map(|_| ())
+    }
+
     fn delete(
         &mut self,
         target: &mut Pipeline,
@@ -939,8 +983,7 @@ impl Database {
         deadline: Option<std::time::Instant>,
     ) -> Result<QueryResponse> {
         let returning = self.bind_returning(&target.from, returning)?;
-        let schema = self.table(&target.from)?.schema.clone();
-        self.bind_mutation_target(target, &schema)?;
+        self.bind_delete_operation(target)?;
         let target_order = self.mutation_target_ids(target, deadline)?;
         let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
         let mut rows = self.table(&target.from)?.rows.clone();
@@ -961,6 +1004,20 @@ impl Database {
         response.affected_rows = Some(affected);
         apply_returning(&mut response, returning, returned);
         Ok(response)
+    }
+
+    fn bind_delete_operation(&self, target: &mut Pipeline) -> Result<()> {
+        let schema = self.table(&target.from)?.schema.clone();
+        self.bind_mutation_target(target, &schema)
+    }
+
+    pub(crate) fn prepare_delete(
+        &self,
+        target: &mut Pipeline,
+        returning: Option<&Returning>,
+    ) -> Result<()> {
+        self.bind_returning(&target.from, returning)?;
+        self.bind_delete_operation(target)
     }
 
     fn bind_returning(

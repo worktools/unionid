@@ -124,11 +124,19 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
                 visit_migration(step, visitor);
             }
         }
-        Statement::InsertParameter { parameter, .. }
-        | Statement::UpsertParameter { parameter, .. } => {
+        Statement::InsertParameter {
+            parameter,
+            parameter_type,
+            ..
+        }
+        | Statement::UpsertParameter {
+            parameter,
+            parameter_type,
+            ..
+        } => {
             visitor(&ScalarExpression::Parameter {
                 name: parameter.clone(),
-                ty: None,
+                ty: parameter_type.clone(),
             });
         }
         Statement::InsertManyParameter {
@@ -182,6 +190,7 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
             table,
             parameter,
             returning,
+            ..
         } => {
             let table = std::mem::take(table);
             let parameter = std::mem::take(parameter);
@@ -196,6 +205,7 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
             table,
             parameter,
             returning,
+            ..
         } => {
             let table = std::mem::take(table);
             let parameter = std::mem::take(parameter);
