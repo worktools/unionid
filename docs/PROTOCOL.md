@@ -2,6 +2,8 @@
 
 unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和响应各占一个物理行。<code>query</code> 是 JSON string，因此源码中的换行、缩进、引号和管道符都作为数据传输，不参与协议分帧。服务仍暂时接受旧的 <code>{"query":"..."}</code> 和纯文本单行请求，新的客户端应使用本页协议。
 
+持久幂等写入的 exactly-once effect、request digest、回执、容量、显式清理和格式升级契约已由 [RFC 0002](rfc/0002-idempotent-write-receipts.md) 冻结。协议字段将在 Engine/redb 能原子保存回执后由 #126 接入；当前 `request_id` 仍然只做关联，不能用于去重。
+
 version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。内置服务使用 JSON Lines；HTTP adapter 应在 `POST /v1/query` 的 JSON body 中直接使用同一结构，并调用 `server::execute_protocol_request`。这样 TCP、HTTP 和嵌入式 adapter 共享版本检查、参数解码、schema identity、deadline、introspection、错误与返回行语义，而不是各自解释 query。
 
 ## 请求
