@@ -107,7 +107,7 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
             visit_pipeline(target, visitor);
             for assignment in assignments {
                 match &assignment.value {
-                    SetValue::Expression(value) => visit_scalar(value, visitor),
+                    SetValue::Expression(value) => visit_bool(value, visitor),
                     SetValue::Match(value) => {
                         for arm in &value.arms {
                             visit_match_value(&arm.result, visitor);
@@ -175,7 +175,7 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
             visit_pipeline_mut(target, visitor);
             for assignment in assignments {
                 match &mut assignment.value {
-                    SetValue::Expression(value) => visit_scalar_mut(value, visitor),
+                    SetValue::Expression(value) => visit_bool_mut(value, visitor),
                     SetValue::Match(value) => {
                         for arm in &mut value.arms {
                             visit_match_value_mut(&mut arm.result, visitor);
@@ -451,7 +451,7 @@ fn visit_scalar_mut(
 
 fn visit_match_value(value: &MatchValue, visitor: &mut impl FnMut(&ScalarExpression)) {
     match value {
-        MatchValue::Expression(expression) => visit_scalar(expression, visitor),
+        MatchValue::Expression(expression) => visit_bool(expression, visitor),
         MatchValue::Constructor { payload, .. } => match payload {
             MatchValuePayload::Unit => {}
             MatchValuePayload::Record(fields) => {
@@ -481,7 +481,7 @@ fn visit_match_value(value: &MatchValue, visitor: &mut impl FnMut(&ScalarExpress
 
 fn visit_match_value_mut(value: &mut MatchValue, visitor: &mut impl FnMut(&mut ScalarExpression)) {
     match value {
-        MatchValue::Expression(expression) => visit_scalar_mut(expression, visitor),
+        MatchValue::Expression(expression) => visit_bool_mut(expression, visitor),
         MatchValue::Constructor { payload, .. } => match payload {
             MatchValuePayload::Unit => {}
             MatchValuePayload::Record(fields) => {

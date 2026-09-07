@@ -65,6 +65,38 @@ pub(crate) fn bind_derive(
     }
 }
 
+pub(crate) fn infer_value_expression(
+    catalog: &Catalog,
+    scope: &[Column],
+    expression: &BoolExpression,
+    reference_kind: &str,
+) -> Result<Option<ScalarType>> {
+    match expression {
+        BoolExpression::Value(value) => infer_scalar(catalog, scope, value, reference_kind),
+        _ => Ok(Some(ScalarType::Bool)),
+    }
+}
+
+pub(crate) fn bind_value_expression(
+    catalog: &Catalog,
+    scope: &[Column],
+    expression: &mut BoolExpression,
+    expected: &ScalarType,
+    reference_kind: &str,
+    context: &str,
+) -> Result<()> {
+    match expression {
+        BoolExpression::Value(value) => {
+            bind_scalar(catalog, scope, value, Some(expected), reference_kind)?;
+        }
+        _ => {
+            require_bool(catalog, expected, context)?;
+            bind_in_scope(catalog, scope, expression, reference_kind, context)?;
+        }
+    }
+    Ok(())
+}
+
 fn bind_in_scope(
     catalog: &Catalog,
     scope: &[Column],

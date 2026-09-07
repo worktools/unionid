@@ -1032,9 +1032,12 @@ fn infer_result_type(
     match result {
         MatchValue::Binding(path) => Ok(Some(binding_type(catalog, bindings, path)?.clone())),
         MatchValue::Literal(value) => literal_type(catalog, value),
-        MatchValue::Expression(expression) => {
-            crate::expression::infer_scalar(catalog, bindings, expression, "match binding")
-        }
+        MatchValue::Expression(expression) => crate::expression::infer_value_expression(
+            catalog,
+            bindings,
+            expression,
+            "match binding",
+        ),
         MatchValue::Constructor { name, payload } => {
             if let Some(definition) = catalog.types.get(name)
                 && matches!(payload, MatchValuePayload::Record(_))
@@ -1193,16 +1196,14 @@ fn bind_result(
             *value = catalog.coerce(value, expected, &format!("{context} branch"))?;
             Ok(())
         }
-        MatchValue::Expression(expression) => {
-            crate::expression::bind_scalar(
-                catalog,
-                bindings,
-                expression,
-                Some(expected),
-                "match binding",
-            )?;
-            Ok(())
-        }
+        MatchValue::Expression(expression) => crate::expression::bind_value_expression(
+            catalog,
+            bindings,
+            expression,
+            expected,
+            "match binding",
+            &format!("{context} branch"),
+        ),
         MatchValue::Constructor { name, payload } => {
             bind_constructor_result(catalog, context, expected, name, payload, bindings)
         }
@@ -1506,20 +1507,29 @@ pub(crate) fn evaluate_derive(
     catalog: &Catalog,
     row: &BTreeMap<String, Value>,
     derive: &DeriveMatch,
+    budget: &mut crate::expression::EvaluationBudget,
 ) -> Result<Value> {
-    evaluate_value_match(catalog, row, derive, &format!("derive '{}'", derive.name))
+    evaluate_value_match(
+        catalog,
+        row,
+        derive,
+        &format!("derive '{}'", derive.name),
+        budget,
+    )
 }
 
 pub(crate) fn evaluate_assignment(
     catalog: &Catalog,
     row: &BTreeMap<String, Value>,
     value: &DeriveMatch,
+    budget: &mut crate::expression::EvaluationBudget,
 ) -> Result<Value> {
     evaluate_value_match(
         catalog,
         row,
         value,
         &format!("update field '{}'", value.name),
+        budget,
     )
 }
 
@@ -1528,6 +1538,7 @@ fn evaluate_value_match(
     row: &BTreeMap<String, Value>,
     value_match: &DeriveMatch,
     context: &str,
+    budget: &mut crate::expression::EvaluationBudget,
 ) -> Result<Value> {
     let value = row_field(row, &value_match.source).ok_or_else(|| {
         Error::new(
@@ -1544,7 +1555,7 @@ fn evaluate_value_match(
                 .output_type
                 .as_ref()
                 .ok_or_else(|| Error::new("E_TYPE", "match value has no bound output type"))?;
-            let raw = evaluate_result(catalog, output_type, &bindings, &arm.result)?;
+            let raw = evaluate_result(catalog, output_type, &bindings, &arm.result, budget)?;
             return catalog.coerce(&raw, output_type, &format!("{context} result"));
         }
     }
@@ -1559,17 +1570,19 @@ fn evaluate_result(
     expected: &ScalarType,
     bindings: &BTreeMap<&str, &Value>,
     result: &MatchValue,
+    budget: &mut crate::expression::EvaluationBudget,
 ) -> Result<Value> {
     match result {
         MatchValue::Binding(path) => binding_value(bindings, path)
             .cloned()
             .ok_or_else(|| Error::new("E_MATCH", format!("missing binding '{path}'"))),
         MatchValue::Literal(value) => Ok(value.clone()),
-        MatchValue::Expression(expression) => {
-            crate::expression::evaluate_value(catalog, expression, |path| {
-                binding_value(bindings, path)
-            })
-        }
+        MatchValue::Expression(expression) => crate::expression::evaluate_derive(
+            catalog,
+            expression,
+            |path| binding_value(bindings, path),
+            budget,
+        ),
         MatchValue::Constructor { name, payload } => {
             if let ScalarType::Ref(id) = expected {
                 let definition = catalog.definition(*id)?;
@@ -1582,7 +1595,7 @@ fn evaluate_result(
                             format!("named record '{name}' requires a record value"),
                         ));
                     };
-                    return evaluate_record(catalog, expected, bindings, fields);
+                    return evaluate_record(catalog, expected, bindings, fields, budget);
                 }
             }
             match catalog.underlying(expected)? {
@@ -1599,7 +1612,13 @@ fn evaluate_result(
                     };
                     Ok(Value::Enum(crate::model::EnumValue {
                         variant: name.clone(),
-                        args: evaluate_value_payload(catalog, &argument_types, bindings, payload)?,
+                        args: evaluate_value_payload(
+                            catalog,
+                            &argument_types,
+                            bindings,
+                            payload,
+                            budget,
+                        )?,
                         id: 0,
                     }))
                 }
@@ -1609,7 +1628,13 @@ fn evaluate_result(
                         resolve_constructor(catalog, &source, "derive result", name)?;
                     Ok(Value::Enum(crate::model::EnumValue {
                         variant: name.clone(),
-                        args: evaluate_value_payload(catalog, &argument_types, bindings, payload)?,
+                        args: evaluate_value_payload(
+                            catalog,
+                            &argument_types,
+                            bindings,
+                            payload,
+                            budget,
+                        )?,
                         id: 0,
                     }))
                 }
@@ -1619,7 +1644,7 @@ fn evaluate_result(
                 )),
             }
         }
-        MatchValue::Record(fields) => evaluate_record(catalog, expected, bindings, fields),
+        MatchValue::Record(fields) => evaluate_record(catalog, expected, bindings, fields, budget),
         MatchValue::Tuple(values) => {
             let ScalarType::Tuple(items) = catalog.underlying(expected)? else {
                 return Err(Error::new(
@@ -1631,7 +1656,7 @@ fn evaluate_result(
                 values
                     .iter()
                     .zip(items)
-                    .map(|(value, ty)| evaluate_result(catalog, ty, bindings, value))
+                    .map(|(value, ty)| evaluate_result(catalog, ty, bindings, value, budget))
                     .collect::<Result<_>>()?,
             ))
         }
@@ -1642,7 +1667,7 @@ fn evaluate_result(
             Ok(Value::List(
                 values
                     .iter()
-                    .map(|value| evaluate_result(catalog, item, bindings, value))
+                    .map(|value| evaluate_result(catalog, item, bindings, value, budget))
                     .collect::<Result<_>>()?,
             ))
         }
@@ -1657,7 +1682,13 @@ pub(crate) fn evaluate_migration_result(
     value: &Value,
 ) -> Result<Value> {
     let bindings = BTreeMap::from([(binding, value)]);
-    let raw = evaluate_result(catalog, expected, &bindings, result)?;
+    let raw = evaluate_result(
+        catalog,
+        expected,
+        &bindings,
+        result,
+        &mut crate::expression::EvaluationBudget::new(),
+    )?;
     catalog.coerce(&raw, expected, "migration result")
 }
 
@@ -1666,6 +1697,7 @@ fn evaluate_value_payload(
     argument_types: &[ScalarType],
     bindings: &BTreeMap<&str, &Value>,
     payload: &MatchValuePayload,
+    budget: &mut crate::expression::EvaluationBudget,
 ) -> Result<Vec<Value>> {
     match payload {
         MatchValuePayload::Unit => Ok(Vec::new()),
@@ -1681,12 +1713,13 @@ fn evaluate_value_payload(
                 record_type,
                 bindings,
                 fields,
+                budget,
             )?])
         }
         MatchValuePayload::Positional(values) => values
             .iter()
             .zip(argument_types)
-            .map(|(value, ty)| evaluate_result(catalog, ty, bindings, value))
+            .map(|(value, ty)| evaluate_result(catalog, ty, bindings, value, budget))
             .collect(),
     }
 }
@@ -1696,6 +1729,7 @@ fn evaluate_record(
     expected: &ScalarType,
     bindings: &BTreeMap<&str, &Value>,
     fields: &[MatchValueField],
+    budget: &mut crate::expression::EvaluationBudget,
 ) -> Result<Value> {
     let ScalarType::Record(definitions) = catalog.underlying(expected)? else {
         return Err(Error::new(
@@ -1717,7 +1751,7 @@ fn evaluate_record(
                 })?;
             Ok((
                 field.name.clone(),
-                evaluate_result(catalog, &definition.ty, bindings, &field.value)?,
+                evaluate_result(catalog, &definition.ty, bindings, &field.value, budget)?,
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;

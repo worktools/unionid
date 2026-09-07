@@ -374,6 +374,25 @@ fn field_type_changes_use_typed_expressions_and_rebuild_indexes() {
 }
 
 #[test]
+fn field_type_changes_can_return_boolean_expressions() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "type Feature =\n  id int\n  score int\ntable features Feature\n  key id\ninsert features {id = 1, score = 2}\ninsert features {id = 2, score = 0}"
+            )
+            .ok
+    );
+    let migrated = engine.execute(
+        "migration feature_enabled\n  change field Feature.score to bool\n    using old -> old > 0",
+    );
+    assert!(migrated.ok, "{}", migrated.message);
+    let rows = engine.execute("from features | sort id");
+    assert!(rows.rows[0]["score"].cmp_eq(&Value::Bool(true)));
+    assert!(rows.rows[1]["score"].cmp_eq(&Value::Bool(false)));
+}
+
+#[test]
 fn migration_transforms_preserve_nested_named_record_identity() {
     let mut engine = Engine::memory();
     ok(

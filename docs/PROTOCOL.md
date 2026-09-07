@@ -19,7 +19,7 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 
 参数名使用与标识符相同的 ASCII 规则，以字母或下划线开头。缺少参数返回 <code>E_PARAM_MISSING</code>，多余参数返回 <code>E_PARAM_EXTRA</code>，wire value 无法解码返回 <code>E_PARAM_TYPE</code>；参数解码后仍由查询上下文做普通类型检查，所以类型不匹配返回 <code>E_TYPE</code>。绑定发生在 AST 上，不通过文本替换，文本参数中的引号、换行、注释符或 pipeline 符号不会改变查询结构。参数也可直接作为 `derive match` 或 `set ... = match ...` 的分支结果及嵌套 constructor 负载，并由结果／目标字段类型检查。
 
-参数可用于 filter、match condition、derive 算术表达式和 update <code>set</code>。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>；<code>insert many tasks $rows</code> 与 <code>upsert many tasks $rows</code> 接受 <code>list Task</code>，按输入顺序原子写入并 returning。批量 upsert 要求主键，拒绝输入内重复主键，并返回与输入逐项对齐的 action。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
+参数可用于 filter、match condition、普通／match derive 的算术或 bool 结果，以及 update <code>set</code>；prepared 绑定会在扫描前从字段或分支结果推导类型。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>；<code>insert many tasks $rows</code> 与 <code>upsert many tasks $rows</code> 接受 <code>list Task</code>，按输入顺序原子写入并 returning。批量 upsert 要求主键，拒绝输入内重复主键，并返回与输入逐项对齐的 action。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
 
 Introspection 使用同一版本请求，返回完整的类型化快照，客户端再按请求种类展示。它不执行查询或修改数据：
 

@@ -1084,20 +1084,25 @@ impl Database {
         let target_order = self.mutation_target_ids(target, deadline)?;
         let mut rows = table.rows.clone();
         let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
+        let mut evaluation_budget = crate::expression::EvaluationBudget::new();
         for row in rows.iter_mut().filter(|row| target_ids.contains(&row.id)) {
             let original = row.fields.clone();
             let mut values = Vec::with_capacity(assignments.len());
             for assignment in assignments.iter() {
                 let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
                 let value = match &assignment.value {
-                    SetValue::Expression(value) => {
-                        crate::expression::evaluate_value(&self.catalog, value, |path| {
-                            row_field(&original, path)
-                        })?
-                    }
-                    SetValue::Match(value) => {
-                        crate::matching::evaluate_assignment(&self.catalog, &original, value)?
-                    }
+                    SetValue::Expression(value) => crate::expression::evaluate_derive(
+                        &self.catalog,
+                        value,
+                        |path| row_field(&original, path),
+                        &mut evaluation_budget,
+                    )?,
+                    SetValue::Match(value) => crate::matching::evaluate_assignment(
+                        &self.catalog,
+                        &original,
+                        value,
+                        &mut evaluation_budget,
+                    )?,
                 };
                 values.push((
                     assignment.path.as_str(),
@@ -1166,12 +1171,13 @@ impl Database {
             let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
             match &mut assignment.value {
                 SetValue::Expression(value) => {
-                    crate::expression::bind_scalar(
+                    crate::expression::bind_value_expression(
                         &self.catalog,
                         &schema,
                         value,
-                        Some(&expected),
+                        &expected,
                         "field",
+                        "update value",
                     )?;
                 }
                 SetValue::Match(value) => {
@@ -1933,7 +1939,12 @@ impl Database {
                 Stage::DeriveMatch(derive) => {
                     for (position, row) in rows.iter_mut().enumerate() {
                         check_deadline_periodically(deadline, position)?;
-                        let value = crate::matching::evaluate_derive(&self.catalog, row, &derive)?;
+                        let value = crate::matching::evaluate_derive(
+                            &self.catalog,
+                            row,
+                            &derive,
+                            &mut evaluation_budget,
+                        )?;
                         row.insert(derive.name.clone(), value);
                     }
                 }

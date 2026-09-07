@@ -3139,3 +3139,118 @@ insert accounts {id = 2, email = "two@example.com"}"#;
     assert!(!failed.ok);
     assert_eq!(failed.error.unwrap().code, "E_CONSTRAINT");
 }
+
+#[test]
+fn match_derives_return_full_boolean_expressions() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type State =
+  Pending {retry_at option int, tags list text}
+  | Running {attempt int, blocked bool}
+type Job =
+  id int
+  state State
+table jobs Job
+  key id
+insert jobs {id = 1, state = Pending {retry_at = Some 10, tags = ["retry"]}}
+insert jobs {id = 2, state = Running {attempt = 3, blocked = true}}"#,
+    );
+
+    let response = ok(
+        &mut engine,
+        r#"from jobs
+let below = (value int, limit int) -> value < limit
+derive retryable =
+  match state
+    Pending {retry_at, tags} =>
+      is_some retry_at
+      and contains tags "retry"
+    Running {attempt, blocked} => below attempt 4 and not blocked
+derive safe =
+  match state
+    Pending {..} => true or (1 / 0 > 0)
+    Running {..} => false and (1 / 0 > 0)
+select {id, retryable, safe}
+sort id"#,
+    );
+    assert_eq!(response.rows.len(), 2);
+    assert!(response.rows[0]["retryable"].cmp_eq(&Value::Bool(true)));
+    assert!(response.rows[0]["safe"].cmp_eq(&Value::Bool(true)));
+    assert!(response.rows[1]["retryable"].cmp_eq(&Value::Bool(false)));
+    assert!(response.rows[1]["safe"].cmp_eq(&Value::Bool(false)));
+
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("limit".into(), Value::Int(4));
+    let prepared = engine
+        .prepare(
+            "from jobs\nderive retryable = match state\n  Pending {..} => false\n  Running {attempt, ..} => attempt < $limit\nselect {id, retryable}\nsort id",
+        )
+        .unwrap();
+    assert_eq!(prepared.parameter_types()["limit"], "int");
+    let response = engine.query(&prepared, params);
+    assert!(response.ok, "{}", response.message);
+    assert!(response.rows[1]["retryable"].cmp_eq(&Value::Bool(true)));
+}
+
+#[test]
+fn boolean_update_expressions_are_typed_and_atomic() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type State = Pending | Running {attempt int}
+type Job =
+  id int
+  ready bool
+  tags list text
+  state State
+table jobs Job
+  key id
+insert jobs {id = 1, ready = false, tags = ["active"], state = Pending}
+insert jobs {id = 2, ready = false, tags = [], state = Running {attempt = 3}}"#,
+    );
+
+    let direct = ok(
+        &mut engine,
+        "update jobs\nfilter id == 1\nset ready = not ready and contains tags \"active\"\nreturning id, ready",
+    );
+    assert!(direct.rows[0]["ready"].cmp_eq(&Value::Bool(true)));
+
+    let prepared = engine
+        .prepare(
+            "update jobs\nset ready =\n  match state\n    Pending => $pending\n    Running {attempt} => attempt >= $minimum\nreturning id, ready",
+        )
+        .unwrap();
+    assert_eq!(prepared.parameter_types()["pending"], "bool");
+    assert_eq!(prepared.parameter_types()["minimum"], "int");
+    let response = engine.execute_prepared(
+        &prepared,
+        std::collections::BTreeMap::from([
+            ("pending".into(), Value::Bool(true)),
+            ("minimum".into(), Value::Int(3)),
+        ]),
+    );
+    assert!(response.ok, "{}", response.message);
+    assert!(
+        response
+            .rows
+            .iter()
+            .all(|row| row["ready"].cmp_eq(&Value::Bool(true)))
+    );
+
+    let before = serde_json::to_value(ok(&mut engine, "from jobs | sort id").rows).unwrap();
+    let failed = engine
+        .execute("update jobs\nset ready = id > 0 and (10 / (id - 2) > 0)\nreturning id, ready");
+    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "E_ARITH");
+    assert_eq!(
+        serde_json::to_value(ok(&mut engine, "from jobs | sort id").rows).unwrap(),
+        before
+    );
+
+    let mut empty = Engine::memory();
+    ok(&mut empty, "create table values (id int, flag bool)");
+    let wrong = empty.execute("update values\nset id = flag and true");
+    assert!(!wrong.ok);
+    assert_eq!(wrong.error.unwrap().code, "E_TYPE");
+}

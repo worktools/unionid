@@ -187,7 +187,7 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
                     SetValue::Expression(value) => line(
                         output,
                         depth,
-                        &format!("set {} = {}", assignment.path, scalar(value, 0, false)),
+                        &format!("set {} = {}", assignment.path, boolean(value, 0, false)),
                     ),
                     SetValue::Match(value) => {
                         line(output, depth, &format!("set {} =", assignment.path));
@@ -830,7 +830,7 @@ fn match_value(value: &MatchValue, argument: bool) -> String {
     let text = match value {
         MatchValue::Binding(name) => name.clone(),
         MatchValue::Literal(value) => value.source_text(),
-        MatchValue::Expression(value) => scalar(value, 0, false),
+        MatchValue::Expression(value) => boolean(value, 0, false),
         MatchValue::Constructor { name, payload } => match payload {
             MatchValuePayload::Unit => name.clone(),
             MatchValuePayload::Record(fields) => {
@@ -869,7 +869,7 @@ fn match_value(value: &MatchValue, argument: bool) -> String {
             MatchValue::Constructor {
                 payload: MatchValuePayload::Positional(_),
                 ..
-            } | MatchValue::Expression(ScalarExpression::Arithmetic { .. })
+            } | MatchValue::Expression(_)
         )
     {
         format!("({text})")

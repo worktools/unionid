@@ -1200,7 +1200,7 @@ impl Parser {
                 let value = if self.word("match") {
                     SetValue::Match(self.match_value_expression(path.clone())?)
                 } else {
-                    SetValue::Expression(self.scalar_expression(0, nested)?)
+                    SetValue::Expression(self.bool_expression(0, nested)?)
                 };
                 if nested {
                     self.expect(Kind::Dedent)?;
@@ -2012,7 +2012,10 @@ impl Parser {
             if *self.kind() == Kind::Dedent {
                 break;
             }
-            self.expect(Kind::Newline)?;
+            let after_block = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
+            if !after_block {
+                self.expect(Kind::Newline)?;
+            }
             self.newlines();
         }
         self.expect(Kind::Dedent)?;
@@ -2028,10 +2031,22 @@ impl Parser {
     }
 
     fn match_value(&mut self) -> Result<MatchValue> {
-        self.match_value_expression_value(0)
+        let multiline = *self.kind() == Kind::Newline;
+        if multiline {
+            self.block()?;
+        }
+        let value = self.match_value_expression_value(0, multiline)?;
+        if multiline {
+            self.expect(Kind::Dedent)?;
+        }
+        Ok(value)
     }
 
-    fn match_value_expression_value(&mut self, depth: usize) -> Result<MatchValue> {
+    fn match_value_expression_value(
+        &mut self,
+        depth: usize,
+        multiline: bool,
+    ) -> Result<MatchValue> {
         self.depth(depth)?;
         if matches!(
             self.kind(),
@@ -2043,8 +2058,8 @@ impl Parser {
                 | Kind::Open('(')
         ) {
             let checkpoint = self.pos;
-            if let Ok(expression) = self.scalar_expression(depth + 1, false)
-                && scalar_is_computed(&expression)
+            if let Ok(expression) = self.bool_expression(depth + 1, multiline)
+                && bool_is_computed(&expression)
             {
                 return Ok(MatchValue::Expression(expression));
             }
@@ -2058,7 +2073,7 @@ impl Parser {
             Kind::Ident(name) => {
                 self.bump();
                 if name.starts_with(|ch: char| ch.is_ascii_uppercase()) {
-                    self.match_value_constructor(name, depth + 1)
+                    self.match_value_constructor(name, depth + 1, multiline)
                 } else {
                     let mut path = name;
                     while self.eat(Kind::Dot) {
@@ -2070,14 +2085,16 @@ impl Parser {
             }
             Kind::Open('{') => {
                 self.bump();
-                Ok(MatchValue::Record(self.match_value_fields(depth + 1)?))
+                Ok(MatchValue::Record(
+                    self.match_value_fields(depth + 1, multiline)?,
+                ))
             }
             Kind::Open('[') => {
                 self.bump();
                 let mut values = Vec::new();
                 self.newlines();
                 while *self.kind() != Kind::Close(']') {
-                    values.push(self.match_value_expression_value(depth + 1)?);
+                    values.push(self.match_value_expression_value(depth + 1, multiline)?);
                     self.newlines();
                     if !self.eat(Kind::Comma) {
                         break;
@@ -2090,7 +2107,7 @@ impl Parser {
             Kind::Open('(') => {
                 self.bump();
                 self.newlines();
-                let first = self.match_value_expression_value(depth + 1)?;
+                let first = self.match_value_expression_value(depth + 1, multiline)?;
                 self.newlines();
                 if !self.eat(Kind::Comma) {
                     self.expect(Kind::Close(')'))?;
@@ -2099,7 +2116,7 @@ impl Parser {
                 let mut values = vec![first];
                 self.newlines();
                 while *self.kind() != Kind::Close(')') {
-                    values.push(self.match_value_expression_value(depth + 1)?);
+                    values.push(self.match_value_expression_value(depth + 1, multiline)?);
                     self.newlines();
                     if !self.eat(Kind::Comma) {
                         break;
@@ -2113,13 +2130,18 @@ impl Parser {
         }
     }
 
-    fn match_value_constructor(&mut self, mut name: String, depth: usize) -> Result<MatchValue> {
+    fn match_value_constructor(
+        &mut self,
+        mut name: String,
+        depth: usize,
+        multiline: bool,
+    ) -> Result<MatchValue> {
         while self.eat(Kind::Dot) {
             name.push('.');
             name.push_str(&self.identifier()?);
         }
         let payload = if self.eat(Kind::Open('{')) {
-            MatchValuePayload::Record(self.match_value_fields(depth + 1)?)
+            MatchValuePayload::Record(self.match_value_fields(depth + 1, multiline)?)
         } else {
             let mut values = Vec::new();
             while matches!(
@@ -2132,7 +2154,7 @@ impl Parser {
                     | Kind::Open('(')
                     | Kind::Open('[')
             ) {
-                values.push(self.match_value_expression_value(depth + 1)?);
+                values.push(self.match_value_expression_value(depth + 1, multiline)?);
             }
             if values.is_empty() {
                 MatchValuePayload::Unit
@@ -2143,7 +2165,11 @@ impl Parser {
         Ok(MatchValue::Constructor { name, payload })
     }
 
-    fn match_value_fields(&mut self, depth: usize) -> Result<Vec<MatchValueField>> {
+    fn match_value_fields(
+        &mut self,
+        depth: usize,
+        multiline: bool,
+    ) -> Result<Vec<MatchValueField>> {
         self.depth(depth)?;
         let mut fields = Vec::new();
         let mut seen = BTreeSet::new();
@@ -2154,7 +2180,7 @@ impl Parser {
                 return Err(self.error(format!("duplicate value field '{name}'")));
             }
             self.expect(Kind::Op("=".into()))?;
-            let value = self.match_value_expression_value(depth + 1)?;
+            let value = self.match_value_expression_value(depth + 1, multiline)?;
             fields.push(MatchValueField { name, value });
             if *self.kind() == Kind::Close('}') {
                 break;
@@ -2502,4 +2528,19 @@ fn scalar_is_computed(expression: &ScalarExpression) -> bool {
             | ScalarExpression::Negate { .. }
             | ScalarExpression::Arithmetic { .. }
     )
+}
+
+fn bool_is_computed(expression: &BoolExpression) -> bool {
+    match expression {
+        BoolExpression::Value(expression) => scalar_is_computed(expression),
+        BoolExpression::Compare { .. }
+        | BoolExpression::Contains { .. }
+        | BoolExpression::Any { .. }
+        | BoolExpression::All { .. }
+        | BoolExpression::IsSome(_)
+        | BoolExpression::IsNone(_)
+        | BoolExpression::Not(_)
+        | BoolExpression::And(_, _)
+        | BoolExpression::Or(_, _) => true,
+    }
 }

@@ -909,13 +909,14 @@ fn versioned_tcp_updates_adts_with_match_and_parameters() {
 type Job =
   id int
   priority int
+  ready bool
   state State
 
 table jobs Job
   key id
 
-insert jobs {id = 1, priority = 1, state = Queued {attempt = 2}}
-insert jobs {id = 2, priority = 2, state = Queued {attempt = 5}}"#;
+insert jobs {id = 1, priority = 1, ready = false, state = Queued {attempt = 2}}
+insert jobs {id = 2, priority = 2, ready = false, state = Queued {attempt = 5}}"#;
     assert!(cli::send_one(&server.addr, setup).unwrap().ok);
 
     let request = ProtocolRequest {
@@ -964,6 +965,31 @@ returning id, state"#
     assert_eq!(
         untouched.rows[0]["state"].source_text(),
         "Queued {attempt = 2}"
+    );
+
+    let boolean_update = ProtocolRequest {
+        version: unionid::protocol::VERSION,
+        request_id: "boolean-update".into(),
+        query: r#"update jobs
+set ready =
+  match state
+    Queued {attempt} => attempt < $threshold
+    Running {attempt, ..} => attempt >= $threshold
+    Done => false
+returning id, ready"#
+            .into(),
+        introspect: None,
+        params: BTreeMap::from([("threshold".into(), WireValue::Int { value: "5".into() })]),
+        schema: None,
+    };
+    let response = cli::send_request(&server.addr, &boolean_update).unwrap();
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.affected_rows, Some(2));
+    assert!(
+        response
+            .rows
+            .iter()
+            .all(|row| matches!(row["ready"], WireValue::Bool { value: true }))
     );
 }
 

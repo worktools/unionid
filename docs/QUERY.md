@@ -35,7 +35,7 @@ take 20
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` / `upsert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91/#97 |
 | ADT 派生列 | `derive x = match ...` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
-| 布尔表达式与集合函数 | `and/or/not`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于普通 filter 与 match condition | — |
+| 布尔表达式与集合函数 | `and/or/not`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于 filter、普通／match derive、typed set 和 migration conversion | #100 |
 | 其他派生列 | `derive score = priority + bonus` | 已实现 scalar 与 bool expression、typed 参数及后续 stage 作用域 | — |
 | 分组与汇总 | `aggregate` / `group {key} ...` | 已实现 count/sum/min/max、typed 空输入语义与资源上限 | — |
 | 查询局部定义 | `let retryable = attempt -> attempt < 3` | 已实现常量、单/多参数非递归纯函数、有限推断、词法遮蔽与展开预算 | — |
@@ -78,8 +78,8 @@ stage             = local-binding | value-filter | match-filter | derive-express
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
-set-stage         = newline "set" field-path "=" scalar-expression
-                  | "|" "set" field-path "=" scalar-expression
+set-stage         = newline "set" field-path "=" result-expression
+                  | "|" "set" field-path "=" result-expression
 delete            = "delete" table delete-stage*
 delete-stage      = newline filter-stage | "|" filter-stage
 filter-stage      = value-filter | match-filter
@@ -99,7 +99,9 @@ group-fields      = field-path | "{" field-path ("," field-path)* ","? "}"
 aggregate-field   = identifier "=" ("count" | (("sum" | "min" | "max") scalar-expression)) newline?
 nested-match-expression = match-expression | newline indent match-expression dedent
 match-expression  = "match" field-path newline indent match-value-arm+ dedent
-match-value-arm   = arm-pattern "=>" match-value newline?
+match-value-arm   = arm-pattern "=>" nested-result-expression newline?
+nested-result-expression = result-expression | newline indent result-expression dedent
+result-expression = bool-expression | match-value
 match-value       = binding-path | literal | constructor-value | record-value | tuple-value | list-value
 constructor-value = qualified-variant (record-value | value-argument*)?
 value-argument    = binding-path | literal | "(" match-value ")" | tuple-value | list-value
@@ -239,7 +241,7 @@ delete jobs | filter archived == true | returning
 
 不写 filter 时从整表开始选择。mutation target 接受 filter、filter match、sort 和 take，并严格按源码顺序执行；sort 并列保持稳定 RowId 输入顺序，生产语句仍应以唯一键结束排序。`take n` 与一基闭区间 `take start..end` 和读取 pipeline 一致。update 的全部 target stage 必须位于第一个 set 之前；derive/select/group/aggregate 不属于 mutation target。单行形式使用 `|`，例如 `update jobs | filter id == 1 | take 1 | set attempts = attempts + 1`。复杂选择和多项 set 推荐逐行写。
 
-set 的字段路径按表的完整 row schema 绑定。右侧可使用 scalar expression：字段引用、literal、ADT constructor、`length` 和 int/float 算术；也可缩进写 `match source`，复用 `derive match` 的 pattern、coverage 和 option/sum/product/list 值构造。assignment 目标给出结果类型，每个分支在扫描前检查，因此空表仍会拒绝未知路径、非穷尽／不可达 pattern、错误 constructor 和类型不匹配。
+set 的字段路径按表的完整 row schema 绑定。右侧可使用字段引用、literal、ADT constructor、`length`、int/float 算术和完整 bool 表达式；也可缩进写 `match source`，复用 `derive match` 的 pattern、coverage、bool 结果和 option/sum/product/list 值构造。assignment 目标给出结果类型，bool 表达式只能写入 bool 字段；每个分支在扫描前检查，因此空表仍会拒绝未知路径、非穷尽／不可达 pattern、错误 constructor 和类型不匹配。
 
 match assignment 的顶层小写 binding 是不可反驳 pattern，必须放在最后。`current => current` 同时绑定并返回完整源值，适合只转换部分 constructor；`_` 仍可用于不需要原值的最终分支。结果可引用该分支的嵌套 binding 与 typed 参数。嵌套更新路径只穿过 record；要修改 sum/option/list 内部内容，应匹配并构造完整目标值。
 
@@ -448,7 +450,7 @@ select {id, retry_at}
 
 引擎先从 binding、primitive literal、`Some value`、结构化 product 或限定 constructor 推导结果类型，再按该类型检查全部分支。`None`、空 list/record 和未限定的普通 sum constructor 不能单独确定类型，但可在其他分支已经给出类型时使用；需要主动确定命名 sum 时写 `Type.Variant`，命名 record 写 `TypeName {...}`。不同命名类型不会因结构相同而统一。
 
-分支必须穷尽且结果类型一致，constructor 归属、参数数量、嵌套覆盖关系和每个值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option，同一个顶层 constructor 可以由多个互补嵌套分支覆盖。派生结果支持 scalar arithmetic 和查询局部纯函数；它尚未复用 filter 的完整布尔节点，也没有全局或高阶函数。prepared query 记录 schema revision/hash，schema 改变后以 `E_SCHEMA_CHANGED` 拒绝旧 plan。
+分支必须穷尽且结果类型一致，constructor 归属、参数数量、嵌套覆盖关系和每个值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option，同一个顶层 constructor 可以由多个互补嵌套分支覆盖。派生结果支持 scalar arithmetic、完整 bool/Option/list predicate 和查询局部纯函数；短路与集合求值预算沿用普通 derive。复杂结果可在 `=>` 后换行缩进。prepared query 记录 schema revision/hash，schema 改变后以 `E_SCHEMA_CHANGED` 拒绝旧 plan。
 
 ## 分组与基础汇总
 
