@@ -65,6 +65,7 @@ fn formatter_covers_statements_stages_patterns_values_and_migrations() {
         "create table legacy (id int, state enum(Pending, Done(text)))\ncreate index legacy (state)",
         "insert tasks $row\nupsert tasks $row",
         "update tasks\nfilter match state\n  Pending => true\n  _ => false\nset score = base + bonus * 2",
+        "update tasks\nset state = match state\n  Pending {attempt} => Running {attempt = attempt + 1}\n  current => current",
         "delete tasks | filter id == $id",
         "explain from tasks | let retryable = attempt -> attempt < 3 | filter retryable attempts | derive score = base + bonus | group {state, owner.id}\n  aggregate\n    rows = count\n    total = sum score\nselect {state, rows}\nsort {-rows, state}\ntake 11..20",
         "from tasks\nderive next = match state\n  Pending {attempt = Some n, ..} => State.Running {attempt = n + 1}\n  Running worker => State.Done (worker, [1, 2])\n  _ => None",

@@ -234,6 +234,8 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "from tasks\ngroup state",
         "explain\n",
         "migration initial\n",
+        "update rows\nset state =\n",
+        "update rows\nset state =\n  match state\n",
     ] {
         let InputStatus::Incomplete(error) = input_status(source) else {
             panic!("expected incomplete source: {source:?}");
@@ -2258,6 +2260,100 @@ fn update_assignments_are_simultaneous_and_batches_remain_atomic() {
     let failed = engine.execute("update pairs\nset left = left + 1\nfrom pairs | select {missing}");
     assert!(!failed.ok);
     assert!(ok(&mut engine, "from pairs").rows[0]["left"].cmp_eq(&Value::Int(20)));
+}
+
+#[test]
+fn update_match_assignments_transform_adts_atomically() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type State =
+  Queued {attempt int}
+  | Running {worker text, attempt int}
+  | Done
+
+type Tree =
+  Leaf text
+  | Branch {label text, children list Tree}
+
+type Job =
+  id int
+  state State
+  owner option text = None
+  tree Tree
+  transition text = ""
+
+table jobs Job
+  key id
+
+table empty_jobs Job
+
+create index jobs (state)
+create index jobs (tree)
+
+insert jobs {id = 1, state = Queued {attempt = 0}, tree = Leaf "root"}
+insert jobs {id = 2, state = Done, owner = Some "alice", tree = Branch {label = "kept", children = []}}"#,
+    );
+    let source = r#"update jobs
+filter id == 1
+set transition =
+  match state
+    Queued {..} => "queued"
+    current => "other"
+set state =
+  match state
+    Queued {attempt} => Running {worker = $worker, attempt = attempt + 1}
+    current => current
+set owner =
+  match owner
+    None => Some $worker
+    current => current
+set tree =
+  match tree
+    Leaf label => Branch {label = label, children = [Tree.Leaf(label)]}
+    current => current"#;
+    let updated = engine.execute_with_params(
+        source,
+        std::collections::BTreeMap::from([("worker".into(), Value::Text("local".into()))]),
+    );
+    assert!(updated.ok, "{}", updated.message);
+    assert_eq!(updated.affected_rows, Some(1));
+
+    let rows = ok(&mut engine, "from jobs | sort id");
+    assert_eq!(rows.rows[0]["transition"].source_text(), "\"queued\"");
+    assert_eq!(
+        rows.rows[0]["state"].source_text(),
+        "Running {attempt = 1, worker = \"local\"}"
+    );
+    assert_eq!(rows.rows[0]["owner"].source_text(), "Some (\"local\")");
+    assert!(rows.rows[0]["tree"].source_text().starts_with("Branch"));
+    assert_eq!(rows.rows[1]["state"].source_text(), "Done");
+    assert_eq!(rows.rows[1]["owner"].source_text(), "Some (\"alice\")");
+    assert!(rows.rows[1]["tree"].source_text().contains("kept"));
+
+    let before = serde_json::to_value(&rows.rows).unwrap();
+    for (source, code) in [
+        (
+            "update empty_jobs\nset state =\n  match state\n    Queued {..} => Done",
+            "E_MATCH",
+        ),
+        (
+            "update jobs\nset state =\n  match state\n    current => current\n    Done => Done",
+            "E_MATCH",
+        ),
+        (
+            "update jobs\nset state =\n  match state\n    Queued {..} => \"bad\"\n    current => current",
+            "E_TYPE",
+        ),
+    ] {
+        let failed = engine.execute(source);
+        assert!(!failed.ok, "accepted {source}");
+        assert_eq!(failed.error.unwrap().code, code);
+        assert_eq!(
+            serde_json::to_value(ok(&mut engine, "from jobs | sort id").rows).unwrap(),
+            before
+        );
+    }
 }
 
 #[test]

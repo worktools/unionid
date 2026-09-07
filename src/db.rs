@@ -9,7 +9,8 @@ use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
 };
 use crate::query::{
-    Aggregate, AggregateAssignment, AggregateFunction, Pipeline, SetAssignment, Stage, Statement,
+    Aggregate, AggregateAssignment, AggregateFunction, Pipeline, SetAssignment, SetValue, Stage,
+    Statement,
 };
 
 mod migration;
@@ -736,13 +737,20 @@ impl Database {
             }
             paths.push(assignment.path.clone());
             let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
-            crate::expression::bind_scalar(
-                &self.catalog,
-                &schema,
-                &mut assignment.value,
-                Some(&expected),
-                "field",
-            )?;
+            match &mut assignment.value {
+                SetValue::Expression(value) => {
+                    crate::expression::bind_scalar(
+                        &self.catalog,
+                        &schema,
+                        value,
+                        Some(&expected),
+                        "field",
+                    )?;
+                }
+                SetValue::Match(value) => {
+                    crate::matching::bind_assignment(&self.catalog, &schema, &expected, value)?
+                }
+            }
         }
         let target_ids = self.mutation_target_ids(target)?;
         let mut rows = table.rows.clone();
@@ -752,10 +760,16 @@ impl Database {
             let mut values = Vec::with_capacity(assignments.len());
             for assignment in assignments.iter() {
                 let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
-                let value =
-                    crate::expression::evaluate_value(&self.catalog, &assignment.value, |path| {
-                        row_field(&original, path)
-                    })?;
+                let value = match &assignment.value {
+                    SetValue::Expression(value) => {
+                        crate::expression::evaluate_value(&self.catalog, value, |path| {
+                            row_field(&original, path)
+                        })?
+                    }
+                    SetValue::Match(value) => {
+                        crate::matching::evaluate_assignment(&self.catalog, &original, value)?
+                    }
+                };
                 values.push((
                     assignment.path.as_str(),
                     self.catalog.coerce(&value, &expected, "update value")?,

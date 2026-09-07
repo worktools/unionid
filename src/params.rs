@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::model::Value;
 use crate::query::{
     BoolExpression, LocatedStatement, MatchValue, MatchValuePayload, Pipeline, ScalarExpression,
-    SchemaMigration, Stage, Statement,
+    SchemaMigration, SetValue, Stage, Statement,
 };
 
 pub(crate) fn names(statements: &[LocatedStatement]) -> BTreeSet<String> {
@@ -105,7 +105,14 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
         } => {
             visit_pipeline(target, visitor);
             for assignment in assignments {
-                visit_scalar(&assignment.value, visitor);
+                match &assignment.value {
+                    SetValue::Expression(value) => visit_scalar(value, visitor),
+                    SetValue::Match(value) => {
+                        for arm in &value.arms {
+                            visit_match_value(&arm.result, visitor);
+                        }
+                    }
+                }
             }
         }
         Statement::Delete { target } | Statement::Explain(target) | Statement::Pipeline(target) => {
@@ -140,7 +147,14 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
         } => {
             visit_pipeline_mut(target, visitor);
             for assignment in assignments {
-                visit_scalar_mut(&mut assignment.value, visitor);
+                match &mut assignment.value {
+                    SetValue::Expression(value) => visit_scalar_mut(value, visitor),
+                    SetValue::Match(value) => {
+                        for arm in &mut value.arms {
+                            visit_match_value_mut(&mut arm.result, visitor);
+                        }
+                    }
+                }
             }
         }
         Statement::Delete { target } | Statement::Explain(target) | Statement::Pipeline(target) => {
