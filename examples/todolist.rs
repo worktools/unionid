@@ -1,15 +1,25 @@
-//! End-to-end todo-list scenario for the durable ADT database.
+//! A production-shaped HTTP todo service using unionid's versioned data protocol.
 //!
-//! This is intentionally an application-shaped example rather than a minimal
-//! CRUD demo. It exercises nested sums/products, a conditional state change,
-//! a deep migration, process-boundary reopening, indexed explain, integrity
-//! checking, and logical backup/restore.
+//! Run with `cargo run --example todolist`. The client side never opens the
+//! database or calls `Engine`: migrations, typed DML/query, restart, integrity
+//! checks, backup, and restore all cross HTTP.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
+use axum::extract::State;
+use axum::routing::post;
+use axum::{Json, Router};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value as JsonValue, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{Mutex, oneshot};
 use unionid::backup;
 use unionid::migration::MigrationFile;
-use unionid::{Engine, QueryResponse};
+use unionid::protocol::{Request, Response, VERSION};
+use unionid::server::execute_protocol_request;
+use unionid::{Engine, Error, SchemaInfo};
 
 const INITIAL: &str = r#"migration m0001_todolist
   add type Retry =
@@ -28,6 +38,8 @@ const INITIAL: &str = r#"migration m0001_todolist
     labels list Label
     due Due
     checklist Checklist
+    estimate option int
+    location (float, float)
   add table todos Task key id
   add index todos.status
 "#;
@@ -40,12 +52,128 @@ const UPGRADE: &str = r#"migration m0002_todolist_upgrade
   add index todos.priority
 "#;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct RetryV1 {
+    attempts: i64,
+    delay_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+enum ReminderV1 {
+    Off,
+    On { retry: RetryV1, channel: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+enum StatusV1 {
+    Inbox,
+    InProgress { attempt: i64, device: String },
+    Blocked { reason: String },
+    Done { at: i64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+enum Label {
+    System { name: String },
+    User { name: String, color: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+enum Due {
+    Never,
+    At { unix_ms: i64 },
+    Window { start: i64, end: i64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+enum Checklist {
+    Empty,
+    Items { entries: Vec<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct TaskV1 {
+    id: i64,
+    title: String,
+    status: StatusV1,
+    reminder: ReminderV1,
+    labels: Vec<Label>,
+    due: Due,
+    checklist: Checklist,
+    estimate: Option<i64>,
+    location: (f64, f64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct RetryV2 {
+    attempts: i64,
+    delay_ms: i64,
+    backoff_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+enum ReminderV2 {
+    Off,
+    On { retry: RetryV2, channel: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+enum StatusV2 {
+    Inbox,
+    Claimed { attempt: i64, device: String },
+    Blocked { reason: String },
+    Done { at: i64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct TaskV2 {
+    id: i64,
+    title: String,
+    status: StatusV2,
+    reminder: ReminderV2,
+    labels: Vec<Label>,
+    due: Due,
+    checklist: Checklist,
+    estimate: Option<i64>,
+    location: (f64, f64),
+    priority: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminRequest {
+    version: u32,
+    request_id: String,
+    #[serde(default)]
+    migrations: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AdminResponse {
+    version: u32,
+    request_id: String,
+    ok: bool,
+    result: Option<JsonValue>,
+    error: Option<Error>,
+}
+
+struct Service {
+    database: PathBuf,
+    restored: PathBuf,
+    archive: PathBuf,
+    engine: Option<Engine>,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+type Shared = Arc<Mutex<Service>>;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("unionid-todolist-{}", std::process::id()))
+            std::env::temp_dir().join(format!("unionid-todolist-http-{}", std::process::id()))
         });
     std::fs::create_dir_all(&root)?;
     let database = root.join("todos.redb");
@@ -57,124 +185,449 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let initial = MigrationFile::parse(INITIAL)?;
-    let upgrade = MigrationFile::parse(UPGRADE)?;
-    {
-        let mut engine = Engine::open_redb(&database)?;
-        let applied = engine.apply_migrations(std::slice::from_ref(&initial))?;
-        assert_eq!(applied.applied, ["m0001_todolist"]);
-        let response = engine.execute(
-            r#"insert todos {
-  id = 1
-  title = "write release notes"
-  status = Inbox
-  reminder = On {retry = {attempts = 2, delay_ms = 1000}, channel = "email"}
-  labels = [System {name = "release"}, User {name = "docs", color = "blue"}]
-  due = Window {start = 1000, end = 5000}
-  checklist = Items {entries = ["draft", "review"]}
-}
-insert todos {
-  id = 2
-  title = "publish crate"
-  status = InProgress {attempt = 1, device = "laptop"}
-  reminder = Off
-  labels = [System {name = "release"}]
-  due = Never
-  checklist = Empty
-}
-update todos
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let state = Arc::new(Mutex::new(Service {
+        engine: Some(Engine::open_redb(&database)?),
+        database,
+        restored,
+        archive: archive.clone(),
+        shutdown: Some(shutdown_tx),
+    }));
+    let app = Router::new()
+        .route("/v1/query", post(query))
+        .route("/v1/restored/query", post(restored_query))
+        .route("/v1/admin/migrations/plan", post(migration_plan))
+        .route("/v1/admin/migrations/apply", post(migration_apply))
+        .route("/v1/admin/migrations/status", post(migration_status))
+        .route("/v1/admin/restart", post(restart))
+        .route("/v1/admin/check", post(check))
+        .route("/v1/admin/backup", post(create_backup))
+        .route("/v1/admin/restore", post(restore_backup))
+        .route("/v1/admin/shutdown", post(shutdown))
+        .with_state(state);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let initial: AdminResponse = post_json(
+        address,
+        "/v1/admin/migrations/apply",
+        &admin("migration-initial", vec![INITIAL]),
+    )
+    .await?;
+    ensure_admin_ok(&initial)?;
+    let schema_v1: SchemaInfo = serde_json::from_value(initial.result.unwrap())?;
+
+    let tasks = vec![
+        TaskV1 {
+            id: 9_007_199_254_740_993,
+            title: "write release notes".into(),
+            status: StatusV1::Inbox,
+            reminder: ReminderV1::On {
+                retry: RetryV1 {
+                    attempts: 2,
+                    delay_ms: 1_000,
+                },
+                channel: "email".into(),
+            },
+            labels: vec![
+                Label::System {
+                    name: "release".into(),
+                },
+                Label::User {
+                    name: "docs".into(),
+                    color: "blue".into(),
+                },
+            ],
+            due: Due::Window {
+                start: 1_000,
+                end: 5_000,
+            },
+            checklist: Checklist::Items {
+                entries: vec!["draft".into(), "review".into()],
+            },
+            estimate: Some(90),
+            location: (31.2304, 121.4737),
+        },
+        TaskV1 {
+            id: 2,
+            title: "publish crate".into(),
+            status: StatusV1::InProgress {
+                attempt: 1,
+                device: "laptop".into(),
+            },
+            reminder: ReminderV1::Off,
+            labels: vec![Label::System {
+                name: "release".into(),
+            }],
+            due: Due::Never,
+            checklist: Checklist::Empty,
+            estimate: None,
+            location: (0.0, 0.0),
+        },
+    ];
+    let insert = Request::query("insert-todos", "insert many todos $rows\nreturning")
+        .with_serde_param("rows", &tasks)?;
+    let inserted: Response = post_json(address, "/v1/query", &insert).await?;
+    assert_eq!(inserted.typed_rows::<TaskV1>()?, tasks);
+
+    let claim = Request::query(
+        "claim-todo",
+        r#"update todos
 filter match status
   Inbox => true
   _ => false
 set status = InProgress {attempt = 1, device = "worker-1"}
 set reminder = On {retry = {attempts = 3, delay_ms = 2000}, channel = "slack"}
-returning id, status, reminder
-"#,
-        );
-        require_ok(response)?;
-
-        let before_restart = require_ok(engine.execute(
-            "from todos | filter status == InProgress {attempt = 1, device = \"worker-1\"} | select {id, title}",
-        ))?;
-        assert_eq!(before_restart.rows.len(), 1);
-        println!("initial query: {} row", before_restart.rows.len());
-    }
-
-    // Reopening proves the row and the nested values crossed an application
-    // process boundary (the engine is dropped before this handle is opened).
-    let mut engine = Engine::open_redb(&database)?;
-    let reopened = require_ok(engine.execute("from todos | sort id"))?;
-    assert_eq!(reopened.rows.len(), 2);
-    assert!(
-        engine
-            .migration_status(&[initial.clone(), upgrade.clone()])?
-            .pending
-            .len()
-            == 1
+returning"#,
     );
-    println!("reopen: {} rows", reopened.rows.len());
+    let claimed: Response = post_json(address, "/v1/query", &claim).await?;
+    assert_eq!(claimed.affected_rows, Some(1));
 
-    // Plan the complete chain before applying it; this also checks migration
-    // parent validation and the target schema revision without changing data.
-    let plan = engine.plan_migrations(&[initial.clone(), upgrade.clone()])?;
-    assert_eq!(plan.pending.len(), 1);
-    assert_eq!(plan.target_schema.revision, 2);
-    engine.apply_migrations(&[initial, upgrade])?;
-
-    let final_rows = require_ok(engine.execute(
-        r#"from todos
-filter match reminder
-  On {retry, channel} => retry.backoff_ms == 250 and channel == "slack"
-  Off => false
-select {id, title, status, reminder, priority}
-"#,
-    ))?;
-    assert_eq!(final_rows.rows.len(), 1);
-    let explain = require_ok(engine.execute("explain from todos | filter priority == 1"))?;
-    let plan = explain.plan.expect("explain response has a plan");
-    assert_eq!(plan.access.index.as_deref(), Some("todos.priority"));
-    let integrity = engine.check_integrity()?;
-    assert!(integrity.backend_clean);
-    let schema = engine.schema_info();
-    let history = engine.migration_history().to_vec();
-    drop(engine);
-
-    let backup_info = backup::create(&database, &archive)?;
-    let restored_info = backup::restore(&archive, &restored)?;
-    assert_eq!(backup_info, restored_info);
-    let mut recovered = Engine::open_redb(&restored)?;
-    assert_eq!(recovered.schema_info(), schema);
-    assert_eq!(recovered.migration_history(), history.as_slice());
-    assert!(recovered.check_integrity()?.backend_clean);
-    let recovered_rows = require_ok(recovered.execute(
-        r#"from todos
-filter match reminder
-  On {retry, channel} => retry.backoff_ms == 250 and channel == "slack"
-  Off => false
-select {id, title, status, reminder, priority}
-"#,
-    ))?;
+    let wrong_type = Request::query("typed-error", "from todos | filter id == $id")
+        .with_serde_param("id", &"not-an-int")?;
+    let rejected: Response = post_json(address, "/v1/query", &wrong_type).await?;
     assert_eq!(
-        serde_json::to_value(&recovered_rows.rows)?,
-        serde_json::to_value(&final_rows.rows)?,
+        rejected.error.as_ref().map(|error| error.code.as_str()),
+        Some("E_TYPE")
     );
 
+    ensure_admin_ok(
+        &post_json::<_, AdminResponse>(address, "/v1/admin/restart", &admin("restart", vec![]))
+            .await?,
+    )?;
+    let reopened: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("reopened", "from todos | sort id"),
+    )
+    .await?;
+    assert_eq!(reopened.rows.len(), 2);
+
+    let migrations = vec![INITIAL, UPGRADE];
+    let planned: AdminResponse = post_json(
+        address,
+        "/v1/admin/migrations/plan",
+        &admin("migration-plan", migrations.clone()),
+    )
+    .await?;
+    ensure_admin_ok(&planned)?;
+    let upgraded: AdminResponse = post_json(
+        address,
+        "/v1/admin/migrations/apply",
+        &admin("migration-upgrade", migrations.clone()),
+    )
+    .await?;
+    ensure_admin_ok(&upgraded)?;
+    let status: AdminResponse = post_json(
+        address,
+        "/v1/admin/migrations/status",
+        &admin("migration-status", migrations),
+    )
+    .await?;
+    ensure_admin_ok(&status)?;
+
+    let stale = Request {
+        schema: Some(schema_v1),
+        ..Request::query("stale-schema", "from todos")
+    };
+    let rejected: Response = post_json(address, "/v1/query", &stale).await?;
+    assert_eq!(
+        rejected.error.as_ref().map(|error| error.code.as_str()),
+        Some("E_SCHEMA_CHANGED")
+    );
+
+    let current: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("current", "from todos | sort id"),
+    )
+    .await?;
+    let current_tasks = current.typed_rows::<TaskV2>()?;
+    assert_eq!(current_tasks.len(), 2);
+    let explain: Response = post_json(
+        address,
+        "/v1/query",
+        &Request::query("explain", "explain from todos | filter priority == 1"),
+    )
+    .await?;
+    assert_eq!(
+        explain.plan.and_then(|plan| plan.access.index),
+        Some("todos.priority".into())
+    );
+    ensure_admin_ok(
+        &post_json::<_, AdminResponse>(address, "/v1/admin/check", &admin("check", vec![])).await?,
+    )?;
+
+    let backup_response: AdminResponse =
+        post_json(address, "/v1/admin/backup", &admin("backup", vec![])).await?;
+    ensure_admin_ok(&backup_response)?;
+    let restore_response: AdminResponse =
+        post_json(address, "/v1/admin/restore", &admin("restore", vec![])).await?;
+    ensure_admin_ok(&restore_response)?;
+    assert_eq!(backup_response.result, restore_response.result);
+    let restored_rows: Response = post_json(
+        address,
+        "/v1/restored/query",
+        &Request::query("restored", "from todos | sort id"),
+    )
+    .await?;
+    assert_eq!(restored_rows.typed_rows::<TaskV2>()?, current_tasks);
+
+    ensure_admin_ok(
+        &post_json::<_, AdminResponse>(address, "/v1/admin/shutdown", &admin("shutdown", vec![]))
+            .await?,
+    )?;
+    server.await??;
     println!(
-        "todo-list flow passed: schema revision {}, {} migration(s), backup {}",
-        schema.revision,
-        history.len(),
-        display_path(&archive)
+        "HTTP todo flow passed: typed ADTs, restart, migration, check, backup/restore ({})",
+        archive.display()
     );
     Ok(())
 }
 
-fn require_ok(response: QueryResponse) -> Result<QueryResponse, unionid::Error> {
-    match response.error {
-        Some(error) => Err(error),
-        None => Ok(response),
+fn admin(request_id: &str, migrations: Vec<&str>) -> AdminRequest {
+    AdminRequest {
+        version: VERSION,
+        request_id: request_id.into(),
+        migrations: migrations.into_iter().map(str::to_owned).collect(),
     }
 }
 
-fn display_path(path: &Path) -> String {
-    path.display().to_string()
+fn ensure_admin_ok(response: &AdminResponse) -> Result<(), Error> {
+    if response.ok {
+        Ok(())
+    } else {
+        Err(response
+            .error
+            .clone()
+            .unwrap_or_else(|| Error::new("E_PROTOCOL", "admin request failed")))
+    }
+}
+
+async fn query(State(state): State<Shared>, Json(request): Json<Request>) -> Json<Response> {
+    let mut service = state.lock().await;
+    let engine = service.engine.as_mut().expect("source engine is open");
+    Json(execute_protocol_request(engine, request))
+}
+
+async fn restored_query(
+    State(state): State<Shared>,
+    Json(request): Json<Request>,
+) -> Json<Response> {
+    let service = state.lock().await;
+    let response = match Engine::open_redb(&service.restored) {
+        Ok(mut engine) => execute_protocol_request(&mut engine, request),
+        Err(error) => Response::failure(
+            request.request_id,
+            error,
+            SchemaInfo {
+                revision: 0,
+                hash: String::new(),
+            },
+        ),
+    };
+    Json(response)
+}
+
+async fn migration_plan(
+    State(state): State<Shared>,
+    Json(request): Json<AdminRequest>,
+) -> Json<AdminResponse> {
+    admin_with_engine(state, request, |engine, files| {
+        engine.plan_migrations(files)
+    })
+    .await
+}
+
+async fn migration_apply(
+    State(state): State<Shared>,
+    Json(request): Json<AdminRequest>,
+) -> Json<AdminResponse> {
+    admin_with_engine(state, request, |engine, files| {
+        engine.apply_migrations(files).map(|result| result.schema)
+    })
+    .await
+}
+
+async fn migration_status(
+    State(state): State<Shared>,
+    Json(request): Json<AdminRequest>,
+) -> Json<AdminResponse> {
+    admin_with_engine(state, request, |engine, files| {
+        engine.migration_status(files)
+    })
+    .await
+}
+
+async fn admin_with_engine<T: Serialize>(
+    state: Shared,
+    request: AdminRequest,
+    operation: impl FnOnce(&mut Engine, &[MigrationFile]) -> Result<T, Error>,
+) -> Json<AdminResponse> {
+    if let Some(response) = validate_admin(&request) {
+        return Json(response);
+    }
+    let files = match parse_migrations(&request.migrations) {
+        Ok(files) => files,
+        Err(error) => return Json(admin_error(request.request_id, error)),
+    };
+    let mut service = state.lock().await;
+    let engine = service.engine.as_mut().expect("source engine is open");
+    Json(match operation(engine, &files) {
+        Ok(result) => admin_ok(request.request_id, result),
+        Err(error) => admin_error(request.request_id, error),
+    })
+}
+
+async fn restart(
+    State(state): State<Shared>,
+    Json(request): Json<AdminRequest>,
+) -> Json<AdminResponse> {
+    if let Some(response) = validate_admin(&request) {
+        return Json(response);
+    }
+    let mut service = state.lock().await;
+    service.engine.take();
+    match Engine::open_redb(&service.database) {
+        Ok(engine) => {
+            service.engine = Some(engine);
+            Json(admin_ok(request.request_id, json!({"reopened": true})))
+        }
+        Err(error) => Json(admin_error(request.request_id, error)),
+    }
+}
+
+async fn check(
+    State(state): State<Shared>,
+    Json(request): Json<AdminRequest>,
+) -> Json<AdminResponse> {
+    if let Some(response) = validate_admin(&request) {
+        return Json(response);
+    }
+    let mut service = state.lock().await;
+    let engine = service.engine.as_mut().expect("source engine is open");
+    Json(match engine.check_integrity() {
+        Ok(result) => admin_ok(request.request_id, result),
+        Err(error) => admin_error(request.request_id, error),
+    })
+}
+
+async fn create_backup(
+    State(state): State<Shared>,
+    Json(request): Json<AdminRequest>,
+) -> Json<AdminResponse> {
+    if let Some(response) = validate_admin(&request) {
+        return Json(response);
+    }
+    let mut service = state.lock().await;
+    service.engine.take();
+    let result = backup::create(&service.database, &service.archive);
+    let reopen = Engine::open_redb(&service.database);
+    if let Ok(engine) = reopen {
+        service.engine = Some(engine);
+    }
+    Json(match result {
+        Ok(result) => admin_ok(request.request_id, result),
+        Err(error) => admin_error(request.request_id, error),
+    })
+}
+
+async fn restore_backup(
+    State(state): State<Shared>,
+    Json(request): Json<AdminRequest>,
+) -> Json<AdminResponse> {
+    if let Some(response) = validate_admin(&request) {
+        return Json(response);
+    }
+    let service = state.lock().await;
+    Json(match backup::restore(&service.archive, &service.restored) {
+        Ok(result) => admin_ok(request.request_id, result),
+        Err(error) => admin_error(request.request_id, error),
+    })
+}
+
+async fn shutdown(
+    State(state): State<Shared>,
+    Json(request): Json<AdminRequest>,
+) -> Json<AdminResponse> {
+    if let Some(response) = validate_admin(&request) {
+        return Json(response);
+    }
+    let mut service = state.lock().await;
+    if let Some(shutdown) = service.shutdown.take() {
+        let _ = shutdown.send(());
+    }
+    Json(admin_ok(request.request_id, json!({"stopped": true})))
+}
+
+fn validate_admin(request: &AdminRequest) -> Option<AdminResponse> {
+    (request.version != VERSION).then(|| {
+        admin_error(
+            request.request_id.clone(),
+            Error::new(
+                "E_PROTOCOL_VERSION",
+                format!("unsupported protocol version {}", request.version),
+            ),
+        )
+    })
+}
+
+fn parse_migrations(sources: &[String]) -> Result<Vec<MigrationFile>, Error> {
+    sources.iter().cloned().map(MigrationFile::parse).collect()
+}
+
+fn admin_ok(request_id: String, result: impl Serialize) -> AdminResponse {
+    match serde_json::to_value(result) {
+        Ok(result) => AdminResponse {
+            version: VERSION,
+            request_id,
+            ok: true,
+            result: Some(result),
+            error: None,
+        },
+        Err(error) => admin_error(
+            request_id,
+            Error::new("E_PROTOCOL", format!("encode response: {error}")),
+        ),
+    }
+}
+
+fn admin_error(request_id: String, error: Error) -> AdminResponse {
+    AdminResponse {
+        version: VERSION,
+        request_id,
+        ok: false,
+        result: None,
+        error: Some(error),
+    }
+}
+
+async fn post_json<T: Serialize, R: DeserializeOwned>(
+    address: std::net::SocketAddr,
+    path: &str,
+    value: &T,
+) -> Result<R, Box<dyn std::error::Error>> {
+    let body = serde_json::to_vec(value)?;
+    let mut stream = tokio::net::TcpStream::connect(address).await?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(&body).await?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+    let body_start = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or("HTTP response has no body")?
+        + 4;
+    Ok(serde_json::from_slice(&response[body_start..])?)
 }

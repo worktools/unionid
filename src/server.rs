@@ -452,8 +452,17 @@ fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
             );
         }
     };
+    OutgoingResponse::Versioned(execute_protocol_request(engine, request))
+}
+
+/// Execute the stable versioned data protocol independently of its transport.
+///
+/// TCP uses this directly, and HTTP adapters can deserialize the same
+/// `ProtocolRequest` and serialize the returned `ProtocolResponse` without
+/// duplicating version, parameter, schema, or introspection semantics.
+pub fn execute_protocol_request(engine: &mut Engine, request: ProtocolRequest) -> ProtocolResponse {
     if request.version != VERSION {
-        return protocol_error(
+        return ProtocolResponse::failure(
             request.request_id,
             Error::new(
                 "E_PROTOCOL_VERSION",
@@ -462,35 +471,37 @@ fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
                     request.version
                 ),
             ),
-            engine,
+            engine.schema_info(),
         );
     }
     if request.request_id.len() > MAX_REQUEST_ID_BYTES {
-        return protocol_error(
+        return ProtocolResponse::failure(
             request.request_id,
             Error::new(
                 "E_LIMIT",
                 format!("request_id exceeds {MAX_REQUEST_ID_BYTES} byte limit"),
             ),
-            engine,
+            engine.schema_info(),
         );
     }
     if request.introspect.is_some() {
         if !request.query.is_empty() || !request.params.is_empty() || request.schema.is_some() {
-            return protocol_error(
+            return ProtocolResponse::failure(
                 request.request_id,
                 Error::new(
                     "E_PROTOCOL",
                     "introspection requests cannot include query, params, or schema",
                 ),
-                engine,
+                engine.schema_info(),
             );
         }
-        return introspection_response(request.request_id, engine.introspection());
+        return introspection_protocol_response(request.request_id, engine.introspection());
     }
     let parameters = match request.decode_params() {
         Ok(parameters) => parameters,
-        Err(error) => return protocol_error(request.request_id, error, engine),
+        Err(error) => {
+            return ProtocolResponse::failure(request.request_id, error, engine.schema_info());
+        }
     };
     let response = engine.execute_with_params_until(
         &request.query,
@@ -498,31 +509,31 @@ fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
         request.schema.as_ref(),
         Instant::now() + EXECUTION_TIMEOUT,
     );
-    OutgoingResponse::Versioned(ProtocolResponse::from_query(request.request_id, response))
+    ProtocolResponse::from_query(request.request_id, response)
 }
 
-fn introspection_response(
+fn introspection_protocol_response(
     request_id: String,
     introspection: crate::Introspection,
-) -> OutgoingResponse {
+) -> ProtocolResponse {
     let schema = introspection.schema.clone();
     match serde_json::to_vec(&introspection) {
-        Ok(encoded) if encoded.len() <= MAX_INTROSPECTION_BYTES => OutgoingResponse::Versioned(
-            ProtocolResponse::from_introspection(request_id, introspection),
-        ),
-        Ok(_) => OutgoingResponse::Versioned(ProtocolResponse::failure(
+        Ok(encoded) if encoded.len() <= MAX_INTROSPECTION_BYTES => {
+            ProtocolResponse::from_introspection(request_id, introspection)
+        }
+        Ok(_) => ProtocolResponse::failure(
             request_id,
             Error::new(
                 "E_LIMIT",
                 format!("introspection exceeds {MAX_INTROSPECTION_BYTES} byte response limit"),
             ),
             schema,
-        )),
-        Err(error) => OutgoingResponse::Versioned(ProtocolResponse::failure(
+        ),
+        Err(error) => ProtocolResponse::failure(
             request_id,
             Error::new("E_PROTOCOL", format!("encode introspection: {error}")),
             schema,
-        )),
+        ),
     }
 }
 
@@ -560,11 +571,7 @@ mod tests {
     fn introspection_has_a_smaller_explicit_response_limit() {
         let mut introspection = Engine::memory().introspection();
         introspection.schema_source = "x".repeat(MAX_INTROSPECTION_BYTES + 1);
-        let OutgoingResponse::Versioned(response) =
-            introspection_response("large-introspection".into(), introspection)
-        else {
-            panic!("introspection must use the versioned response");
-        };
+        let response = introspection_protocol_response("large-introspection".into(), introspection);
         assert_eq!(response.request_id, "large-introspection");
         assert_eq!(response.error.unwrap().code, "E_LIMIT");
     }

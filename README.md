@@ -44,6 +44,7 @@ cargo run -- backup --db app.redb --output app.backup.json
 cargo run -- restore --backup app.backup.json --db restored.redb
 cargo run --example embedded
 cargo run --example parameters
+cargo run --example todolist
 ```
 
 [tasks.uid](examples/tasks.uid) 包含类型定义、建表、插入与查询，最后返回：
@@ -73,6 +74,8 @@ cargo run -- cli --memory
 ```
 
 REPL 用 `unionid>` 表示新输入、`..>` 表示语法仍需续写、`ready>` 表示当前脚本已经完整。只在 `ready>` 后用空行提交；不完整时空行会保留缓冲区，明确非法的输入会立即显示源码位置并重新开始。Tab 补全语言关键字和当前 catalog 的表／类型／字段；`.schema`、`.tables`、`.types`、`.storage` 在 memory、redb 和 TCP 模式返回一致 introspection。交互历史默认只持久化不含写入或字面量的安全输入，可用 `--history <path>` 改路径或 `--no-history` 关闭。详细行为见 [CLI 与交互式 REPL](docs/CLI.md)。
+
+[HTTP 数据协议示例](docs/HTTP.md)展示 Rust serde 数据如何经 version 1 协议进入真实 HTTP 服务，并完成 migration、typed DML、重启、检查和备份还原。
 
 当前可执行语法见 [LANGUAGE.md](docs/LANGUAGE.md)，查询 stage、执行顺序、模式规则和能力状态见 [QUERY.md](docs/QUERY.md)，[version 1 协议与参数](docs/PROTOCOL.md)描述无损 ADT/i64 wire codec 和 Rust prepared query/DML，schema 演进语法与版本化 runner 见 [MIGRATIONS.md](docs/MIGRATIONS.md)，声明式目标结构与草稿生成见 [SCHEMA-DIFF.md](docs/SCHEMA-DIFF.md)，跨版本操作见[升级与格式兼容](docs/UPGRADING.md)。类型可直接引用自身来表达有限树、原因链和规则 AST；catalog 会拒绝没有终止路径的循环，值仍受 64 层预算约束，详细契约见 [RFC 0001](docs/rfc/0001-finite-recursive-adts.md)。字段默认值使用 `field type = value`；sum/option 的 match 支持 unit、record、位置负载和递归 pattern，同一个顶层 constructor 可以由多个互补嵌套分支完整覆盖。普通／match derive、typed set 和 migration conversion 共享有类型算术与 bool 表达式；分支可直接返回比较、`not/and/or`、`contains`、Option helper 或嵌套 `any/all` 的结果，也可从 binding 构造 option、sum、record、tuple 和 list。查询局部 `let` 可定义常量和有类型、非递归纯函数，以空格调用并在 filter、derive、match 与 aggregate 输入中复用。`group ... aggregate` 与未分组 `aggregate` 提供 count/sum/min/max，并保留命名字段和 ADT group key 的类型。`explain` 返回 full scan／主键或二级索引 lookup、当前候选数、stage 顺序和结果 schema，不执行数据行。`update`/`delete` 可按源码顺序组合 filter、sort 和 take；多个 typed `set` 同时求值，`set field = match source` 可穷尽解构并重建 ADT 或产生 bool，最后用 `current => current` 保留其余 constructor。insert/upsert/update/delete 可用 `returning` 原子返回完整 typed 行或有序字段投影；单行与批量 upsert 按主键插入或整行替换，批量响应返回逐项 action。所有写入都原子维护主键与索引。显式 migration 可跨所有嵌套引用路径改名、回填和转换 ADT，并同步维护约束与索引；`new/plan/diff/apply/status` 管理不可变迁移历史。
 

@@ -28,6 +28,33 @@ pub struct Request {
 }
 
 impl Request {
+    /// Build a versioned query request for TCP, HTTP, or an embedded adapter.
+    pub fn query(request_id: impl Into<String>, query: impl Into<String>) -> Self {
+        Self {
+            version: VERSION,
+            request_id: request_id.into(),
+            query: query.into(),
+            introspect: None,
+            params: BTreeMap::new(),
+            schema: None,
+        }
+    }
+
+    /// Add an application-native serde value as a typed query parameter.
+    ///
+    /// The source language still declares where the value is used (`$name`).
+    /// The prepared binder supplies nominal type identity and validates the
+    /// complete value before any row is scanned or mutation is committed.
+    pub fn with_serde_param<T: Serialize>(
+        mut self,
+        name: impl Into<String>,
+        value: &T,
+    ) -> Result<Self, Error> {
+        let value = Value::from_serde(value)?;
+        self.params.insert(name.into(), WireValue::from(&value));
+        Ok(self)
+    }
+
     pub fn decode_params(&self) -> Result<BTreeMap<String, Value>, Error> {
         self.params
             .iter()
@@ -228,6 +255,45 @@ pub struct Response {
 }
 
 impl Response {
+    /// Decode lossless protocol rows into application-native serde records.
+    ///
+    /// This is the network equivalent of `QueryResponse::typed_rows`: stable
+    /// nominal IDs stay on the wire while Rust code receives ordinary structs
+    /// and enums shaped like the source-language records and constructors.
+    pub fn typed_rows<T: serde::de::DeserializeOwned>(&self) -> Result<Vec<T>, Error> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        if !self.ok {
+            return Err(Error::new(
+                "E_QUERY",
+                "cannot decode rows from a failed protocol response",
+            ));
+        }
+        self.rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let fields = row
+                    .iter()
+                    .map(|(name, value)| {
+                        Value::try_from(value.clone()).map(|value| (name.clone(), value))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
+                Value::Record(fields).to_serde().map_err(|error| {
+                    Error::new(
+                        error.code.as_str(),
+                        format!(
+                            "decode protocol result row {}: {}",
+                            index + 1,
+                            error.message
+                        ),
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub fn from_query(request_id: impl Into<String>, response: QueryResponse) -> Self {
         Self {
             version: VERSION,
