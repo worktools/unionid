@@ -16,7 +16,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Package native artifact
         shell: bash
@@ -28,7 +28,7 @@ jobs:
           python3 scripts/package-release.py --output dist "${args[@]}"
       - name: Verify checksum, CLI and tutorial
         run: python3 scripts/verify-release.py --dist dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: unionid-${{ runner.os }}-${{ runner.arch }}
           path: dist/*
@@ -39,8 +39,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: unionid-*
           merge-multiple: true
