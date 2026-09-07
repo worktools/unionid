@@ -2,7 +2,7 @@
 
 本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)。
 
-当前包含类型与表声明、单行／批量 insert、upsert/update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort、take，以及结构化 `explain`。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort、take，以及结构化 `explain`。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
 ## 类型、表与值
 
@@ -49,9 +49,9 @@ create index tasks (state)
 create unique index tasks (owner.email)
 ```
 
-索引路径可以指向嵌套 record 字段。unique index 支持 primitive、命名 sum/record、tuple、option 和 list；比较的是完整类型和值，`None` 也是普通 typed value，因此同一 unique index 最多出现一次 `None`。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert、upsert、update、migration、restore 和 redb 完整性检查都在发布候选状态前执行同一约束。当前只支持单字段路径，不支持复合、partial 或 SQL `NULL` 语义。
+索引路径可以指向嵌套 record 字段。unique index 支持 primitive、命名 sum/record、tuple、option 和 list；比较的是完整类型和值，`None` 也是普通 typed value，因此同一 unique index 最多出现一次 `None`。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert/upsert、单行 upsert、update、migration、restore 和 redb 完整性检查都在发布候选状态前执行同一约束。当前只支持单字段路径，不支持复合、partial 或 SQL `NULL` 语义。
 
-批量插入使用明确的 `many` 关键字和已有 list/record 值语法：
+批量写入使用明确的 `many` 关键字和已有 list/record 值语法：
 
 ```text
 insert many tasks [
@@ -61,7 +61,9 @@ insert many tasks [
 returning id, state
 ```
 
-也可写 `insert many tasks $rows`，其中 `$rows` 的期望类型是 `list Task`。每行独立补齐默认值并检查完整 ADT record，随后整批检查主键和 unique indexes；输入顺序决定 RowId 分配与 returning 顺序。空 list 成功返回 `affected_rows = 0`，使用 returning 时仍提供稳定 columns。单批最多 100,000 行；任一行、预算、deadline 或提交失败都不会发布部分 rows、indexes 或 RowId 游标。批量 upsert 与流式导入不属于当前语法。
+也可写 `insert many tasks $rows`，其中 `$rows` 的期望类型是 `list Task`。`upsert many tasks <list>` 和 `upsert many tasks $rows` 使用同一行类型，但要求表声明主键。每行独立补齐默认值并检查完整 ADT record，随后整批检查主键和 unique indexes；输入顺序决定新 RowId 分配、returning 行和 `upsert_actions` 的顺序。批量 upsert 更新命中行并保留 RowId，插入未命中行；输入 list 内出现重复主键直接返回 `E_CONSTRAINT`，不使用 first/last wins。
+
+空 list 成功返回 `affected_rows = 0`，使用 returning 时仍提供稳定 columns。单批最多 100,000 行；任一行、预算、deadline、主键／unique 冲突或提交失败都不会发布部分 rows、indexes 或 RowId 游标。流式导入不属于当前语法。
 
 直接自递归沿用同一套无分号声明语法，不增加 `rec` 标记。递归类型必须至少能构造一个有限值：sum 需要终止变体，record/tuple 的每个必需成员都必须可终止，`option` 的 `None` 与 `list` 的空列表可作为终止路径。例如：
 
@@ -127,7 +129,7 @@ take 20
 
 未分组 `aggregate` 在空输入上返回一行：count 为 0、sum 为输入数值类型的零、min/max 为 `None`；分组空输入返回零行。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
 
-兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。filter、match condition、derive 数值表达式与 update `set` 可引用 `$name`；完整单行 insert/upsert 写成 `insert tasks $row`，批量 insert 写成 `insert many tasks $rows`。参数由调用端提供 typed value，在 AST 上绑定并在扫描前按上下文检查，详见[版本化接口与参数](PROTOCOL.md)。
+兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。filter、match condition、derive 数值表达式与 update `set` 可引用 `$name`；完整单行 insert/upsert 写成 `insert tasks $row` / `upsert tasks $row`，批量写入写成 `insert many tasks $rows` / `upsert many tasks $rows`。参数由调用端提供 typed value，在 AST 上绑定并在扫描前按上下文检查，详见[版本化接口与参数](PROTOCOL.md)。
 
 嵌入式 Rust 应用可以直接把 serde 类型用于 prepared 参数和结果，无需手工拆装 `Value`：
 
@@ -179,7 +181,7 @@ delete tasks | filter id == 2 | returning
 - 顶层小写 binding 是带类型的不可反驳 pattern，必须是最后一支；`current => current` 可保留其余 constructor 的完整原值。分支可使用 typed 参数和自己的 pattern bindings。
 - 可直接设置 record 的嵌套路径，如 `set owner.email = "new@example.com"`。路径不能穿过 sum/option；修改 variant 时设置完整值。父路径与子路径不能在同一 update 中同时赋值，避免依赖隐含顺序。
 - 每条候选 row 更新完成后重新检查完整 row 类型；全表重新检查主键与 unique indexes，再原子替换 rows 与派生 indexes。任一行除零、溢出、类型或约束失败时，该请求不修改任何行。
-- 成功 insert/upsert/update/delete 的 JSON 响应包含 `affected_rows`；批量 insert 返回输入行数，update/delete 未命中时返回 0。末尾的 `returning` 返回完整受影响行，`returning id, state` 按给定顺序投影字段：单行／批量 insert 与 upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像。空批次或空命中仍返回稳定 columns 和空 rows。
+- 成功 insert/upsert/update/delete 的 JSON 响应包含 `affected_rows`；批量 insert/upsert 返回输入行数，update/delete 未命中时返回 0。末尾的 `returning` 返回完整受影响行，`returning id, state` 按给定顺序投影字段：单行／批量 insert 与 upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像。空批次或空命中仍返回稳定 columns 和空 rows。
 - returning 字段在扫描前按表 schema 检查，行数和 8 MiB typed wire 预算也在提交前检查；失败不会发布 row 或索引。内部稳定 RowId 不出现在用户 record 中，删除后不会被后续插入复用。
 
 单行形式可用必要的 pipeline 分隔符，例如 `update tasks | filter id == 1 | set attempts = attempts + 1`。多项修改推荐换行，避免长表达式掩盖目标范围。
@@ -200,6 +202,8 @@ upsert config
 - 替换是整行语义。输入中省略的非主键字段只有在 schema 声明了默认值时才合法，并使用默认值，而非保留旧值；局部修改使用 `update ... set`。
 - 成功响应的 `affected_rows` 为 1，`upsert_action` 明确返回 `inserted` 或 `updated`。重复提交同一主键仍走 `updated` 分支。
 - 主键和派生索引与 row 在同一请求中原子更新；后续语句失败时，新插入或替换也会一起回滚。
+
+`upsert many config [row1, row2]` 批量应用相同的完整替换语义。输入 list 不能含重复主键；执行按输入顺序决定每一项的 `inserted`／`updated`，成功响应以同顺序返回 `upsert_actions`。所有候选行完成后统一验证主键和 unique indexes，因此任一冲突会回滚整个批次。
 
 ## Schema migration
 
@@ -256,4 +260,4 @@ cargo run -- cli --addr 127.0.0.1:7878 --file examples/tasks.uid
 
 TCP 的稳定客户端入口是 [JSON Lines version 1](PROTOCOL.md)：请求包含 `version/request_id/query/params` 和可选 schema 前置条件，响应回显 ID，并以独立 wire codec 无损编码 ADT 与 i64。JSON 中的换行不会被压平。服务暂时兼容 `{"query":"..."}` 和旧纯文本单行请求。
 
-响应包含 `ok/message/columns/rows/error/warnings/schema`，成功 DML 还包含 `affected_rows`，upsert 额外包含 `upsert_action`；带 returning 的 DML 同时填充 typed `columns/rows`。`schema` 提供当前应用 schema 的 revision 与 SHA-256 hash；原子 schema 脚本只推进一次 revision，行写入与失败请求不推进，完整规则见 [Schema 身份与演进契约](SCHEMA.md)。`columns` 保留投影顺序和类型描述；version 1 的 `rows` 使用与内部 serde/存储 codec 分离的 typed wire value，i64 和稳定 ID 以十进制 string 传输。服务默认本机监听；连接、frame、working/result rows、response bytes、execution deadline、socket timeout、SIGINT/SIGTERM 关闭和重试语义见[服务运行边界](SERVICE.md)。
+响应包含 `ok/message/columns/rows/error/warnings/schema`，成功 DML 还包含 `affected_rows`；单行 upsert 额外包含 `upsert_action`，批量 upsert 包含按输入顺序排列的 `upsert_actions`。带 returning 的 DML 同时填充 typed `columns/rows`。`schema` 提供当前应用 schema 的 revision 与 SHA-256 hash；原子 schema 脚本只推进一次 revision，行写入与失败请求不推进，完整规则见 [Schema 身份与演进契约](SCHEMA.md)。`columns` 保留投影顺序和类型描述；version 1 的 `rows` 使用与内部 serde/存储 codec 分离的 typed wire value，i64 和稳定 ID 以十进制 string 传输。服务默认本机监听；连接、frame、working/result rows、response bytes、execution deadline、socket timeout、SIGINT/SIGTERM 关闭和重试语义见[服务运行边界](SERVICE.md)。

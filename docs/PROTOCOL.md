@@ -19,7 +19,7 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 
 参数名使用与标识符相同的 ASCII 规则，以字母或下划线开头。缺少参数返回 <code>E_PARAM_MISSING</code>，多余参数返回 <code>E_PARAM_EXTRA</code>，wire value 无法解码返回 <code>E_PARAM_TYPE</code>；参数解码后仍由查询上下文做普通类型检查，所以类型不匹配返回 <code>E_TYPE</code>。绑定发生在 AST 上，不通过文本替换，文本参数中的引号、换行、注释符或 pipeline 符号不会改变查询结构。参数也可直接作为 `derive match` 或 `set ... = match ...` 的分支结果及嵌套 constructor 负载，并由结果／目标字段类型检查。
 
-参数可用于 filter、match condition、derive 算术表达式和 update <code>set</code>。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>；<code>insert many tasks $rows</code> 接受 <code>list Task</code>，按输入顺序原子插入并 returning。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
+参数可用于 filter、match condition、derive 算术表达式和 update <code>set</code>。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>；<code>insert many tasks $rows</code> 与 <code>upsert many tasks $rows</code> 接受 <code>list Task</code>，按输入顺序原子写入并 returning。批量 upsert 要求主键，拒绝输入内重复主键，并返回与输入逐项对齐的 action。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
 
 Introspection 使用同一版本请求，返回完整的类型化快照，客户端再按请求种类展示。它不执行查询或修改数据：
 
@@ -64,11 +64,11 @@ Introspection 使用同一版本请求，返回完整的类型化快照，客户
 }
 ~~~
 
-<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；introspection 响应改为包含 <code>introspection</code>，两者都不执行数据行。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>，upsert 另有 <code>upsert_action</code>；`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
+<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；introspection 响应改为包含 <code>introspection</code>，两者都不执行数据行。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>；单行 upsert 使用 <code>upsert_action</code>，批量 upsert 使用按输入顺序排列的 <code>upsert_actions</code> array。`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。新增的 <code>upsert_actions</code> 在其他响应中省略，旧 version 1 response 反序列化时视为空 array。warnings 不改变 <code>ok</code>。连接在响应前断开时，客户端不能依据断线判断写入是否提交，也不能把相同 <code>request_id</code> 当作服务端幂等键。
 
 ## Rust 嵌入接口
 
-<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert、参数化 upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
+<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline、explain、参数化单行／批量 insert/upsert，以及 update/delete；准备阶段不扫描数据，却会绑定表、target、set/match、returning 和参数类型。完整 row 参数显示命名 RowType，批量参数显示 <code>list RowType</code>。plan 记录当前 schema revision/hash；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
 
 可运行示例：
 

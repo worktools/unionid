@@ -35,11 +35,28 @@ table tasks Task
         return Err(error.into());
     }
 
-    let prepared = database.prepare("from tasks | filter id == $id | select {id, title}")?;
-    let result = database.query(
-        &prepared,
-        BTreeMap::from([("id".into(), Value::Int(9_007_199_254_740_993))]),
+    let incoming = vec![
+        Task {
+            id: 9_007_199_254_740_993,
+            title: "updated".into(),
+        },
+        Task {
+            id: 2,
+            title: "second".into(),
+        },
+    ];
+    let bulk_upsert = database.prepare("upsert many tasks $rows\nreturning")?;
+    let upserted = database.execute_prepared(
+        &bulk_upsert,
+        BTreeMap::from([("rows".into(), Value::from_serde(&incoming)?)]),
     );
+    if let Some(error) = upserted.error {
+        return Err(error.into());
+    }
+    println!("actions: {:?}", upserted.upsert_actions);
+
+    let prepared = database.prepare("from tasks | sort id | select {id, title}")?;
+    let result = database.query(&prepared, BTreeMap::new());
     if let Some(error) = result.error {
         return Err(error.into());
     }

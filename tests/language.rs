@@ -3016,3 +3016,126 @@ fn upsert_requires_a_key_and_failed_batches_leave_no_partial_row() {
             .is_empty()
     );
 }
+
+#[test]
+fn typed_bulk_upsert_mixes_updates_and_inserts_in_input_order() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type State = Pending | Active {worker text}
+type Account =
+  id int
+  email text
+  note text = "default"
+  state State
+table accounts Account
+  key id
+create unique index accounts (email)
+insert accounts {id = 1, email = "old@example.com", note = "old", state = Pending}"#,
+    );
+
+    let response = ok(
+        &mut engine,
+        r#"upsert many accounts [
+  {id = 1, email = "one@example.com", state = Active {worker = "a"}},
+  {id = 2, email = "two@example.com", note = "two", state = Pending}
+]
+returning id, email, note, state"#,
+    );
+    assert_eq!(response.affected_rows, Some(2));
+    assert_eq!(
+        response.upsert_actions,
+        [UpsertAction::Updated, UpsertAction::Inserted]
+    );
+    assert_eq!(response.rows.len(), 2);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(response.rows[0]["note"].cmp_eq(&Value::Text("default".into())));
+    assert!(response.rows[1]["id"].cmp_eq(&Value::Int(2)));
+
+    let empty = ok(&mut engine, "upsert many accounts []\nreturning id");
+    assert_eq!(empty.affected_rows, Some(0));
+    assert!(empty.upsert_actions.is_empty());
+    assert!(empty.rows.is_empty());
+    assert_eq!(empty.columns.len(), 1);
+
+    let non_list = engine.execute_with_params(
+        "upsert many accounts $rows",
+        std::collections::BTreeMap::from([(
+            "rows".into(),
+            Value::Record([("id".into(), Value::Int(3))].into()),
+        )]),
+    );
+    assert!(!non_list.ok);
+    assert_eq!(non_list.error.unwrap().code, "E_TYPE");
+
+    let too_many = engine.execute_with_params(
+        "upsert many accounts $rows",
+        std::collections::BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![
+                Value::Record(std::collections::BTreeMap::new());
+                unionid::db::MAX_BULK_INSERT_ROWS + 1
+            ]),
+        )]),
+    );
+    assert!(!too_many.ok);
+    assert_eq!(too_many.error.unwrap().code, "E_LIMIT");
+
+    let invalid = engine.execute("upsert many accounts {id = 3}");
+    assert!(!invalid.ok);
+    assert_eq!(invalid.error.unwrap().code, "E_SYNTAX");
+
+    let mut compatibility = Engine::memory();
+    ok(
+        &mut compatibility,
+        "type Row =\n  id int\ntable many Row\n  key id\nupsert many {id = 1}",
+    );
+    assert_eq!(ok(&mut compatibility, "from many").rows.len(), 1);
+}
+
+#[test]
+fn typed_bulk_upsert_rejects_batch_and_unique_conflicts_atomically() {
+    let setup = r#"type Account =
+  id int
+  email text
+table accounts Account
+  key id
+create unique index accounts (email)
+insert accounts {id = 1, email = "one@example.com"}
+insert accounts {id = 2, email = "two@example.com"}"#;
+    let mut engine = Engine::memory();
+    ok(&mut engine, setup);
+    let before = serde_json::to_value(ok(&mut engine, "from accounts | sort id").rows).unwrap();
+
+    for source in [
+        r#"upsert many accounts [
+  {id = 1, email = "changed@example.com"},
+  {id = 1, email = "again@example.com"}
+]"#,
+        r#"upsert many accounts [
+  {id = 1, email = "changed@example.com"},
+  {id = 3, email = "two@example.com"}
+]"#,
+        r#"upsert many accounts [
+  {id = 1, email = "changed@example.com"},
+  {id = 3, email = 3}
+]"#,
+    ] {
+        let failed = engine.execute(source);
+        assert!(!failed.ok, "accepted {source}");
+        assert!(matches!(
+            failed.error.unwrap().code.as_str(),
+            "E_CONSTRAINT" | "E_TYPE"
+        ));
+        assert_eq!(
+            serde_json::to_value(ok(&mut engine, "from accounts | sort id").rows).unwrap(),
+            before
+        );
+    }
+
+    let mut unkeyed = Engine::memory();
+    ok(&mut unkeyed, "create table events (id int)");
+    let failed = unkeyed.execute("upsert many events []");
+    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "E_CONSTRAINT");
+}

@@ -402,6 +402,33 @@ fn local_cli_reports_the_structured_upsert_action() {
 }
 
 #[test]
+fn local_cli_reports_bulk_upsert_actions_in_input_order() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--query",
+            "type Item =\n  id int\n  value text\ntable items Item\n  key id\ninsert items {id = 1, value = \"old\"}\nupsert many items [{id = 1, value = \"new\"}, {id = 2, value = \"second\"}]\nreturning id, value",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response.affected_rows, Some(2));
+    assert_eq!(
+        response.upsert_actions,
+        [UpsertAction::Updated, UpsertAction::Inserted]
+    );
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(response.rows[1]["id"].cmp_eq(&Value::Int(2)));
+}
+
+#[test]
 fn cli_eof_exits_and_query_does_not_wait_for_stdin() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_unionid"))
         .args(["cli", "--memory"])
@@ -817,6 +844,58 @@ create index events (state)"#;
     assert_eq!(stored.rows.len(), 2);
     assert!(stored.rows[0]["id"].cmp_eq(&Value::Int(1)));
     assert!(stored.rows[1]["id"].cmp_eq(&Value::Int(2)));
+}
+
+#[test]
+fn versioned_tcp_bulk_upserts_typed_row_lists() {
+    let server = Server::start(&[]);
+    let setup = r#"type Item =
+  id int
+  value text
+table items Item
+  key id
+insert items {id = 1, value = "old"}"#;
+    assert!(cli::send_one(&server.addr, setup).unwrap().ok);
+
+    let row = |id: &str, value: &str| WireValue::Record {
+        fields: BTreeMap::from([
+            ("id".into(), WireValue::Int { value: id.into() }),
+            (
+                "value".into(),
+                WireValue::Text {
+                    value: value.into(),
+                },
+            ),
+        ]),
+    };
+    let request = ProtocolRequest {
+        version: unionid::protocol::VERSION,
+        request_id: "bulk-upsert".into(),
+        query: "upsert many items $rows\nreturning id, value".into(),
+        introspect: None,
+        params: BTreeMap::from([(
+            "rows".into(),
+            WireValue::List {
+                items: vec![row("1", "new"), row("2", "second")],
+            },
+        )]),
+        schema: None,
+    };
+    let response = cli::send_request(&server.addr, &request).unwrap();
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.request_id, "bulk-upsert");
+    assert_eq!(response.affected_rows, Some(2));
+    assert_eq!(
+        response.upsert_actions,
+        [UpsertAction::Updated, UpsertAction::Inserted]
+    );
+    assert!(matches!(&response.rows[0]["value"], WireValue::Text { value } if value == "new"));
+    assert!(matches!(&response.rows[1]["value"], WireValue::Text { value } if value == "second"));
+
+    let stored = cli::send_one(&server.addr, "from items | sort id").unwrap();
+    assert!(stored.ok, "{}", stored.message);
+    assert_eq!(stored.rows.len(), 2);
+    assert!(stored.rows[0]["value"].cmp_eq(&Value::Text("new".into())));
 }
 
 #[test]

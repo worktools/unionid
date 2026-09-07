@@ -51,7 +51,7 @@
 - `docs/SCENARIOS.md` 用任务队列、配置、事件、同步和 key/value 工作流维护查询覆盖；#35/#36、#59–#61 已补齐 ADT 派生、布尔/集合表达式、普通派生、基础汇总和查询局部纯函数。
 - 已支持 typed unique index：`create unique index table (field.path)` 对 primitive、sum/product、tuple、option 与 list 的完整 typed value 强制唯一，`None` 也占用一个唯一值；ordinary/unique kind 进入 schema hash、migration/diff、backup 与 redb catalog v2，旧 v1 index 按 ordinary 兼容读取。
 - 字段可用 `field type = value` 声明默认值；默认值在完整类型体建立后于 schema 阶段类型检查，因此可安全使用自递归类型的终止 constructor，insert 会对嵌套 record 和 sum record 负载逐层补齐。
-- 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，并已接入 redb `rows` 表。`insert many table <list>` 可在同一事务校验并写入 typed row list；insert/upsert/update/delete 可用 `returning` 返回完整行或字段投影；update/delete target 可按源码顺序组合 filter、sort 和 take，以稳定选择并修改有限行集。
+- 已实现独立于 serde/Rust enum 布局的版本 1 ADT value codec；它用稳定 type/field/variant ID 编码，并已接入 redb `rows` 表。`insert many table <list>` 与 `upsert many table <list>` 可在同一事务校验并写入 typed row list；批量 upsert 拒绝输入内重复主键、保留更新行的 RowId，并返回逐项 action。insert/upsert/update/delete 可用 `returning` 返回完整行或字段投影；update/delete target 可按源码顺序组合 filter、sort 和 take，以稳定选择并修改有限行集。
 - 已通过 `docs/adr/0001-redb-storage.md` 选定 redb 作为长期事务后端；`Engine::open_redb`、`run/cli/server --db` 使用固定的 meta/catalog/rows/secondary_index/migration_ledger 表和同步 two-phase 原子提交。提交按稳定 ID/RowId 计算前后状态差异，只删除或写入变化的 catalog/row/index 键，并在覆盖前核对旧值；现有 WAL/snapshot 只保留为过渡兼容入口。
 - redb transaction commit 前的失败视为明确回滚并允许重试；commit 返回错误视为结果不确定，Engine 关闭句柄并阻止继续写。`check --db` 运行 redb 完整性检查后重新验证 unionid 逻辑状态；子进程测试覆盖提交前/成功提交后直接退出、未知版本、无效文件、索引不一致与跨进程 `E_BUSY`。
 - macOS/Linux 子进程使用 OS `RLIMIT_FSIZE` 注入真实 redb 文件增长失败，验证 Engine 的确定／不确定错误分类；重开后完整检查 typed rows、indexes、schema 与 migration ledger 只接受完整旧／新状态。

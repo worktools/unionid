@@ -1104,14 +1104,43 @@ impl Parser {
 
     fn upsert(&mut self) -> Result<Statement> {
         self.expect_word("upsert")?;
+        let many = self.word("many")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| matches!(token.kind, Kind::Ident(_)));
+        if many {
+            self.bump();
+        }
         let table = self.identifier()?;
         if let Kind::Parameter(parameter) = self.kind().clone() {
             self.bump();
             let returning = self.optional_returning()?;
-            return Ok(Statement::UpsertParameter {
+            return Ok(if many {
+                Statement::UpsertManyParameter {
+                    table,
+                    parameter,
+                    parameter_type: None,
+                    returning,
+                }
+            } else {
+                Statement::UpsertParameter {
+                    table,
+                    parameter,
+                    parameter_type: None,
+                    returning,
+                }
+            });
+        }
+        if many {
+            let values = self.value(0)?;
+            if !matches!(values, Value::List(_)) {
+                return Err(self.error("upsert many requires a list of rows"));
+            }
+            let returning = self.optional_returning()?;
+            return Ok(Statement::UpsertMany {
                 table,
-                parameter,
-                parameter_type: None,
+                values,
                 returning,
             });
         }

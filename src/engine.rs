@@ -298,6 +298,19 @@ impl Engine {
                     );
                     mutating = true;
                 }
+                Statement::UpsertManyParameter {
+                    table,
+                    parameter_type,
+                    returning,
+                    ..
+                } => {
+                    *parameter_type = Some(
+                        self.db
+                            .prepare_bulk_upsert_parameter(table, returning.as_ref())
+                            .map_err(|error| error.at(located.span))?,
+                    );
+                    mutating = true;
+                }
                 Statement::Update {
                     target,
                     assignments,
