@@ -272,10 +272,42 @@ impl Catalog {
                 format!("type '{name}' already exists"),
             ));
         }
-        let ty = self.resolve(ty, 0)?;
-        let id = self.allocate()?;
-        self.types
-            .insert(name.clone(), TypeDefinition { id, name, ty });
+        // Reserve the nominal identity before resolving the body so a direct
+        // self-reference becomes the same stable Ref. Predicting the ID after
+        // the body's field/variant allocations preserves the v1 allocation
+        // order for every non-recursive schema. The complete catalog is
+        // restored on failure because resolving also allocates those IDs.
+        let previous = self.clone();
+        let result = (|| {
+            let body_ids = structural_id_count(&ty, 0)?;
+            let id = self
+                .next_id
+                .checked_add(body_ids)
+                .ok_or_else(|| Error::new("E_SCHEMA", "catalog ID space exhausted"))?;
+            self.types.insert(
+                name.clone(),
+                TypeDefinition {
+                    id,
+                    name: name.clone(),
+                    ty: ScalarType::Bool,
+                },
+            );
+            let ty = self.resolve_inner(ty, 0)?;
+            let allocated = self.allocate()?;
+            debug_assert_eq!(allocated, id);
+            self.types.get_mut(&name).expect("reserved type").ty = ty;
+            // Defaults that construct the type currently being declared need
+            // the complete definition, so normalize every default only after
+            // the nominal body has replaced the temporary reservation.
+            let ty = self.types.get(&name).expect("reserved type").ty.clone();
+            let ty = self.normalize_defaults(ty, 0)?;
+            self.types.get_mut(&name).expect("reserved type").ty = ty;
+            self.validate_finite_types()
+        })();
+        if let Err(error) = result {
+            *self = previous;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -287,30 +319,39 @@ impl Catalog {
     }
 
     pub fn resolve(&mut self, ty: ScalarType, depth: usize) -> Result<ScalarType> {
+        let ty = self.resolve_inner(ty, depth)?;
+        self.normalize_defaults(ty, depth)
+    }
+
+    fn resolve_inner(&mut self, ty: ScalarType, depth: usize) -> Result<ScalarType> {
         check_depth(depth)?;
         Ok(match ty {
-            ScalarType::Named(name) => ScalarType::Ref(self.types.get(&name).ok_or_else(|| Error::new("E_SCHEMA", format!("unknown type '{name}'; declare referenced types first (recursive types are not supported yet)")))?.id),
+            ScalarType::Named(name) => ScalarType::Ref(
+                self.types
+                    .get(&name)
+                    .ok_or_else(|| {
+                        Error::new(
+                            "E_SCHEMA",
+                            format!("unknown type '{name}'; declare other referenced types first"),
+                        )
+                    })?
+                    .id,
+            ),
             ScalarType::Record(columns) => {
                 let mut seen = BTreeSet::new();
                 let mut resolved = Vec::new();
                 for column in columns {
-                    if !seen.insert(column.name.clone()) { return Err(Error::new("E_SCHEMA", format!("duplicate field '{}'", column.name))); }
-                    let ty = self.resolve(column.ty, depth + 1)?;
-                    let default = column
-                        .default
-                        .map(|value| {
-                            self.coerce_inner(
-                                &value,
-                                &ty,
-                                &format!("default for field '{}'", column.name),
-                                depth + 1,
-                            )
-                        })
-                        .transpose()?;
+                    if !seen.insert(column.name.clone()) {
+                        return Err(Error::new(
+                            "E_SCHEMA",
+                            format!("duplicate field '{}'", column.name),
+                        ));
+                    }
+                    let ty = self.resolve_inner(column.ty, depth + 1)?;
                     resolved.push(Column {
                         name: column.name,
                         ty,
-                        default,
+                        default: column.default,
                         id: self.allocate()?,
                     });
                 }
@@ -320,14 +361,94 @@ impl Catalog {
                 let mut seen = BTreeSet::new();
                 let mut variants = Vec::new();
                 for v in def.variants {
-                    if !seen.insert(v.name.clone()) { return Err(Error::new("E_SCHEMA", format!("duplicate variant '{}'", v.name))); }
-                    variants.push(EnumVariantDef { name: v.name, args: v.args.into_iter().map(|t| self.resolve(t, depth + 1)).collect::<Result<_>>()?, id: self.allocate()? });
+                    if !seen.insert(v.name.clone()) {
+                        return Err(Error::new(
+                            "E_SCHEMA",
+                            format!("duplicate variant '{}'", v.name),
+                        ));
+                    }
+                    variants.push(EnumVariantDef {
+                        name: v.name,
+                        args: v
+                            .args
+                            .into_iter()
+                            .map(|t| self.resolve_inner(t, depth + 1))
+                            .collect::<Result<_>>()?,
+                        id: self.allocate()?,
+                    });
                 }
                 ScalarType::Enum(EnumType { variants })
             }
-            ScalarType::Option(t) => ScalarType::Option(Box::new(self.resolve(*t, depth + 1)?)),
-            ScalarType::List(t) => ScalarType::List(Box::new(self.resolve(*t, depth + 1)?)),
-            ScalarType::Tuple(ts) => ScalarType::Tuple(ts.into_iter().map(|t| self.resolve(t, depth + 1)).collect::<Result<_>>()?),
+            ScalarType::Option(t) => {
+                ScalarType::Option(Box::new(self.resolve_inner(*t, depth + 1)?))
+            }
+            ScalarType::List(t) => ScalarType::List(Box::new(self.resolve_inner(*t, depth + 1)?)),
+            ScalarType::Tuple(ts) => ScalarType::Tuple(
+                ts.into_iter()
+                    .map(|t| self.resolve_inner(t, depth + 1))
+                    .collect::<Result<_>>()?,
+            ),
+            other => other,
+        })
+    }
+
+    fn normalize_defaults(&self, ty: ScalarType, depth: usize) -> Result<ScalarType> {
+        check_depth(depth)?;
+        Ok(match ty {
+            ScalarType::Record(columns) => ScalarType::Record(
+                columns
+                    .into_iter()
+                    .map(|column| {
+                        let ty = self.normalize_defaults(column.ty, depth + 1)?;
+                        let default = column
+                            .default
+                            .map(|value| {
+                                self.coerce_inner(
+                                    &value,
+                                    &ty,
+                                    &format!("default for field '{}'", column.name),
+                                    depth + 1,
+                                )
+                            })
+                            .transpose()?;
+                        Ok(Column {
+                            name: column.name,
+                            ty,
+                            default,
+                            id: column.id,
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+            ScalarType::Enum(sum) => ScalarType::Enum(EnumType {
+                variants: sum
+                    .variants
+                    .into_iter()
+                    .map(|variant| {
+                        Ok(EnumVariantDef {
+                            name: variant.name,
+                            args: variant
+                                .args
+                                .into_iter()
+                                .map(|argument| self.normalize_defaults(argument, depth + 1))
+                                .collect::<Result<_>>()?,
+                            id: variant.id,
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            }),
+            ScalarType::Tuple(items) => ScalarType::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| self.normalize_defaults(item, depth + 1))
+                    .collect::<Result<_>>()?,
+            ),
+            ScalarType::Option(inner) => {
+                ScalarType::Option(Box::new(self.normalize_defaults(*inner, depth + 1)?))
+            }
+            ScalarType::List(inner) => {
+                ScalarType::List(Box::new(self.normalize_defaults(*inner, depth + 1)?))
+            }
             other => other,
         })
     }
@@ -340,6 +461,46 @@ impl Catalog {
             }
         }
         Err(Error::new("E_LIMIT", "type reference depth exceeds limit"))
+    }
+
+    /// Reject named-type cycles that cannot construct any finite value.
+    /// Option and list are immediately inhabited by None and [], while sums
+    /// need one finite branch and products need every component to be finite.
+    pub(crate) fn validate_finite_types(&self) -> Result<()> {
+        for definition in self.types.values() {
+            validate_type_references(self, &definition.ty, 0)?;
+        }
+        validate_no_mutual_cycles(self)?;
+        let mut finite = BTreeSet::new();
+        loop {
+            let mut changed = false;
+            for definition in self.types.values() {
+                if !finite.contains(&definition.id) && type_is_finite(&definition.ty, &finite) {
+                    finite.insert(definition.id);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let uninhabited = self
+            .types
+            .values()
+            .filter(|definition| !finite.contains(&definition.id))
+            .map(|definition| format!("'{}'", definition.name))
+            .collect::<Vec<_>>();
+        if uninhabited.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "E_SCHEMA",
+                format!(
+                    "recursive type {} has no finite value; add a terminating sum variant, option, or list path",
+                    uninhabited.join(", ")
+                ),
+            ))
+        }
     }
 
     pub fn field_type<'a>(&'a self, fields: &'a [Column], path: &str) -> Result<&'a ScalarType> {
@@ -443,12 +604,15 @@ impl Catalog {
                         Some(value) => {
                             self.coerce_inner(value, &column.ty, &field_path, depth + 1)?
                         }
-                        None => column.default.clone().ok_or_else(|| {
-                            Error::new(
-                                "E_FIELD",
-                                format!("missing required field '{field_path}'; declare a default or provide the field explicitly"),
-                            )
-                        })?,
+                        None => {
+                            let default = column.default.as_ref().ok_or_else(|| {
+                                Error::new(
+                                    "E_FIELD",
+                                    format!("missing required field '{field_path}'; declare a default or provide the field explicitly"),
+                                )
+                            })?;
+                            self.coerce_inner(default, &column.ty, &field_path, depth + 1)?
+                        }
                     };
                     out.insert(column.name.clone(), value);
                 }
@@ -634,6 +798,174 @@ impl Catalog {
         }
         text
     }
+}
+
+fn type_is_finite(ty: &ScalarType, finite: &BTreeSet<u64>) -> bool {
+    match ty {
+        ScalarType::Int | ScalarType::Float | ScalarType::Bool | ScalarType::Text => true,
+        ScalarType::Ref(id) => finite.contains(id),
+        ScalarType::Option(_) | ScalarType::List(_) => true,
+        ScalarType::Tuple(items) => items.iter().all(|item| type_is_finite(item, finite)),
+        ScalarType::Record(fields) => fields.iter().all(|field| type_is_finite(&field.ty, finite)),
+        ScalarType::Enum(sum) => sum.variants.iter().any(|variant| {
+            variant
+                .args
+                .iter()
+                .all(|argument| type_is_finite(argument, finite))
+        }),
+        ScalarType::Named(_) => false,
+    }
+}
+
+fn validate_type_references(catalog: &Catalog, ty: &ScalarType, depth: usize) -> Result<()> {
+    check_depth(depth)?;
+    match ty {
+        ScalarType::Ref(id) => {
+            catalog.definition(*id)?;
+        }
+        ScalarType::Record(fields) => {
+            for field in fields {
+                validate_type_references(catalog, &field.ty, depth + 1)?;
+            }
+        }
+        ScalarType::Enum(sum) => {
+            for variant in &sum.variants {
+                for argument in &variant.args {
+                    validate_type_references(catalog, argument, depth + 1)?;
+                }
+            }
+        }
+        ScalarType::Tuple(items) => {
+            for item in items {
+                validate_type_references(catalog, item, depth + 1)?;
+            }
+        }
+        ScalarType::Option(inner) | ScalarType::List(inner) => {
+            validate_type_references(catalog, inner, depth + 1)?;
+        }
+        ScalarType::Named(name) => {
+            return Err(Error::new(
+                "E_SCHEMA",
+                format!("unresolved type reference '{name}'"),
+            ));
+        }
+        ScalarType::Int | ScalarType::Float | ScalarType::Bool | ScalarType::Text => {}
+    }
+    Ok(())
+}
+
+fn validate_no_mutual_cycles(catalog: &Catalog) -> Result<()> {
+    fn visit(
+        catalog: &Catalog,
+        id: u64,
+        visiting: &mut BTreeSet<u64>,
+        visited: &mut BTreeSet<u64>,
+    ) -> Result<()> {
+        if visited.contains(&id) {
+            return Ok(());
+        }
+        visiting.insert(id);
+        let definition = catalog.definition(id)?;
+        let mut references = BTreeSet::new();
+        collect_type_references(&definition.ty, &mut references);
+        for reference in references {
+            if reference == id {
+                continue;
+            }
+            if visiting.contains(&reference) {
+                let other = &catalog.definition(reference)?.name;
+                return Err(Error::new(
+                    "E_SCHEMA",
+                    format!(
+                        "mutually recursive types '{}' and '{other}' are not supported; use direct self-reference or separate the values",
+                        definition.name
+                    ),
+                ));
+            }
+            visit(catalog, reference, visiting, visited)?;
+        }
+        visiting.remove(&id);
+        visited.insert(id);
+        Ok(())
+    }
+
+    let mut visited = BTreeSet::new();
+    for definition in catalog.types.values() {
+        visit(catalog, definition.id, &mut BTreeSet::new(), &mut visited)?;
+    }
+    Ok(())
+}
+
+fn collect_type_references(ty: &ScalarType, references: &mut BTreeSet<u64>) {
+    match ty {
+        ScalarType::Ref(id) => {
+            references.insert(*id);
+        }
+        ScalarType::Record(fields) => {
+            for field in fields {
+                collect_type_references(&field.ty, references);
+            }
+        }
+        ScalarType::Enum(sum) => {
+            for variant in &sum.variants {
+                for argument in &variant.args {
+                    collect_type_references(argument, references);
+                }
+            }
+        }
+        ScalarType::Tuple(items) => {
+            for item in items {
+                collect_type_references(item, references);
+            }
+        }
+        ScalarType::Option(inner) | ScalarType::List(inner) => {
+            collect_type_references(inner, references);
+        }
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Named(_) => {}
+    }
+}
+
+fn structural_id_count(ty: &ScalarType, depth: usize) -> Result<u64> {
+    check_depth(depth)?;
+    let nested = match ty {
+        ScalarType::Record(fields) => fields.iter().try_fold(0_u64, |count, field| {
+            let count = count
+                .checked_add(1)
+                .ok_or_else(|| Error::new("E_SCHEMA", "catalog ID space exhausted"))?;
+            count
+                .checked_add(structural_id_count(&field.ty, depth + 1)?)
+                .ok_or_else(|| Error::new("E_SCHEMA", "catalog ID space exhausted"))
+        })?,
+        ScalarType::Enum(sum) => sum.variants.iter().try_fold(0_u64, |count, variant| {
+            let count = count
+                .checked_add(1)
+                .ok_or_else(|| Error::new("E_SCHEMA", "catalog ID space exhausted"))?;
+            variant.args.iter().try_fold(count, |count, argument| {
+                count
+                    .checked_add(structural_id_count(argument, depth + 1)?)
+                    .ok_or_else(|| Error::new("E_SCHEMA", "catalog ID space exhausted"))
+            })
+        })?,
+        ScalarType::Tuple(items) => items.iter().try_fold(0_u64, |count, item| {
+            count
+                .checked_add(structural_id_count(item, depth + 1)?)
+                .ok_or_else(|| Error::new("E_SCHEMA", "catalog ID space exhausted"))
+        })?,
+        ScalarType::Option(inner) | ScalarType::List(inner) => {
+            structural_id_count(inner, depth + 1)?
+        }
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Named(_)
+        | ScalarType::Ref(_) => 0,
+    };
+    Ok(nested)
 }
 
 impl Value {

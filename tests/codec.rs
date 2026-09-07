@@ -1,5 +1,7 @@
 use unionid::codec::{MAX_VALUE_BYTES, VALUE_CODEC_VERSION, decode_value, encode_value};
-use unionid::model::{Catalog, Column, EnumType, EnumValue, EnumVariantDef, ScalarType, Value};
+use unionid::model::{
+    Catalog, Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value,
+};
 
 fn column(name: &str, ty: ScalarType, default: Option<Value>) -> Column {
     Column {
@@ -327,4 +329,57 @@ fn encoded_and_input_size_limits_are_enforced() {
             .code,
         "E_CODEC"
     );
+}
+
+#[test]
+fn recursive_named_values_round_trip_and_obey_the_depth_limit() {
+    let mut catalog = Catalog::default();
+    catalog
+        .define(
+            "Chain".into(),
+            ScalarType::Enum(EnumType {
+                variants: vec![
+                    EnumVariantDef {
+                        name: "Next".into(),
+                        args: vec![ScalarType::Named("Chain".into())],
+                        id: 0,
+                    },
+                    EnumVariantDef {
+                        name: "End".into(),
+                        args: Vec::new(),
+                        id: 0,
+                    },
+                ],
+            }),
+        )
+        .unwrap();
+    let definition = &catalog.types["Chain"];
+    let ScalarType::Enum(sum) = &definition.ty else {
+        unreachable!()
+    };
+    assert_eq!(
+        sum.variants
+            .iter()
+            .map(|variant| variant.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(definition.id, 3);
+    let ty = ScalarType::Ref(catalog.types["Chain"].id);
+    let mut input = variant("End", Vec::new());
+    for _ in 0..4 {
+        input = variant("Next", vec![input]);
+    }
+    let expected = catalog.coerce(&input, &ty, "value").unwrap();
+    let encoded = encode_value(&catalog, &ty, &input).unwrap();
+    let decoded = decode_value(&catalog, &ty, &encoded).unwrap();
+    assert!(decoded.cmp_eq(&expected));
+    assert_eq!(encode_value(&catalog, &ty, &decoded).unwrap(), encoded);
+
+    let mut too_deep = variant("End", Vec::new());
+    for _ in 0..MAX_DEPTH {
+        too_deep = variant("Next", vec![too_deep]);
+    }
+    let error = encode_value(&catalog, &ty, &too_deep).unwrap_err();
+    assert_eq!(error.code, "E_LIMIT");
 }

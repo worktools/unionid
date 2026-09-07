@@ -9,6 +9,10 @@ fn formatter_is_idempotent_for_current_examples() {
         ("job_queue", include_str!("../examples/job_queue.uid")),
         ("sync", include_str!("../examples/sync_conflicts.uid")),
         ("mutations", include_str!("../examples/task_mutations.uid")),
+        (
+            "recursive_tree",
+            include_str!("../examples/recursive_tree.uid"),
+        ),
         ("schema", include_str!("../examples/schema.uid")),
         (
             "schema_migration",

@@ -433,11 +433,86 @@ fn type_add_and_drop_obey_reference_integrity() {
     assert_eq!(engine.schema_info(), before);
     assert!(!engine.schema().contains("note text"));
 
-    let recursive =
-        engine.execute("migration recursive_type\n  add field Task.child option Task = None");
-    assert!(!recursive.ok);
-    assert_eq!(recursive.error.unwrap().code, "E_SCHEMA");
-    assert!(!engine.schema().contains("child option"));
+    ok(
+        &mut engine,
+        "migration recursive_type\n  add field Task.child option Task = None",
+    );
+    assert!(engine.schema().contains("child option Task = None"));
+}
+
+#[test]
+fn recursive_record_migrations_rewrite_every_finite_occurrence() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type Chain =
+  value int
+  next option Chain = None
+
+table chains Chain
+  key value
+
+create index chains (next)
+
+insert chains
+  value = 1
+  next = Some {value = 2}"#,
+    );
+    ok(
+        &mut engine,
+        r#"migration chain_v2
+  rename field Chain.value to number
+  add field Chain.note text = "added""#,
+    );
+    let rows = ok(
+        &mut engine,
+        r#"from chains
+filter number == 1
+filter match next
+  None => false
+  Some {number, note, ..} => number == 2 and note == "added""#,
+    );
+    assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0]["note"].cmp_eq(&Value::Text("added".into())));
+    assert!(engine.schema().contains("key number"));
+    assert!(engine.schema().contains("create index chains (next)"));
+
+    let mut sum = Engine::memory();
+    ok(
+        &mut sum,
+        r#"type Link =
+  Next Link
+  | End
+
+type LinkRow =
+  id int
+  link Link
+
+table links LinkRow"#,
+    );
+    let before = sum.schema_info();
+    let failed = sum.execute("migration remove_end\n  drop variant Link.End");
+    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "E_SCHEMA");
+    assert_eq!(sum.schema_info(), before);
+    assert!(sum.schema().contains("| End"));
+
+    let mut mutual = Engine::memory();
+    ok(
+        &mut mutual,
+        r#"type Parent =
+  id int
+
+type Child =
+  parent option Parent = None"#,
+    );
+    let before = mutual.schema_info();
+    let failed =
+        mutual.execute("migration mutual_cycle\n  add field Parent.child option Child = None");
+    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "E_SCHEMA");
+    assert_eq!(mutual.schema_info(), before);
+    assert!(!mutual.schema().contains("child option Child"));
 }
 
 #[test]

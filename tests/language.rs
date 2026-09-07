@@ -90,6 +90,125 @@ fn executable_examples() {
     assert_eq!(r.rows.len(), 1);
     assert!(r.rows[0]["id"].cmp_eq(&Value::Int(1)));
     assert!(r.rows[0]["attempts"].cmp_eq(&Value::Int(2)));
+
+    let mut recursive = Engine::memory();
+    let result = ok(
+        &mut recursive,
+        include_str!("../examples/recursive_tree.uid"),
+    );
+    assert_eq!(result.rows.len(), 2);
+    assert!(result.rows[0]["root_label"].cmp_eq(&Value::Text("root".into())));
+    assert!(result.rows[1]["root_label"].cmp_eq(&Value::Text("single".into())));
+}
+
+#[test]
+fn finite_self_recursive_types_are_strict_and_productive() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type Chain =
+  value int
+  next option Chain = None
+
+table chains Chain
+  key value
+
+insert chains
+  value = 1
+  next = Some {value = 2}"#,
+    );
+    let nested = ok(
+        &mut engine,
+        r#"from chains
+filter match next
+  None => false
+  Some {value, ..} => value == 2"#,
+    );
+    assert_eq!(nested.rows.len(), 1);
+    assert!(engine.schema().contains("next option Chain = None"));
+
+    let mut recursive_default = Engine::memory();
+    let defaulted = ok(
+        &mut recursive_default,
+        r#"type Tree =
+  Leaf
+  | Node
+    child Tree = Leaf
+
+type Document =
+  id int
+  tree Tree = Leaf
+
+table documents Document
+insert documents {id = 1}
+from documents"#,
+    );
+    assert_eq!(defaulted.rows[0]["tree"].source_text(), "Leaf");
+
+    for source in [
+        "type Loop = Loop",
+        "type Required =\n  next Required",
+        "type Endless =\n  Next Endless",
+    ] {
+        let before = engine.schema_info();
+        let failed = engine.execute(source);
+        assert!(!failed.ok, "accepted {source}");
+        assert_eq!(failed.error.unwrap().code, "E_SCHEMA");
+        assert_eq!(engine.schema_info(), before);
+    }
+
+    let before = Engine::memory().schema_info();
+    let mut atomic = Engine::memory();
+    let failed = atomic.execute("type Good = int\ntype Loop = Loop");
+    assert!(!failed.ok);
+    assert_eq!(atomic.schema_info(), before);
+    assert!(!atomic.schema().contains("Good"));
+}
+
+#[test]
+fn recursive_match_coverage_produces_finite_witnesses() {
+    let mut engine = Engine::memory();
+    let failed = engine.execute(
+        r#"type Chain =
+  Next Chain
+  | End
+
+type Row =
+  id int
+  value Chain
+
+table rows Row
+
+from rows
+filter match value
+  End => true"#,
+    );
+    assert!(!failed.ok);
+    let error = failed.error.unwrap();
+    assert_eq!(error.code, "E_MATCH");
+    assert!(error.message.contains("uncovered example Next(End)"));
+    assert_eq!(engine.schema_info().revision, 0);
+
+    ok(
+        &mut engine,
+        r#"type Chain =
+  Next Chain
+  | End
+
+type Row =
+  id int
+  value Chain
+
+table rows Row"#,
+    );
+    let mut value = "End".to_string();
+    for _ in 0..unionid::model::MAX_DEPTH {
+        value = format!("Next ({value})");
+    }
+    let failed = engine.execute(&format!("insert rows {{id = 1, value = {value}}}"));
+    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "E_LIMIT");
+    assert!(ok(&mut engine, "from rows").rows.is_empty());
 }
 
 #[test]

@@ -319,7 +319,7 @@ impl Database {
             .find(|column| column.id == old_column.id)
             .unwrap();
         column.ty = new_ty.clone();
-        validate_catalog_cycles(&self.catalog)?;
+        self.catalog.validate_finite_types()?;
         let input = expose_binding_root(&old_catalog, &old_column.ty)?;
         crate::matching::bind_migration_result(
             &self.catalog,
@@ -488,7 +488,7 @@ impl Database {
             .find(|candidate| candidate.id == old_variant.id)
             .unwrap();
         changed.args = args.clone();
-        validate_catalog_cycles(&self.catalog)?;
+        self.catalog.validate_finite_types()?;
         let input = expanded_payload_type(&old_catalog, &old_variant.args)?;
         let output = payload_type(&args);
         crate::matching::bind_migration_result(
@@ -618,7 +618,7 @@ impl Database {
         changed_type: Option<u64>,
         rewrite: Option<&ValueRewrite>,
     ) -> Result<()> {
-        validate_catalog_cycles(&self.catalog)?;
+        self.catalog.validate_finite_types()?;
         let mut old_tables = BTreeMap::new();
         for (name, object) in &self.objects {
             let DbObject::Table(table) = object;
@@ -908,72 +908,6 @@ fn type_reaches(
         | ScalarType::Bool
         | ScalarType::Text
         | ScalarType::Named(_) => false,
-    }
-}
-
-fn validate_catalog_cycles(catalog: &Catalog) -> Result<()> {
-    fn visit(
-        catalog: &Catalog,
-        id: u64,
-        visiting: &mut BTreeSet<u64>,
-        visited: &mut BTreeSet<u64>,
-    ) -> Result<()> {
-        if visited.contains(&id) {
-            return Ok(());
-        }
-        if !visiting.insert(id) {
-            let name = catalog.definition(id)?.name.clone();
-            return Err(Error::new(
-                "E_SCHEMA",
-                format!("migration would create a recursive type through '{name}'"),
-            ));
-        }
-        let definition = catalog.definition(id)?;
-        let mut references = Vec::new();
-        collect_type_references(&definition.ty, &mut references);
-        for reference in references {
-            visit(catalog, reference, visiting, visited)?;
-        }
-        visiting.remove(&id);
-        visited.insert(id);
-        Ok(())
-    }
-
-    let mut visited = BTreeSet::new();
-    for definition in catalog.types.values() {
-        visit(catalog, definition.id, &mut BTreeSet::new(), &mut visited)?;
-    }
-    Ok(())
-}
-
-fn collect_type_references(ty: &ScalarType, references: &mut Vec<u64>) {
-    match ty {
-        ScalarType::Ref(id) => references.push(*id),
-        ScalarType::Record(fields) => {
-            for field in fields {
-                collect_type_references(&field.ty, references);
-            }
-        }
-        ScalarType::Enum(enum_type) => {
-            for variant in &enum_type.variants {
-                for argument in &variant.args {
-                    collect_type_references(argument, references);
-                }
-            }
-        }
-        ScalarType::Tuple(items) => {
-            for item in items {
-                collect_type_references(item, references);
-            }
-        }
-        ScalarType::Option(item) | ScalarType::List(item) => {
-            collect_type_references(item, references)
-        }
-        ScalarType::Int
-        | ScalarType::Float
-        | ScalarType::Bool
-        | ScalarType::Text
-        | ScalarType::Named(_) => {}
     }
 }
 
