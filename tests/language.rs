@@ -221,6 +221,7 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "from tasks\ngroup id\n  aggregate\n    rows = count",
         "from tasks\nfilter match state\n  Pending => true",
         "delete tasks\nreturning",
+        "insert many tasks []\nreturning id",
     ] {
         assert_eq!(input_status(source), InputStatus::Complete, "{source:?}");
     }
@@ -238,6 +239,7 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "update rows\nset state =\n",
         "update rows\nset state =\n  match state\n",
         "insert rows {id = 1}\nreturning id,",
+        "insert many rows [",
     ] {
         let InputStatus::Incomplete(error) = input_status(source) else {
             panic!("expected incomplete source: {source:?}");
@@ -2519,6 +2521,112 @@ fn returning_limits_are_checked_before_publishing_mutations() {
     assert!(!failed.ok);
     assert_eq!(failed.error.unwrap().code, "E_LIMIT");
     assert!(ok(&mut engine, "from items").rows.is_empty());
+}
+
+#[test]
+fn typed_bulk_insert_applies_defaults_and_commits_as_one_batch() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type State =
+  Pending
+  | Ready {attempt int}
+
+type Meta =
+  source text
+  tags list text
+
+type Event =
+  id int
+  state State = Pending
+  meta Meta = {source = "seed", tags = []}
+
+table events Event
+  key id
+
+create index events (state)"#,
+    );
+
+    let inserted = ok(
+        &mut engine,
+        r#"insert many events [
+  {id = 2, state = Ready {attempt = 2}},
+  {id = 1}
+]
+returning id, meta.source, state"#,
+    );
+    assert_eq!(inserted.affected_rows, Some(2));
+    assert_eq!(inserted.rows.len(), 2);
+    assert!(inserted.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(inserted.rows[1]["id"].cmp_eq(&Value::Int(1)));
+    assert!(inserted.rows[0]["meta.source"].cmp_eq(&Value::Text("seed".into())));
+    assert_eq!(inserted.rows[1]["state"].source_text(), "Pending");
+
+    let empty = ok(&mut engine, "insert many events []\nreturning id, state");
+    assert_eq!(empty.affected_rows, Some(0));
+    assert!(empty.rows.is_empty());
+    assert_eq!(
+        empty
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "state"]
+    );
+
+    let before = rows(&mut engine, "from events | sort id");
+    let duplicate = engine.execute("insert many events [{id = 3}, {id = 1}]\nreturning id");
+    assert!(!duplicate.ok);
+    assert_eq!(duplicate.error.unwrap().code, "E_CONSTRAINT");
+    assert_eq!(rows(&mut engine, "from events | sort id"), before);
+
+    let non_list = engine.execute_with_params(
+        "insert many events $rows",
+        std::collections::BTreeMap::from([(
+            "rows".into(),
+            Value::Record([("id".into(), Value::Int(3))].into()),
+        )]),
+    );
+    assert!(!non_list.ok);
+    assert_eq!(non_list.error.unwrap().code, "E_TYPE");
+
+    let too_many = engine.execute_with_params(
+        "insert many events $rows",
+        std::collections::BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![
+                Value::Record(std::collections::BTreeMap::new());
+                unionid::db::MAX_BULK_INSERT_ROWS + 1
+            ]),
+        )]),
+    );
+    assert!(!too_many.ok);
+    assert_eq!(too_many.error.unwrap().code, "E_LIMIT");
+    assert_eq!(rows(&mut engine, "from events | sort id"), before);
+
+    let expired = engine.execute_with_params_until(
+        "insert many events $rows",
+        std::collections::BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![Value::Record([("id".into(), Value::Int(3))].into())]),
+        )]),
+        None,
+        std::time::Instant::now() - std::time::Duration::from_millis(1),
+    );
+    assert!(!expired.ok);
+    assert_eq!(expired.error.unwrap().code, "E_TIMEOUT");
+    assert_eq!(rows(&mut engine, "from events | sort id"), before);
+
+    let invalid = engine.execute("insert many events {id = 3}");
+    assert!(!invalid.ok);
+    assert_eq!(invalid.error.unwrap().code, "E_SYNTAX");
+
+    let mut compatibility = Engine::memory();
+    ok(
+        &mut compatibility,
+        "create table many (id int)\ninsert many {id = 1}",
+    );
+    assert_eq!(ok(&mut compatibility, "from many").rows.len(), 1);
 }
 
 #[test]

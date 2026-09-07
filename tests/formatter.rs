@@ -64,6 +64,7 @@ fn formatter_covers_statements_stages_patterns_values_and_migrations() {
     for source in [
         "create table legacy (id int, state enum(Pending, Done(text)))\ncreate index legacy (state)",
         "insert tasks $row | returning\nupsert tasks $row\nreturning id, state",
+        "insert many tasks [{id = 2, state = Pending}, {id = 1, state = Done}] | returning {id, state}\ninsert many tasks $rows\nreturning id",
         "update tasks\nfilter match state\n  Pending => true\n  _ => false\nsort {-priority, id}\ntake 1\nset score = base + bonus * 2",
         "update tasks\nset state = match state\n  Pending {attempt} => Running {attempt = attempt + 1}\n  current => current",
         "delete tasks | filter id == $id | returning {id, state}",
@@ -78,11 +79,11 @@ fn formatter_covers_statements_stages_patterns_values_and_migrations() {
 
 #[test]
 fn formatter_uses_low_punctuation_returning_layout() {
-    let source = "insert tasks {id = 1, state = Pending} | returning {id, state}\nupdate tasks | set state = Done | returning {id, state}\ndelete tasks\nreturning";
+    let source = "insert tasks {id = 1, state = Pending} | returning {id, state}\ninsert many tasks [{id = 2, state = Pending}, {id = 3, state = Done}] | returning {id}\nupdate tasks | set state = Done | returning {id, state}\ndelete tasks\nreturning";
     let formatted = format_source(source).unwrap();
     assert_eq!(
         formatted,
-        "insert tasks\n  id = 1\n  state = Pending\nreturning id, state\n\nupdate tasks\nset state = Done\nreturning id, state\n\ndelete tasks\nreturning\n"
+        "insert tasks\n  id = 1\n  state = Pending\nreturning id, state\n\ninsert many tasks [\n  {id = 2, state = Pending},\n  {id = 3, state = Done}\n]\nreturning id\n\nupdate tasks\nset state = Done\nreturning id, state\n\ndelete tasks\nreturning\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
 }

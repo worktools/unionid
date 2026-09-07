@@ -776,6 +776,50 @@ insert items
 }
 
 #[test]
+fn versioned_tcp_bulk_inserts_typed_row_lists() {
+    let server = Server::start(&[]);
+    let setup = r#"type State = Pending | Done
+type Event =
+  id int
+  note text = "new"
+  state State = Pending
+table events Event
+  key id
+create index events (state)"#;
+    assert!(cli::send_one(&server.addr, setup).unwrap().ok);
+
+    let row = |id: &str| WireValue::Record {
+        fields: BTreeMap::from([("id".into(), WireValue::Int { value: id.into() })]),
+    };
+    let request = ProtocolRequest {
+        version: unionid::protocol::VERSION,
+        request_id: "bulk-insert".into(),
+        query: "insert many events $rows\nreturning id, note, state".into(),
+        introspect: None,
+        params: BTreeMap::from([(
+            "rows".into(),
+            WireValue::List {
+                items: vec![row("2"), row("1")],
+            },
+        )]),
+        schema: None,
+    };
+    let response = cli::send_request(&server.addr, &request).unwrap();
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.request_id, "bulk-insert");
+    assert_eq!(response.affected_rows, Some(2));
+    assert!(matches!(&response.rows[0]["id"], WireValue::Int { value } if value == "2"));
+    assert!(matches!(&response.rows[1]["id"], WireValue::Int { value } if value == "1"));
+    assert!(matches!(&response.rows[0]["note"], WireValue::Text { value } if value == "new"));
+
+    let stored = cli::send_one(&server.addr, "from events | sort id").unwrap();
+    assert!(stored.ok, "{}", stored.message);
+    assert_eq!(stored.rows.len(), 2);
+    assert!(stored.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(stored.rows[1]["id"].cmp_eq(&Value::Int(2)));
+}
+
+#[test]
 fn versioned_tcp_updates_adts_with_match_and_parameters() {
     let server = Server::start(&[]);
     let setup = r#"type State =

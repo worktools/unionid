@@ -8,7 +8,7 @@
 - 共享 Rust 引擎、本地 CLI 与 TCP 服务
 - version 1 JSON Lines 协议、无损 ADT/i64 wire values、typed 参数与 schema-aware prepared query
 - 有界连接/请求/查询/结果、执行 deadline、运行统计与 SIGINT/SIGTERM 优雅关闭
-- 严格类型检查、字段默认值、主键、upsert/update/delete、typed returning、等值索引及原子脚本
+- 严格类型检查、字段默认值、主键、typed 单行／批量 insert、upsert/update/delete、typed returning、等值索引及原子脚本
 - 稳定 catalog 身份、原子 schema revision 与可校验 hash
 - 独立于 serde/Rust enum 布局的版本化 ADT value codec
 - redb 增量原子持久模式，可由本地命令、REPL 与 TCP 服务共同使用

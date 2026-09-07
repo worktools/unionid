@@ -2,7 +2,7 @@
 
 本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)，不能据此推断当前语法。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)。
 
-当前包含类型与表声明、insert/upsert/update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort、take，以及结构化 `explain`。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、单行／批量 insert、upsert/update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 `filter match`、查询局部 let/纯函数、普通与 ADT `derive`、group/aggregate、select、sort、take，以及结构化 `explain`。filter 与 match/derive/set/migration conversion 表达式支持有类型的 int/float 算术；filter 和普通 derive 还支持 `not/and/or`、字段间比较、Option helper 及 `contains/length/any/all`。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
 ## 类型、表与值
 
@@ -41,6 +41,18 @@ insert tasks
 - 没有默认值的字段全部必填，即使类型为 option 也必须显式写 `None`。缺失字段逐层使用它自身声明的默认值；显式值不会因为类型错误而退回默认值。重复、缺失、未知字段及错误负载均报错。
 - 命名类型保留身份；有歧义时可用 `State.Pending` 或 `State.Running {...}` 限定构造器。
 - `table tasks Task` 要求 Task 是 record；可选的缩进 `key id` 声明 int/text 主键，拒绝重复键。无 key 时允许重复行。
+
+批量插入使用明确的 `many` 关键字和已有 list/record 值语法：
+
+```text
+insert many tasks [
+  {id = 1, owner = {email = "a@example.com"}, state = Pending},
+  {id = 2, owner = {email = "b@example.com"}, state = Pending}
+]
+returning id, state
+```
+
+也可写 `insert many tasks $rows`，其中 `$rows` 的期望类型是 `list Task`。每行独立补齐默认值并检查完整 ADT record，随后整批检查主键和索引；输入顺序决定 RowId 分配与 returning 顺序。空 list 成功返回 `affected_rows = 0`，使用 returning 时仍提供稳定 columns。单批最多 100,000 行；任一行、预算、deadline 或提交失败都不会发布部分 rows、indexes 或 RowId 游标。批量 upsert 与流式导入不属于当前语法。
 
 直接自递归沿用同一套无分号声明语法，不增加 `rec` 标记。递归类型必须至少能构造一个有限值：sum 需要终止变体，record/tuple 的每个必需成员都必须可终止，`option` 的 `None` 与 `list` 的空列表可作为终止路径。例如：
 
@@ -106,7 +118,7 @@ take 20
 
 未分组 `aggregate` 在空输入上返回一行：count 为 0、sum 为输入数值类型的零、min/max 为 `None`；分组空输入返回零行。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
 
-兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。filter、match condition、derive 数值表达式与 update `set` 可引用 `$name`；完整 insert/upsert row 写成 `insert tasks $row`。参数由调用端提供 typed value，在 AST 上绑定并在扫描前按上下文检查，详见[版本化接口与参数](PROTOCOL.md)。
+兼容入口 `=`、`limit` 和无花括号的 `select id,name` 仍可执行。新代码与文档使用 `==`、`take` 和 `select {id, name}`。filter、match condition、derive 数值表达式与 update `set` 可引用 `$name`；完整单行 insert/upsert 写成 `insert tasks $row`，批量 insert 写成 `insert many tasks $rows`。参数由调用端提供 typed value，在 AST 上绑定并在扫描前按上下文检查，详见[版本化接口与参数](PROTOCOL.md)。
 
 ## 更新与删除
 
@@ -136,7 +148,7 @@ delete tasks | filter id == 2 | returning
 - 顶层小写 binding 是带类型的不可反驳 pattern，必须是最后一支；`current => current` 可保留其余 constructor 的完整原值。分支可使用 typed 参数和自己的 pattern bindings。
 - 可直接设置 record 的嵌套路径，如 `set owner.email = "new@example.com"`。路径不能穿过 sum/option；修改 variant 时设置完整值。父路径与子路径不能在同一 update 中同时赋值，避免依赖隐含顺序。
 - 每条候选 row 更新完成后重新检查完整 row 类型；全表重新检查主键唯一性，再原子替换 rows 与派生 indexes。任一行除零、溢出、类型或约束失败时，该请求不修改任何行。
-- 成功 insert/upsert/update/delete 的 JSON 响应包含 `affected_rows`；update/delete 未命中时返回 0。末尾的 `returning` 返回完整受影响行，`returning id, state` 按给定顺序投影字段：insert/upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像。空命中仍返回稳定 columns 和空 rows。
+- 成功 insert/upsert/update/delete 的 JSON 响应包含 `affected_rows`；批量 insert 返回输入行数，update/delete 未命中时返回 0。末尾的 `returning` 返回完整受影响行，`returning id, state` 按给定顺序投影字段：单行／批量 insert 与 upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像。空批次或空命中仍返回稳定 columns 和空 rows。
 - returning 字段在扫描前按表 schema 检查，行数和 8 MiB typed wire 预算也在提交前检查；失败不会发布 row 或索引。内部稳定 RowId 不出现在用户 record 中，删除后不会被后续插入复用。
 
 单行形式可用必要的 pipeline 分隔符，例如 `update tasks | filter id == 1 | set attempts = attempts + 1`。多项修改推荐换行，避免长表达式掩盖目标范围。

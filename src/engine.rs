@@ -39,8 +39,9 @@ pub struct StorageIntegrity {
     pub schema: crate::db::SchemaInfo,
 }
 
-/// A parsed, read-only query bound to one schema identity. Parameter values are
-/// supplied for each execution and type checked before rows are scanned.
+/// A parsed query or supported parameterized operation bound to one schema
+/// identity. Parameter values are supplied for each execution and type checked
+/// before rows are scanned or mutations are published.
 #[derive(Debug, Clone)]
 pub struct PreparedQuery {
     source: String,
@@ -48,6 +49,7 @@ pub struct PreparedQuery {
     schema: crate::db::SchemaInfo,
     parameters: Vec<String>,
     parameter_types: std::collections::BTreeMap<String, String>,
+    mutating: bool,
 }
 
 impl PreparedQuery {
@@ -249,23 +251,35 @@ impl Engine {
 
     pub fn prepare(&self, source: &str) -> Result<PreparedQuery> {
         let mut statements = syntax::parse(source)?;
-        if statements
-            .iter()
-            .any(|statement| statement.statement.is_mutating())
-        {
-            return Err(Error::new(
-                "E_PREPARE",
-                "prepared queries must contain only from pipelines",
-            ));
-        }
+        let mut mutating = false;
         for located in &mut statements {
-            let pipeline = match &mut located.statement {
-                Statement::Explain(pipeline) | Statement::Pipeline(pipeline) => pipeline,
-                _ => unreachable!("mutating statements were rejected"),
-            };
-            self.db
-                .prepare_pipeline(pipeline)
-                .map_err(|error| error.at(located.span))?;
+            match &mut located.statement {
+                Statement::Explain(pipeline) | Statement::Pipeline(pipeline) => self
+                    .db
+                    .prepare_pipeline(pipeline)
+                    .map(|_| ())
+                    .map_err(|error| error.at(located.span))?,
+                Statement::InsertManyParameter {
+                    table,
+                    parameter_type,
+                    returning,
+                    ..
+                } => {
+                    *parameter_type = Some(
+                        self.db
+                            .prepare_bulk_insert_parameter(table, returning.as_ref())
+                            .map_err(|error| error.at(located.span))?,
+                    );
+                    mutating = true;
+                }
+                _ => {
+                    return Err(Error::new(
+                        "E_PREPARE",
+                        "prepared operations support only read pipelines, explain, and 'insert many table $rows'",
+                    )
+                    .at(located.span));
+                }
+            }
         }
         let parameter_types = crate::params::types(&statements)?
             .into_iter()
@@ -277,6 +291,7 @@ impl Engine {
             parameter_types,
             statements,
             schema: self.db.schema_info(),
+            mutating,
         })
     }
 
@@ -284,6 +299,15 @@ impl Engine {
         &mut self,
         prepared: &PreparedQuery,
         parameters: std::collections::BTreeMap<String, crate::Value>,
+    ) -> QueryResponse {
+        self.execute_prepared_with_deadline(prepared, parameters, None)
+    }
+
+    fn execute_prepared_with_deadline(
+        &mut self,
+        prepared: &PreparedQuery,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        deadline: Option<std::time::Instant>,
     ) -> QueryResponse {
         if prepared.schema != self.db.schema_info() {
             return self.with_schema(QueryResponse::failure(Error::new(
@@ -297,9 +321,15 @@ impl Engine {
                 ),
             )));
         }
+        if prepared.mutating && self.wal.is_some() {
+            return self.with_schema(QueryResponse::failure(Error::new(
+                "E_CONFIG",
+                "parameterized writes require redb or memory mode; the transitional WAL stores source text",
+            )));
+        }
         let mut statements = prepared.statements.clone();
         let result = crate::params::bind(&mut statements, &parameters)
-            .and_then(|()| self.try_execute_statements(statements, None, None));
+            .and_then(|()| self.try_execute_statements(statements, None, deadline));
         match result {
             Ok(response) => response,
             Err(error) => self.with_schema(QueryResponse::failure(error)),
@@ -312,6 +342,15 @@ impl Engine {
         parameters: std::collections::BTreeMap<String, crate::Value>,
     ) -> QueryResponse {
         self.query(prepared, parameters)
+    }
+
+    pub fn execute_prepared_until(
+        &mut self,
+        prepared: &PreparedQuery,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        deadline: std::time::Instant,
+    ) -> QueryResponse {
+        self.execute_prepared_with_deadline(prepared, parameters, Some(deadline))
     }
 
     fn try_execute_with_params(

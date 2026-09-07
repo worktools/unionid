@@ -19,7 +19,7 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 
 参数名使用与标识符相同的 ASCII 规则，以字母或下划线开头。缺少参数返回 <code>E_PARAM_MISSING</code>，多余参数返回 <code>E_PARAM_EXTRA</code>，wire value 无法解码返回 <code>E_PARAM_TYPE</code>；参数解码后仍由查询上下文做普通类型检查，所以类型不匹配返回 <code>E_TYPE</code>。绑定发生在 AST 上，不通过文本替换，文本参数中的引号、换行、注释符或 pipeline 符号不会改变查询结构。参数也可直接作为 `derive match` 或 `set ... = match ...` 的分支结果及嵌套 constructor 负载，并由结果／目标字段类型检查。
 
-参数可用于 filter、match condition、derive 算术表达式和 update <code>set</code>。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
+参数可用于 filter、match condition、derive 算术表达式和 update <code>set</code>。完整 insert/upsert row 使用 <code>insert tasks $row</code> / <code>upsert tasks $row</code>；<code>insert many tasks $rows</code> 接受 <code>list Task</code>，按输入顺序原子插入并 returning。一个带参数的多语句请求仍是同一个原子批次。过渡 WAL 不能安全重放绑定后的写 AST，因此参数化写入只支持 memory/redb；redb 是正式持久入口。
 
 Introspection 使用同一版本请求，返回完整的类型化快照，客户端再按请求种类展示。它不执行查询或修改数据：
 
@@ -68,7 +68,7 @@ Introspection 使用同一版本请求，返回完整的类型化快照，客户
 
 ## Rust 嵌入接口
 
-<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline 或 explain 并记录当前 schema revision/hash，<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
+<code>Engine::memory()</code> 和 <code>Engine::open_redb(path)</code> 创建数据库；<code>execute</code> 执行无参数原子脚本，<code>execute_with_params</code> 在 AST 上绑定参数。<code>prepare</code> 接受只读 pipeline、explain，以及参数化的 <code>insert many table $rows</code>，并记录当前 schema revision/hash 与 <code>list RowType</code> 参数类型；<code>query</code> 或 <code>execute_prepared</code> 执行时若 schema 已变化会返回 <code>E_SCHEMA_CHANGED</code>，调用方可重新 prepare。<code>execute_prepared_until</code> 为 prepared operation 增加 deadline。prepared 批量写入只在 memory/redb 执行，过渡 WAL 返回 <code>E_CONFIG</code>。Rust 调用方可直接读取 <code>QueryPlan</code>、<code>QueryAccessPlan</code> 和对应 enum。migration 继续通过 <code>plan_migrations</code>、<code>apply_migrations</code> 和 <code>migration_status</code> 进入同一个 Engine 提交边界。
 
 可运行示例：
 
