@@ -37,7 +37,18 @@ pub struct Engine {
     read_only: bool,
     durable: Option<Box<dyn DurableBackend>>,
     storage_mode: StorageMode,
-    _locks: Vec<File>,
+    _locks: Vec<DatabaseLock>,
+}
+
+struct DatabaseLock(File);
+
+impl Drop for DatabaseLock {
+    fn drop(&mut self) {
+        // Closing a file releases its advisory lock, but explicitly unlocking
+        // avoids a transient reacquisition failure observed on macOS when a
+        // database is reopened immediately after dropping its Engine.
+        let _ = self.0.unlock();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -159,7 +170,7 @@ impl Engine {
                     ),
                 )
             })?;
-            locks.push(lock);
+            locks.push(DatabaseLock(lock));
         }
         let snapshot = snapshot_path
             .map(SnapshotStore::new)
