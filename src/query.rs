@@ -152,7 +152,13 @@ pub struct MigrationTransform {
 #[derive(Debug, Clone)]
 pub struct SetAssignment {
     pub path: String,
-    pub value: ScalarExpression,
+    pub value: SetValue,
+}
+
+#[derive(Debug, Clone)]
+pub enum SetValue {
+    Expression(ScalarExpression),
+    Match(DeriveMatch),
 }
 
 impl Statement {

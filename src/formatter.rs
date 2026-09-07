@@ -5,8 +5,8 @@ use crate::model::{Column, EnumType, ScalarType, Value};
 use crate::query::{
     Aggregate, AggregateFunction, ArithmeticOp, BoolExpression, DeriveMatch, LocalBinding,
     MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueField,
-    MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression, SchemaMigration, Stage,
-    Statement,
+    MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression, SchemaMigration, SetValue,
+    Stage, Statement,
 };
 
 /// Parse a script and return its canonical semicolon-free representation.
@@ -115,15 +115,17 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
                 stage_text(output, stage, depth);
             }
             for assignment in assignments {
-                line(
-                    output,
-                    depth,
-                    &format!(
-                        "set {} = {}",
-                        assignment.path,
-                        scalar(&assignment.value, 0, false)
+                match &assignment.value {
+                    SetValue::Expression(value) => line(
+                        output,
+                        depth,
+                        &format!("set {} = {}", assignment.path, scalar(value, 0, false)),
                     ),
-                );
+                    SetValue::Match(value) => {
+                        line(output, depth, &format!("set {} =", assignment.path));
+                        match_value_arms(output, value, depth + 1);
+                    }
+                }
             }
         }
         Statement::Delete { target } => {
@@ -322,6 +324,21 @@ fn derive_match(output: &mut String, derive: &DeriveMatch, depth: usize) {
         &format!("derive {} = match {}", derive.name, derive.source),
     );
     for arm in &derive.arms {
+        line(
+            output,
+            depth + 1,
+            &format!(
+                "{} => {}",
+                pattern(&arm.pattern, false),
+                match_value(&arm.result, false)
+            ),
+        );
+    }
+}
+
+fn match_value_arms(output: &mut String, value: &DeriveMatch, depth: usize) {
+    line(output, depth, &format!("match {}", value.source));
+    for arm in &value.arms {
         line(
             output,
             depth + 1,

@@ -11,7 +11,7 @@ use crate::query::{
     DeriveExpression, DeriveMatch, LocalBinding, LocalParameter, LocatedStatement, MatchArm,
     MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
     MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
-    SchemaMigration, SetAssignment, SortKey, Stage, Statement,
+    SchemaMigration, SetAssignment, SetValue, SortKey, Stage, Statement,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -1083,10 +1083,19 @@ impl Parser {
                     return Err(self.error(format!("duplicate update field '{path}'")));
                 }
                 self.expect(Kind::Op("=".into()))?;
-                assignments.push(SetAssignment {
-                    path,
-                    value: self.scalar_expression(0, false)?,
-                });
+                let nested = *self.kind() == Kind::Newline;
+                if nested {
+                    self.block()?;
+                }
+                let value = if self.word("match") {
+                    SetValue::Match(self.match_value_expression(path.clone())?)
+                } else {
+                    SetValue::Expression(self.scalar_expression(0, nested)?)
+                };
+                if nested {
+                    self.expect(Kind::Dedent)?;
+                }
+                assignments.push(SetAssignment { path, value });
             } else if self.word("filter") {
                 return Err(self.error("update filters must appear before set assignments"));
             } else {
@@ -1683,11 +1692,11 @@ impl Parser {
         let pattern = self.nested_match_pattern(0)?;
         if matches!(
             pattern,
-            MatchPattern::Wildcard | MatchPattern::Constructor { .. }
+            MatchPattern::Wildcard | MatchPattern::Binding(_) | MatchPattern::Constructor { .. }
         ) {
             Ok(pattern)
         } else {
-            Err(self.error("top-level match branch must name a constructor or '_'"))
+            Err(self.error("top-level match branch must name a constructor, binding, or '_'"))
         }
     }
 
@@ -1838,7 +1847,12 @@ impl Parser {
         self.depth(depth)?;
         if matches!(
             self.kind(),
-            Kind::Ident(_) | Kind::Number(_) | Kind::Text(_) | Kind::Minus | Kind::Open('(')
+            Kind::Ident(_)
+                | Kind::Parameter(_)
+                | Kind::Number(_)
+                | Kind::Text(_)
+                | Kind::Minus
+                | Kind::Open('(')
         ) {
             let checkpoint = self.pos;
             if let Ok(expression) = self.scalar_expression(depth + 1, false)
@@ -1923,8 +1937,10 @@ impl Parser {
             while matches!(
                 self.kind(),
                 Kind::Ident(_)
+                    | Kind::Parameter(_)
                     | Kind::Number(_)
                     | Kind::Text(_)
+                    | Kind::Minus
                     | Kind::Open('(')
                     | Kind::Open('[')
             ) {
@@ -2291,7 +2307,9 @@ impl Parser {
 fn scalar_is_computed(expression: &ScalarExpression) -> bool {
     matches!(
         expression,
-        ScalarExpression::Call { .. }
+        ScalarExpression::Parameter { .. }
+            | ScalarExpression::Ascribed { .. }
+            | ScalarExpression::Call { .. }
             | ScalarExpression::Length(_)
             | ScalarExpression::Negate { .. }
             | ScalarExpression::Arithmetic { .. }

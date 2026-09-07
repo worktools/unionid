@@ -86,7 +86,7 @@ P0 表示所属阶段的正确性、契约或发布门槛；P1 仍属于 v0.1 �
 
 ### 后续探索
 
-[#25](https://github.com/worktools/unionid/issues/25)：用户定义泛型与递归 ADT、模式查询简写、函数组合。P2，不阻塞 v0.1；[#81](https://github.com/worktools/unionid/issues/81) 先交付有实际树／原因链场景支撑的有限直接自递归 ADT。互递归、用户泛型、递归查询函数和 match 简写继续分别评估，避免一次引入批量 catalog 注册、参数化身份和新的执行语义。
+[#25](https://github.com/worktools/unionid/issues/25)：用户定义泛型与递归 ADT、模式查询简写、函数组合。P2，不阻塞 v0.1；[#81](https://github.com/worktools/unionid/issues/81) 已交付有实际树／原因链场景支撑的有限直接自递归 ADT，[#83](https://github.com/worktools/unionid/issues/83) 让原子 update 复用现有穷尽 match IR。互递归、用户泛型、递归查询函数和额外简写继续分别评估，避免一次引入批量 catalog 注册、参数化身份和新的执行语义。
 
 ## 建议从哪里开始
 

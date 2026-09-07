@@ -19,7 +19,10 @@ filter match state
   Pending => true
   _ => false
 set attempts = attempts + 1
-set state = Done {result = "ok"}
+set state =
+  match state
+    Pending => Done {result = "ok"}
+    current => current
 
 delete tasks | filter id == 2
 

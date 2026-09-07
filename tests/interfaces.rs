@@ -774,6 +774,59 @@ insert items
 }
 
 #[test]
+fn versioned_tcp_updates_adts_with_match_and_parameters() {
+    let server = Server::start(&[]);
+    let setup = r#"type State =
+  Queued {attempt int}
+  | Running {worker text, attempt int}
+  | Done
+
+type Job =
+  id int
+  state State
+
+table jobs Job
+  key id
+
+insert jobs {id = 1, state = Queued {attempt = 2}}"#;
+    assert!(cli::send_one(&server.addr, setup).unwrap().ok);
+
+    let request = ProtocolRequest {
+        version: unionid::protocol::VERSION,
+        request_id: "match-update".into(),
+        query: r#"update jobs
+filter id == $id
+set state =
+  match state
+    Queued {attempt} => Running {worker = $worker, attempt = attempt + 1}
+    current => current"#
+            .into(),
+        introspect: None,
+        params: BTreeMap::from([
+            ("id".into(), WireValue::Int { value: "1".into() }),
+            (
+                "worker".into(),
+                WireValue::Text {
+                    value: "tcp-worker".into(),
+                },
+            ),
+        ]),
+        schema: None,
+    };
+    let response = cli::send_request(&server.addr, &request).unwrap();
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.request_id, "match-update");
+    assert_eq!(response.affected_rows, Some(1));
+
+    let rows = cli::send_one(&server.addr, "from jobs | filter id == 1").unwrap();
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(
+        rows.rows[0]["state"].source_text(),
+        "Running {attempt = 3, worker = \"tcp-worker\"}"
+    );
+}
+
+#[test]
 fn introspection_is_consistent_across_memory_redb_and_all_tcp_commands() {
     let setup = "type Task =\n  id int\n  title text\ntable tasks Task\n  key id";
     let mut local = Engine::memory();

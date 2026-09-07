@@ -48,6 +48,54 @@ fn recursive_adt_rows_indexes_and_schema_survive_redb_reopen() {
 }
 
 #[test]
+fn adt_match_updates_persist_rows_and_secondary_indexes() {
+    let dir = TempDir::new();
+    let path = dir.0.join("match-update.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(
+            r#"type State =
+  Queued {attempt int}
+  | Running {worker text, attempt int}
+  | Done
+
+type Job =
+  id int
+  state State
+
+table jobs Job
+  key id
+
+create index jobs (state)
+insert jobs {id = 1, state = Queued {attempt = 0}}"#,
+        );
+        assert!(setup.ok, "{}", setup.message);
+        let updated = engine.execute(
+            r#"update jobs
+set state =
+  match state
+    Queued {attempt} => Running {worker = "disk", attempt = attempt + 1}
+    current => current"#,
+        );
+        assert!(updated.ok, "{}", updated.message);
+        assert_eq!(updated.affected_rows, Some(1));
+    }
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let value = "State.Running {worker = \"disk\", attempt = 1}";
+    let rows = reopened.execute(&format!("from jobs | filter state == {value}"));
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 1);
+    let plan = reopened.execute(&format!("explain from jobs | filter state == {value}"));
+    assert!(plan.ok, "{}", plan.message);
+    assert_eq!(
+        plan.plan.unwrap().access.kind,
+        QueryAccessKind::SecondaryIndexLookup
+    );
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
 fn redb_crash_transaction_child() {
     let Ok(path) = std::env::var(CRASH_PATH_ENV) else {
         return;
