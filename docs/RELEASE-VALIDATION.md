@@ -34,7 +34,7 @@ cargo test --locked --test release_scenarios
 cargo publish --dry-run --locked --registry crates-io
 ```
 
-`v*` tag 运行首先用仓库 Actions secret `CARGO_REGISTRY_TOKEN` 在 Ubuntu runner 执行 `cargo publish --locked --registry crates-io`；crate 发布成功后，才汇总 macOS/Linux artifacts 并创建 GitHub Release。tag 版本仍由原生包脚本校验为与 `Cargo.toml` 一致。缺少 token、crate dry-run 或实际发布失败都会阻止 GitHub Release job。
+所有 Release workflow 运行还会只检查仓库 Actions secret `CARGO_REGISTRY_TOKEN` 是否可见且非空，不打印或使用其内容。随后，`v*` tag 运行在 Ubuntu runner 执行 `cargo publish --locked --registry crates-io`；crate 发布成功后，才汇总 macOS/Linux artifacts 并创建 GitHub Release。tag 版本仍由原生包脚本校验为与 `Cargo.toml` 一致。缺少 token、crate dry-run 或实际发布失败都会阻止 GitHub Release job。
 
 参考的 `command-pool` 流程使用 `katyo/publish-crates@v2`。该 action 当前声明 Node 20 runtime，因此 unionid 保留相同的 GitHub Actions + registry token 模型，但在固定 Rust 1.94.0 runner 中直接调用 Cargo，避免重新引入已在 #105 消除的 Node runtime 警告。
 
@@ -46,6 +46,6 @@ The source and restored databases are compared for canonical schema, revision/ha
 
 Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. #75 records workload latency in the [workload cost report](benchmarks/workload-2026-09-07.md), and #76 owns installable release artifacts and the five-minute tutorial.
 
-Official versions are published only by `.github/workflows/release.yml`; developers do not run `cargo publish` from a workstation. A manual non-tag run executes `cargo publish --dry-run --locked --registry crates-io` alongside the native artifact checks. On a `v*` tag, the Ubuntu runner publishes with the repository Actions secret `CARGO_REGISTRY_TOKEN`; only after that succeeds does the workflow assemble the macOS/Linux assets and create the GitHub Release. Missing credentials or any crate validation/publication failure blocks the GitHub Release job.
+Official versions are published only by `.github/workflows/release.yml`; developers do not run `cargo publish` from a workstation. A manual non-tag run executes `cargo publish --dry-run --locked --registry crates-io` alongside the native artifact checks, then safely checks only that `CARGO_REGISTRY_TOKEN` is visible and non-empty without printing or using its contents. On a `v*` tag, the Ubuntu runner publishes with that secret; only after publication succeeds does the workflow assemble the macOS/Linux assets and create the GitHub Release. Missing credentials or any crate validation/publication failure blocks the GitHub Release job.
 
 The reference `command-pool` workflow uses `katyo/publish-crates@v2`. Because that action currently declares a Node 20 runtime, unionid preserves its GitHub Actions plus registry-token model but invokes Cargo directly on the pinned Rust 1.94.0 runner, avoiding the runtime warning removed in #105.
