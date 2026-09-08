@@ -16,6 +16,8 @@ unionid server --db ./data/app.redb --read-only
 | --- | --- | --- |
 | 活动 TCP 连接 | 64 | 新连接收到 <code>E_BUSY</code> 后关闭；拒绝处理不创建 worker |
 | 并发读快照 | 8 | 后续读取排队并受请求 deadline／shutdown 控制；统计暴露 active/queued reads |
+| 已注册可取消读取 | 64 | 接纳前返回 `E_OPERATION_CAPACITY`；未启动 handle drop 后立即释放 entry |
+| operation terminal tombstone | 256 / 60 秒 | FIFO/TTL 淘汰；淘汰后的合法 capability 返回 `unknown` |
 | 请求 frame | 6 × 1 MiB + 256 bytes | 返回 <code>E_LIMIT</code> 并关闭该连接；该空间容纳 1 MiB 源码最坏 JSON 转义 |
 | 查询源码 | 1 MiB / 100,000 tokens / 64 层 | 返回 <code>E_LIMIT</code> 或带位置的语法错误 |
 | ADT value | 16 MiB encoded / 64 层 / 1,000,000 collection items | codec、恢复或写入拒绝超限值 |
@@ -50,7 +52,7 @@ TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON by
 
 客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；带 `idempotency_key` 的 version 1 mutation 通过“数据效果与回执同事务”提供 exactly-once effect，但网络仍只是 best-effort delivery。未收到响应时，重开连接并原样重发 query、wire params、schema precondition 和 key；不要改变内容或猜测结果。规范 digest 和 commit uncertain 恢复见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)。
 
-分页读取没有 effect。客户端断开后，已进入 snapshot 的读取可能继续到内置 25 秒 deadline；working rows、排序内存、page 大小和响应编码仍然有界，连接 worker 随执行或 socket write 结束而释放。HTTP adapter 可调用 `ConcurrentEngine::execute_protocol_request_until` 使用更短的绝对 deadline；超时返回 `E_TIMEOUT`，不发布半页或 cursor。关闭连接不是显式取消协议。长期读取的 operation capability、状态机、NDJSON frame 和背压边界已由 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) 冻结，核心与 adapter 实现分别由 [#156](https://github.com/worktools/unionid/issues/156)、[#157](https://github.com/worktools/unionid/issues/157) 跟踪；在两项完成前，当前服务仍只提供完整 response/page。
+分页读取没有 effect。客户端断开后，已进入 snapshot 的读取可能继续到内置 25 秒 deadline；working rows、排序内存、page 大小和响应编码仍然有界，连接 worker 随执行或 socket write 结束而释放。HTTP adapter 可调用 `ConcurrentEngine::execute_protocol_request_until` 使用更短的绝对 deadline；超时返回 `E_TIMEOUT`，不发布半页或 cursor。关闭连接不是显式取消协议。长期读取的 operation capability、状态机、NDJSON frame 和背压边界已由 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) 冻结；[#156](https://github.com/worktools/unionid/issues/156) 已提供 transport-neutral registry/cancellation 核心，[#157](https://github.com/worktools/unionid/issues/157) 继续实现 TCP/HTTP adapter。在 adapter 完成前，当前 wire 服务仍只提供完整 response/page。
 
 receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明确 cutoff、最多 1000 条的单次边界和 confirm 原子清理。清理意味着旧 key 可以再次执行，保留窗口必须覆盖所有自动与人工重试。receipt 运维端点与数据库写入权限等价，HTTP adapter 必须鉴权并审计。
 
@@ -59,5 +61,7 @@ receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明�
 ## 嵌入式控制
 
 应用可以调用 <code>server::serve_until(listener, engine, shutdown)</code>，通过共享 <code>AtomicBool</code> 发起同样的关闭流程，并在返回时获得 <code>ServerStats</code>。需要读取运行中并发统计或让 TCP/HTTP 共用执行边界时，构造可克隆的 <code>ConcurrentEngine</code>，调用 <code>stats()</code> 并传给 <code>serve_until_concurrent</code>；HTTP handler 应像 todolist 示例一样通过 blocking worker 调用同步数据库入口。命令行 <code>server</code> 已把 SIGINT/SIGTERM 连接到这个入口。
+
+adapter 可先调用 `ConcurrentEngine::register_read(request, deadline)`，把返回 handle 的 server-issued `o1` capability 发送并 flush 给客户端后，再调用 `ReadOperation::start()`。`ConcurrentEngine::cancel` 只接受 canonical capability，并在线性化点返回 `accepted`、`already_terminal + outcome` 或 `unknown`；`register_read_with_shutdown` 额外把进程关闭信号接入同一检查顺序。operation registry 不保存 query/params，统计只暴露 registered/queued/executing/cancelling、累计 cancelled 和上限，capability 不得进入日志或持久化数据。
 
 服务限制是 v0.1 的明确支持边界，而非容量承诺。1 万/10 万行实际负载、恢复和 migration 数据由 #24 的发布基准记录。

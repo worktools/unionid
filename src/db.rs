@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::control::ExecutionControl;
 use crate::error::{Error, Result};
 use crate::migration::MigrationEntry;
 use crate::model::{
@@ -341,23 +342,13 @@ fn project_rows(
         .collect()
 }
 
-fn check_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
-    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        Err(Error::new(
-            "E_TIMEOUT",
-            "request execution deadline exceeded",
-        ))
-    } else {
-        Ok(())
-    }
+fn check_deadline(control: Option<&ExecutionControl>) -> Result<()> {
+    control.map_or(Ok(()), ExecutionControl::checkpoint)
 }
 
-fn check_deadline_periodically(
-    deadline: Option<std::time::Instant>,
-    position: usize,
-) -> Result<()> {
+fn check_deadline_periodically(control: Option<&ExecutionControl>, position: usize) -> Result<()> {
     if position.is_multiple_of(1024) {
-        check_deadline(deadline)
+        check_deadline(control)
     } else {
         Ok(())
     }
@@ -700,7 +691,7 @@ impl Database {
     pub(crate) fn execute_with_deadline(
         &mut self,
         stmt: Statement,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
         match stmt {
             Statement::DefineType { name, ty } => {
@@ -748,7 +739,7 @@ impl Database {
                 table,
                 values,
                 returning,
-            } => self.insert_many(&table, values, returning.as_ref(), deadline),
+            } => self.insert_many(&table, values, returning.as_ref(), control),
             Statement::InsertParameter { parameter, .. }
             | Statement::InsertManyParameter { parameter, .. }
             | Statement::UpsertParameter { parameter, .. }
@@ -765,34 +756,34 @@ impl Database {
                 table,
                 values,
                 returning,
-            } => self.upsert_many(&table, values, returning.as_ref(), deadline),
+            } => self.upsert_many(&table, values, returning.as_ref(), control),
             Statement::Update {
                 mut target,
                 mut assignments,
                 returning,
-            } => self.update(&mut target, &mut assignments, returning.as_ref(), deadline),
+            } => self.update(&mut target, &mut assignments, returning.as_ref(), control),
             Statement::Delete {
                 mut target,
                 returning,
-            } => self.delete(&mut target, returning.as_ref(), deadline),
+            } => self.delete(&mut target, returning.as_ref(), control),
             Statement::Migration {
                 name,
                 parent: _,
                 steps,
             } => self.migrate(&name, steps),
             Statement::Explain(pipeline) => self.explain(pipeline),
-            Statement::Pipeline(pipeline) => self.query(pipeline, deadline),
+            Statement::Pipeline(pipeline) => self.query(pipeline, control),
         }
     }
 
     pub(crate) fn execute_read(
         &self,
         stmt: Statement,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
         match stmt {
             Statement::Explain(pipeline) => self.explain(pipeline),
-            Statement::Pipeline(pipeline) => self.query(pipeline, deadline),
+            Statement::Pipeline(pipeline) => self.query(pipeline, control),
             _ => Err(Error::new(
                 "E_READ_SNAPSHOT",
                 "immutable read snapshots only execute query and explain statements",
@@ -939,9 +930,9 @@ impl Database {
         name: &str,
         values: Value,
         returning: Option<&Returning>,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
-        check_deadline(deadline)?;
+        check_deadline(control)?;
         let returning = self.bind_returning(name, returning)?;
         let Value::List(values) = values else {
             return Err(Error::new(
@@ -961,7 +952,7 @@ impl Database {
 
         let mut fields = Vec::with_capacity(values.len());
         for (position, value) in values.iter().enumerate() {
-            check_deadline_periodically(deadline, position)?;
+            check_deadline_periodically(control, position)?;
             fields.push(self.coerce_row(name, value, "insert many")?);
         }
         let returned_fields = fields.iter().collect::<Vec<_>>();
@@ -977,7 +968,7 @@ impl Database {
         let mut rows = table.rows.clone();
         let first_row_id = table.next_row_id;
         for (position, fields) in fields.into_iter().enumerate() {
-            check_deadline_periodically(deadline, position)?;
+            check_deadline_periodically(control, position)?;
             let offset = u64::try_from(position)
                 .map_err(|_| Error::new("E_LIMIT", "bulk insert row count exceeds u64"))?;
             rows.push(Row {
@@ -986,7 +977,7 @@ impl Database {
             });
         }
         self.validate_primary_keys(name, &rows)?;
-        check_deadline(deadline)?;
+        check_deadline(control)?;
         self.replace_rows_and_indexes(name, rows)?;
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             unreachable!("bulk insert table was validated")
@@ -1059,9 +1050,9 @@ impl Database {
         name: &str,
         values: Value,
         returning: Option<&Returning>,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
-        check_deadline(deadline)?;
+        check_deadline(control)?;
         let returning = self.bind_returning(name, returning)?;
         let table = self.table(name)?;
         let key = table.primary_key.clone().ok_or_else(|| {
@@ -1089,7 +1080,7 @@ impl Database {
         let mut fields = Vec::with_capacity(values.len());
         let mut batch_keys = BTreeSet::new();
         for (position, value) in values.iter().enumerate() {
-            check_deadline_periodically(deadline, position)?;
+            check_deadline_periodically(control, position)?;
             let row = self.coerce_row(name, value, "upsert many")?;
             let key_value = row_field(&row, &key)
                 .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
@@ -1122,7 +1113,7 @@ impl Database {
 
         let mut actions = Vec::with_capacity(fields.len());
         for (position, fields) in fields.into_iter().enumerate() {
-            check_deadline_periodically(deadline, position)?;
+            check_deadline_periodically(control, position)?;
             let key_value = row_field(&fields, &key)
                 .expect("bulk upsert rows were checked for their primary key")
                 .index_key();
@@ -1140,7 +1131,7 @@ impl Database {
                 actions.push(UpsertAction::Inserted);
             }
         }
-        check_deadline(deadline)?;
+        check_deadline(control)?;
         self.replace_rows_and_indexes(name, rows)?;
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             unreachable!("bulk upsert table was validated")
@@ -1305,12 +1296,12 @@ impl Database {
         target: &mut Pipeline,
         assignments: &mut [SetAssignment],
         returning: Option<&Returning>,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
         let returning = self.bind_returning(&target.from, returning)?;
         let (schema, row_type) = self.bind_update_operation(target, assignments)?;
         let table = self.table(&target.from)?;
-        let target_order = self.mutation_target_ids(target, deadline)?;
+        let target_order = self.mutation_target_ids(target, control)?;
         let mut rows = table.rows.clone();
         let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
         let mut evaluation_budget = crate::expression::EvaluationBudget::new();
@@ -1431,11 +1422,11 @@ impl Database {
         &mut self,
         target: &mut Pipeline,
         returning: Option<&Returning>,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
         let returning = self.bind_returning(&target.from, returning)?;
         self.bind_delete_operation(target)?;
-        let target_order = self.mutation_target_ids(target, deadline)?;
+        let target_order = self.mutation_target_ids(target, control)?;
         let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
         let mut rows = self.table(&target.from)?.rows.clone();
         let returned_fields = target_order
@@ -1605,9 +1596,9 @@ impl Database {
     fn mutation_target_ids(
         &self,
         target: &Pipeline,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<Vec<RowId>> {
-        check_deadline(deadline)?;
+        check_deadline(control)?;
         let table = self.table(&target.from)?;
         let candidates = self.plan_access(target)?.candidates;
         let working_rows = candidates
@@ -1640,7 +1631,7 @@ impl Database {
                 Stage::Filter(expression) => {
                     let mut filtered = Vec::with_capacity(rows.len());
                     for (position, row) in rows.into_iter().enumerate() {
-                        check_deadline_periodically(deadline, position)?;
+                        check_deadline_periodically(control, position)?;
                         if crate::expression::evaluate(
                             &self.catalog,
                             expression,
@@ -1655,7 +1646,7 @@ impl Database {
                 Stage::FilterMatch(predicate) => {
                     let mut filtered = Vec::with_capacity(rows.len());
                     for (position, row) in rows.into_iter().enumerate() {
-                        check_deadline_periodically(deadline, position)?;
+                        check_deadline_periodically(control, position)?;
                         if crate::matching::evaluate(
                             &self.catalog,
                             &row.fields,
@@ -1668,7 +1659,7 @@ impl Database {
                     rows = filtered;
                 }
                 Stage::Sort(keys) => {
-                    check_deadline(deadline)?;
+                    check_deadline(control)?;
                     rows.sort_by(|a, b| {
                         for key in keys {
                             let order = row_field(&a.fields, &key.column)
@@ -1686,7 +1677,7 @@ impl Database {
                         }
                         std::cmp::Ordering::Equal
                     });
-                    check_deadline(deadline)?;
+                    check_deadline(control)?;
                 }
                 Stage::Take { offset, limit } => {
                     rows = rows.into_iter().skip(*offset).take(*limit).collect();
@@ -1699,7 +1690,7 @@ impl Database {
                 | Stage::Select(_) => unreachable!("mutation target stages were bound"),
             }
         }
-        check_deadline(deadline)?;
+        check_deadline(control)?;
         Ok(rows.into_iter().map(|row| row.id).collect())
     }
 
@@ -2036,7 +2027,7 @@ impl Database {
         &self,
         rows: Vec<BTreeMap<String, Value>>,
         aggregate: &Aggregate,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<Vec<BTreeMap<String, Value>>> {
         let mut groups: BTreeMap<Vec<String>, GroupAccumulator> = BTreeMap::new();
         let mut working_bytes = 0usize;
@@ -2047,7 +2038,7 @@ impl Database {
             );
         }
         for (position, row) in rows.iter().enumerate() {
-            check_deadline_periodically(deadline, position)?;
+            check_deadline_periodically(control, position)?;
             let mut key = Vec::with_capacity(aggregate.group_by.len());
             let mut values = Vec::with_capacity(aggregate.group_by.len());
             for path in &aggregate.group_by {
@@ -2080,7 +2071,7 @@ impl Database {
         }
         let mut output = Vec::with_capacity(groups.len());
         for (position, (_, group)) in groups.into_iter().enumerate() {
-            check_deadline_periodically(deadline, position)?;
+            check_deadline_periodically(control, position)?;
             output.push(group.finish(&self.catalog, &aggregate.assignments)?);
         }
         Ok(output)
@@ -2315,7 +2306,7 @@ impl Database {
         &self,
         rows: Vec<BTreeMap<String, Value>>,
         page: &PreparedPage,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<(Vec<BTreeMap<String, Value>>, PageInfo)> {
         let eligible = |row: &BTreeMap<String, Value>| -> Result<bool> {
             let Some(boundary) = &page.boundary else {
@@ -2332,7 +2323,7 @@ impl Database {
         match page.spec.direction {
             PageDirection::Forward => {
                 for (position, row) in rows.into_iter().enumerate() {
-                    check_deadline_periodically(deadline, position)?;
+                    check_deadline_periodically(control, position)?;
                     if eligible(&row)? {
                         selected.push(row);
                         if selected.len() == bound {
@@ -2343,7 +2334,7 @@ impl Database {
             }
             PageDirection::Backward => {
                 for (position, row) in rows.into_iter().rev().enumerate() {
-                    check_deadline_periodically(deadline, position)?;
+                    check_deadline_periodically(control, position)?;
                     if eligible(&row)? {
                         selected.push(row);
                         if selected.len() == bound {
@@ -2539,9 +2530,9 @@ impl Database {
     fn query(
         &self,
         mut pipeline: Pipeline,
-        deadline: Option<std::time::Instant>,
+        control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
-        check_deadline(deadline)?;
+        check_deadline(control)?;
         let schema = self.prepare_pipeline(&mut pipeline)?;
         let prepared_page = self.prepare_page(&pipeline)?;
         let table = self.table(&pipeline.from)?;
@@ -2561,7 +2552,7 @@ impl Database {
             Some(ids) => {
                 let mut rows = Vec::with_capacity(ids.len());
                 for (position, id) in ids.into_iter().enumerate() {
-                    check_deadline_periodically(deadline, position)?;
+                    check_deadline_periodically(control, position)?;
                     if let Ok(position) = table.rows.binary_search_by_key(&id, |row| row.id) {
                         rows.push(table.rows[position].fields.clone());
                     }
@@ -2571,7 +2562,7 @@ impl Database {
             None => {
                 let mut rows = Vec::with_capacity(table.rows.len());
                 for (position, row) in table.rows.iter().enumerate() {
-                    check_deadline_periodically(deadline, position)?;
+                    check_deadline_periodically(control, position)?;
                     rows.push(row.fields.clone());
                 }
                 rows
@@ -2590,7 +2581,7 @@ impl Database {
                 Stage::Filter(expression) => {
                     let mut filtered = Vec::with_capacity(rows.len());
                     for (position, row) in rows.into_iter().enumerate() {
-                        check_deadline_periodically(deadline, position)?;
+                        check_deadline_periodically(control, position)?;
                         if crate::expression::evaluate(
                             &self.catalog,
                             &expression,
@@ -2605,7 +2596,7 @@ impl Database {
                 Stage::FilterMatch(pred) => {
                     let mut filtered = Vec::with_capacity(rows.len());
                     for (position, row) in rows.into_iter().enumerate() {
-                        check_deadline_periodically(deadline, position)?;
+                        check_deadline_periodically(control, position)?;
                         if crate::matching::evaluate(
                             &self.catalog,
                             &row,
@@ -2619,7 +2610,7 @@ impl Database {
                 }
                 Stage::DeriveMatch(derive) => {
                     for (position, row) in rows.iter_mut().enumerate() {
-                        check_deadline_periodically(deadline, position)?;
+                        check_deadline_periodically(control, position)?;
                         let value = crate::matching::evaluate_derive(
                             &self.catalog,
                             row,
@@ -2634,7 +2625,7 @@ impl Database {
                         Error::new("E_TYPE", "derived expression has no bound output type")
                     })?;
                     for (position, row) in rows.iter_mut().enumerate() {
-                        check_deadline_periodically(deadline, position)?;
+                        check_deadline_periodically(control, position)?;
                         let raw = crate::expression::evaluate_derive(
                             &self.catalog,
                             &derive.expression,
@@ -2650,7 +2641,7 @@ impl Database {
                     }
                 }
                 Stage::Aggregate(aggregate) => {
-                    rows = self.aggregate_rows(rows, &aggregate, deadline)?;
+                    rows = self.aggregate_rows(rows, &aggregate, control)?;
                 }
                 Stage::Select(columns) => {
                     if prepared_page.is_some()
@@ -2662,7 +2653,7 @@ impl Database {
                     }
                 }
                 Stage::Sort(keys) => {
-                    check_deadline(deadline)?;
+                    check_deadline(control)?;
                     rows.sort_by(|a, b| {
                         for key in &keys {
                             let order = row_field(a, &key.column)
@@ -2680,7 +2671,7 @@ impl Database {
                         }
                         std::cmp::Ordering::Equal
                     });
-                    check_deadline(deadline)?;
+                    check_deadline(control)?;
                 }
                 Stage::Take { offset, limit } => {
                     rows = rows.into_iter().skip(offset).take(limit).collect()
@@ -2690,7 +2681,7 @@ impl Database {
                         .as_ref()
                         .expect("page stage has prepared page metadata");
                     (rows, page_info) = {
-                        let (rows, info) = self.apply_page(rows, page, deadline)?;
+                        let (rows, info) = self.apply_page(rows, page, control)?;
                         (rows, Some(info))
                     };
                 }
@@ -2699,7 +2690,7 @@ impl Database {
         for columns in deferred_selects {
             rows = project_rows(rows, &columns);
         }
-        check_deadline(deadline)?;
+        check_deadline(control)?;
         if rows.len() > MAX_RESULT_ROWS {
             return Err(Error::new(
                 "E_LIMIT",

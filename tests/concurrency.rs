@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use unionid::protocol::{PRODUCTION_VERSION, Request};
 use unionid::server::ConcurrentEngine;
@@ -71,4 +71,36 @@ fn malformed_and_mutating_requests_keep_existing_protocol_errors() {
     let read = shared.execute_protocol_request(Request::query("read", "from items"));
     assert!(read.ok, "{}", read.message);
     assert_eq!(read.schema, created.schema);
+}
+
+#[test]
+fn cancelled_redb_read_has_no_database_effect_and_survives_reopen() {
+    let database = TempDatabase::new();
+    let shared = ConcurrentEngine::new(Engine::open_redb(&database.0).unwrap());
+    assert!(shared.execute("create table items (id int, value text)").ok);
+    assert!(shared.execute("insert items {id: 1, value: \"kept\"}").ok);
+
+    let operation = shared
+        .register_read(
+            Request::query("cancel-redb", "from items | sort id"),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+    let operation_id = operation.id().to_owned();
+    assert_eq!(
+        shared.cancel(&operation_id).unwrap().status,
+        unionid::server::CancelStatus::Accepted
+    );
+    let response = operation.start();
+    assert_eq!(response.error.unwrap().code, "E_CANCELLED");
+
+    let rows = shared.execute("from items | sort id");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 1);
+    drop(shared);
+
+    let mut reopened = Engine::open_redb(&database.0).unwrap();
+    let rows = reopened.execute("from items | sort id");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 1);
 }

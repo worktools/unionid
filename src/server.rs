@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -5,8 +6,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
+use crate::control::ExecutionControl;
 use crate::protocol::{
     MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, ReceiptOperation, ReceiptOperationResult,
     Request as ProtocolRequest, Response as ProtocolResponse, VERSION, supported_version,
@@ -17,6 +20,9 @@ pub const MAX_FRAME_BYTES: usize = crate::syntax::MAX_SOURCE_BYTES * 6 + 256;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CONNECTIONS: usize = 64;
 pub const MAX_CONCURRENT_READS: usize = 8;
+pub const MAX_READ_OPERATIONS: usize = 64;
+pub const MAX_OPERATION_TOMBSTONES: usize = 256;
+pub const OPERATION_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
 const CONNECTION_POLL: Duration = Duration::from_millis(100);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(25);
@@ -38,6 +44,13 @@ pub struct ConcurrencyStats {
     pub queued_writes: usize,
     pub peak_active_reads: usize,
     pub max_active_reads: usize,
+    pub registered_operations: usize,
+    pub queued_operations: usize,
+    pub executing_operations: usize,
+    pub emitting_operations: usize,
+    pub cancelling_operations: usize,
+    pub cancelled_operations: usize,
+    pub max_read_operations: usize,
 }
 
 #[derive(Clone)]
@@ -54,6 +67,73 @@ struct ConcurrentEngineInner {
     active_writes: AtomicUsize,
     queued_writes: AtomicUsize,
     peak_active_reads: AtomicUsize,
+    cancelled_operations: AtomicUsize,
+    operations: Mutex<OperationRegistry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationOutcome {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelStatus {
+    Accepted,
+    AlreadyTerminal,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CancelResult {
+    pub status: CancelStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<OperationOutcome>,
+}
+
+#[derive(Clone, Copy)]
+enum OperationPhase {
+    Registered,
+    Queued,
+    Executing,
+    Cancelling,
+}
+
+struct OperationEntry {
+    phase: OperationPhase,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct OperationTombstone {
+    id: String,
+    outcome: OperationOutcome,
+    completed: Instant,
+}
+
+#[derive(Default)]
+struct OperationRegistry {
+    active: BTreeMap<String, OperationEntry>,
+    terminal: VecDeque<OperationTombstone>,
+}
+
+#[must_use = "a registered read must be started or explicitly dropped"]
+pub struct ReadOperation {
+    engine: ConcurrentEngine,
+    id: String,
+    request: Option<ProtocolRequest>,
+    statements: Option<Vec<crate::query::LocatedStatement>>,
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+    shutdown: Option<Arc<AtomicBool>>,
+}
+
+struct OperationGuard {
+    engine: ConcurrentEngine,
+    id: String,
+    finished: bool,
 }
 
 impl ConcurrentEngine {
@@ -68,11 +148,160 @@ impl ConcurrentEngine {
                 active_writes: AtomicUsize::new(0),
                 queued_writes: AtomicUsize::new(0),
                 peak_active_reads: AtomicUsize::new(0),
+                cancelled_operations: AtomicUsize::new(0),
+                operations: Mutex::new(OperationRegistry::default()),
             }),
         }
     }
 
+    pub fn register_read(
+        &self,
+        request: ProtocolRequest,
+        deadline: Instant,
+    ) -> Result<ReadOperation, Error> {
+        self.register_read_with_shutdown(request, deadline, None)
+    }
+
+    pub fn register_read_with_shutdown(
+        &self,
+        request: ProtocolRequest,
+        deadline: Instant,
+        shutdown: Option<Arc<AtomicBool>>,
+    ) -> Result<ReadOperation, Error> {
+        let statements = validate_read_operation(&request)?;
+        let mut registry = self
+            .inner
+            .operations
+            .lock()
+            .map_err(|_| Error::new("E_INTERNAL", "operation registry lock poisoned"))?;
+        registry.expire();
+        if registry.active.len() >= MAX_READ_OPERATIONS {
+            return Err(Error::new(
+                "E_OPERATION_CAPACITY",
+                format!("at most {MAX_READ_OPERATIONS} read operations may be registered"),
+            ));
+        }
+        let id = (0..8)
+            .find_map(|_| {
+                let mut bytes = [0_u8; 16];
+                getrandom::fill(&mut bytes).ok()?;
+                let id = format!("o1.{}", URL_SAFE_NO_PAD.encode(bytes));
+                (!registry.active.contains_key(&id)
+                    && !registry.terminal.iter().any(|entry| entry.id == id))
+                .then_some(id)
+            })
+            .ok_or_else(|| Error::new("E_INTERNAL", "cannot allocate operation capability"))?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        registry.active.insert(
+            id.clone(),
+            OperationEntry {
+                phase: OperationPhase::Registered,
+                cancelled: Arc::clone(&cancelled),
+            },
+        );
+        Ok(ReadOperation {
+            engine: self.clone(),
+            id,
+            request: Some(request),
+            statements: Some(statements),
+            deadline,
+            cancelled,
+            shutdown,
+        })
+    }
+
+    pub fn cancel(&self, operation_id: &str) -> Result<CancelResult, Error> {
+        validate_operation_id(operation_id)?;
+        let mut registry = self
+            .inner
+            .operations
+            .lock()
+            .map_err(|_| Error::new("E_INTERNAL", "operation registry lock poisoned"))?;
+        registry.expire();
+        if let Some(entry) = registry.active.get_mut(operation_id) {
+            if matches!(entry.phase, OperationPhase::Cancelling) {
+                return Ok(CancelResult {
+                    status: CancelStatus::Accepted,
+                    outcome: None,
+                });
+            }
+            entry.cancelled.store(true, Ordering::Release);
+            entry.phase = OperationPhase::Cancelling;
+            self.inner.read_ready.notify_all();
+            return Ok(CancelResult {
+                status: CancelStatus::Accepted,
+                outcome: None,
+            });
+        }
+        Ok(registry
+            .terminal
+            .iter()
+            .find(|entry| entry.id == operation_id)
+            .map_or(
+                CancelResult {
+                    status: CancelStatus::Unknown,
+                    outcome: None,
+                },
+                |entry| CancelResult {
+                    status: CancelStatus::AlreadyTerminal,
+                    outcome: Some(entry.outcome),
+                },
+            ))
+    }
+
+    fn operation_phase(&self, id: &str, phase: OperationPhase) -> Result<(), Error> {
+        let mut registry = self
+            .inner
+            .operations
+            .lock()
+            .map_err(|_| Error::new("E_INTERNAL", "operation registry lock poisoned"))?;
+        let entry = registry
+            .active
+            .get_mut(id)
+            .ok_or_else(|| Error::new("E_OPERATION_UNKNOWN", "read operation is not active"))?;
+        if matches!(entry.phase, OperationPhase::Cancelling) {
+            return Err(Error::new("E_CANCELLED", "read operation cancelled"));
+        }
+        entry.phase = phase;
+        Ok(())
+    }
+
+    fn finish_operation(&self, id: &str, proposed: OperationOutcome) -> OperationOutcome {
+        let mut registry = self
+            .inner
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = registry.active.remove(id) else {
+            return proposed;
+        };
+        let outcome = {
+            if matches!(entry.phase, OperationPhase::Cancelling) {
+                OperationOutcome::Cancelled
+            } else {
+                proposed
+            }
+        };
+        if outcome == OperationOutcome::Cancelled {
+            self.inner
+                .cancelled_operations
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        registry.terminal.push_back(OperationTombstone {
+            id: id.to_owned(),
+            outcome,
+            completed: Instant::now(),
+        });
+        registry.expire();
+        outcome
+    }
+
     pub fn stats(&self) -> ConcurrencyStats {
+        let registry = self
+            .inner
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         ConcurrencyStats {
             active_reads: self.inner.active_reads.load(Ordering::Relaxed),
             queued_reads: self.inner.queued_reads.load(Ordering::Relaxed),
@@ -80,6 +309,26 @@ impl ConcurrentEngine {
             queued_writes: self.inner.queued_writes.load(Ordering::Relaxed),
             peak_active_reads: self.inner.peak_active_reads.load(Ordering::Relaxed),
             max_active_reads: MAX_CONCURRENT_READS,
+            registered_operations: registry.active.len(),
+            queued_operations: registry
+                .active
+                .values()
+                .filter(|entry| matches!(entry.phase, OperationPhase::Queued))
+                .count(),
+            executing_operations: registry
+                .active
+                .values()
+                .filter(|entry| matches!(entry.phase, OperationPhase::Executing))
+                .count(),
+            // Frame emission is introduced by the transport adapters in #157.
+            emitting_operations: 0,
+            cancelling_operations: registry
+                .active
+                .values()
+                .filter(|entry| matches!(entry.phase, OperationPhase::Cancelling))
+                .count(),
+            cancelled_operations: self.inner.cancelled_operations.load(Ordering::Relaxed),
+            max_read_operations: MAX_READ_OPERATIONS,
         }
     }
 
@@ -254,6 +503,233 @@ impl ConcurrentEngine {
             started: false,
         })
     }
+
+    fn with_controlled_read_snapshot<T>(
+        &self,
+        operation_id: &str,
+        control: &ExecutionControl,
+        execute: impl FnOnce(&mut Engine) -> T,
+    ) -> Result<T, Error> {
+        let mut permit = self.acquire_controlled_read(control)?;
+        self.operation_phase(operation_id, OperationPhase::Executing)?;
+        let mut snapshot = self
+            .inner
+            .engine
+            .lock()
+            .map_err(|_| Error::new("E_INTERNAL", "engine lock poisoned"))?
+            .read_snapshot();
+        permit.start();
+        control.checkpoint()?;
+        let result = execute(&mut snapshot);
+        drop(permit);
+        Ok(result)
+    }
+
+    fn acquire_controlled_read(&self, control: &ExecutionControl) -> Result<ReadPermit<'_>, Error> {
+        self.inner.queued_reads.fetch_add(1, Ordering::AcqRel);
+        let mut active = self
+            .inner
+            .read_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *active >= MAX_CONCURRENT_READS {
+            if let Err(error) = control.checkpoint() {
+                self.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
+                return Err(error);
+            }
+            let Some(remaining) = control.remaining() else {
+                self.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
+                return Err(Error::new(
+                    "E_TIMEOUT",
+                    "request execution deadline exceeded",
+                ));
+            };
+            let (next, _) = self
+                .inner
+                .read_ready
+                .wait_timeout(active, remaining.min(CONNECTION_POLL))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            active = next;
+        }
+        if let Err(error) = control.checkpoint() {
+            self.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
+        }
+        *active += 1;
+        Ok(ReadPermit {
+            owner: self,
+            started: false,
+        })
+    }
+}
+
+impl OperationRegistry {
+    fn expire(&mut self) {
+        let cutoff = Instant::now()
+            .checked_sub(OPERATION_TOMBSTONE_TTL)
+            .unwrap_or_else(Instant::now);
+        while self
+            .terminal
+            .front()
+            .is_some_and(|entry| entry.completed <= cutoff)
+            || self.terminal.len() > MAX_OPERATION_TOMBSTONES
+        {
+            self.terminal.pop_front();
+        }
+    }
+}
+
+impl ReadOperation {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn start(mut self) -> ProtocolResponse {
+        let request = self.request.take().expect("read operation starts once");
+        let statements = self
+            .statements
+            .take()
+            .expect("registered read owns its parsed statement");
+        let mut terminal = OperationGuard {
+            engine: self.engine.clone(),
+            id: self.id.clone(),
+            finished: false,
+        };
+        let request_id = request.request_id.clone();
+        let version = request.version;
+        let control = ExecutionControl::cancellable(
+            self.deadline,
+            Arc::clone(&self.cancelled),
+            self.shutdown.clone(),
+        );
+        let result = self
+            .engine
+            .operation_phase(&self.id, OperationPhase::Queued)
+            .and_then(|()| request.decode_params())
+            .and_then(|parameters| {
+                self.engine
+                    .with_controlled_read_snapshot(&self.id, &control, |snapshot| {
+                        snapshot.execute_read_statements_controlled(
+                            statements,
+                            parameters,
+                            request.schema.as_ref(),
+                            &control,
+                        )
+                    })
+            });
+        let mut response = match result {
+            Ok(response) => ProtocolResponse::from_query(request_id, response),
+            Err(error) => ProtocolResponse::failure(request_id, error, self.engine.schema_info()),
+        };
+        response.version = version;
+        let proposed = if response.ok {
+            OperationOutcome::Completed
+        } else if response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "E_CANCELLED")
+        {
+            OperationOutcome::Cancelled
+        } else {
+            OperationOutcome::Failed
+        };
+        let outcome = terminal.finish(proposed);
+        if outcome == OperationOutcome::Cancelled
+            && response
+                .error
+                .as_ref()
+                .is_none_or(|error| error.code != "E_CANCELLED")
+        {
+            response = ProtocolResponse::failure(
+                response.request_id,
+                Error::new("E_CANCELLED", "read operation cancelled"),
+                response.schema.unwrap_or_else(|| self.engine.schema_info()),
+            );
+            response.version = version;
+        }
+        response
+    }
+}
+
+impl OperationGuard {
+    fn finish(&mut self, outcome: OperationOutcome) -> OperationOutcome {
+        let outcome = self.engine.finish_operation(&self.id, outcome);
+        self.finished = true;
+        outcome
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.engine
+                .finish_operation(&self.id, OperationOutcome::Failed);
+        }
+    }
+}
+
+impl Drop for ReadOperation {
+    fn drop(&mut self) {
+        if self.request.is_some() {
+            let mut registry = self
+                .engine
+                .inner
+                .operations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.active.remove(&self.id);
+        }
+    }
+}
+
+fn validate_operation_id(id: &str) -> Result<(), Error> {
+    let Some(encoded) = id.strip_prefix("o1.") else {
+        return Err(Error::new("E_OPERATION_ID", "invalid operation capability"));
+    };
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| Error::new("E_OPERATION_ID", "invalid operation capability"))?;
+    if bytes.len() != 16 || URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+        return Err(Error::new("E_OPERATION_ID", "invalid operation capability"));
+    }
+    Ok(())
+}
+
+fn validate_read_operation(
+    request: &ProtocolRequest,
+) -> Result<Vec<crate::query::LocatedStatement>, Error> {
+    if !supported_version(request.version) {
+        return Err(Error::new(
+            "E_PROTOCOL_VERSION",
+            "supported protocol versions are 1 and 2",
+        ));
+    }
+    if request.request_id.len() > MAX_REQUEST_ID_BYTES {
+        return Err(Error::new("E_LIMIT", "request_id exceeds byte limit"));
+    }
+    if request.introspect.is_some()
+        || request.receipts.is_some()
+        || request.idempotency_key.is_some()
+        || request.page.is_some()
+    {
+        return Err(Error::new(
+            "E_STREAM_SHAPE",
+            "streaming accepts only a query, params, and schema precondition",
+        ));
+    }
+    let statements = crate::syntax::parse(&request.query)?;
+    if statements.len() != 1
+        || !matches!(
+            statements[0].statement,
+            crate::query::Statement::Pipeline(_)
+        )
+    {
+        return Err(Error::new(
+            "E_STREAM_SHAPE",
+            "streaming requires exactly one read query",
+        ));
+    }
+    Ok(statements)
 }
 
 struct ReadPermit<'a> {
@@ -1174,6 +1650,192 @@ mod tests {
         drop(lock);
         assert!(received.recv_timeout(Duration::from_secs(2)).unwrap().ok);
         assert_eq!(shared.stats().queued_writes, 0);
+    }
+
+    #[test]
+    fn operation_cancellation_is_targeted_and_terminal_results_are_stable() {
+        let shared = ConcurrentEngine::new(Engine::memory());
+        assert!(shared.execute("create table items (id int)").ok);
+        assert!(shared.execute("insert items {id: 1}").ok);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let cancelled = shared
+            .register_read(ProtocolRequest::query("cancelled", "from items"), deadline)
+            .unwrap();
+        let completed = shared
+            .register_read(ProtocolRequest::query("completed", "from items"), deadline)
+            .unwrap();
+        let cancelled_id = cancelled.id().to_owned();
+        let completed_id = completed.id().to_owned();
+
+        assert_ne!(cancelled_id, completed_id);
+        assert!(cancelled_id.starts_with("o1."));
+        assert_eq!(shared.stats().registered_operations, 2);
+        assert_eq!(
+            shared.cancel(&cancelled_id).unwrap().status,
+            CancelStatus::Accepted
+        );
+        assert_eq!(
+            shared.cancel(&cancelled_id).unwrap().status,
+            CancelStatus::Accepted
+        );
+
+        let cancelled_response = cancelled.start();
+        assert_eq!(cancelled_response.error.unwrap().code, "E_CANCELLED");
+        let completed_response = completed.start();
+        assert!(completed_response.ok, "{}", completed_response.message);
+        assert_eq!(completed_response.rows.len(), 1);
+
+        assert_eq!(
+            shared.cancel(&cancelled_id).unwrap(),
+            CancelResult {
+                status: CancelStatus::AlreadyTerminal,
+                outcome: Some(OperationOutcome::Cancelled),
+            }
+        );
+        assert_eq!(
+            shared.cancel(&completed_id).unwrap(),
+            CancelResult {
+                status: CancelStatus::AlreadyTerminal,
+                outcome: Some(OperationOutcome::Completed),
+            }
+        );
+        let unknown = format!("o1.{}", URL_SAFE_NO_PAD.encode([9_u8; 16]));
+        assert_eq!(
+            shared.cancel(&unknown).unwrap().status,
+            CancelStatus::Unknown
+        );
+        assert_eq!(
+            shared.cancel("not-an-operation").unwrap_err().code,
+            "E_OPERATION_ID"
+        );
+        assert_eq!(shared.stats().registered_operations, 0);
+        assert_eq!(shared.stats().cancelled_operations, 1);
+    }
+
+    #[test]
+    fn operation_registry_is_bounded_and_dropped_handles_release_capacity() {
+        let shared = ConcurrentEngine::new(Engine::memory());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let operations = (0..MAX_READ_OPERATIONS)
+            .map(|index| {
+                shared
+                    .register_read(
+                        ProtocolRequest::query(format!("read-{index}"), "from missing"),
+                        deadline,
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shared.stats().registered_operations, MAX_READ_OPERATIONS);
+        assert_eq!(shared.stats().max_read_operations, MAX_READ_OPERATIONS);
+        let error = shared
+            .register_read(ProtocolRequest::query("overflow", "from missing"), deadline)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "E_OPERATION_CAPACITY");
+        drop(operations);
+        assert_eq!(shared.stats().registered_operations, 0);
+    }
+
+    #[test]
+    fn queued_and_executing_operations_cancel_without_leaking_read_slots() {
+        let shared = ConcurrentEngine::new(Engine::memory());
+        assert!(shared.execute("create table items (id int)").ok);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut permits = (0..MAX_CONCURRENT_READS)
+            .map(|_| {
+                let mut permit = shared.acquire_read(deadline, None).unwrap();
+                permit.start();
+                permit
+            })
+            .collect::<Vec<_>>();
+        let queued = shared
+            .register_read(ProtocolRequest::query("queued", "from items"), deadline)
+            .unwrap();
+        let queued_id = queued.id().to_owned();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sent.send(queued.start()).unwrap());
+        wait_for(|| shared.stats().queued_operations == 1);
+        assert_eq!(
+            shared.cancel(&queued_id).unwrap().status,
+            CancelStatus::Accepted
+        );
+        let response = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(response.error.unwrap().code, "E_CANCELLED");
+        assert_eq!(shared.stats().registered_operations, 0);
+        assert_eq!(shared.stats().active_reads, MAX_CONCURRENT_READS);
+        drop(permits.pop());
+        drop(permits);
+        wait_for(|| shared.stats().active_reads == 0);
+
+        let running = shared
+            .register_read(
+                ProtocolRequest::query("executing", "from items"),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+        let running_id = running.id().to_owned();
+        let engine_lock = shared.inner.engine.lock().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sent.send(running.start()).unwrap());
+        wait_for(|| shared.stats().executing_operations == 1);
+        assert_eq!(
+            shared.cancel(&running_id).unwrap().status,
+            CancelStatus::Accepted
+        );
+        drop(engine_lock);
+        let response = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(response.error.unwrap().code, "E_CANCELLED");
+        wait_for(|| shared.stats().active_reads == 0);
+        assert_eq!(shared.stats().registered_operations, 0);
+    }
+
+    #[test]
+    fn operation_deadline_shutdown_and_shape_failures_are_bounded() {
+        let shared = ConcurrentEngine::new(Engine::memory());
+        let mutation = shared
+            .register_read(
+                ProtocolRequest::query("mutation", "create table forbidden (id int)"),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(mutation.code, "E_STREAM_SHAPE");
+        let page = ProtocolRequest::query("page", "from items")
+            .with_page(crate::query::PageSpec::forward(1));
+        assert_eq!(
+            shared
+                .register_read(page, Instant::now() + Duration::from_secs(2))
+                .err()
+                .unwrap()
+                .code,
+            "E_STREAM_SHAPE"
+        );
+        assert_eq!(
+            shared.execute("from forbidden").error.unwrap().code,
+            "E_TABLE"
+        );
+
+        let expired = shared
+            .register_read(
+                ProtocolRequest::query("expired", "from missing"),
+                Instant::now() - Duration::from_millis(1),
+            )
+            .unwrap()
+            .start();
+        assert_eq!(expired.error.unwrap().code, "E_TIMEOUT");
+
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let stopped = shared
+            .register_read_with_shutdown(
+                ProtocolRequest::query("shutdown", "from missing"),
+                Instant::now() + Duration::from_secs(2),
+                Some(shutdown),
+            )
+            .unwrap()
+            .start();
+        assert_eq!(stopped.error.unwrap().code, "E_SHUTDOWN");
+        assert_eq!(shared.stats().registered_operations, 0);
     }
 
     #[test]
