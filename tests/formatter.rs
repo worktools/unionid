@@ -12,6 +12,10 @@ fn formatter_is_idempotent_for_current_examples() {
             "content_metadata",
             include_str!("../examples/content_metadata.uid"),
         ),
+        (
+            "session_events",
+            include_str!("../examples/session_events.uid"),
+        ),
         ("mutations", include_str!("../examples/task_mutations.uid")),
         (
             "recursive_tree",

@@ -2,7 +2,7 @@
 
 ## 当前可用范围
 
-`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`，并已接入原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2、value codec 2 与 storage format 4。`uuid` 和 `bytes` 还已接入源码声明、字面量、查询、索引、主键、migration 与可运行场景；时间和 decimal 的源码/运算仍由 #139/#140 跟踪。
+`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`，并已接入原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2、value codec 2 与 storage format 4。`uuid`、`bytes`、`date`、`timestamp` 和 `duration` 还已接入源码声明、字面量、查询、索引、migration 与可运行场景；decimal 的源码/运算仍由 #140 跟踪。
 
 完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。新 redb 数据库使用 storage format 4 和 catalog/value/index-key/receipt codec 3/2/2/2；逻辑 backup 使用 codec 3。旧 format 1–3 和过渡 snapshot 仍拒绝新 schema/receipt，持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；显式执行 `unionid upgrade --db <path> --target 4` 会在一个同步事务中校验并重写 catalog、rows、indexes、receipts 和 meta。失败保留旧格式。
 

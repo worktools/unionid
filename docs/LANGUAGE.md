@@ -37,7 +37,9 @@ insert tasks {
 ```
 
 - 无分号。花括号用于 record、projection、match branches 和多项 sort 等明确结构边界的地方，圆括号表达 precedence、tuple、嵌套调用或 group inner pipeline，方括号表达 list；delimiter 内相邻项用逗号分隔，formatter 保留 trailing comma。类型名和变体名以大写字母开头；当前标识符为 ASCII 字母、数字与下划线，首字符不能是数字；文本值支持 UTF-8。
-- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid` 和 `bytes`。UUID 字面量写作 `uuid "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"`，接受 RFC 9562 带连字符大小写输入并规范输出小写；bytes 源码字面量写作小写偶数长度 hex，例如 `bytes "00ff"`，空字符串表示空 bytes。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。时间与定点 decimal 仍只有 Rust/wire/codec 基础，尚不能作为当前源码类型或字面量使用。
+- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid`、`date`、`timestamp`、`duration` 和 `bytes`。date 写作 `@2026-09-08`；timestamp 必须带 `Z` 或 numeric offset，例如 `@2026-09-08T09:30:15.123456+08:00`，并规范为 UTC 微秒；duration 使用 `30seconds` 等整数精确单位。UUID 字面量写作 `uuid "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"`；bytes 写作小写偶数长度 hex，例如 `bytes "00ff"`。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。定点 decimal 仍只有 Rust/wire/codec 基础，尚不能作为当前源码类型或字面量使用。
+
+- duration 支持 checked `+`、`-`、一元负号和 `sum`；`timestamp +/- duration` 得到 timestamp，`timestamp - timestamp` 得到 duration。溢出返回 `E_ARITH`。date 不做 calendar 算术，也没有隐式当前时间、本地时区或 DST 规则。旧 text 数据可在 migration 中用 `date_parse`、`timestamp_parse` 和 `duration_parse` 精确转换。
 - 支持命名 record/sum、嵌套积类型、tuple，以及内建 `option T`、`list T`，例如 `type Point = (float, float)`、`option (list Contact)`。
 - record 类型规范写成 braced field set，如 `{email text, nickname option text}`；变体的 record payload 同样使用 `{}`。旧缩进 record 与 variant payload 继续作为 migration、WAL 和已有脚本的兼容输入，formatter 只输出 braced 形式。
 - record 值使用 `field = value`，内联字段之间用逗号；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载与多个位置参数通过括号区分。

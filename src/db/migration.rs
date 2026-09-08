@@ -540,18 +540,11 @@ impl Database {
         let ty = self.catalog.field_type(&source.schema, column)?;
         if !matches!(
             self.catalog.underlying(ty)?,
-            ScalarType::Int
-                | ScalarType::Text
-                | ScalarType::Uuid
-                | ScalarType::Date
-                | ScalarType::Timestamp
-                | ScalarType::Duration
-                | ScalarType::Decimal { .. }
-                | ScalarType::Bytes
+            ScalarType::Int | ScalarType::Text | ScalarType::Uuid
         ) {
             return Err(Error::new(
                 "E_TYPE",
-                "primary keys require an indexable scalar type",
+                "primary keys require int, text, or uuid",
             ));
         }
         let mut seen = BTreeSet::new();
@@ -766,20 +759,11 @@ impl Database {
                 let ty = self.catalog.field_type(&table.schema, key)?;
                 if !matches!(
                     self.catalog.underlying(ty)?,
-                    ScalarType::Int
-                        | ScalarType::Text
-                        | ScalarType::Uuid
-                        | ScalarType::Date
-                        | ScalarType::Timestamp
-                        | ScalarType::Duration
-                        | ScalarType::Decimal { .. }
-                        | ScalarType::Bytes
+                    ScalarType::Int | ScalarType::Text | ScalarType::Uuid
                 ) {
                     return Err(Error::new(
                         "E_TYPE",
-                        format!(
-                            "primary key '{table_name}.{key}' must remain an indexable scalar type"
-                        ),
+                        format!("primary key '{table_name}.{key}' must remain int, text, or uuid"),
                     ));
                 }
             }
