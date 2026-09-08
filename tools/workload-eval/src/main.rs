@@ -17,7 +17,7 @@ const DEFAULT_BATCH_ROWS: usize = 1_500;
 const WARMUPS: usize = 5;
 const BATCH_WRITE_ROWS: usize = 100;
 const ORDERED_READ_ROWS: usize = 25;
-const MIN_ROWS: usize = 1_000;
+const MIN_ROWS: usize = 100;
 const MAX_ROWS: usize = 1_000_000;
 
 const MIGRATION: &str = r#"migration benchmark_task_v2
@@ -341,9 +341,20 @@ fn measure_query(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
     let target = rows / 2;
     let tenant = format!("tenant-{}", target % 10);
     let ordered = format!("from tasks\nfilter tenant == \"{tenant}\"\nsort {{-priority, id}}");
+    let ordered_read_rows = ORDERED_READ_ROWS.min(rows / 30);
     let page_source = match case {
-        "page_seek_forward" => Some(page_seek_source(&mut engine, &ordered, false)?),
-        "page_seek_backward" => Some(page_seek_source(&mut engine, &ordered, true)?),
+        "page_seek_forward" => Some(page_seek_source(
+            &mut engine,
+            &ordered,
+            ordered_read_rows,
+            false,
+        )?),
+        "page_seek_backward" => Some(page_seek_source(
+            &mut engine,
+            &ordered,
+            ordered_read_rows,
+            true,
+        )?),
         _ => None,
     };
     let composite_index = Some("tasks (tenant, -priority, id)");
@@ -368,28 +379,28 @@ fn measure_query(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
         ),
         "composite_range" => (
             format!(
-                "from tasks\nfilter tenant == \"{tenant}\"\nfilter priority >= 50\nsort {{-priority, id}}\ntake {ORDERED_READ_ROWS}"
+                "from tasks\nfilter tenant == \"{tenant}\"\nfilter priority >= 50\nsort {{-priority, id}}\ntake {ordered_read_rows}"
             ),
             QueryAccessKind::RangeScan,
             composite_index,
-            ORDERED_READ_ROWS,
+            ordered_read_rows,
         ),
         "composite_order" => (
-            format!("{ordered}\ntake {ORDERED_READ_ROWS}"),
+            format!("{ordered}\ntake {ordered_read_rows}"),
             QueryAccessKind::OrderedScan,
             composite_index,
-            ORDERED_READ_ROWS,
+            ordered_read_rows,
         ),
         "page_seek_forward" | "page_seek_backward" => (
             page_source.expect("page source was prepared"),
             QueryAccessKind::PageSeek,
             composite_index,
-            ORDERED_READ_ROWS,
+            ordered_read_rows,
         ),
         _ => return Err(format!("unknown query case '{case}'").into()),
     };
     let plan = require_plan(&mut engine, &source, expected_access, expected_index)?;
-    validate_query_plan(case, &plan)?;
+    validate_query_plan(case, &plan, ordered_read_rows)?;
     for _ in 0..WARMUPS {
         require_rows(engine.execute(&source), expected_rows)?;
     }
@@ -414,32 +425,37 @@ fn measure_query(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
     })
 }
 
-fn page_seek_source(engine: &mut Engine, ordered: &str, backward: bool) -> AnyResult<String> {
-    let first_source = format!("{ordered}\npage {ORDERED_READ_ROWS}");
-    let first = require_rows(engine.execute(&first_source), ORDERED_READ_ROWS)?;
+fn page_seek_source(
+    engine: &mut Engine,
+    ordered: &str,
+    read_rows: usize,
+    backward: bool,
+) -> AnyResult<String> {
+    let first_source = format!("{ordered}\npage {read_rows}");
+    let first = require_rows(engine.execute(&first_source), read_rows)?;
     let next = first
         .page
         .and_then(|page| page.next_cursor)
         .ok_or("first ordered page did not return a next cursor")?;
     let second_source = format!(
-        "{ordered}\npage {ORDERED_READ_ROWS} after {}",
+        "{ordered}\npage {read_rows} after {}",
         serde_json::to_string(&next)?
     );
     if !backward {
         return Ok(second_source);
     }
-    let second = require_rows(engine.execute(&second_source), ORDERED_READ_ROWS)?;
+    let second = require_rows(engine.execute(&second_source), read_rows)?;
     let previous = second
         .page
         .and_then(|page| page.previous_cursor)
         .ok_or("second ordered page did not return a previous cursor")?;
     Ok(format!(
-        "{ordered}\npage {ORDERED_READ_ROWS} before {}",
+        "{ordered}\npage {read_rows} before {}",
         serde_json::to_string(&previous)?
     ))
 }
 
-fn validate_query_plan(case: &str, plan: &QueryPlan) -> AnyResult<()> {
+fn validate_query_plan(case: &str, plan: &QueryPlan, read_rows: usize) -> AnyResult<()> {
     match case {
         "composite_range" => {
             let range = plan
@@ -473,7 +489,7 @@ fn validate_query_plan(case: &str, plan: &QueryPlan) -> AnyResult<()> {
                 || !plan.access.sort_satisfied
                 || page.access != PageAccessKind::IndexSeek
                 || !page.resume_boundary
-                || page.read_limit != ORDERED_READ_ROWS + 1
+                || page.read_limit != read_rows + 1
             {
                 return Err(format!("unexpected page seek plan: {plan:?}").into());
             }
