@@ -4,6 +4,7 @@
 
 ## 发布后进展
 
+- 普通 row-only DML 使用按路径复制的 persistent row/index/receipt roots 和请求级合并 write set；Engine 通过一个 committed root 同时发布 database 与 receipt。redb 直接编码并核对变化的 catalog/row/index/receipt stable keys，常驻 durable head 只保留 layout、meta 与兼容状态；DDL、migration、upgrade、restore 和 receipt prune 明确走临时 full-rebuild 路径。`MutationProfile` 与 `tools/workload-eval` 分别记录 candidate build、durable commit、增量模式及不含业务值的 write-set 计数。
 - `unionid::scalars` 提供六种生产标量的 Rust 值域、规范 serde payload 与边界校验；原生 ScalarType/Value、无损 serde、protocol v2、完整 v1 typed-boundary 预检、按 boundary 选择的 `u1`/`u2` cursor、storage format 4、完整 durable codec 集、显式 upgrader、源码声明与精确运算均已接通。#137–#140 的验收由 PR #147–#151 完成，已实现范围见 [SCALARS.md](SCALARS.md)。
 - v0.1.0 crate、原生 target 包、校验清单和 GitHub Release 已由 tag workflow 发布。
 - Engine、本地 run/CLI 和 TCP 服务已提供统一只读执行边界；`introspection.read_only` 可验证实际状态，mutation 在创建候选状态或持久事务前返回 `E_READ_ONLY`。
@@ -22,7 +23,7 @@
 - 类型、字段和变体的单调递增 catalog ID；命名类型相等检查身份，schema 展示可重新解析。
 - `field type = value` 字段默认值在完整命名类型体建立后完成递归类型检查，可使用自递归类型的终止 constructor；insert 对嵌套 record 和 sum record 负载逐层补齐，schema 展示、WAL/snapshot 恢复与 hash 均保留默认值。
 - 版本 1 ADT value codec 以 catalog 和期望类型驱动，用稳定 type/field/variant ID 编码命名类型、record、sum、tuple、option/list 及有限递归子值；不依赖 serde 或 Rust enum 布局，字段重排和显式 rename 保持字节可解释。
-- redb 4.1 已接入共享 Engine：`run --db`、`cli --db` 与 `server --db` 使用同一个持久文件；每个写脚本按稳定 ID/RowId 计算已提交状态与候选状态的差异，只删除或写入变化的 catalog、ADT row 和 secondary-index 键，再与 meta 一起放入一个 `Immediate`、two-phase write transaction。版本化 migration 在同一事务追加 ledger entry，普通数据提交不触碰 ledger。覆盖前核对旧值，打开时校验存储／catalog／value／索引／migration 编码版本、schema hash、ledger head、RowId 水位和派生索引一致性。
+- redb 4.1 已接入共享 Engine：`run --db`、`cli --db` 与 `server --db` 使用同一个持久文件；普通 DML 根据合并 write set 只准备变化的 catalog、ADT row、secondary-index 与 receipt 键，并与 meta 放入一个 `Immediate`、two-phase write transaction。版本化 migration 在同一事务追加 ledger entry，普通数据提交不触碰 ledger。所有增量覆盖都核对旧值与 meta head；打开时校验存储／catalog／value／索引／migration 编码版本、schema hash、ledger head、RowId 水位和派生索引一致性。
 - 每条 row 带表内稳定 `u64` RowId，每表持久化单调分配游标；索引 posting 不再保存 `Vec` 下标。删除形成的 ID 缺口可安全恢复，后续插入不会复用旧身份；旧 redb 和 snapshot 会从原有连续顺序升级。
 - `update table`/`delete table` 复用普通与 match filter，并可按源码顺序 sort/take 出稳定 RowId 子集；多个 typed `set` 从原 row 同时求值，可设置嵌套 record 路径。`set field = match source` 直接复用 derive 的 pattern coverage 和 typed value construction，顶层 binding 可保留完整 sum/option/递归 ADT 原值，分支参数经 version 1 TCP 绑定。执行器先生成全部候选 row，再检查完整类型和主键唯一性并重建该表索引；失败请求不发布任何修改。全部 DML 响应包含 `affected_rows`，可选 `returning` 在提交前完成投影、行数和 typed wire 大小检查，并返回 insert/upsert/update 后像或 delete 前像。
 - `upsert table value` 与 `upsert many table <list>` 要求声明主键，输入按完整 row 与默认值规则检查；未命中时按输入顺序分配 RowId，命中时整行替换并保留 RowId。批量形式拒绝输入内重复主键，完成全部候选值后统一验证主键和 unique indexes；响应以 `upsert_action` 或逐项 `upsert_actions` 区分 inserted/updated，索引和 redb 状态服从同一请求级提交边界。
@@ -30,7 +31,7 @@
 - macOS/Linux 子进程通过 OS `RLIMIT_FSIZE` 强制真实 redb 文件增长失败；Engine 按失败点返回确定中止或结果不确定，父进程重开并验证 typed row、索引、schema、ledger 与完整性只处于完整旧／新状态。
 - `tools/recovery-eval` 在独立进程测量完整 ADT 工作集的 open/check 与 peak RSS；本机三次中位数为 10k 行 66/78 ms、52.67/81.48 MiB，100k 行 653/741 ms、459.28/745.84 MiB。CI 在 macOS/Linux 跑 100 行 smoke，完整环境与容量解释见恢复 benchmark 记录。
 - `tests/release_scenarios.rs` 从隔离临时目录驱动真实 CLI 子进程，覆盖任务条件状态转换、深层命名 ADT 配置迁移和 session key 生命周期；每条链路均跨重启执行 migration、check、backup/restore，并比较 schema identity、ledger、typed rows 与 explain。场景暴露并修复了 migration transform 递归展开嵌套命名 record、导致 `old.retry` 丢失类型身份的问题。
-- `tools/workload-eval` 使用新数据库副本和 release 子进程保留 20 个原始样本，测量 indexed query/full scan、条件 update、upsert、100-row batch 与深层 migration。10k 行写入 p95 约 72–94 ms、migration 344 ms；100k 行写入 p95 约 0.51–0.88 s、migration 4.15 s，写入／迁移 peak RSS 约 1.1–1.29 GiB。完整方法与 JSON 见 workload benchmark 记录。
+- `tools/workload-eval` 使用新数据库副本和 release 子进程保留原始样本，测量 indexed query/full scan、条件 update、upsert、100-row batch 与深层 migration，并将 candidate build 与 durable commit 分段报告。M6 之前的基线是 10k 行写入 p95 约 72–94 ms、migration 344 ms；100k 行写入 p95 约 0.51–0.88 s、migration 4.15 s，写入／迁移 peak RSS 约 1.1–1.29 GiB。更新后的容量结论由 #166 在复合有序访问完成后统一重测。
 - `check --db` 调用 redb `check_integrity`，再重新加载并验证 unionid 逻辑状态；无效数据库文件、未知 codec 版本、索引不一致和跨进程占用都有结构化诊断。
 - 换行及单行 pipeline、字段路径、filter/select、单键/多键 sort、前 N 行/范围 take、普通 scalar/bool derive、sum/option 的模式过滤与 ADT derive、主键唯一性和等值索引。普通 filter、match condition 与 derive result 共用有类型的 scalar expression，支持带 checked 错误的 int/float 算术；filter/match condition 和普通 derive 还支持括号、`not/and/or`、字段或 binding 间比较、list `contains`、list/text `length`、Option helper 与有预算的嵌套 `any/all`。复杂条件可使用 `filter`／`=>` 后的缩进块或跨行括号。
 - 未分组 `aggregate` 与 `group ... aggregate` 支持 count/sum/min/max；绑定阶段确定输入与输出类型，sum 保留命名数值类型，min/max 返回 option。group key 使用完整 typed equality，可包含 ADT；后续 filter/select/sort/take 使用汇总后的 schema。group 数量、accumulator cell 与估算状态内存都有显式上限。

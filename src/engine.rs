@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::control::ExecutionControl;
-use crate::db::{Database, QueryResponse};
+use crate::db::{Database, LogicalWriteSet, QueryResponse};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyReceipt,
@@ -41,6 +41,7 @@ pub struct Engine {
     durable: Option<Box<dyn DurableBackend>>,
     storage_mode: StorageMode,
     snapshot_storage_versions: Option<StorageVersions>,
+    last_mutation_profile: Option<MutationProfile>,
     _locks: Vec<DatabaseLock>,
 }
 
@@ -74,6 +75,42 @@ pub struct StorageUpgrade {
     pub previous_format: u32,
     pub format: u32,
     pub changed: bool,
+}
+
+/// Phase timings for the last successful mutating request.
+///
+/// This observation is intended for diagnostics and workload evaluation. It
+/// contains no source text, parameter values, row values, or idempotency keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct MutationProfile {
+    pub candidate_micros: u64,
+    pub durable_commit_micros: u64,
+    pub full_rebuild: bool,
+    pub touched_tables: usize,
+    pub row_inserts: usize,
+    pub row_updates: usize,
+    pub row_deletes: usize,
+    pub index_inserts: usize,
+    pub index_deletes: usize,
+    pub receipt_changes: usize,
+}
+
+impl MutationProfile {
+    fn from_write_set(started: std::time::Instant, write_set: Option<&LogicalWriteSet>) -> Self {
+        let summary = write_set.map(LogicalWriteSet::summary).unwrap_or_default();
+        Self {
+            candidate_micros: elapsed_micros(started),
+            durable_commit_micros: 0,
+            full_rebuild: write_set.is_none(),
+            touched_tables: summary.touched_tables,
+            row_inserts: summary.row_inserts,
+            row_updates: summary.row_updates,
+            row_deletes: summary.row_deletes,
+            index_inserts: summary.index_inserts,
+            index_deletes: summary.index_deletes,
+            receipt_changes: summary.receipt_changes,
+        }
+    }
 }
 
 /// A parsed query or supported parameterized operation bound to one schema
@@ -111,8 +148,10 @@ trait DurableBackend: Send {
     fn commit(
         &mut self,
         previous: &Database,
+        previous_receipts: &ReceiptMap,
         database: &Database,
         receipts: &ReceiptMap,
+        write_set: Option<&LogicalWriteSet>,
     ) -> std::result::Result<(), CommitFailure>;
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)>;
     fn supports_production_scalars(&self) -> bool;
@@ -129,10 +168,22 @@ impl DurableBackend for RedbStore {
     fn commit(
         &mut self,
         previous: &Database,
+        previous_receipts: &ReceiptMap,
         database: &Database,
         receipts: &ReceiptMap,
+        write_set: Option<&LogicalWriteSet>,
     ) -> std::result::Result<(), CommitFailure> {
-        RedbStore::commit(self, previous, database, receipts)
+        match write_set {
+            Some(write_set) => RedbStore::commit_incremental(
+                self,
+                previous,
+                previous_receipts,
+                database,
+                receipts,
+                write_set,
+            ),
+            None => RedbStore::commit(self, previous, database, receipts),
+        }
     }
 
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
@@ -264,6 +315,7 @@ impl Engine {
             durable: None,
             storage_mode,
             snapshot_storage_versions: None,
+            last_mutation_profile: None,
             _locks: locks,
         })
     }
@@ -311,6 +363,10 @@ impl Engine {
 
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    pub fn last_mutation_profile(&self) -> Option<MutationProfile> {
+        self.last_mutation_profile
     }
 
     pub fn execute(&mut self, source: &str) -> QueryResponse {
@@ -386,6 +442,7 @@ impl Engine {
         expected_schema: Option<&crate::db::SchemaInfo>,
         control: &ExecutionControl,
     ) -> QueryResponse {
+        self.last_mutation_profile = None;
         let result = (|| {
             control.checkpoint()?;
             if let Some(expected) = expected_schema
@@ -495,6 +552,7 @@ impl Engine {
         expected_schema: Option<&crate::db::SchemaInfo>,
         deadline: Option<&ExecutionControl>,
     ) -> Result<IdempotentExecution> {
+        self.last_mutation_profile = None;
         validate_key(key)?;
         validate_digest(digest)?;
         let durability = if self.durable.is_some() {
@@ -639,7 +697,7 @@ impl Engine {
             .checked_add(1)
             .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
         let mut response = QueryResponse::ok_message("idempotency receipts pruned");
-        self.commit_candidate(candidate, None, &mut response, Some(receipts))?;
+        self.commit_candidate(candidate, None, &mut response, Some(receipts), None)?;
         result.applied = true;
         Ok(result)
     }
@@ -913,6 +971,7 @@ impl Engine {
         parameters: std::collections::BTreeMap<String, crate::Value>,
         deadline: Option<&ExecutionControl>,
     ) -> QueryResponse {
+        self.last_mutation_profile = None;
         if prepared.schema != self.committed.db.schema_info() {
             return self.with_schema(QueryResponse::failure(Error::new(
                 "E_SCHEMA_CHANGED",
@@ -997,6 +1056,7 @@ impl Engine {
         idempotency: Option<PendingIdempotency<'_>>,
         page: Option<PageSpec>,
     ) -> Result<QueryResponse> {
+        self.last_mutation_profile = None;
         if let Some(expected) = expected_schema
             && expected != &self.committed.db.schema_info()
         {
@@ -1098,6 +1158,7 @@ impl Engine {
                 "writes are disabled after a storage failure; reopen the database to resolve the commit state",
             ));
         }
+        let candidate_started = mutating.then(std::time::Instant::now);
         let mut candidate = if mutating {
             Some(self.committed.db.as_ref().clone())
         } else {
@@ -1123,6 +1184,7 @@ impl Engine {
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
+            let mut write_set = candidate.take_write_set();
             let receipt_state = if let Some(idempotency) = idempotency {
                 response.schema = Some(candidate.schema_info());
                 let receipt = IdempotencyReceipt {
@@ -1134,11 +1196,24 @@ impl Engine {
                 validate_new_receipt(&self.committed.receipts, &receipt)?;
                 let mut receipts = self.committed.receipts.as_ref().clone();
                 receipts.insert(idempotency.key.to_owned(), receipt);
+                write_set.record_receipt(idempotency.key);
                 Some(receipts)
             } else {
                 None
             };
-            self.commit_candidate(candidate, wal_source, &mut response, receipt_state)?;
+            let write_set = (!schema_changing).then_some(write_set);
+            let mut profile = MutationProfile::from_write_set(
+                candidate_started.expect("mutating scripts start candidate timing"),
+                write_set.as_ref(),
+            );
+            profile.durable_commit_micros = self.commit_candidate(
+                candidate,
+                wal_source,
+                &mut response,
+                receipt_state,
+                write_set,
+            )?;
+            self.last_mutation_profile = Some(profile);
         }
         Ok(self.with_schema(response))
     }
@@ -1285,21 +1360,37 @@ impl Engine {
             applied_at_unix_ms,
         })?;
         let mut response = QueryResponse::ok_message(format!("migration '{}' applied", file.id));
-        self.commit_candidate(candidate, None, &mut response, None)
+        self.commit_candidate(candidate, None, &mut response, None, None)
+            .map(|_| ())
     }
 
     fn commit_candidate(
         &mut self,
-        candidate: Database,
+        mut candidate: Database,
         wal_source: Option<&str>,
         response: &mut QueryResponse,
         receipt_state: Option<ReceiptMap>,
-    ) -> Result<()> {
+        write_set: Option<LogicalWriteSet>,
+    ) -> Result<u64> {
+        // A committed root never carries changes forward into the next
+        // candidate. Row-only callers already extracted the supplied set;
+        // full-rebuild callers intentionally discard any internal details.
+        let _ = candidate.take_write_set();
+        let mut durable_commit_micros = 0;
         if let Some(durable) = &mut self.durable {
             let receipts = receipt_state
                 .as_ref()
                 .unwrap_or_else(|| self.committed.receipts.as_ref());
-            match durable.commit(&self.committed.db, &candidate, receipts) {
+            let commit_started = std::time::Instant::now();
+            let result = durable.commit(
+                &self.committed.db,
+                &self.committed.receipts,
+                &candidate,
+                receipts,
+                write_set.as_ref(),
+            );
+            durable_commit_micros = elapsed_micros(commit_started);
+            match result {
                 Ok(()) => {}
                 Err(CommitFailure::Definite(error)) => {
                     return Err(Error::new(
@@ -1353,7 +1444,7 @@ impl Engine {
         {
             response.warnings.push(error.to_string());
         }
-        Ok(())
+        Ok(durable_commit_micros)
     }
 
     pub fn checkpoint(&mut self) -> Result<()> {
@@ -1532,7 +1623,7 @@ impl Engine {
         let result = (|| {
             let mut engine = Self::open_redb(path.clone())?;
             let mut response = QueryResponse::ok_message("backup restored");
-            engine.commit_candidate(database, None, &mut response, Some(receipts))?;
+            engine.commit_candidate(database, None, &mut response, Some(receipts), None)?;
             Ok(engine)
         })();
         if result.is_err() {
@@ -1562,6 +1653,10 @@ impl Engine {
 
 fn ensure_deadline(control: Option<&ExecutionControl>) -> Result<()> {
     control.map_or(Ok(()), ExecutionControl::checkpoint)
+}
+
+fn elapsed_micros(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 fn unix_time_ms() -> Result<u64> {
@@ -1647,8 +1742,10 @@ mod tests {
         fn commit(
             &mut self,
             _: &Database,
+            _: &ReceiptMap,
             _: &Database,
             _: &ReceiptMap,
+            _: Option<&LogicalWriteSet>,
         ) -> std::result::Result<(), CommitFailure> {
             match self.uncertain.take() {
                 Some(false) => Err(CommitFailure::Definite(Error::new(
@@ -1714,6 +1811,36 @@ mod tests {
             })),
             ..Engine::default()
         }
+    }
+
+    #[test]
+    fn mutation_profile_reports_candidate_shape_and_resets_on_read() {
+        let mut engine = Engine::memory();
+        let schema = engine.execute("create table entries (id int, value int)");
+        assert!(schema.ok, "{}", schema.message);
+        assert!(engine.last_mutation_profile().unwrap().full_rebuild);
+
+        let inserted = engine.execute("insert entries {id = 1, value = 2}");
+        assert!(inserted.ok, "{}", inserted.message);
+        assert_eq!(
+            engine.last_mutation_profile(),
+            Some(MutationProfile {
+                candidate_micros: engine.last_mutation_profile().unwrap().candidate_micros,
+                durable_commit_micros: 0,
+                full_rebuild: false,
+                touched_tables: 1,
+                row_inserts: 1,
+                row_updates: 0,
+                row_deletes: 0,
+                index_inserts: 0,
+                index_deletes: 0,
+                receipt_changes: 0,
+            })
+        );
+
+        let read = engine.execute("from entries");
+        assert!(read.ok, "{}", read.message);
+        assert_eq!(engine.last_mutation_profile(), None);
     }
 
     #[test]
@@ -1789,6 +1916,7 @@ mod tests {
         assert!(!first.replayed);
         assert_eq!(first.durability, IdempotencyDurability::ProcessLocal);
         assert_eq!(first.response.rows.len(), 1);
+        assert_eq!(engine.last_mutation_profile().unwrap().receipt_changes, 1);
 
         let replay = engine
             .execute_idempotent_with_params(
@@ -1800,6 +1928,7 @@ mod tests {
             )
             .unwrap();
         assert!(replay.replayed);
+        assert_eq!(engine.last_mutation_profile(), None);
         assert_eq!(replay.committed_sequence, first.committed_sequence);
         assert_eq!(replay.response.schema, first.response.schema);
         assert_eq!(engine.execute("from entries").rows.len(), 1);

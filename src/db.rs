@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,7 +17,10 @@ use crate::query::{
 
 mod migration;
 
-type Indexes = BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<RowId>>>>;
+type PostingRows = imbl::Vector<RowId>;
+type IndexPosting = imbl::OrdMap<String, PostingRows>;
+type TableIndexes = imbl::OrdMap<String, IndexPosting>;
+type Indexes = imbl::OrdMap<String, TableIndexes>;
 
 pub const MAX_QUERY_WORKING_ROWS: usize = 250_000;
 pub const MAX_RESULT_ROWS: usize = 100_000;
@@ -30,6 +34,104 @@ pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
 struct PlannedAccess {
     plan: QueryAccessPlan,
     candidates: Option<Vec<RowId>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RowChange {
+    pub(crate) before: Option<Arc<Row>>,
+    pub(crate) after: Option<Arc<Row>>,
+}
+
+impl RowChange {
+    fn inserted(row: Arc<Row>) -> Self {
+        Self {
+            before: None,
+            after: Some(row),
+        }
+    }
+
+    fn updated(before: Arc<Row>, after: Arc<Row>) -> Self {
+        Self {
+            before: Some(before),
+            after: Some(after),
+        }
+    }
+
+    fn deleted(row: Arc<Row>) -> Self {
+        Self {
+            before: Some(row),
+            after: None,
+        }
+    }
+
+    fn row_id(&self) -> RowId {
+        self.before
+            .as_ref()
+            .or(self.after.as_ref())
+            .expect("row changes always have a before or after image")
+            .id
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LogicalWriteSet {
+    pub(crate) rows: BTreeMap<(String, RowId), RowChange>,
+    pub(crate) table_watermarks: BTreeMap<String, (RowId, RowId)>,
+    pub(crate) index_entries: BTreeMap<(u64, String, RowId), IndexEntryChange>,
+    pub(crate) receipt_keys: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct IndexEntryChange {
+    pub(crate) index_id: u64,
+    pub(crate) value: Value,
+    pub(crate) row_id: RowId,
+    pub(crate) before: bool,
+    pub(crate) after: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WriteSetSummary {
+    pub(crate) touched_tables: usize,
+    pub(crate) row_inserts: usize,
+    pub(crate) row_updates: usize,
+    pub(crate) row_deletes: usize,
+    pub(crate) index_inserts: usize,
+    pub(crate) index_deletes: usize,
+    pub(crate) receipt_changes: usize,
+}
+
+impl LogicalWriteSet {
+    pub(crate) fn record_receipt(&mut self, key: impl Into<String>) {
+        self.receipt_keys.insert(key.into());
+    }
+
+    pub(crate) fn summary(&self) -> WriteSetSummary {
+        let mut summary = WriteSetSummary {
+            receipt_changes: self.receipt_keys.len(),
+            ..WriteSetSummary::default()
+        };
+        let mut tables = BTreeSet::new();
+        tables.extend(self.table_watermarks.keys());
+        for ((table, _), change) in &self.rows {
+            tables.insert(table);
+            match (&change.before, &change.after) {
+                (None, Some(_)) => summary.row_inserts += 1,
+                (Some(_), Some(_)) => summary.row_updates += 1,
+                (Some(_), None) => summary.row_deletes += 1,
+                (None, None) => unreachable!("empty row changes are removed during coalescing"),
+            }
+        }
+        summary.touched_tables = tables.len();
+        for change in self.index_entries.values() {
+            match (change.before, change.after) {
+                (false, true) => summary.index_inserts += 1,
+                (true, false) => summary.index_deletes += 1,
+                _ => unreachable!("unchanged index entries are removed during coalescing"),
+            }
+        }
+        summary
+    }
 }
 
 #[derive(Clone)]
@@ -413,7 +515,7 @@ pub struct IndexDefinition {
     pub kind: IndexKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DurableMeta {
     pub sequence: u64,
     pub schema_revision: u64,
@@ -712,9 +814,101 @@ pub struct Database {
     migration_history: Vec<MigrationEntry>,
     #[serde(skip, default)]
     cursor_identity: crate::pagination::CursorIdentity,
+    #[serde(skip, default)]
+    pending_writes: LogicalWriteSet,
 }
 
 impl Database {
+    pub(crate) fn take_write_set(&mut self) -> LogicalWriteSet {
+        std::mem::take(&mut self.pending_writes)
+    }
+
+    fn record_row_changes(&mut self, table: &str, changes: &[RowChange]) {
+        for change in changes {
+            let key = (table.to_owned(), change.row_id());
+            match self.pending_writes.rows.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(change.clone());
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().after = change.after.clone();
+                    if entry.get().before.is_none() && entry.get().after.is_none() {
+                        entry.remove();
+                    }
+                }
+            }
+        }
+    }
+
+    fn record_table_watermark(&mut self, table: &str, before: RowId, after: RowId) {
+        if before == after {
+            return;
+        }
+        self.pending_writes
+            .table_watermarks
+            .entry(table.to_owned())
+            .and_modify(|watermark| watermark.1 = after)
+            .or_insert((before, after));
+    }
+
+    fn record_index_changes(
+        &mut self,
+        definitions: &BTreeMap<String, IndexDefinition>,
+        changes: &[RowChange],
+    ) {
+        for definition in definitions.values() {
+            for change in changes {
+                let before = change
+                    .before
+                    .as_ref()
+                    .and_then(|row| row_field(&row.fields, &definition.column));
+                let after = change
+                    .after
+                    .as_ref()
+                    .and_then(|row| row_field(&row.fields, &definition.column));
+                if before.is_some_and(|before| {
+                    after.is_some_and(|after| before.index_key() == after.index_key())
+                }) {
+                    continue;
+                }
+                if let Some(value) = before {
+                    self.record_index_entry(definition.id, value, change.row_id(), true, false);
+                }
+                if let Some(value) = after {
+                    self.record_index_entry(definition.id, value, change.row_id(), false, true);
+                }
+            }
+        }
+    }
+
+    fn record_index_entry(
+        &mut self,
+        index_id: u64,
+        value: &Value,
+        row_id: RowId,
+        before: bool,
+        after: bool,
+    ) {
+        let key = (index_id, value.index_key(), row_id);
+        match self.pending_writes.index_entries.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(IndexEntryChange {
+                    index_id,
+                    value: value.clone(),
+                    row_id,
+                    before,
+                    after,
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().after = after;
+                if entry.get().before == entry.get().after {
+                    entry.remove();
+                }
+            }
+        }
+    }
+
     pub fn execute(&mut self, stmt: Statement) -> Result<QueryResponse> {
         self.execute_with_deadline(stmt, None)
     }
@@ -867,7 +1061,7 @@ impl Database {
                 id: table_id,
                 name: name.clone(),
                 schema: columns,
-                rows: Vec::new(),
+                rows: imbl::Vector::new(),
                 next_row_id: 0,
                 row_type,
                 primary_key: key.clone(),
@@ -930,7 +1124,7 @@ impl Database {
         )))
     }
 
-    fn build_index(&self, name: &str, column: &str) -> Result<BTreeMap<String, Vec<RowId>>> {
+    fn build_index(&self, name: &str, column: &str) -> Result<IndexPosting> {
         let table = self.table(name)?;
         for row in &table.rows {
             if let Some(value) = row_field(&row.fields, column) {
@@ -997,23 +1191,26 @@ impl Database {
             .checked_add(count)
             .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
         let mut rows = table.rows.clone();
+        let mut changes = Vec::with_capacity(fields.len());
         let first_row_id = table.next_row_id;
         for (position, fields) in fields.into_iter().enumerate() {
             check_deadline_periodically(control, position)?;
             let offset = u64::try_from(position)
                 .map_err(|_| Error::new("E_LIMIT", "bulk insert row count exceeds u64"))?;
-            rows.push(Row {
+            let row = Arc::new(Row {
                 id: first_row_id + offset,
                 fields,
             });
+            rows.push_back(row.clone());
+            changes.push(RowChange::inserted(row));
         }
-        self.validate_primary_keys(name, &rows)?;
         check_deadline(control)?;
-        self.replace_rows_and_indexes(name, rows)?;
+        self.replace_rows_and_indexes(name, rows, &changes)?;
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             unreachable!("bulk insert table was validated")
         };
         table.next_row_id = next_row_id;
+        self.record_table_watermark(name, first_row_id, next_row_id);
 
         let affected = usize::try_from(count)
             .map_err(|_| Error::new("E_LIMIT", "bulk insert row count exceeds usize"))?;
@@ -1047,7 +1244,7 @@ impl Database {
             .get(name)
             .and_then(|columns| columns.get(&key))
             .and_then(|posting| posting.get(&key_value.index_key()))
-            .and_then(|ids| ids.first())
+            .and_then(|ids| ids.front())
             .copied();
         let action = if let Some(id) = existing_id {
             let mut rows = table.rows.clone();
@@ -1057,9 +1254,10 @@ impl Database {
                     format!("primary-key index for '{name}.{key}' references a missing row"),
                 )
             })?;
-            rows[position].fields = fields;
-            self.validate_primary_keys(name, &rows)?;
-            self.replace_rows_and_indexes(name, rows)?;
+            let before = rows[position].clone();
+            let after = Arc::new(Row { id, fields });
+            rows.set(position, after.clone());
+            self.replace_rows_and_indexes(name, rows, &[RowChange::updated(before, after)])?;
             UpsertAction::Updated
         } else {
             self.insert_fields(name, fields)?;
@@ -1128,28 +1326,42 @@ impl Database {
 
         let table = self.table(name)?;
         let mut rows = table.rows.clone();
-        let mut next_row_id = table.next_row_id;
-        let mut positions = BTreeMap::new();
-        for (position, row) in rows.iter().enumerate() {
-            let value = row_field(&row.fields, &key).ok_or_else(|| {
-                Error::new("E_FIELD", format!("missing primary key '{name}.{key}'"))
+        let initial_next_row_id = table.next_row_id;
+        let mut next_row_id = initial_next_row_id;
+        let primary_posting = self
+            .indexes
+            .get(name)
+            .and_then(|columns| columns.get(&key))
+            .cloned()
+            .ok_or_else(|| {
+                Error::new(
+                    "E_INDEX",
+                    format!("missing primary-key index '{name}.{key}'"),
+                )
             })?;
-            if positions.insert(value.index_key(), position).is_some() {
-                return Err(Error::new(
-                    "E_CONSTRAINT",
-                    format!("duplicate primary key '{name}.{key}'"),
-                ));
-            }
-        }
 
         let mut actions = Vec::with_capacity(fields.len());
+        let mut changes = Vec::with_capacity(fields.len());
         for (position, fields) in fields.into_iter().enumerate() {
             check_deadline_periodically(control, position)?;
             let key_value = row_field(&fields, &key)
                 .expect("bulk upsert rows were checked for their primary key")
                 .index_key();
-            if let Some(existing) = positions.get(&key_value).copied() {
-                rows[existing].fields = fields;
+            if let Some(id) = primary_posting
+                .get(&key_value)
+                .and_then(|ids| ids.front())
+                .copied()
+            {
+                let existing = rows.binary_search_by_key(&id, |row| row.id).map_err(|_| {
+                    Error::new(
+                        "E_INDEX",
+                        format!("primary-key index for '{name}.{key}' references a missing row"),
+                    )
+                })?;
+                let before = rows[existing].clone();
+                let after = Arc::new(Row { id, fields });
+                rows.set(existing, after.clone());
+                changes.push(RowChange::updated(before, after));
                 actions.push(UpsertAction::Updated);
             } else {
                 let id = next_row_id;
@@ -1157,17 +1369,20 @@ impl Database {
                     .checked_add(1)
                     .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
                 let new_position = rows.len();
-                rows.push(Row { id, fields });
-                positions.insert(key_value, new_position);
+                let row = Arc::new(Row { id, fields });
+                rows.push_back(row.clone());
+                debug_assert_eq!(new_position + 1, rows.len());
+                changes.push(RowChange::inserted(row));
                 actions.push(UpsertAction::Inserted);
             }
         }
         check_deadline(control)?;
-        self.replace_rows_and_indexes(name, rows)?;
+        self.replace_rows_and_indexes(name, rows, &changes)?;
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             unreachable!("bulk upsert table was validated")
         };
         table.next_row_id = next_row_id;
+        self.record_table_watermark(name, initial_next_row_id, next_row_id);
 
         let inserted = actions
             .iter()
@@ -1308,17 +1523,31 @@ impl Database {
             .checked_add(1)
             .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
         if let Some(cols) = self.indexes.get_mut(name) {
-            for (column, posting) in cols {
-                if let Some(value) = row_field(&fields, column) {
-                    posting.entry(value.index_key()).or_default().push(id);
+            let columns = cols.keys().cloned().collect::<Vec<_>>();
+            for column in columns {
+                if let Some(value) = row_field(&fields, &column) {
+                    let posting = cols
+                        .get_mut(&column)
+                        .expect("index column came from the same map");
+                    posting.entry(value.index_key()).or_default().push_back(id);
                 }
             }
         }
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             unreachable!()
         };
-        table.rows.push(Row { id, fields });
+        table.rows.push_back(Arc::new(Row { id, fields }));
         table.next_row_id = next_row_id;
+        let inserted = table.rows.back().expect("inserted row is present").clone();
+        let changes = [RowChange::inserted(inserted)];
+        self.record_row_changes(name, &changes);
+        let definitions = self
+            .index_definitions
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        self.record_index_changes(&definitions, &changes);
+        self.record_table_watermark(name, id, next_row_id);
         Ok(id)
     }
 
@@ -1334,10 +1563,18 @@ impl Database {
         let table = self.table(&target.from)?;
         let target_order = self.mutation_target_ids(target, control)?;
         let mut rows = table.rows.clone();
-        let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
+        let mut changes = Vec::with_capacity(target_order.len());
         let mut evaluation_budget = crate::expression::EvaluationBudget::new();
-        for row in rows.iter_mut().filter(|row| target_ids.contains(&row.id)) {
-            let original = row.fields.clone();
+        for (target_position, id) in target_order.iter().enumerate() {
+            check_deadline_periodically(control, target_position)?;
+            let position = rows.binary_search_by_key(id, |row| row.id).map_err(|_| {
+                Error::new(
+                    "E_INDEX",
+                    format!("mutation target references missing row ID {id}"),
+                )
+            })?;
+            let before = rows[position].clone();
+            let original = before.fields.clone();
             let mut values = Vec::with_capacity(assignments.len());
             for assignment in assignments.iter() {
                 let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
@@ -1360,21 +1597,24 @@ impl Database {
                     self.catalog.coerce(&value, &expected, "update value")?,
                 ));
             }
+            let mut fields = original;
             for (path, value) in values {
-                set_row_field(&mut row.fields, path, value)?;
+                set_row_field(&mut fields, path, value)?;
             }
-            let checked = self.catalog.coerce(
-                &Value::Record(row.fields.clone()),
-                &row_type,
-                "updated row",
-            )?;
+            let checked = self
+                .catalog
+                .coerce(&Value::Record(fields), &row_type, "updated row")?;
             let Value::Record(fields) = checked.unwrapped() else {
                 unreachable!()
             };
-            row.fields = fields.clone();
+            let after = Arc::new(Row {
+                id: *id,
+                fields: fields.clone(),
+            });
+            rows.set(position, after.clone());
+            changes.push(RowChange::updated(before, after));
         }
-        self.validate_primary_keys(&target.from, &rows)?;
-        let affected = target_ids.len();
+        let affected = changes.len();
         let returned_fields = target_order
             .iter()
             .filter_map(|id| {
@@ -1384,7 +1624,7 @@ impl Database {
             })
             .collect::<Vec<_>>();
         let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
-        self.replace_rows_and_indexes(&target.from, rows)?;
+        self.replace_rows_and_indexes(&target.from, rows, &changes)?;
         let mut response =
             QueryResponse::ok_message(format!("updated {affected} row(s) in '{}'", target.from));
         response.affected_rows = Some(affected);
@@ -1458,7 +1698,6 @@ impl Database {
         let returning = self.bind_returning(&target.from, returning)?;
         self.bind_delete_operation(target)?;
         let target_order = self.mutation_target_ids(target, control)?;
-        let target_ids = target_order.iter().copied().collect::<BTreeSet<_>>();
         let mut rows = self.table(&target.from)?.rows.clone();
         let returned_fields = target_order
             .iter()
@@ -1469,9 +1708,24 @@ impl Database {
             })
             .collect::<Vec<_>>();
         let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
-        rows.retain(|row| !target_ids.contains(&row.id));
-        self.replace_rows_and_indexes(&target.from, rows)?;
-        let affected = target_ids.len();
+        let mut positions = Vec::with_capacity(target_order.len());
+        let mut changes = Vec::with_capacity(target_order.len());
+        for id in &target_order {
+            let position = rows.binary_search_by_key(id, |row| row.id).map_err(|_| {
+                Error::new(
+                    "E_INDEX",
+                    format!("mutation target references missing row ID {id}"),
+                )
+            })?;
+            positions.push(position);
+            changes.push(RowChange::deleted(rows[position].clone()));
+        }
+        positions.sort_unstable_by(|left, right| right.cmp(left));
+        for position in positions {
+            rows.remove(position);
+        }
+        self.replace_rows_and_indexes(&target.from, rows, &changes)?;
+        let affected = changes.len();
         let mut response =
             QueryResponse::ok_message(format!("deleted {affected} row(s) from '{}'", target.from));
         response.affected_rows = Some(affected);
@@ -1725,7 +1979,7 @@ impl Database {
         Ok(rows.into_iter().map(|row| row.id).collect())
     }
 
-    fn validate_primary_keys(&self, name: &str, rows: &[Row]) -> Result<()> {
+    fn validate_primary_keys(&self, name: &str, rows: &imbl::Vector<Arc<Row>>) -> Result<()> {
         let table = self.table(name)?;
         let Some(key) = &table.primary_key else {
             return Ok(());
@@ -1745,7 +1999,7 @@ impl Database {
         Ok(())
     }
 
-    fn validate_unique_indexes(&self, name: &str, rows: &[Row]) -> Result<()> {
+    fn validate_unique_indexes(&self, name: &str, rows: &imbl::Vector<Arc<Row>>) -> Result<()> {
         let Some(definitions) = self.index_definitions.get(name) else {
             return Ok(());
         };
@@ -1775,37 +2029,160 @@ impl Database {
         Ok(())
     }
 
-    fn replace_rows_and_indexes(&mut self, name: &str, rows: Vec<Row>) -> Result<()> {
-        self.validate_primary_keys(name, &rows)?;
-        self.validate_unique_indexes(name, &rows)?;
-        if let Some(definitions) = self.index_definitions.get(name) {
-            for definition in definitions.values() {
-                for row in &rows {
-                    if let Some(value) = row_field(&row.fields, &definition.column) {
-                        validate_index_value(value, name, &definition.column)?;
-                    }
+    fn replace_rows_and_indexes(
+        &mut self,
+        name: &str,
+        rows: imbl::Vector<Arc<Row>>,
+        changes: &[RowChange],
+    ) -> Result<()> {
+        let primary_key = self.table(name)?.primary_key.clone();
+        let definitions = self
+            .index_definitions
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let mut indexes = self.indexes.get(name).cloned().unwrap_or_default();
+
+        for change in changes {
+            if let (Some(before), Some(after)) = (&change.before, &change.after)
+                && before.id != after.id
+            {
+                return Err(Error::new(
+                    "E_INDEX",
+                    "an updated row cannot change its stable row ID",
+                ));
+            }
+            if let Some(after) = &change.after {
+                for definition in definitions.values() {
+                    let value = row_field(&after.fields, &definition.column).ok_or_else(|| {
+                        Error::new(
+                            "E_FIELD",
+                            format!("missing indexed field '{name}.{}'", definition.column),
+                        )
+                    })?;
+                    validate_index_value(value, name, &definition.column)?;
                 }
             }
         }
-        let columns = self
-            .indexes
-            .get(name)
-            .map(|columns| columns.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let indexes = columns
-            .into_iter()
-            .map(|column| {
-                let posting = build_posting(&rows, &column);
-                (column, posting)
-            })
-            .collect();
+
+        // Remove every before image first so atomic swaps between unique keys
+        // validate against the final candidate rather than statement order.
+        for definition in definitions.values() {
+            let posting = indexes.get_mut(&definition.column).ok_or_else(|| {
+                Error::new(
+                    "E_INDEX",
+                    format!("missing in-memory index '{name}.{}'", definition.column),
+                )
+            })?;
+            for change in changes {
+                let Some(before) = change.before.as_ref() else {
+                    continue;
+                };
+                let value = row_field(&before.fields, &definition.column).ok_or_else(|| {
+                    Error::new(
+                        "E_FIELD",
+                        format!("missing indexed field '{name}.{}'", definition.column),
+                    )
+                })?;
+                let key = value.index_key();
+                if change.after.as_ref().is_some_and(|after| {
+                    row_field(&after.fields, &definition.column)
+                        .is_some_and(|value| value.index_key() == key)
+                }) {
+                    continue;
+                }
+                let remove_key = {
+                    let ids = posting.get_mut(&key).ok_or_else(|| {
+                        Error::new(
+                            "E_INDEX",
+                            format!(
+                                "index '{name}.{}' is missing row ID {}",
+                                definition.column, before.id
+                            ),
+                        )
+                    })?;
+                    let position = ids.binary_search(&before.id).map_err(|_| {
+                        Error::new(
+                            "E_INDEX",
+                            format!(
+                                "index '{name}.{}' is missing row ID {}",
+                                definition.column, before.id
+                            ),
+                        )
+                    })?;
+                    ids.remove(position);
+                    ids.is_empty()
+                };
+                if remove_key {
+                    posting.remove(&key);
+                }
+            }
+        }
+
+        for definition in definitions.values() {
+            let unique = definition.kind.is_unique()
+                || primary_key.as_deref() == Some(definition.column.as_str());
+            let posting = indexes.get_mut(&definition.column).ok_or_else(|| {
+                Error::new(
+                    "E_INDEX",
+                    format!("missing in-memory index '{name}.{}'", definition.column),
+                )
+            })?;
+            for change in changes {
+                let Some(after) = change.after.as_ref() else {
+                    continue;
+                };
+                let value = row_field(&after.fields, &definition.column).ok_or_else(|| {
+                    Error::new(
+                        "E_FIELD",
+                        format!("missing indexed field '{name}.{}'", definition.column),
+                    )
+                })?;
+                let key = value.index_key();
+                if change.before.as_ref().is_some_and(|before| {
+                    row_field(&before.fields, &definition.column)
+                        .is_some_and(|value| value.index_key() == key)
+                }) {
+                    continue;
+                }
+                let ids = posting.entry(key).or_default();
+                if unique && !ids.is_empty() {
+                    return Err(Error::new(
+                        "E_CONSTRAINT",
+                        if primary_key.as_deref() == Some(definition.column.as_str()) {
+                            format!("duplicate primary key '{name}.{}'", definition.column)
+                        } else {
+                            format!(
+                                "duplicate value for unique index '{name}.{}'",
+                                definition.column
+                            )
+                        },
+                    ));
+                }
+                match ids.binary_search(&after.id) {
+                    Ok(_) => {
+                        return Err(Error::new(
+                            "E_INDEX",
+                            format!(
+                                "index '{name}.{}' already contains row ID {}",
+                                definition.column, after.id
+                            ),
+                        ));
+                    }
+                    Err(position) => ids.insert(position, after.id),
+                }
+            }
+        }
+
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
         };
         table.rows = rows;
-        if let Some(existing) = self.indexes.get_mut(name) {
-            *existing = indexes;
+        if !definitions.is_empty() {
+            self.indexes.insert(name.to_owned(), indexes);
         }
+        self.record_row_changes(name, changes);
+        self.record_index_changes(&definitions, changes);
         Ok(())
     }
 
@@ -2529,7 +2906,10 @@ impl Database {
                 .get(&pipeline.from)
                 .and_then(|columns| columns.get(column))
         {
-            let candidates = posting.get(&value.index_key()).cloned().unwrap_or_default();
+            let candidates: Vec<RowId> = posting
+                .get(&value.index_key())
+                .map(|rows| rows.iter().copied().collect())
+                .unwrap_or_default();
             let kind = if table.primary_key.as_deref() == Some(column) {
                 QueryAccessKind::PrimaryKeyLookup
             } else {
@@ -2898,6 +3278,7 @@ impl Database {
                 // Transitional snapshots did not store row identities. Their
                 // vector order was also their durable row identity.
                 for (id, row) in table.rows.iter_mut().enumerate() {
+                    let row = Arc::make_mut(row);
                     row.id = u64::try_from(id)
                         .map_err(|_| Error::new("E_LIMIT", "row ID space exhausted"))?;
                 }
@@ -3164,6 +3545,54 @@ impl Database {
         entries
     }
 
+    pub(crate) fn durable_table_catalog_entry(&self, name: &str) -> Result<DurableCatalogEntry> {
+        let table = self.table(name)?;
+        Ok(DurableCatalogEntry::Table(DurableTable {
+            id: table.id,
+            name: table.name.clone(),
+            schema: table.schema.clone(),
+            row_type: table.row_type,
+            primary_key: table.primary_key.clone(),
+            next_row_id: table.next_row_id,
+        }))
+    }
+
+    pub(crate) fn durable_row_with_codec(
+        &self,
+        table_name: &str,
+        row: &Row,
+        codec_version: u16,
+    ) -> Result<(u64, Vec<u8>)> {
+        let table = self.table(table_name)?;
+        let ty = table
+            .row_type
+            .map(ScalarType::Ref)
+            .unwrap_or_else(|| ScalarType::Record(table.schema.clone()));
+        let record = Value::Record(row.fields.clone());
+        let value = match table.row_type {
+            Some(type_id) => Value::Named {
+                type_id,
+                value: Box::new(record),
+            },
+            None => record,
+        };
+        let bytes = match codec_version {
+            crate::codec::VALUE_CODEC_VERSION => {
+                crate::codec::encode_value(&self.catalog, &ty, &value)?
+            }
+            crate::codec::PRODUCTION_VALUE_CODEC_VERSION => {
+                crate::codec::encode_value_v2(&self.catalog, &ty, &value)?
+            }
+            _ => {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!("unsupported value codec version {codec_version}"),
+                ));
+            }
+        };
+        Ok((table.id, bytes))
+    }
+
     #[cfg(test)]
     pub(crate) fn durable_rows(&self) -> Result<Vec<(u64, u64, Vec<u8>)>> {
         self.durable_rows_with_codec(crate::codec::VALUE_CODEC_VERSION)
@@ -3330,7 +3759,7 @@ impl Database {
                             id: table.id,
                             name: table.name,
                             schema: table.schema,
-                            rows: Vec::new(),
+                            rows: imbl::Vector::new(),
                             next_row_id: table.next_row_id,
                             row_type: table.row_type,
                             primary_key: table.primary_key,
@@ -3433,7 +3862,7 @@ impl Database {
             let Some(DbObject::Table(table)) = objects.get_mut(&table_name) else {
                 unreachable!()
             };
-            table.rows = rows;
+            table.rows = rows.into_iter().map(Arc::new).collect();
             let inferred_next = table.rows.last().map_or(0, |row| row.id.saturating_add(1));
             if table.next_row_id == 0 {
                 // Catalogs written before stable RowIds did not persist an
@@ -3448,7 +3877,7 @@ impl Database {
         }
         let mut database = Self {
             objects,
-            indexes: BTreeMap::new(),
+            indexes: imbl::OrdMap::new(),
             index_definitions,
             catalog,
             sequence: meta.sequence,
@@ -3458,6 +3887,7 @@ impl Database {
                 meta.cursor_instance_id,
                 meta.cursor_secret,
             ),
+            pending_writes: LogicalWriteSet::default(),
         };
         crate::migration::validate_history(&database.migration_history)?;
         if let Some(head) = database.migration_history.last()
@@ -3614,11 +4044,14 @@ fn row_field<'a>(row: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a Val
     row.get(head)?.field(tail)
 }
 
-fn build_posting(rows: &[Row], column: &str) -> BTreeMap<String, Vec<RowId>> {
-    let mut posting: BTreeMap<String, Vec<RowId>> = BTreeMap::new();
+fn build_posting(rows: &imbl::Vector<Arc<Row>>, column: &str) -> IndexPosting {
+    let mut posting = IndexPosting::new();
     for row in rows {
         if let Some(value) = row_field(&row.fields, column) {
-            posting.entry(value.index_key()).or_default().push(row.id);
+            posting
+                .entry(value.index_key())
+                .or_default()
+                .push_back(row.id);
         }
     }
     posting
@@ -3753,6 +4186,83 @@ mod tests {
         );
         assert_eq!(table(&database, "entries").next_row_id, 3);
         assert_eq!(database.indexes["entries"]["id"].values().count(), 3);
+    }
+
+    #[test]
+    fn row_candidates_share_unchanged_tables_and_row_values() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "create table entries (id int, value int)\ncreate index entries (id)\ncreate index entries (value)\ncreate table untouched (id int)\ncreate index untouched (id)",
+        );
+        for id in 0..80 {
+            execute(
+                &mut database,
+                &format!("insert entries {{id = {id}, value = {id}}}"),
+            );
+            execute(&mut database, &format!("insert untouched {{id = {id}}}"));
+        }
+        let before = database.clone();
+
+        execute(
+            &mut database,
+            "update entries\nfilter id == 40\nset value = 400",
+        );
+
+        let before_entries = table(&before, "entries");
+        let after_entries = table(&database, "entries");
+        assert!(!before_entries.rows.ptr_eq(&after_entries.rows));
+        assert!(Arc::ptr_eq(&before_entries.rows[0], &after_entries.rows[0]));
+        assert!(!Arc::ptr_eq(
+            &before_entries.rows[40],
+            &after_entries.rows[40]
+        ));
+        assert!(
+            table(&before, "untouched")
+                .rows
+                .ptr_eq(&table(&database, "untouched").rows)
+        );
+        assert!(before.indexes["untouched"].ptr_eq(&database.indexes["untouched"]));
+        assert!(before.indexes["entries"]["id"].ptr_eq(&database.indexes["entries"]["id"]));
+        assert!(!before.indexes["entries"]["value"].ptr_eq(&database.indexes["entries"]["value"]));
+    }
+
+    #[test]
+    fn logical_write_set_coalesces_a_complete_script() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "create table entries (id int, value int)\ncreate index entries (id)\ncreate index entries (value)\ninsert entries {id = 0, value = 0}",
+        );
+        let _ = database.take_write_set();
+
+        execute(
+            &mut database,
+            "insert entries {id = 1, value = 10}\nupdate entries | filter id == 1 | set value = 11\ninsert entries {id = 2, value = 20}\ndelete entries | filter id == 2\nupdate entries | filter id == 0 | set value = 1\nupdate entries | filter id == 0 | set value = 2\ndelete entries | filter id == 0",
+        );
+
+        let writes = database.take_write_set();
+        assert_eq!(
+            writes.summary(),
+            WriteSetSummary {
+                touched_tables: 1,
+                row_inserts: 1,
+                row_updates: 0,
+                row_deletes: 1,
+                index_inserts: 2,
+                index_deletes: 2,
+                receipt_changes: 0,
+            }
+        );
+        assert_eq!(writes.table_watermarks["entries"], (1, 3));
+        assert_eq!(writes.rows.len(), 2);
+        assert_eq!(writes.index_entries.len(), 4);
+        let inserted = &writes.rows[&("entries".to_string(), 1)];
+        assert!(inserted.before.is_none());
+        assert!(inserted.after.as_ref().unwrap().fields["value"].cmp_eq(&Value::Int(11)));
+        let deleted = &writes.rows[&("entries".to_string(), 0)];
+        assert!(deleted.before.as_ref().unwrap().fields["value"].cmp_eq(&Value::Int(0)));
+        assert!(deleted.after.is_none());
     }
 
     #[test]

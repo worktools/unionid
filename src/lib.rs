@@ -36,7 +36,7 @@ pub use db::{
     PageAccessKind, PageInfo, PageOrder, PagePlan, QueryAccessKind, QueryAccessPlan, QueryPlan,
     QueryPlanStage, QueryResponse, QueryStageKind, SchemaInfo, TypedPage, UpsertAction,
 };
-pub use engine::{Engine, PreparedQuery, StorageIntegrity, StorageUpgrade};
+pub use engine::{Engine, MutationProfile, PreparedQuery, StorageIntegrity, StorageUpgrade};
 pub use error::{Error, Result, Span};
 pub use formatter::format_source;
 pub use idempotency::{

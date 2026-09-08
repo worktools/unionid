@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::db::QueryResponse;
@@ -12,7 +10,7 @@ pub const MAX_IDEMPOTENCY_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_IDEMPOTENCY_PRUNE_RECEIPTS: usize = 1_000;
 const DURABLE_CODEC_OVERHEAD: usize = 6;
 
-pub(crate) type ReceiptMap = BTreeMap<String, IdempotencyReceipt>;
+pub(crate) type ReceiptMap = imbl::OrdMap<String, IdempotencyReceipt>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdempotencyReceipt {
@@ -267,9 +265,10 @@ mod tests {
     #[test]
     fn rejects_new_receipts_at_count_capacity_but_validates_existing_state() {
         let stored = receipt("ok".into());
-        let receipts = (0..MAX_IDEMPOTENCY_RECEIPTS)
-            .map(|index| (format!("key-{index}"), stored.clone()))
-            .collect::<ReceiptMap>();
+        let mut receipts = ReceiptMap::new();
+        for index in 0..MAX_IDEMPOTENCY_RECEIPTS {
+            receipts.insert(format!("key-{index}"), stored.clone());
+        }
         let error = validate_new_receipt(&receipts, &stored).unwrap_err();
         assert_eq!(error.code, "E_IDEMPOTENCY_CAPACITY");
         assert!(validate_receipts(&receipts, 1).is_ok());
