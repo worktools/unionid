@@ -66,6 +66,7 @@
 - v0.1 发布闭环使用 `scripts/package-release.py` 生成包含完整文档与示例的原生 target 压缩包、`RELEASE.json` 与 SHA-256；包内教程由 `scripts/verify-release.py` 从空目录验证本地 redb CLI 和 TCP，并由集成测试核对 Rust Engine 的 typed 语义。入门和升级契约分别见 `docs/GETTING_STARTED.md` 与 `docs/UPGRADING.md`；#103 跟踪实际 `v0.1.0` tag 与 GitHub Release。
 - README 是面向用户的中英双语产品入口，优先解释“直接用 ADT 描述数据库数据”和“query language 直接理解 ADT”两个核心特点，并保留最短可运行路径。实现历史、测试矩阵、原型兼容、存储内部结构和实时计划分别放在 `docs/DEVELOPMENT.md`、专题文档与 GitHub issues，避免重新堆回 README。
 - `Engine::open_redb_read_only`、`run/cli/server --db --read-only` 提供统一只读执行边界；完整解析和参数绑定后、创建候选状态或持久事务前以 `E_READ_ONLY` 拒绝 mutation，`introspection.read_only` 可验证实际状态。
+- `ConcurrentEngine` 以 immutable `Arc<Database>`/receipt committed state 提供最多 8 个一致并发读快照；读取在 writer lock 外执行，写入和 maintenance 串行。active/queued read/write 与 peak readers 可观测，deadline/shutdown 限制等待和生命周期；设计与 10k 基准见 `docs/rfc/0006-consistent-read-snapshots.md`。
 - 持久幂等写入契约见 `docs/rfc/0002-idempotent-write-receipts.md`：独立 key + canonical digest 保存完整成功回执，目标是 exactly-once effect；不自动 TTL/LRU，首次持久回执原子进入 storage format 2。`request_id` 仍只用于单次尝试关联。
 - 稳定分页契约见 `docs/rfc/0003-stable-cursor-pagination.md`：首版使用主键收尾的唯一 keyset 顺序和 sequence-pinned traversal；任意成功写入使旧 cursor 在扫描前明确过期。语言 `page`、Rust API 与 version 1 结构映射同一 PageSpec；HMAC cursor、bounded page 由 #131 实现，接口旅程与取消/streaming 后续切片由 #132 跟踪。
 - 六类生产标量已接通源码、Rust wrapper/serde、protocol v2、storage format 4、value/index/receipt codec、cursor、backup 与 migration。decimal 使用 `decimal P S` 和 context typed string literal，支持同类型 checked 加减/negation/sum；乘除、avg 与舍入保持 deferred。

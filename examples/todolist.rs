@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, oneshot};
 use unionid::backup;
 use unionid::migration::MigrationFile;
 use unionid::protocol::{Request, Response, VERSION};
-use unionid::server::{execute_protocol_request, execute_protocol_request_until};
+use unionid::server::ConcurrentEngine;
 use unionid::{Engine, Error, PageSpec, SchemaInfo};
 
 const HTTP_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -164,7 +164,7 @@ struct Service {
     database: PathBuf,
     restored: PathBuf,
     archive: PathBuf,
-    engine: Option<Engine>,
+    engine: Option<ConcurrentEngine>,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let state = Arc::new(Mutex::new(Service {
-        engine: Some(Engine::open_redb(&database)?),
+        engine: Some(ConcurrentEngine::new(Engine::open_redb(&database)?)),
         database,
         restored,
         archive: archive.clone(),
@@ -570,11 +570,20 @@ fn ensure_admin_ok(response: &AdminResponse) -> Result<(), Error> {
 }
 
 async fn query(State(state): State<Shared>, Json(request): Json<Request>) -> Json<Response> {
-    let mut service = state.lock().await;
-    let response = match service.engine.as_mut() {
-        Some(engine) => {
-            execute_protocol_request_until(engine, request, Instant::now() + HTTP_EXECUTION_TIMEOUT)
-        }
+    let engine = state.lock().await.engine.clone();
+    let response = match engine {
+        Some(engine) => match tokio::task::spawn_blocking(move || {
+            engine.execute_protocol_request_until(request, Instant::now() + HTTP_EXECUTION_TIMEOUT)
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => Response::failure(
+                "http-worker",
+                Error::new("E_INTERNAL", format!("HTTP query worker failed: {error}")),
+                unavailable_schema(),
+            ),
+        },
         None => Response::failure(
             request.request_id,
             engine_unavailable(),
@@ -590,7 +599,7 @@ async fn restored_query(
 ) -> Json<Response> {
     let service = state.lock().await;
     let response = match Engine::open_redb(&service.restored) {
-        Ok(mut engine) => execute_protocol_request(&mut engine, request),
+        Ok(engine) => ConcurrentEngine::new(engine).execute_protocol_request(request),
         Err(error) => Response::failure(
             request.request_id,
             error,
@@ -645,9 +654,9 @@ async fn admin_with_engine<T: Serialize>(
         Ok(files) => files,
         Err(error) => return Json(admin_error(request.request_id, error)),
     };
-    let mut service = state.lock().await;
-    Json(match service.engine.as_mut() {
-        Some(engine) => match operation(engine, &files) {
+    let service = state.lock().await;
+    Json(match service.engine.as_ref() {
+        Some(engine) => match engine.with_exclusive(|engine| operation(engine, &files)) {
             Ok(result) => admin_ok(request.request_id, result),
             Err(error) => admin_error(request.request_id, error),
         },
@@ -666,7 +675,7 @@ async fn restart(
     service.engine.take();
     match Engine::open_redb(&service.database) {
         Ok(engine) => {
-            service.engine = Some(engine);
+            service.engine = Some(ConcurrentEngine::new(engine));
             Json(admin_ok(request.request_id, json!({"reopened": true})))
         }
         Err(error) => Json(admin_error(request.request_id, error)),
@@ -680,9 +689,9 @@ async fn check(
     if let Some(response) = validate_admin(&request) {
         return Json(response);
     }
-    let mut service = state.lock().await;
-    Json(match service.engine.as_mut() {
-        Some(engine) => match engine.check_integrity() {
+    let service = state.lock().await;
+    Json(match service.engine.as_ref() {
+        Some(engine) => match engine.with_exclusive(Engine::check_integrity) {
             Ok(result) => admin_ok(request.request_id, result),
             Err(error) => admin_error(request.request_id, error),
         },
@@ -704,11 +713,11 @@ async fn create_backup(
     Json(match (result, reopen) {
         (_, Err(error)) => admin_error(request.request_id, error),
         (Ok(result), Ok(engine)) => {
-            service.engine = Some(engine);
+            service.engine = Some(ConcurrentEngine::new(engine));
             admin_ok(request.request_id, result)
         }
         (Err(error), Ok(engine)) => {
-            service.engine = Some(engine);
+            service.engine = Some(ConcurrentEngine::new(engine));
             admin_error(request.request_id, error)
         }
     })

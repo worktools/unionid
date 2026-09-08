@@ -785,6 +785,21 @@ impl Database {
         }
     }
 
+    pub(crate) fn execute_read(
+        &self,
+        stmt: Statement,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<QueryResponse> {
+        match stmt {
+            Statement::Explain(pipeline) => self.explain(pipeline),
+            Statement::Pipeline(pipeline) => self.query(pipeline, deadline),
+            _ => Err(Error::new(
+                "E_READ_SNAPSHOT",
+                "immutable read snapshots only execute query and explain statements",
+            )),
+        }
+    }
+
     fn table(&self, name: &str) -> Result<&Table> {
         let Some(DbObject::Table(table)) = self.objects.get(name) else {
             return Err(Error::new("E_TABLE", format!("table '{name}' not found")));

@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ use crate::{Engine, Error, QueryResponse};
 pub const MAX_FRAME_BYTES: usize = crate::syntax::MAX_SOURCE_BYTES * 6 + 256;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CONNECTIONS: usize = 64;
+pub const MAX_CONCURRENT_READS: usize = 8;
 const CONNECTION_POLL: Duration = Duration::from_millis(100);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(25);
@@ -26,6 +27,286 @@ pub struct ServerStats {
     pub rejected_connections: usize,
     pub requests: usize,
     pub failed_requests: usize,
+    pub concurrency: ConcurrencyStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct ConcurrencyStats {
+    pub active_reads: usize,
+    pub queued_reads: usize,
+    pub active_writes: usize,
+    pub queued_writes: usize,
+    pub peak_active_reads: usize,
+    pub max_active_reads: usize,
+}
+
+#[derive(Clone)]
+pub struct ConcurrentEngine {
+    inner: Arc<ConcurrentEngineInner>,
+}
+
+struct ConcurrentEngineInner {
+    engine: Mutex<Engine>,
+    read_slots: Mutex<usize>,
+    read_ready: Condvar,
+    active_reads: AtomicUsize,
+    queued_reads: AtomicUsize,
+    active_writes: AtomicUsize,
+    queued_writes: AtomicUsize,
+    peak_active_reads: AtomicUsize,
+}
+
+impl ConcurrentEngine {
+    pub fn new(engine: Engine) -> Self {
+        Self {
+            inner: Arc::new(ConcurrentEngineInner {
+                engine: Mutex::new(engine),
+                read_slots: Mutex::new(0),
+                read_ready: Condvar::new(),
+                active_reads: AtomicUsize::new(0),
+                queued_reads: AtomicUsize::new(0),
+                active_writes: AtomicUsize::new(0),
+                queued_writes: AtomicUsize::new(0),
+                peak_active_reads: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    pub fn stats(&self) -> ConcurrencyStats {
+        ConcurrencyStats {
+            active_reads: self.inner.active_reads.load(Ordering::Relaxed),
+            queued_reads: self.inner.queued_reads.load(Ordering::Relaxed),
+            active_writes: self.inner.active_writes.load(Ordering::Relaxed),
+            queued_writes: self.inner.queued_writes.load(Ordering::Relaxed),
+            peak_active_reads: self.inner.peak_active_reads.load(Ordering::Relaxed),
+            max_active_reads: MAX_CONCURRENT_READS,
+        }
+    }
+
+    pub fn execute(&self, source: &str) -> QueryResponse {
+        self.execute_until(source, Instant::now() + EXECUTION_TIMEOUT, None)
+    }
+
+    fn execute_until(
+        &self,
+        source: &str,
+        deadline: Instant,
+        shutdown: Option<&AtomicBool>,
+    ) -> QueryResponse {
+        if source_is_read_only(source) {
+            match self.with_read_snapshot(deadline, shutdown, |snapshot| {
+                snapshot.execute_with_params_until(
+                    source,
+                    std::collections::BTreeMap::new(),
+                    None,
+                    deadline,
+                )
+            }) {
+                Ok(response) => response,
+                Err(error) => self.failure_with_schema(error),
+            }
+        } else {
+            self.with_writer(|engine| {
+                engine.execute_with_params_until(
+                    source,
+                    std::collections::BTreeMap::new(),
+                    None,
+                    deadline,
+                )
+            })
+        }
+    }
+
+    pub fn execute_protocol_request(&self, request: ProtocolRequest) -> ProtocolResponse {
+        self.execute_protocol_request_until(request, Instant::now() + EXECUTION_TIMEOUT)
+    }
+
+    pub fn execute_protocol_request_until(
+        &self,
+        request: ProtocolRequest,
+        deadline: Instant,
+    ) -> ProtocolResponse {
+        self.execute_protocol_request_until_shutdown(request, deadline, None)
+    }
+
+    /// Run maintenance that needs exclusive mutable access to the Engine.
+    /// Reads already holding snapshots continue on their captured commit;
+    /// snapshot capture and other writes wait until this operation returns.
+    pub fn with_exclusive<T>(&self, operation: impl FnOnce(&mut Engine) -> T) -> T {
+        self.with_writer(operation)
+    }
+
+    fn execute_protocol_request_until_shutdown(
+        &self,
+        request: ProtocolRequest,
+        deadline: Instant,
+        shutdown: Option<&AtomicBool>,
+    ) -> ProtocolResponse {
+        if protocol_request_is_read_only(&request) {
+            let request_id = request.request_id.clone();
+            let version = request.version;
+            match self.with_read_snapshot(deadline, shutdown, |snapshot| {
+                execute_protocol_request_until(snapshot, request, deadline)
+            }) {
+                Ok(response) => response,
+                Err(error) => {
+                    let mut response =
+                        ProtocolResponse::failure(request_id, error, self.schema_info());
+                    response.version = version;
+                    response
+                }
+            }
+        } else {
+            self.with_writer(|engine| execute_protocol_request_until(engine, request, deadline))
+        }
+    }
+
+    fn schema_info(&self) -> crate::SchemaInfo {
+        self.inner
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .schema_info()
+    }
+
+    fn failure_with_schema(&self, error: Error) -> QueryResponse {
+        let mut response = QueryResponse::failure(error);
+        response.schema = Some(self.schema_info());
+        response
+    }
+
+    fn with_writer<T>(&self, execute: impl FnOnce(&mut Engine) -> T) -> T {
+        self.inner.queued_writes.fetch_add(1, Ordering::AcqRel);
+        let mut engine = self
+            .inner
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.inner.queued_writes.fetch_sub(1, Ordering::AcqRel);
+        self.inner.active_writes.fetch_add(1, Ordering::AcqRel);
+        struct ActiveWrite<'a>(&'a AtomicUsize);
+        impl Drop for ActiveWrite<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        let _active = ActiveWrite(&self.inner.active_writes);
+        execute(&mut engine)
+    }
+
+    fn with_read_snapshot<T>(
+        &self,
+        deadline: Instant,
+        shutdown: Option<&AtomicBool>,
+        execute: impl FnOnce(&mut Engine) -> T,
+    ) -> Result<T, Error> {
+        let mut permit = self.acquire_read(deadline, shutdown)?;
+        let mut snapshot = self
+            .inner
+            .engine
+            .lock()
+            .map_err(|_| Error::new("E_INTERNAL", "engine lock poisoned"))?
+            .read_snapshot();
+        permit.start();
+        let result = execute(&mut snapshot);
+        drop(permit);
+        Ok(result)
+    }
+
+    fn acquire_read(
+        &self,
+        deadline: Instant,
+        shutdown: Option<&AtomicBool>,
+    ) -> Result<ReadPermit<'_>, Error> {
+        self.inner.queued_reads.fetch_add(1, Ordering::AcqRel);
+        if shutdown.is_some_and(|signal| signal.load(Ordering::Acquire)) {
+            self.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
+            return Err(Error::new("E_SHUTDOWN", "server is shutting down"));
+        }
+        let mut active = self
+            .inner
+            .read_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *active >= MAX_CONCURRENT_READS {
+            if shutdown.is_some_and(|signal| signal.load(Ordering::Acquire)) {
+                self.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
+                return Err(Error::new("E_SHUTDOWN", "server is shutting down"));
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                self.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
+                return Err(Error::new(
+                    "E_TIMEOUT",
+                    "request deadline expired while waiting for a read snapshot",
+                ));
+            };
+            let wait = remaining.min(CONNECTION_POLL);
+            let (next, _) = self
+                .inner
+                .read_ready
+                .wait_timeout(active, wait)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            active = next;
+        }
+        *active += 1;
+        Ok(ReadPermit {
+            owner: self,
+            started: false,
+        })
+    }
+}
+
+struct ReadPermit<'a> {
+    owner: &'a ConcurrentEngine,
+    started: bool,
+}
+
+impl ReadPermit<'_> {
+    fn start(&mut self) {
+        debug_assert!(!self.started);
+        self.started = true;
+        self.owner.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
+        let current = self.owner.inner.active_reads.fetch_add(1, Ordering::AcqRel) + 1;
+        self.owner
+            .inner
+            .peak_active_reads
+            .fetch_max(current, Ordering::AcqRel);
+    }
+}
+
+impl Drop for ReadPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .owner
+            .inner
+            .read_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active -= 1;
+        if self.started {
+            self.owner.inner.active_reads.fetch_sub(1, Ordering::AcqRel);
+        } else {
+            self.owner.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.owner.inner.read_ready.notify_one();
+    }
+}
+
+fn source_is_read_only(source: &str) -> bool {
+    crate::syntax::parse(source).map_or(true, |statements| {
+        statements
+            .iter()
+            .all(|located| !located.statement.is_mutating())
+    })
+}
+
+fn protocol_request_is_read_only(request: &ProtocolRequest) -> bool {
+    match request.receipts.as_ref() {
+        Some(ReceiptOperation::Prune { confirm: true, .. }) => false,
+        Some(ReceiptOperation::Status | ReceiptOperation::Prune { .. }) => true,
+        None if request.introspect.is_some() => true,
+        None => source_is_read_only(&request.query),
+    }
 }
 
 #[derive(Default)]
@@ -38,12 +319,13 @@ struct RuntimeStats {
 }
 
 impl RuntimeStats {
-    fn snapshot(&self) -> ServerStats {
+    fn snapshot(&self, concurrency: ConcurrencyStats) -> ServerStats {
         ServerStats {
             accepted_connections: self.accepted.load(Ordering::Relaxed),
             rejected_connections: self.rejected.load(Ordering::Relaxed),
             requests: self.requests.load(Ordering::Relaxed),
             failed_requests: self.failed.load(Ordering::Relaxed),
+            concurrency,
         }
     }
 }
@@ -149,11 +431,16 @@ pub fn run_server_with_db_read_only(
         .map_err(|error| format!("install shutdown handler: {error}"))?;
     let stats = serve_until(listener, engine, shutdown)?;
     eprintln!(
-        "unionid server stopped: accepted={}, rejected={}, requests={}, failed={}",
+        "unionid server stopped: accepted={}, rejected={}, requests={}, failed={}, peak_reads={}, active_reads={}, queued_reads={}, active_writes={}, queued_writes={}",
         stats.accepted_connections,
         stats.rejected_connections,
         stats.requests,
-        stats.failed_requests
+        stats.failed_requests,
+        stats.concurrency.peak_active_reads,
+        stats.concurrency.active_reads,
+        stats.concurrency.queued_reads,
+        stats.concurrency.active_writes,
+        stats.concurrency.queued_writes,
     );
     Ok(())
 }
@@ -167,10 +454,20 @@ pub fn serve_until(
     engine: Engine,
     shutdown: Arc<AtomicBool>,
 ) -> Result<ServerStats, String> {
+    serve_until_concurrent(listener, ConcurrentEngine::new(engine), shutdown)
+}
+
+/// Serve TCP requests through a reusable concurrent execution boundary.
+/// Keeping a clone lets an embedding application inspect live queue/active
+/// counts or reuse the same committed state from an HTTP adapter.
+pub fn serve_until_concurrent(
+    listener: TcpListener,
+    engine: ConcurrentEngine,
+    shutdown: Arc<AtomicBool>,
+) -> Result<ServerStats, String> {
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("set listener nonblocking: {error}"))?;
-    let engine = Arc::new(Mutex::new(engine));
     let stats = Arc::new(RuntimeStats::default());
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
@@ -184,7 +481,7 @@ pub fn serve_until(
                     continue;
                 }
                 stats.accepted.fetch_add(1, Ordering::Relaxed);
-                let engine = Arc::clone(&engine);
+                let engine = engine.clone();
                 let stats = Arc::clone(&stats);
                 let shutdown = Arc::clone(&shutdown);
                 std::thread::spawn(move || {
@@ -210,8 +507,9 @@ pub fn serve_until(
     while stats.active.load(Ordering::Acquire) != 0 {
         std::thread::sleep(CONNECTION_POLL);
     }
+    let concurrency = engine.stats();
     drop(engine);
-    Ok(stats.snapshot())
+    Ok(stats.snapshot(concurrency))
 }
 
 fn reject_busy(mut stream: TcpStream) -> Result<(), String> {
@@ -313,7 +611,7 @@ fn encode_limited(response: &impl Serialize) -> Result<Vec<u8>, serde_json::Erro
 
 fn handle(
     mut writer: TcpStream,
-    engine: Arc<Mutex<Engine>>,
+    engine: ConcurrentEngine,
     shutdown: Arc<AtomicBool>,
     stats: Arc<RuntimeStats>,
 ) -> Result<(), String> {
@@ -373,17 +671,13 @@ fn handle(
         } else if quit {
             OutgoingResponse::Legacy(Box::new(QueryResponse::ok_message("bye")))
         } else {
-            let mut engine = engine
-                .lock()
-                .map_err(|_| "engine lock poisoned".to_string())?;
             if input.starts_with('{') {
-                execute_json_request(input, &mut engine)
+                execute_json_request_concurrent(input, &engine, &shutdown)
             } else {
-                OutgoingResponse::Legacy(Box::new(engine.execute_with_params_until(
+                OutgoingResponse::Legacy(Box::new(engine.execute_until(
                     input,
-                    std::collections::BTreeMap::new(),
-                    None,
                     Instant::now() + EXECUTION_TIMEOUT,
+                    Some(&shutdown),
                 )))
             }
         };
@@ -400,6 +694,65 @@ fn handle(
             return Ok(());
         }
     }
+}
+
+fn execute_json_request_concurrent(
+    input: &str,
+    engine: &ConcurrentEngine,
+    shutdown: &AtomicBool,
+) -> OutgoingResponse {
+    let decoded = match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            return legacy_error(Error::new(
+                "E_PROTOCOL",
+                format!("expected a JSON request object: {error}"),
+            ));
+        }
+    };
+    let versioned = decoded
+        .as_object()
+        .is_some_and(|object| object.contains_key("version"));
+    if !versioned {
+        return match serde_json::from_value::<LegacyRequest>(decoded) {
+            Ok(request) => OutgoingResponse::Legacy(Box::new(engine.execute_until(
+                &request.query,
+                Instant::now() + EXECUTION_TIMEOUT,
+                Some(shutdown),
+            ))),
+            Err(error) => legacy_error(Error::new(
+                "E_PROTOCOL",
+                format!("expected JSON object with a query string: {error}"),
+            )),
+        };
+    }
+    let request_id = decoded
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let version = decoded
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(VERSION);
+    let request = match serde_json::from_value::<ProtocolRequest>(decoded) {
+        Ok(request) => request,
+        Err(error) => {
+            let mut response = ProtocolResponse::failure(
+                request_id,
+                Error::new("E_PROTOCOL", format!("invalid versioned request: {error}")),
+                engine.schema_info(),
+            );
+            response.version = version;
+            return OutgoingResponse::Versioned(Box::new(response));
+        }
+    };
+    OutgoingResponse::Versioned(Box::new(engine.execute_protocol_request_until_shutdown(
+        request,
+        Instant::now() + EXECUTION_TIMEOUT,
+        Some(shutdown),
+    )))
 }
 
 fn drain_after_response(writer: &mut TcpStream, reader: &mut impl Read) -> Result<(), String> {
@@ -432,6 +785,7 @@ fn drain_after_response(writer: &mut TcpStream, reader: &mut impl Read) -> Resul
     Ok(())
 }
 
+#[cfg(test)]
 fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
     let decoded = match serde_json::from_str::<serde_json::Value>(input) {
         Ok(decoded) => decoded,
@@ -720,6 +1074,107 @@ fn legacy_error(error: Error) -> OutgoingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_for(predicate: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !predicate() {
+            assert!(Instant::now() < deadline, "condition did not become true");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn read_snapshot_observes_one_commit_without_blocking_the_next_write() {
+        let shared = ConcurrentEngine::new(Engine::memory());
+        assert!(shared.execute("create table items (id int, value text)").ok);
+        assert!(shared.execute("insert items {id: 1, value: \"before\"}").ok);
+
+        let mut permit = shared
+            .acquire_read(Instant::now() + Duration::from_secs(2), None)
+            .unwrap();
+        let mut snapshot = { shared.inner.engine.lock().unwrap().read_snapshot() };
+        permit.start();
+        let writer = shared.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let response = writer.execute("update items | set value = \"after\"");
+            sent.send(response).unwrap();
+        });
+        let write = received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a held read snapshot must not retain the writer mutex");
+        assert!(write.ok, "{}", write.message);
+
+        let old = snapshot.execute("from items | select value");
+        assert!(old.ok, "{}", old.message);
+        assert!(matches!(
+            &old.rows[0]["value"],
+            crate::Value::Text(value) if value == "before"
+        ));
+        drop(permit);
+
+        let current = shared.execute("from items | select value");
+        assert!(current.ok, "{}", current.message);
+        assert!(matches!(
+            &current.rows[0]["value"],
+            crate::Value::Text(value) if value == "after"
+        ));
+        assert_eq!(shared.stats().peak_active_reads, 1);
+    }
+
+    #[test]
+    fn read_snapshot_admission_is_bounded_and_shutdown_aware() {
+        let shared = ConcurrentEngine::new(Engine::memory());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut permits = (0..MAX_CONCURRENT_READS)
+            .map(|_| {
+                let mut permit = shared.acquire_read(deadline, None).unwrap();
+                permit.start();
+                permit
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shared.stats().active_reads, MAX_CONCURRENT_READS);
+
+        let waiting = shared.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut permit = waiting
+                .acquire_read(Instant::now() + Duration::from_secs(2), None)
+                .unwrap();
+            permit.start();
+            sent.send(true).unwrap();
+        });
+        wait_for(|| shared.stats().queued_reads == 1);
+        permits.pop();
+        assert!(received.recv_timeout(Duration::from_secs(2)).unwrap());
+
+        let shutdown = AtomicBool::new(true);
+        let error = shared
+            .acquire_read(Instant::now() + Duration::from_secs(2), Some(&shutdown))
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "E_SHUTDOWN");
+        drop(permits);
+        wait_for(|| shared.stats().active_reads == 0);
+        assert_eq!(shared.stats().max_active_reads, MAX_CONCURRENT_READS);
+    }
+
+    #[test]
+    fn service_stats_expose_a_queued_writer() {
+        let shared = ConcurrentEngine::new(Engine::memory());
+        let lock = shared.inner.engine.lock().unwrap();
+        let waiting = shared.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            sent.send(waiting.execute("create table items (id int)"))
+                .unwrap()
+        });
+        wait_for(|| shared.stats().queued_writes == 1);
+        assert_eq!(shared.stats().active_writes, 0);
+        drop(lock);
+        assert!(received.recv_timeout(Duration::from_secs(2)).unwrap().ok);
+        assert_eq!(shared.stats().queued_writes, 0);
+    }
 
     #[test]
     fn response_encoder_stops_at_the_byte_limit() {

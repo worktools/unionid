@@ -3,4 +3,5 @@
 /tools/storage-eval/target
 /tools/recovery-eval/target
 /tools/workload-eval/target
+/tools/concurrency-eval/target
 /dist
