@@ -1,6 +1,6 @@
 # RFC 0005：PRQL 风格的结构化查询语法
 
-- 状态：提议
+- 状态：已接受，分阶段实现
 - 日期：2026-09-08
 - 父任务：[#119](https://github.com/worktools/unionid/issues/119)
 - 实现任务：[#142](https://github.com/worktools/unionid/issues/142)、[#143](https://github.com/worktools/unionid/issues/143)；时间 literal 随 [#139](https://github.com/worktools/unionid/issues/139) 交付
@@ -248,7 +248,7 @@ returning {id, state}
 - idempotency digest 基于精确 query source。调用方不能用同一个 key 把旧布局重试成新布局，否则应得到既有 conflict；
 - formatter 必须 idempotent，parse(format(parse(source))) 保持同一 AST、schema hash、plan 和执行结果。
 
-新文档与示例在实现切片合并后统一改为 canonical syntax。在此之前，LANGUAGE/QUERY 必须把 RFC 示例标为目标语法，不能假装已经可运行。
+结构 parser/formatter 切片由 #142 实现后，新文档与示例统一使用 canonical syntax。尚未落地的 field-set transforms 与 literal 仍必须明确标为目标语法，不能假装已经可运行。
 
 ### 11. 实现切片与验收
 

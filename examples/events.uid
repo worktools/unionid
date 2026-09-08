@@ -1,25 +1,34 @@
 type Event =
-  Login {user text}
-  | Purchase {item int, amount_cents int}
-  | Failure {message text}
-type EventRow =
-  id int
-  event Event
+  Login {
+    user text,
+  }
+  | Purchase {
+    item int,
+    amount_cents int,
+  }
+  | Failure {
+    message text,
+  }
+
+type EventRow = {
+  id int,
+  event Event,
+}
 
 table events EventRow
   key id
 
 insert many events [
-  {id = 1, event = Login {user = "alice"}},
-  {id = 2, event = Purchase {item = 42, amount_cents = 1990}},
-  {id = 3, event = Failure {message = "network | timeout"}}
+  {event = Login {user = "alice"}, id = 1},
+  {event = Purchase {amount_cents = 1990, item = 42}, id = 2},
+  {event = Failure {message = "network | timeout"}, id = 3},
 ]
 
 from events
-filter event == Purchase {item = 42, amount_cents = 1990}
-derive event_kind =
-  match event
-    Login {..} => "login"
-    Purchase {..} => "purchase"
-    Failure {..} => "failure"
+filter event == Purchase {amount_cents = 1990, item = 42}
+derive event_kind = match event {
+  Login {..} => "login",
+  Purchase {..} => "purchase",
+  Failure {..} => "failure",
+}
 select {id, event_kind, event}

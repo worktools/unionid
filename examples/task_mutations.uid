@@ -1,33 +1,52 @@
 type State =
   Pending
-  | Running {attempt int}
-  | Done {result text}
+  | Running {
+    attempt int,
+  }
+  | Done {
+    result text,
+  }
 
-type Task =
-  id int
-  attempts int
-  state State
+type Task = {
+  id int,
+  attempts int,
+  state State,
+}
 
 table tasks Task
   key id
 
-insert tasks {id = 1, attempts = 1, state = Pending}
-insert tasks {id = 2, attempts = 3, state = Running {attempt = 2}}
+insert tasks {
+  attempts = 1,
+  id = 1,
+  state = Pending,
+}
+
+insert tasks {
+  attempts = 3,
+  id = 2,
+  state = Running {attempt = 2},
+}
 
 update tasks
-filter match state
-  Pending => true
-  _ => false
+filter (
+  match state {
+    Pending => true,
+    _ => false,
+  }
+)
 sort id
 take 1
 set attempts = attempts + 1
-set state =
-  match state
-    Pending => Done {result = "ok"}
-    current => current
-returning id, state
+set state = match state {
+  Pending => Done {result = "ok"},
+  current => current,
+}
+returning {id, state}
 
-delete tasks | filter id == 2 | returning id
+delete tasks
+filter id == 2
+returning id
 
 from tasks
 select {id, attempts, state}

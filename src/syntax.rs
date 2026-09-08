@@ -422,6 +422,15 @@ impl Parser {
     fn word(&self, word: &str) -> bool {
         matches!(self.kind(), Kind::Ident(s) if s.eq_ignore_ascii_case(word))
     }
+    fn parenthesized_match_starts(&self) -> bool {
+        if *self.kind() != Kind::Open('(') {
+            return false;
+        }
+        self.tokens[self.pos + 1..]
+            .iter()
+            .find(|token| token.kind != Kind::Newline)
+            .is_some_and(|token| matches!(&token.kind, Kind::Ident(word) if word.eq_ignore_ascii_case("match")))
+    }
     fn expect_word(&mut self, word: &str) -> Result<()> {
         if self.word(word) {
             self.bump();
@@ -1275,8 +1284,15 @@ impl Parser {
 
     fn filter_stage(&mut self) -> Result<Stage> {
         self.expect_word("filter")?;
-        if self.word("match") {
-            Ok(Stage::FilterMatch(self.match_predicate()?))
+        if self.word("match") || self.parenthesized_match_starts() {
+            let parenthesized = self.eat(Kind::Open('('));
+            self.newlines();
+            let predicate = self.match_predicate()?;
+            if parenthesized {
+                self.newlines();
+                self.expect(Kind::Close(')'))?;
+            }
+            Ok(Stage::FilterMatch(predicate))
         } else {
             let nested = *self.kind() == Kind::Newline;
             if nested {
@@ -1490,13 +1506,22 @@ impl Parser {
             } else if self.word("group") {
                 self.bump();
                 let group_by = self.path_list("group", "group field")?;
-                self.block()?;
+                let parenthesized = self.eat(Kind::Open('('));
+                if parenthesized {
+                    self.newlines();
+                } else {
+                    self.block()?;
+                }
                 if !self.word("aggregate") {
-                    return Err(self.error("group block must contain aggregate"));
+                    return Err(self.error("group inner pipeline must contain aggregate"));
                 }
                 let aggregate = self.aggregate(group_by)?;
                 self.newlines();
-                self.expect(Kind::Dedent)?;
+                self.expect(if parenthesized {
+                    Kind::Close(')')
+                } else {
+                    Kind::Dedent
+                })?;
                 Stage::Aggregate(aggregate)
             } else if self.word("select") {
                 self.bump();
@@ -1696,11 +1721,21 @@ impl Parser {
 
     fn aggregate(&mut self, group_by: Vec<String>) -> Result<Aggregate> {
         self.expect_word("aggregate")?;
-        self.block()?;
+        let braced = self.eat(Kind::Open('{'));
+        if braced {
+            self.newlines();
+        } else {
+            self.block()?;
+        }
         self.newlines();
         let mut assignments = Vec::new();
         let mut seen = BTreeSet::new();
-        while *self.kind() != Kind::Dedent {
+        let end = if braced {
+            Kind::Close('}')
+        } else {
+            Kind::Dedent
+        };
+        while *self.kind() != end {
             let name = self.identifier()?;
             if !seen.insert(name.clone()) {
                 return Err(self.error(format!("duplicate aggregate field '{name}'")));
@@ -1711,15 +1746,15 @@ impl Parser {
                 "count" => (AggregateFunction::Count, None),
                 "sum" => (
                     AggregateFunction::Sum,
-                    Some(self.scalar_expression(0, false)?),
+                    Some(self.scalar_expression(0, braced)?),
                 ),
                 "min" => (
                     AggregateFunction::Min,
-                    Some(self.scalar_expression(0, false)?),
+                    Some(self.scalar_expression(0, braced)?),
                 ),
                 "max" => (
                     AggregateFunction::Max,
-                    Some(self.scalar_expression(0, false)?),
+                    Some(self.scalar_expression(0, braced)?),
                 ),
                 _ => {
                     return Err(self.error(format!(
@@ -1733,13 +1768,24 @@ impl Parser {
                 input,
                 output_type: None,
             });
-            if *self.kind() == Kind::Dedent {
-                break;
+            if braced {
+                self.newlines();
+                if *self.kind() == end {
+                    break;
+                }
+                if !self.eat(Kind::Comma) {
+                    return Err(self.error("expected ',' between aggregate fields"));
+                }
+                self.newlines();
+            } else {
+                if *self.kind() == end {
+                    break;
+                }
+                self.expect(Kind::Newline)?;
+                self.newlines();
             }
-            self.expect(Kind::Newline)?;
-            self.newlines();
         }
-        self.expect(Kind::Dedent)?;
+        self.expect(end)?;
         if assignments.is_empty() {
             return Err(self.error("aggregate requires at least one output field"));
         }
@@ -1874,10 +1920,20 @@ impl Parser {
     fn match_predicate(&mut self) -> Result<MatchPredicate> {
         self.expect_word("match")?;
         let column = self.path()?;
-        self.block()?;
+        let braced = self.eat(Kind::Open('{'));
+        if braced {
+            self.newlines();
+        } else {
+            self.block()?;
+        }
+        let end = if braced {
+            Kind::Close('}')
+        } else {
+            Kind::Dedent
+        };
         let mut arms = Vec::new();
         self.newlines();
-        while *self.kind() != Kind::Dedent {
+        while *self.kind() != end {
             let pattern = self.match_pattern()?;
             match self.bump() {
                 Token {
@@ -1885,28 +1941,45 @@ impl Parser {
                 } if op == "=>" => {}
                 token => return Err(syntax("expected '=>' after match pattern", token.span)),
             }
-            let nested_condition = *self.kind() == Kind::Newline;
-            if nested_condition {
-                self.block()?;
-            }
-            let condition = self.bool_expression(0, nested_condition)?;
-            if nested_condition {
-                self.expect(Kind::Dedent)?;
-            }
+            let condition = if braced {
+                self.newlines();
+                self.bool_expression(0, true)?
+            } else {
+                let nested = *self.kind() == Kind::Newline;
+                if nested {
+                    self.block()?;
+                }
+                let condition = self.bool_expression(0, nested)?;
+                if nested {
+                    self.expect(Kind::Dedent)?;
+                }
+                condition
+            };
             arms.push(MatchArm { pattern, condition });
-            if nested_condition {
-                if *self.kind() == Kind::Dedent {
+            if braced {
+                self.newlines();
+                if *self.kind() == end {
                     break;
                 }
-                continue;
+                if !self.eat(Kind::Comma) {
+                    return Err(self.error("expected ',' between match branches"));
+                }
+                self.newlines();
+                if *self.kind() == end {
+                    break;
+                }
+            } else {
+                let after_block = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
+                if *self.kind() == end {
+                    break;
+                }
+                if !after_block {
+                    self.expect(Kind::Newline)?;
+                }
+                self.newlines();
             }
-            if *self.kind() == Kind::Dedent {
-                break;
-            }
-            self.expect(Kind::Newline)?;
-            self.newlines();
         }
-        self.expect(Kind::Dedent)?;
+        self.expect(end)?;
         if arms.is_empty() {
             return Err(self.error("match requires at least one branch"));
         }
@@ -2033,10 +2106,20 @@ impl Parser {
     fn match_value_expression(&mut self, name: String) -> Result<DeriveMatch> {
         self.expect_word("match")?;
         let source = self.path()?;
-        self.block()?;
+        let braced = self.eat(Kind::Open('{'));
+        if braced {
+            self.newlines();
+        } else {
+            self.block()?;
+        }
+        let end = if braced {
+            Kind::Close('}')
+        } else {
+            Kind::Dedent
+        };
         let mut arms = Vec::new();
         self.newlines();
-        while *self.kind() != Kind::Dedent {
+        while *self.kind() != end {
             let pattern = self.match_pattern()?;
             match self.bump() {
                 Token {
@@ -2044,18 +2127,37 @@ impl Parser {
                 } if op == "=>" => {}
                 token => return Err(syntax("expected '=>' after match pattern", token.span)),
             }
-            let result = self.match_value()?;
+            let result = if braced {
+                self.newlines();
+                self.match_value_expression_value(0, true)?
+            } else {
+                self.match_value()?
+            };
             arms.push(MatchValueArm { pattern, result });
-            if *self.kind() == Kind::Dedent {
-                break;
+            if braced {
+                self.newlines();
+                if *self.kind() == end {
+                    break;
+                }
+                if !self.eat(Kind::Comma) {
+                    return Err(self.error("expected ',' between match branches"));
+                }
+                self.newlines();
+                if *self.kind() == end {
+                    break;
+                }
+            } else {
+                if *self.kind() == end {
+                    break;
+                }
+                let after_block = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
+                if !after_block {
+                    self.expect(Kind::Newline)?;
+                }
+                self.newlines();
             }
-            let after_block = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
-            if !after_block {
-                self.expect(Kind::Newline)?;
-            }
-            self.newlines();
         }
-        self.expect(Kind::Dedent)?;
+        self.expect(end)?;
         if arms.is_empty() {
             return Err(self.error("match requires at least one branch"));
         }

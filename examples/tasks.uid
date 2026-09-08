@@ -1,51 +1,63 @@
 # A complete, semicolon-free script. The final query is the returned result.
-type Contact =
-  email text
-  nickname option text
+type Contact = {
+  email text,
+  nickname option text,
+}
 
 type State =
   Pending
-  | Running
-    worker text
-    attempt int
-  | Done
-    result text
-  | Failed
-    message text
-    retryable bool
+  | Running {
+    worker text,
+    attempt int,
+  }
+  | Done {
+    result text,
+  }
+  | Failed {
+    message text,
+    retryable bool,
+  }
 
-type Task =
-  id int
-  title text
-  owner Contact
-  tags list text
-  state State
+type Task = {
+  id int,
+  title text,
+  owner Contact,
+  tags list text,
+  state State,
+}
 
 table tasks Task
   key id
 
-insert tasks
-  id = 1
-  owner =
-    email = "alice@example.com"
-    nickname = None
-  state = Running {attempt = 2, worker = "local"}
-  tags = ["local", "sync"]
-  title = "同步目录"
+insert tasks {
+  id = 1,
+  owner = {
+    email = "alice@example.com",
+    nickname = None,
+  },
+  state = Running {attempt = 2, worker = "local"},
+  tags = ["local", "sync"],
+  title = "同步目录",
+}
 
-insert tasks
-  id = 2
-  owner =
-    email = "bob@example.com"
-    nickname = Some("Bob")
-  state = Pending
-  tags = ["local"]
-  title = "检查配置"
+insert tasks {
+  id = 2,
+  owner = {
+    email = "bob@example.com",
+    nickname = Some("Bob"),
+  },
+  state = Pending,
+  tags = ["local"],
+  title = "检查配置",
+}
 
 from tasks
-filter match state
-  Running {attempt, ..} => attempt >= 2
-  _ => false
+filter (
+  match state {
+    Running {attempt, ..} => attempt >= 2,
+    _ => false,
+  }
+)
 select {id, title, owner.email, state}
 sort id
 take 20

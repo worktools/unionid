@@ -326,9 +326,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let claim = Request::query(
         "claim-todo",
         r#"update todos
-filter match status
-  Inbox => true
-  _ => false
+filter (
+  match status {
+    Inbox => true,
+    _ => false,
+  }
+)
 set status = InProgress {attempt = 1, device = "worker-1"}
 set reminder = On {retry = {attempts = 3, delay_ms = 2000}, channel = "slack"}
 returning"#,
@@ -399,13 +402,16 @@ returning"#,
 
     let mut invalid_page = second_page.clone();
     let invalid_cursor = invalid_page.cursor.as_mut().unwrap();
-    let replacement = if invalid_cursor.ends_with('A') {
+    let signature_start = invalid_cursor.rfind('.').unwrap() + 1;
+    let replacement = if invalid_cursor.as_bytes()[signature_start] == b'A' {
         'B'
     } else {
         'A'
     };
-    invalid_cursor.pop();
-    invalid_cursor.push(replacement);
+    invalid_cursor.replace_range(
+        signature_start..signature_start + 1,
+        &replacement.to_string(),
+    );
     let invalid: Response = post_json(
         address,
         "/v1/query",

@@ -129,7 +129,7 @@ fn fmt_cli_formats_file_and_stdin_and_checks_canonical_input() {
     let canonical = String::from_utf8(formatted.stdout).unwrap();
     assert_eq!(
         canonical,
-        "type Task =\n  id int\n  title text\n\nfrom tasks\ntake 1\n"
+        "type Task = {\n  id int,\n  title text,\n}\n\nfrom tasks\ntake 1\n"
     );
 
     let mut stdin = Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -522,7 +522,7 @@ fn cli_eof_exits_and_query_does_not_wait_for_stdin() {
 }
 
 #[test]
-fn cli_help_uses_current_low_punctuation_examples_that_execute() {
+fn cli_help_uses_current_structured_examples_that_execute() {
     let help = Command::new(env!("CARGO_BIN_EXE_unionid"))
         .args(["cli", "--help"])
         .output()
@@ -572,7 +572,7 @@ fn cli_help_uses_current_low_punctuation_examples_that_execute() {
     assert!(
         cli::send_one(
             &server.addr,
-            "type Task =\n  id int\ntable tasks Task\n  key id"
+            "type Task = {\n  id int,\n}\ntable tasks Task\n  key id"
         )
         .unwrap()
         .ok

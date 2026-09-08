@@ -1,55 +1,73 @@
 # Complementary nested patterns classify both sides of a sync conflict.
 type Remote =
-  Git {url text, branch text}
-  | Http {url text, token option text}
+  Git {
+    url text,
+    branch text,
+  }
+  | Http {
+    url text,
+    token option text,
+  }
 
 type Change =
-  Added {path text}
-  | Modified {path text, before text, after text}
-  | Deleted {path text, before text}
+  Added {
+    path text,
+  }
+  | Modified {
+    path text,
+    before text,
+    after text,
+  }
+  | Deleted {
+    path text,
+    before text,
+  }
 
 type SyncState =
-  Clean {revision text}
-  | Conflict {local Change, remote Change}
+  Clean {
+    revision text,
+  }
+  | Conflict {
+    local Change,
+    remote Change,
+  }
 
-type Workspace =
-  id text
-  remote Remote
-  state SyncState
-  last_sync option int = None
+type Workspace = {
+  id text,
+  remote Remote,
+  state SyncState,
+  last_sync option int = None,
+}
 
 table workspaces Workspace
   key id
 
-insert workspaces
-  id = "docs"
-  remote = Git {url = "ssh://example/docs", branch = "main"}
-  state = Conflict {
-    local = Modified {path = "README.md", before = "old", after = "local"},
-    remote = Modified {path = "README.md", before = "old", after = "remote"}
-  }
-  last_sync = Some 100
+insert workspaces {
+  id = "docs",
+  last_sync = Some(100),
+  remote = Git {branch = "main", url = "ssh://example/docs"},
+  state = Conflict {local = Modified {after = "local", before = "old", path = "README.md"}, remote = Modified {after = "remote", before = "old", path = "README.md"}},
+}
 
-insert workspaces
-  id = "images"
-  remote = Http {url = "https://example.test/images", token = None}
-  state = Conflict {
-    local = Added {path = "logo.png"},
-    remote = Deleted {path = "logo.png", before = "old-hash"}
-  }
+insert workspaces {
+  id = "images",
+  remote = Http {token = None, url = "https://example.test/images"},
+  state = Conflict {local = Added {path = "logo.png"}, remote = Deleted {before = "old-hash", path = "logo.png"}},
+}
 
-insert workspaces
-  id = "notes"
-  remote = Git {url = "ssh://example/notes", branch = "main"}
-  state = Clean {revision = "abc123"}
-  last_sync = Some 120
+insert workspaces {
+  id = "notes",
+  last_sync = Some(120),
+  remote = Git {branch = "main", url = "ssh://example/notes"},
+  state = Clean {revision = "abc123"},
+}
 
 from workspaces
-derive local_change =
-  match state
-    Conflict {local = Added {path}, ..} => "added"
-    Conflict {local = Modified {path, ..}, ..} => "modified"
-    Conflict {local = Deleted {path, ..}, ..} => "deleted"
-    Clean {..} => "none"
+derive local_change = match state {
+  Conflict {local = Added {path}, ..} => "added",
+  Conflict {local = Modified {path, ..}, ..} => "modified",
+  Conflict {local = Deleted {path, ..}, ..} => "deleted",
+  Clean {..} => "none",
+}
 sort id
 select {id, local_change, state, last_sync}

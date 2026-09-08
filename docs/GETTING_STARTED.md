@@ -22,11 +22,13 @@ unionid run --db tasks.redb --file ../tutorial/01_setup.uid
 ```text
 type State =
   Pending
-  | Running
-    worker text
-    attempt int
-  | Done
-    result text
+  | Running {
+    worker text,
+    attempt int,
+  }
+  | Done {
+    result text,
+  }
 
 table tasks Task
   key id
@@ -40,13 +42,16 @@ table tasks Task
 unionid run --db tasks.redb --file ../tutorial/02_running.uid
 ```
 
-查询使用换行 pipeline。`filter match` 穷尽匹配 `State`，`select` 保留嵌套字段：
+查询使用换行 pipeline。braced `match` 穷尽匹配 `State`，`select` 保留嵌套字段：
 
 ```text
 from tasks
-filter match state
-  Running {worker, attempt} => attempt >= 1
-  _ => false
+filter (
+  match state {
+    Running {worker, attempt} => attempt >= 1,
+    _ => false,
+  }
+)
 select {id, title, owner.email, state}
 sort id
 ```
