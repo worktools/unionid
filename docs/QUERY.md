@@ -324,6 +324,8 @@ explain
 
 当前只有第一个改变或观察行的 stage 是单纯 `field == literal` 或 `literal == field` 时才选择等值索引；前置 `let` 不改变行，可以跳过。planner 不会把 filter 越过 derive、aggregate、select、sort 或 take，也不会从复合布尔表达式中抽取条件，因为提前缩小候选集可能隐藏前序表达式错误或改变短路行为。索引 lookup 未命中时直接产生 0 个候选行。
 
+当前可执行版本仍只有单 field path 的完整 equality lookup。有序复合声明、equality-prefix range、index-order scan 与 page seek 的目标语义已在 [RFC 0009](rfc/0009-ordered-composite-indexes.md) 冻结，由 #165 实现；在该实现合并前，文档中的 `create index tasks (status, -priority, id)` 只属于设计示例，不能作为现有语法执行。
+
 所有可存储的静态类型都使用与 `cmp_eq` 相同的稳定结构键，包括命名类型、record、tuple、sum、option 和 list。Option 的 `None` 与 sum 的不同 constructor 有不同键，不会按 null 或缺失值混合。索引从 row 派生，insert/update/delete、redb 恢复和 migration 后都会维护或重建；是否存在索引不能改变查询结果。
 
 `estimated_rows` 是当前快照中将进入 pipeline 的确切候选数量：full scan 等于表行数，lookup 等于 posting 长度。它用于验证访问路径和工作集上限，不是基于统计信息的长期基数预测，也不承诺固定性能倍数。测量时应在同一数据集上分别执行无索引与有索引查询，同时用 explain 确认访问路径；记录行数、候选数、构建模式和硬件环境。

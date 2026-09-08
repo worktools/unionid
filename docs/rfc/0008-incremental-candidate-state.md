@@ -1,6 +1,6 @@
 # RFC 0008：增量候选状态与原子发布
 
-- 状态：proposed
+- 状态：accepted
 - 日期：2026-09-08
 - 跟踪：[M6 #167](https://github.com/worktools/unionid/issues/167)、[设计 #162](https://github.com/worktools/unionid/issues/162)、[实现 #163](https://github.com/worktools/unionid/issues/163)
 
