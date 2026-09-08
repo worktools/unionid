@@ -33,9 +33,9 @@ unionid migration status --db app.redb --dir migrations
 
 ## 升级 unionid 二进制
 
-1. 用旧二进制运行 `check`，并保存可校验逻辑备份。
+1. 保存旧二进制的 `version --format json` 和 `doctor --db app.redb --format json` 输出，再运行 `check` 并创建可校验逻辑备份。
 2. 保留旧二进制、发布压缩包和 `.sha256`，直到新版本验证完成。
-3. 在数据库副本上运行新二进制的 `check`、migration plan 和应用查询。
+3. 先用新二进制运行 `version --format json`，比较 `readable_storage_formats`、`current_storage` 和 `protocol_versions`；再在数据库副本上运行 `doctor`、`check`、migration plan 和应用查询。
 4. 只有目标版本的 release notes 明确声明支持当前内部格式时，才让它打开生产文件。
 5. 如果内部格式发生变化，使用该版本提供的显式转换工具；先写到新路径并验证，再切换应用。
 
@@ -43,10 +43,12 @@ unionid migration status --db app.redb --dir migrations
 
 原型 WAL/snapshot 是过渡输入，不是正式 redb 格式。只能使用 `import-legacy` 显式转换到新路径；它们不会与 `--db` 双写，也不能改名后直接作为 redb 打开。
 
+`doctor` 有意不对生产路径执行 redb 打开：它读取权限受限的临时副本并删除副本，因此不会触发恢复或格式变化。它适合部署前兼容性探测，但不能替代对静止副本执行 `check`。部署脚本应按 [CLI 退出码](CLI.md#json-错误与退出码)区分参数、输入、连接、存储和完整性失败，而不是匹配错误句子。
+
 ## English compatibility policy
 
 unionid 0.1.0 separates application schema migrations from internal database-format changes. Versioned migration files evolve fields, variants, types, constraints, indexes, and their data. A unionid binary opens only the internal codec versions it explicitly knows and fails before mutation when it encounters an unknown version.
 
 The current binary reads storage formats 1–4. New databases start at format 4 with catalog/value/index-key/receipt codecs 3/2/2/2. Opening format 1 or 2 still adds cursor identity and upgrades to format 3, while ordinary writes keep a format-3 database at format 3. Run `unionid upgrade --db app.redb --target 4` to validate and rewrite catalog, rows, indexes, receipts, and meta in one synchronous two-phase redb transaction. Preflight and pre-commit failures preserve format 3; after an uncertain commit, reopen and run `check --db`. Logical backup 3 preserves production scalars and receipts while rotating cursor identity on restore.
 
-Before changing binaries, run `check` with the old binary, create a verified logical backup, retain the old release archive and checksum, and test the new binary against a copy. Open the production file only when the target release notes declare support for its stored versions. Any future internal-format conversion must be explicit and write a separately verifiable path; v0.1 makes no promise of unannounced in-place upgrades.
+Before changing binaries, retain the old binary's `version --format json` and `doctor --db app.redb --format json` reports, run `check`, create a verified logical backup, and keep the old release archive and checksum. Compare the new binary's readable/current storage and protocol versions, then run doctor, check, migration planning, and application queries against a quiescent copy. Doctor diagnoses a private temporary copy and never creates, repairs, or upgrades the requested path; it is not a replacement for checking the actual copy. Automation should branch on the documented CLI exit classes rather than matching prose. Open the production file only when the target release notes declare support for its stored versions. Any future internal-format conversion must be explicit and write a separately verifiable path; v0.1 makes no promise of unannounced in-place upgrades.

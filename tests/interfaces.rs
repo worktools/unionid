@@ -103,7 +103,7 @@ fn receipt_cli_previews_before_explicit_bounded_pruning() {
         .args(["receipts", "prune", "--db", path.to_str().unwrap()])
         .output()
         .unwrap();
-    assert_eq!(invalid.status.code(), Some(1));
+    assert_eq!(invalid.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("E_IDEMPOTENCY_PRUNE"));
 }
 

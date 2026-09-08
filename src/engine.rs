@@ -163,6 +163,10 @@ struct PendingIdempotency<'a> {
 }
 
 impl Engine {
+    pub fn current_storage_versions() -> StorageVersions {
+        crate::redb_storage::production_versions()
+    }
+
     pub fn memory() -> Self {
         Self::default()
     }
