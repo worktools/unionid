@@ -41,9 +41,11 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 语法、类型、约束、编码或 redb transaction commit 之前的写入错误属于明确中止：返回 `E_STORAGE`，候选状态不发布，事务回滚，当前句柄仍可继续使用和重试。真正进入 redb `commit` 后返回的 I/O 错误属于结果不确定：当前 Engine 关闭 redb 句柄并禁用后续写入；读取仍反映进程内最后一次明确成功的状态。客户端不能把未确认写入当作确定回滚，也不应自动按 exactly-once 重试。重新打开数据库后，应通过业务主键查询确认结果。
 
-提交前，持久后端分别编码 Engine 的已提交状态与候选状态，再按稳定 catalog ID、`(table_id, row_id)`、版本化 index key 和 ledger sequence 计算确定性差异。redb transaction 只删除消失的键，只写入新增或编码内容变化的键；普通数据写入不触碰 `migration_ledger`。meta 的固定版本与水位值保持同步更新。删除或覆盖时会核对 redb 中的旧值是否与 Engine 基线一致，不一致则在 commit 前明确中止并回滚事务。
+普通 row-only mutation 会生成合并的逻辑 write set，并只编码其中变化的 catalog、`(table_id, row_id)`、版本化 index key 和 receipt key。redb transaction 只删除消失的键，只写入新增或编码内容变化的键；普通数据写入不触碰 `migration_ledger`。meta 的固定版本与水位值保持同步更新。删除或覆盖时会核对 redb 中的旧值是否与 Engine 基线一致，不一致则在 commit 前明确中止并回滚事务。
 
-当前 Engine 仍会为请求级隔离复制小工作集，并编码前后逻辑状态来计算差异，因此 CPU 与内存成本还不是 O(变更量)；本阶段消除的是 redb 的全表清空和持久写放大。后续若扩大工作集，可让执行器直接产生 mutation set，同时保留同一稳定键和原子提交契约。
+DDL、schema/data migration、格式升级、restore 与 receipt prune 仍走 full-rebuild 路径：重新加载 durable 前态，编码完整候选状态，再按稳定键计算差异。该路径保留同一原子提交契约，但 CPU 和峰值内存仍随完整数据规模增长。
+
+`Engine::open_profile` 和成功 mutation 的 `MutationProfile::durable` 提供不含业务值的内部诊断。open 分离 redb open、bootstrap、各内部表读取、typed `Database` 构造和逻辑验证；commit 分离 prepare、transaction apply 与 sync，full rebuild 还记录前态 reload、完整后态 encode 和 diff。`prepare` 包含这三个 full-rebuild 子阶段，不能与它们重复相加。profile 只在成功 open/commit 后发布；memory Engine 没有 durable profile，read-only redb 会显式标记。类型不包含 schema/field 名、key/value、cursor secret、idempotency key 或 receipt payload，也不改变 storage/catalog/value/index/backup/protocol 格式。
 
 每张表从 0 开始单调分配 `u64` RowId，并单独持久化下一分配值。RowId 与内存 `Vec` 位置分离，索引 posting 和 redb row key 都引用 RowId；未来删除产生的缺口合法，后续插入不会复用已删除身份。打开时要求已有 RowId 严格递增且小于分配游标。第一版 redb 文件没有游标时，可从原有连续 row key 推导并在下一次写入保存；旧 snapshot 缺少显式 RowId 时按当时的 vector 顺序升级。
 
@@ -71,6 +73,8 @@ macOS/Linux 测试还在隔离子进程中用操作系统 `RLIMIT_FSIZE` 把 red
 可重复的恢复测量工具位于 `tools/recovery-eval`。2026-09-07 的三次中位数显示：10,000 行 ADT 工作集 open/check 为 66/78 ms，峰值 RSS 为 52.67/81.48 MiB；100,000 行为 653/741 ms，峰值 RSS 为 459.28/745.84 MiB。100,000 行检查的内存放大来自当前完整加载和索引验证，因此作为 v0.1 已测试上限，不作为日常目标。环境、命令、数据库大小和完整结果见[恢复成本记录](benchmarks/recovery-2026-09-07.md)。
 
 M6 使用更宽的 row 与额外复合索引重新测量完整工作负载：10k/100k 的增量单行 write p95 都约 10 ms，但 100k Engine open p95 约 5.6 s、resident query 接近 1 GiB，完整深层 migration p95 约 49.9 s、peak RSS 约 1.44 GiB。普通 write set 已不再复制整库；open/check 与 schema/data full rebuild 仍是大工作集的主要限制。完整方法、结构化访问计划和原始样本见 [M6 工作负载记录](benchmarks/workload-2026-09-09.md)。
+
+M7 的分阶段复测显示：100k open p50 约 5.44 s，其中完整派生索引重算与逻辑验证约 4.72 s，typed `Database` 构造约 0.55 s；row/index 读取合计约 0.15 s。100k migration durable commit p50 约 47.18 s，其中完整候选编码约 41.01 s、重载并验证前态约 5.44 s，而 transaction apply 与 sync 合计约 0.76 s。下一阶段应消除重复全量验证/编码并引入可恢复 generation，而不是只优化 redb I/O。边界、完整样本和解释见 [M7 存储阶段记录](benchmarks/storage-phases-2026-09-09.md)。
 
 ## 与旧原型格式的关系
 
