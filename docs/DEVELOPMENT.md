@@ -12,6 +12,8 @@
 
 ## 已实现
 
+- `set { ... }` 支持多字段、嵌套 record 路径与 braced match；所有 assignment 继续从旧行同时求值。formatter 把重复 set 归并为字段集，单项保持简写；prepared 参数、returning 预算、约束与算术失败、redb 重开及 TCP/HTTP 更新路径有回归覆盖。#143 的 derive/select 字段集与 computed select 仍待后续实现。
+
 - PRQL 风格结构语法已扩展到当前可执行子集：命名 record 与 constructor record payload、insert/upsert record、match branch、aggregate field 和 group inner pipeline 使用有语义的 `{}`／`()` 与逗号边界；旧缩进 record/match/group 继续解析以兼容 migration 与过渡 WAL。canonical formatter 输出新布局，过长布尔表达式会在括号与 `and`／`or` 边界换行，缺少 branch/aggregate 逗号时返回带上下文的源码诊断。
 - 共享 Rust `Engine`，本地 CLI 与 TCP 复用同一个执行、类型校验和原子提交边界。
 - Lexer、源码位置、缩进与换行 AST；命名 sum/record、tuple、option/list、有限直接自递归 ADT、完整值构造和严格校验。自递归类型必须至少有一个有限值，互递归与用户泛型仍延后。

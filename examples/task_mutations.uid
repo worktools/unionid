@@ -37,10 +37,12 @@ filter (
 )
 sort id
 take 1
-set attempts = attempts + 1
-set state = match state {
-  Pending => Done {result = "ok"},
-  current => current,
+set {
+  attempts = attempts + 1,
+  state = match state {
+    Pending => Done {result = "ok"},
+    current => current,
+  },
 }
 returning {id, state}
 

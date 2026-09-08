@@ -332,8 +332,10 @@ filter (
     _ => false,
   }
 )
-set status = InProgress {attempt = 1, device = "worker-1"}
-set reminder = On {retry = {attempts = 3, delay_ms = 2000}, channel = "slack"}
+set {
+  status = InProgress {attempt = 1, device = "worker-1"},
+  reminder = On {retry = {attempts = 3, delay_ms = 2000}, channel = "slack"},
+}
 returning"#,
     );
     let claimed: Response = post_json(address, "/v1/query", &claim).await?;

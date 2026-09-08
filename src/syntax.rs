@@ -1198,24 +1198,49 @@ impl Parser {
             } else if self.word("set") {
                 setting = true;
                 self.bump();
-                let path = self.path()?;
-                if !seen.insert(path.clone()) {
-                    return Err(self.error(format!("duplicate update field '{path}'")));
+                let braced = self.eat(Kind::Open('{'));
+                if braced {
+                    self.newlines();
+                    if *self.kind() == Kind::Close('}') {
+                        return Err(self.error("set requires at least one assignment"));
+                    }
                 }
-                self.expect(Kind::Op("=".into()))?;
-                let nested = *self.kind() == Kind::Newline;
-                if nested {
-                    self.block()?;
+                loop {
+                    let path = self.path()?;
+                    if !seen.insert(path.clone()) {
+                        return Err(self.error(format!("duplicate update field '{path}'")));
+                    }
+                    self.expect(Kind::Op("=".into()))?;
+                    let nested = !braced && *self.kind() == Kind::Newline;
+                    if nested {
+                        self.block()?;
+                    } else if braced {
+                        self.newlines();
+                    }
+                    let value = if self.word("match") {
+                        SetValue::Match(self.match_value_expression(path.clone())?)
+                    } else {
+                        SetValue::Expression(self.bool_expression(0, nested || braced)?)
+                    };
+                    if nested {
+                        self.expect(Kind::Dedent)?;
+                    }
+                    assignments.push(SetAssignment { path, value });
+                    if !braced {
+                        break;
+                    }
+                    self.newlines();
+                    if self.eat(Kind::Close('}')) {
+                        break;
+                    }
+                    if !self.eat(Kind::Comma) {
+                        return Err(self.error("expected ',' between set assignments"));
+                    }
+                    self.newlines();
+                    if self.eat(Kind::Close('}')) {
+                        break;
+                    }
                 }
-                let value = if self.word("match") {
-                    SetValue::Match(self.match_value_expression(path.clone())?)
-                } else {
-                    SetValue::Expression(self.bool_expression(0, nested)?)
-                };
-                if nested {
-                    self.expect(Kind::Dedent)?;
-                }
-                assignments.push(SetAssignment { path, value });
             } else if self.word("filter") {
                 return Err(self.error("update filters must appear before set assignments"));
             } else if self.word("sort") || self.word("take") {

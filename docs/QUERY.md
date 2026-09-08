@@ -1,6 +1,6 @@
 # 查询语言参考
 
-本页只描述当前可执行语义。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的 braced match、group inner pipeline 与 canonical formatter 已实现；多项 field-set transforms 由 #143 跟踪，`@` temporal 与 duration unit literal 由 #139 跟踪。
+本页只描述当前可执行语义。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的 braced match、group inner pipeline 与 canonical formatter 已实现；多项 derive/select 与 computed select 由 #143 跟踪，`@` temporal 与 duration unit literal 由 #139 跟踪。
 
 本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。第一次使用可先运行[五分钟教程](GETTING_STARTED.md)中的持久查询、更新和重开链路。类型、表和 insert/upsert 见 [LANGUAGE.md](LANGUAGE.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)；尚未实现的表达式与 runner 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
 
@@ -82,8 +82,8 @@ stage             = local-binding | value-filter | match-filter | derive-express
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
-set-stage         = newline "set" field-path "=" result-expression
-                  | "|" "set" field-path "=" result-expression
+set-stage         = (newline | "|") "set" (set-assignment | "{" set-assignment ("," set-assignment)* ","? "}")
+set-assignment    = field-path "=" (result-expression | match-expression)
 delete            = "delete" table delete-stage*
 delete-stage      = newline filter-stage | "|" filter-stage
 filter-stage      = value-filter | match-filter
@@ -239,10 +239,12 @@ filter (
 )
 sort {-priority, scheduled_at, id}
 take 1
-set attempts = attempts + 1
-set state = match state {
-  Queued {attempt, ..} => Running {worker = "local", attempt = attempt + 1},
-  current => current,
+set {
+  attempts = attempts + 1,
+  state = match state {
+    Queued {attempt, ..} => Running {worker = "local", attempt = attempt + 1},
+    current => current,
+  },
 }
 returning {id, state}
 
@@ -250,6 +252,8 @@ delete jobs | filter archived == true | returning
 ```
 
 不写 filter 时从整表开始选择。mutation target 接受普通 filter、braced match filter、sort 和 take，并严格按源码顺序执行；sort 并列保持稳定 RowId 输入顺序，生产语句仍应以唯一键结束排序。`take n` 与一基闭区间 `take start..end` 和读取 pipeline 一致。update 的全部 target stage 必须位于第一个 set 之前；derive/select/group/aggregate 不属于 mutation target。单行形式使用 `|`，例如 `update jobs | filter id == 1 | take 1 | set attempts = attempts + 1`。复杂选择和多项 set 推荐逐行写。
+
+多字段更新规范写成 `set {left = right, right = left}`，每个右侧读取旧行，可安全交换字段。单项 `set left = right` 保持可用；旧的重复 `set` 也继续执行，formatter 将其合并为一个字段集。空字段集、缺少逗号和重复路径会提供源码诊断；重复检查跨越同一 update 的所有 set。多项 derive/select 与 computed select 仍由 #143 后续切片实现。
 
 set 的字段路径按表的完整 row schema 绑定。右侧可使用字段引用、literal、ADT constructor、`length`、int/float 算术和完整 bool 表达式，也可写 `match source {...}`，复用 ADT derive 的 pattern、coverage、bool 结果和 option/sum/product/list 值构造。assignment 目标给出结果类型，bool 表达式只能写入 bool 字段；每个分支在扫描前检查，因此空表仍会拒绝未知路径、非穷尽／不可达 pattern、错误 constructor 和类型不匹配。
 
