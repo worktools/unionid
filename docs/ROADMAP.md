@@ -125,7 +125,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | Issue | 任务 | 优先级 | 前置依赖 |
 | --- | --- | --- | --- |
 | [#167](https://github.com/worktools/unionid/issues/167) | [路线图] M6 总览与验收顺序 | P0 | M5 核心完成 |
-| [#162](https://github.com/worktools/unionid/issues/162) | [设计] 增量候选状态与原子发布 RFC | P0 | 当前 candidate clone、redb delta 与并发 snapshot 契约 |
+| [#162](https://github.com/worktools/unionid/issues/162) | [设计] 增量候选状态与原子发布 RFC | 当前 | [RFC 0008](rfc/0008-incremental-candidate-state.md)；当前 candidate clone、redb delta 与并发 snapshot 契约 |
 | [#163](https://github.com/worktools/unionid/issues/163) | [核心] 增量 row-only DML 候选状态 | P0 | [#162](https://github.com/worktools/unionid/issues/162) |
 | [#164](https://github.com/worktools/unionid/issues/164) | [设计] 有序复合索引与范围访问 RFC | P0 | 当前 typed equality/order 与 cursor 契约；可与 #162 并行设计 |
 | [#165](https://github.com/worktools/unionid/issues/165) | [查询] 有序复合索引、range/ordered scan 与 page seek | P1 | [#163](https://github.com/worktools/unionid/issues/163)、[#164](https://github.com/worktools/unionid/issues/164) |
@@ -144,7 +144,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-先完成 #162，冻结普通 DML 的增量候选状态、约束验证、redb commit 和 immutable snapshot 发布边界，再由 #163 修改核心写路径。#164 可同时完成索引语义设计；#165 等 #163 的内存所有权稳定后再实现，避免连续重写同一套 row/index 结构。最后由 #166 用保存原始样本的 10k/100k workload 复验能力边界。
+当前由 #162／RFC 0008 冻结普通 DML 的增量候选状态、约束验证、redb commit 和 immutable snapshot 发布边界，再由 #163 修改核心写路径。#164 可同时完成索引语义设计；#165 等 #163 的内存所有权稳定后再实现，避免连续重写同一套 row/index 结构。最后由 #166 用保存原始样本的 10k/100k workload 复验能力边界。
 
 ## 维护约定
 
