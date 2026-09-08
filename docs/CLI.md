@@ -55,6 +55,8 @@ unionid doctor --db app.redb --format json
 
 JSON 成功结果和错误只写 stdout，面向人的诊断只写 stderr。`run --format json` 和 `cli --format json` 为保持协议兼容，继续输出现有 `QueryResponse`，不会套入 CLI envelope；失败时仍使用上表的进程退出码。`--version` 保留 clap 的单行人类输出，自动化应使用显式的 `version --format json`。
 
+`version --format json` 的 `stream_protocol_versions` 声明服务支持的独立 NDJSON 协议。当前 CLI query 命令仍等待完整 response，不把 partial stream 混入脚本输出；需要流式消费的应用使用 Rust `stream` API、TCP envelope 或 HTTP adapter。需要可靠续传时使用 bounded cursor page，不能把断开的 stream 行号当作 resume token。
+
 持久幂等回执使用独立运维命令。prune 默认只预览，至少需要一个 cutoff，只有 `--confirm` 才删除：
 
 ```bash

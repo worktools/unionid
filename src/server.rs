@@ -25,6 +25,7 @@ pub const MAX_OPERATION_TOMBSTONES: usize = 256;
 pub const OPERATION_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
 const CONNECTION_POLL: Duration = Duration::from_millis(100);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -71,7 +72,7 @@ struct ConcurrentEngineInner {
     operations: Mutex<OperationRegistry>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationOutcome {
     Completed,
@@ -79,7 +80,7 @@ pub enum OperationOutcome {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CancelStatus {
     Accepted,
@@ -87,7 +88,7 @@ pub enum CancelStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CancelResult {
     pub status: CancelStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +100,7 @@ enum OperationPhase {
     Registered,
     Queued,
     Executing,
+    Emitting,
     Cancelling,
 }
 
@@ -134,6 +136,15 @@ struct OperationGuard {
     engine: ConcurrentEngine,
     id: String,
     finished: bool,
+}
+
+pub(crate) struct StreamReadExecution {
+    pub(crate) operation_id: String,
+    pub(crate) request_id: String,
+    pub(crate) version: u32,
+    pub(crate) response: ProtocolResponse,
+    control: ExecutionControl,
+    terminal: OperationGuard,
 }
 
 impl ConcurrentEngine {
@@ -320,8 +331,11 @@ impl ConcurrentEngine {
                 .values()
                 .filter(|entry| matches!(entry.phase, OperationPhase::Executing))
                 .count(),
-            // Frame emission is introduced by the transport adapters in #157.
-            emitting_operations: 0,
+            emitting_operations: registry
+                .active
+                .values()
+                .filter(|entry| matches!(entry.phase, OperationPhase::Emitting))
+                .count(),
             cancelling_operations: registry
                 .active
                 .values()
@@ -584,13 +598,38 @@ impl ReadOperation {
         &self.id
     }
 
-    pub fn start(mut self) -> ProtocolResponse {
+    pub fn start(self) -> ProtocolResponse {
+        self.execute_registered().finish_response()
+    }
+
+    pub(crate) fn start_stream(self) -> StreamReadExecution {
+        let mut execution = self.execute_registered();
+        if let Err(error) = execution
+            .terminal
+            .engine
+            .operation_phase(&execution.operation_id, OperationPhase::Emitting)
+        {
+            execution.response = ProtocolResponse::failure(
+                execution.request_id.clone(),
+                error,
+                execution
+                    .response
+                    .schema
+                    .clone()
+                    .unwrap_or_else(|| execution.terminal.engine.schema_info()),
+            );
+            execution.response.version = execution.version;
+        }
+        execution
+    }
+
+    fn execute_registered(mut self) -> StreamReadExecution {
         let request = self.request.take().expect("read operation starts once");
         let statements = self
             .statements
             .take()
             .expect("registered read owns its parsed statement");
-        let mut terminal = OperationGuard {
+        let terminal = OperationGuard {
             engine: self.engine.clone(),
             id: self.id.clone(),
             finished: false,
@@ -622,9 +661,23 @@ impl ReadOperation {
             Err(error) => ProtocolResponse::failure(request_id, error, self.engine.schema_info()),
         };
         response.version = version;
-        let proposed = if response.ok {
+        StreamReadExecution {
+            operation_id: self.id.clone(),
+            request_id: request.request_id,
+            version,
+            response,
+            control,
+            terminal,
+        }
+    }
+}
+
+impl StreamReadExecution {
+    fn proposed_outcome(&self) -> OperationOutcome {
+        if self.response.ok {
             OperationOutcome::Completed
-        } else if response
+        } else if self
+            .response
             .error
             .as_ref()
             .is_some_and(|error| error.code == "E_CANCELLED")
@@ -632,22 +685,41 @@ impl ReadOperation {
             OperationOutcome::Cancelled
         } else {
             OperationOutcome::Failed
-        };
-        let outcome = terminal.finish(proposed);
+        }
+    }
+
+    fn finish_response(mut self) -> ProtocolResponse {
+        let proposed = self.proposed_outcome();
+        let outcome = self.terminal.finish(proposed);
         if outcome == OperationOutcome::Cancelled
-            && response
+            && self
+                .response
                 .error
                 .as_ref()
                 .is_none_or(|error| error.code != "E_CANCELLED")
         {
-            response = ProtocolResponse::failure(
-                response.request_id,
+            self.response = ProtocolResponse::failure(
+                self.response.request_id,
                 Error::new("E_CANCELLED", "read operation cancelled"),
-                response.schema.unwrap_or_else(|| self.engine.schema_info()),
+                self.response
+                    .schema
+                    .unwrap_or_else(|| self.terminal.engine.schema_info()),
             );
-            response.version = version;
+            self.response.version = self.version;
         }
-        response
+        self.response
+    }
+
+    pub(crate) fn checkpoint(&self) -> Result<(), Error> {
+        self.control.checkpoint()
+    }
+
+    pub(crate) fn finish(&mut self, outcome: OperationOutcome) -> OperationOutcome {
+        self.terminal.finish(outcome)
+    }
+
+    pub(crate) fn cancel_local(&self) {
+        let _ = self.terminal.engine.cancel(&self.operation_id);
     }
 }
 
@@ -1139,6 +1211,13 @@ fn handle(
         }
         stats.requests.fetch_add(1, Ordering::Relaxed);
         let quit = input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("exit");
+        if !oversized && input.starts_with('{') && is_stream_envelope(input) {
+            let failed = handle_stream_request(&mut writer, input, &engine, Arc::clone(&shutdown))?;
+            if failed {
+                stats.failed.fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
         let response = if oversized {
             OutgoingResponse::Legacy(Box::new(QueryResponse::failure(Error::new(
                 "E_LIMIT",
@@ -1168,6 +1247,117 @@ fn handle(
         }
         if quit {
             return Ok(());
+        }
+    }
+}
+
+fn is_stream_envelope(input: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .is_some_and(|object| object.contains_key("stream_version"))
+}
+
+fn handle_stream_request(
+    writer: &mut TcpStream,
+    input: &str,
+    engine: &ConcurrentEngine,
+    shutdown: Arc<AtomicBool>,
+) -> Result<bool, String> {
+    let decoded = serde_json::from_str::<serde_json::Value>(input)
+        .map_err(|error| format!("decode stream envelope after stream classification: {error}"))?;
+    let fallback_request_id = decoded
+        .get("request_id")
+        .or_else(|| {
+            decoded
+                .get("request")
+                .and_then(|request| request.get("request_id"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let request = match serde_json::from_value::<crate::stream::Request>(decoded) {
+        Ok(request) => request,
+        Err(error) => {
+            write_response(
+                writer,
+                &crate::stream::error_response(
+                    fallback_request_id,
+                    Error::new("E_PROTOCOL", format!("invalid stream request: {error}")),
+                ),
+            )?;
+            return Ok(true);
+        }
+    };
+    match request {
+        crate::stream::Request::Cancel {
+            stream_version,
+            request_id,
+            operation_id,
+        } => {
+            if stream_version != crate::stream::VERSION {
+                write_response(
+                    writer,
+                    &crate::stream::error_response(
+                        request_id,
+                        Error::new("E_STREAM_VERSION", "supported stream version is 1"),
+                    ),
+                )?;
+                return Ok(true);
+            }
+            match crate::stream::cancel(engine, request_id.clone(), operation_id) {
+                Ok(response) => {
+                    write_response(writer, &response)?;
+                    Ok(false)
+                }
+                Err(error) => {
+                    write_response(writer, &crate::stream::error_response(request_id, error))?;
+                    Ok(true)
+                }
+            }
+        }
+        crate::stream::Request::Query {
+            stream_version,
+            request,
+        } => {
+            let request_id = request.request_id.clone();
+            if stream_version != crate::stream::VERSION {
+                write_response(
+                    writer,
+                    &crate::stream::error_response(
+                        request_id,
+                        Error::new("E_STREAM_VERSION", "supported stream version is 1"),
+                    ),
+                )?;
+                return Ok(true);
+            }
+            let accepted = match crate::stream::accept(
+                engine,
+                request,
+                Instant::now() + EXECUTION_TIMEOUT,
+                Some(shutdown),
+            ) {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    write_response(writer, &crate::stream::error_response(request_id, error))?;
+                    return Ok(true);
+                }
+            };
+            writer
+                .set_write_timeout(Some(STREAM_WRITE_TIMEOUT))
+                .map_err(|error| format!("set stream write timeout: {error}"))?;
+            writer
+                .write_all(accepted.accepted_bytes())
+                .and_then(|_| writer.flush())
+                .map_err(|error| format!("write accepted stream frame: {error}"))?;
+            let receiver = accepted.start();
+            while let Ok(chunk) = receiver.recv() {
+                writer
+                    .write_all(chunk.as_bytes())
+                    .and_then(|_| writer.flush())
+                    .map_err(|error| format!("write stream frame: {error}"))?;
+            }
+            Ok(false)
         }
     }
 }
@@ -1836,6 +2026,76 @@ mod tests {
             .start();
         assert_eq!(stopped.error.unwrap().code, "E_SHUTDOWN");
         assert_eq!(shared.stats().registered_operations, 0);
+    }
+
+    #[test]
+    fn tcp_cancel_control_stops_the_target_queued_stream() {
+        let shared = ConcurrentEngine::new(Engine::memory());
+        assert!(shared.execute("create table items (id int)").ok);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let permits = (0..MAX_CONCURRENT_READS)
+            .map(|_| {
+                let mut permit = shared.acquire_read(deadline, None).unwrap();
+                permit.start();
+                permit
+            })
+            .collect::<Vec<_>>();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&shutdown);
+        let server_engine = shared.clone();
+        let server = std::thread::spawn(move || {
+            serve_until_concurrent(listener, server_engine, signal).unwrap()
+        });
+
+        let mut query = TcpStream::connect(address).unwrap();
+        serde_json::to_writer(
+            &mut query,
+            &crate::stream::Request::Query {
+                stream_version: crate::stream::VERSION,
+                request: ProtocolRequest::query("queued-stream", "from items"),
+            },
+        )
+        .unwrap();
+        query.write_all(b"\n").unwrap();
+        query.flush().unwrap();
+        let mut query = BufReader::new(query);
+        let mut line = String::new();
+        query.read_line(&mut line).unwrap();
+        let accepted: crate::stream::Frame = serde_json::from_str(&line).unwrap();
+        let crate::stream::Frame::Accepted { operation_id, .. } = accepted else {
+            panic!("stream must begin with accepted")
+        };
+        wait_for(|| shared.stats().queued_operations == 1);
+
+        let mut cancel = TcpStream::connect(address).unwrap();
+        serde_json::to_writer(
+            &mut cancel,
+            &crate::stream::Request::Cancel {
+                stream_version: crate::stream::VERSION,
+                request_id: "cancel-queued".into(),
+                operation_id,
+            },
+        )
+        .unwrap();
+        cancel.write_all(b"\n").unwrap();
+        cancel.flush().unwrap();
+        let mut cancel_line = String::new();
+        BufReader::new(cancel).read_line(&mut cancel_line).unwrap();
+        let cancelled: crate::stream::CancelResponse = serde_json::from_str(&cancel_line).unwrap();
+        assert_eq!(cancelled.result.status, CancelStatus::Accepted);
+
+        line.clear();
+        query.read_line(&mut line).unwrap();
+        let terminal: crate::stream::Frame = serde_json::from_str(&line).unwrap();
+        assert!(
+            matches!(terminal, crate::stream::Frame::Error { error, .. } if error.code == "E_CANCELLED")
+        );
+        drop(permits);
+        shutdown.store(true, Ordering::Release);
+        let stats = server.join().unwrap();
+        assert_eq!(stats.concurrency.registered_operations, 0);
     }
 
     #[test]

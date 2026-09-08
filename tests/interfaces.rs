@@ -1545,3 +1545,113 @@ fn embedded_server_shutdown_returns_request_statistics() {
     assert_eq!(stats.requests, 1);
     assert_eq!(stats.failed_requests, 1);
 }
+
+#[test]
+fn tcp_ndjson_stream_preserves_typed_rows_and_terminal_cancel_status() {
+    let server = Server::start(&[]);
+    assert!(
+        cli::send_one(&server.addr, "create table items (id int, value text)")
+            .unwrap()
+            .ok
+    );
+    assert!(
+        cli::send_one(&server.addr, "insert items {id: 1, value: \"one\"}")
+            .unwrap()
+            .ok
+    );
+
+    let mut socket = TcpStream::connect(&server.addr).unwrap();
+    let envelope = serde_json::json!({
+        "stream_version": 1,
+        "operation": "query",
+        "request": {
+            "version": 1,
+            "request_id": "tcp-stream",
+            "query": "from items | sort id"
+        }
+    });
+    serde_json::to_writer(&mut socket, &envelope).unwrap();
+    socket.write_all(b"\n").unwrap();
+    socket.flush().unwrap();
+    let mut reader = BufReader::new(socket);
+    let mut frames = Vec::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        let frame: unionid::stream::Frame = serde_json::from_str(&line).unwrap();
+        let terminal = matches!(
+            frame,
+            unionid::stream::Frame::Complete { .. } | unionid::stream::Frame::Error { .. }
+        );
+        frames.push(frame);
+        if terminal {
+            break;
+        }
+    }
+    let operation_id = match &frames[0] {
+        unionid::stream::Frame::Accepted { operation_id, .. } => operation_id.clone(),
+        frame => panic!("expected accepted frame, got {frame:?}"),
+    };
+    assert!(matches!(frames[1], unionid::stream::Frame::Schema { .. }));
+    assert!(matches!(
+        &frames[2],
+        unionid::stream::Frame::Row { sequence, row, .. }
+            if sequence == "0" && row["id"] == WireValue::Int { value: "1".into() }
+    ));
+    assert!(matches!(
+        frames[3],
+        unionid::stream::Frame::Complete { ref row_count, .. } if row_count == "1"
+    ));
+
+    let cancel = serde_json::json!({
+        "stream_version": 1,
+        "operation": "cancel",
+        "request_id": "cancel-complete",
+        "operation_id": operation_id
+    });
+    let mut socket = TcpStream::connect(&server.addr).unwrap();
+    serde_json::to_writer(&mut socket, &cancel).unwrap();
+    socket.write_all(b"\n").unwrap();
+    let mut line = String::new();
+    BufReader::new(socket).read_line(&mut line).unwrap();
+    let response: unionid::stream::CancelResponse = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        response.result.status,
+        unionid::server::CancelStatus::AlreadyTerminal
+    );
+    assert_eq!(
+        response.result.outcome,
+        Some(unionid::server::OperationOutcome::Completed)
+    );
+}
+
+#[test]
+fn tcp_stream_rejects_mutations_before_acceptance() {
+    let server = Server::start(&[]);
+    let mut socket = TcpStream::connect(&server.addr).unwrap();
+    let envelope = serde_json::json!({
+        "stream_version": 1,
+        "operation": "query",
+        "request": {
+            "version": 1,
+            "request_id": "bad-stream",
+            "query": "create table forbidden (id int)"
+        }
+    });
+    serde_json::to_writer(&mut socket, &envelope).unwrap();
+    socket.write_all(b"\n").unwrap();
+    let mut line = String::new();
+    BufReader::new(socket).read_line(&mut line).unwrap();
+    let response: unionid::stream::ErrorResponse = serde_json::from_str(&line).unwrap();
+    assert_eq!(response.error.code, "E_STREAM_SHAPE");
+    assert_eq!(
+        cli::send_one(&server.addr, "from forbidden")
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "E_TABLE"
+    );
+}

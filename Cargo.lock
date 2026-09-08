@@ -850,6 +850,7 @@ dependencies = [
  "base64",
  "clap",
  "ctrlc",
+ "futures-core",
  "getrandom",
  "hmac",
  "redb",

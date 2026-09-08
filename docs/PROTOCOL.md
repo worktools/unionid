@@ -158,4 +158,16 @@ TCP 客户端可直接构造 <code>ProtocolRequest</code> 并调用 <code>cli::s
 
 HTTP/TCP Rust adapter 还可使用 `Request::query`、`Request::with_serde_param`、`Request::with_page`、`Response::typed_rows` 和 `Response::typed_page`，避免应用代码手工拆装 `WireValue` 或 cursor。`server::execute_protocol_request` 是使用内置 25 秒预算的统一执行入口；`execute_protocol_request_until` 接受 adapter 计算的绝对 deadline。两者都不启动 listener，也不规定认证、TLS、路由或部署策略。
 
-当前稳定 wire 入口只返回完整 `Response` 或 bounded page。独立的 stream protocol version 1 已在 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) 定义 accepted/schema/row/complete/error NDJSON frame、server-issued operation capability 和 cancel control。transport-neutral Rust 核心已提供 `ConcurrentEngine::register_read`、`ReadOperation::start` 与 `ConcurrentEngine::cancel`，但 TCP/HTTP envelope 要等 #157 同时完成两种 adapter 后才开放；客户端不得预先发送该 envelope 或把 socket 断开当作取消确认。
+完整 `Response` 与 bounded page 保持兼容；另有独立 stream protocol version 1。TCP 发送一行 query envelope，HTTP 示例向 `POST /v1/stream` 发送同一结构：
+
+```json
+{"stream_version":1,"operation":"query","request":{"version":2,"request_id":"export-42","query":"from events\nsort id","params":{}}}
+```
+
+成功响应依次为 `accepted`、`schema`、零到多条 `row`、一个 `complete`/`error` NDJSON frame。`accepted` 的 server-issued `o1` capability 也在 HTTP `x-unionid-operation-id` header 中返回；TCP 应通过另一连接、HTTP 应向独立 control route 发送取消：
+
+```json
+{"stream_version":1,"operation":"cancel","request_id":"cancel-42","operation_id":"o1.ABC..."}
+```
+
+TCP 与 HTTP 复用 `stream::accept`、`AcceptedStream::start` 和同一有界 frame producer；typed row 继续使用 `WireValue`。完整状态机、资源数值和竞态见 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md)。stream 在 `complete` 前断开时是不可恢复的 partial result，不能从半帧或行号隐式续传；短查询和需要可靠重试/续传的遍历应使用完整 response 或 stable cursor page。

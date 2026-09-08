@@ -112,8 +112,8 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | 已完成 | version 1 JSON 与退出码契约 |
 | [#135](https://github.com/worktools/unionid/issues/135) | [服务] 显式取消与有背压的流式读取 | P1 | [#155](https://github.com/worktools/unionid/issues/155) → [#156](https://github.com/worktools/unionid/issues/156) → [#157](https://github.com/worktools/unionid/issues/157) |
 | [#155](https://github.com/worktools/unionid/issues/155) | [设计] 取消与 streaming 契约 RFC | 已完成 | [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) |
-| [#156](https://github.com/worktools/unionid/issues/156) | [并发] 有界 operation registry 与只读取消 | 当前 | [#155](https://github.com/worktools/unionid/issues/155) |
-| [#157](https://github.com/worktools/unionid/issues/157) | [接口] TCP/HTTP NDJSON 背压流 | P1 | [#156](https://github.com/worktools/unionid/issues/156) |
+| [#156](https://github.com/worktools/unionid/issues/156) | [并发] 有界 operation registry 与只读取消 | 已完成 | PR #159 |
+| [#157](https://github.com/worktools/unionid/issues/157) | [接口] TCP/HTTP NDJSON 背压流 | 当前 | [#156](https://github.com/worktools/unionid/issues/156) |
 | [#122](https://github.com/worktools/unionid/issues/122) | [文档] 中英双语 README 与 ADT/query 产品入口 | P1 | 使用已发布 v0.1.0 和 [#112](https://github.com/worktools/unionid/issues/112) 的真实入口 |
 | [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | P2 | 以真实 schema 复用需求单独验证 |
 | [#119](https://github.com/worktools/unionid/issues/119) | [语言] PRQL 风格结构化查询语法 RFC | P1 | 当前 typed IR 与持久源码兼容契约 |
@@ -123,7 +123,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量、#116 的一致并发读快照，以及 #117 的机器可读 CLI 诊断均已完成。#135 已修正过时的 deferred 状态并拆为 #155 RFC、#156 核心取消、#157 TCP/HTTP streaming；RFC 0007 已冻结并完成，当前实现 #156 的 registry、统一 execution control 与资源收敛测试。#118 与 #120 仍是独立 P2 探索。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量、#116 的一致并发读快照，以及 #117 的机器可读 CLI 诊断均已完成。#135 的 #155 RFC 与 #156 核心取消已完成；当前实现 #157 的共享 TCP/HTTP NDJSON producer、背压和故障旅程。#118 与 #120 仍是独立 P2 探索。
 
 ## 维护约定
 

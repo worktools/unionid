@@ -5,12 +5,18 @@
 //! checks, backup, and restore all cross HTTP.
 
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use axum::body::{Body, Bytes};
 use axum::extract::State;
+use axum::response::{IntoResponse, Response as AxumResponse};
 use axum::routing::post;
 use axum::{Json, Router};
+use futures_core::Stream;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
@@ -20,6 +26,7 @@ use unionid::backup;
 use unionid::migration::MigrationFile;
 use unionid::protocol::{Request, Response, VERSION};
 use unionid::server::ConcurrentEngine;
+use unionid::stream::{self, AcceptedStream, Frame as StreamFrame};
 use unionid::{Engine, Error, PageSpec, SchemaInfo};
 
 const HTTP_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -207,6 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     let app = Router::new()
         .route("/v1/query", post(query))
+        .route("/v1/stream", post(stream_query))
+        .route("/v1/stream/cancel", post(cancel_stream))
         .route("/v1/restored/query", post(restored_query))
         .route("/v1/admin/migrations/plan", post(migration_plan))
         .route("/v1/admin/migrations/apply", post(migration_apply))
@@ -216,7 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/admin/backup", post(create_backup))
         .route("/v1/admin/restore", post(restore_backup))
         .route("/v1/admin/shutdown", post(shutdown))
-        .with_state(state);
+        .with_state(Arc::clone(&state));
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async {
@@ -322,6 +331,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inserted: Response = post_json(address, "/v1/query", &retry).await?;
     assert!(inserted.idempotency.as_ref().unwrap().replayed);
     assert_eq!(inserted.typed_rows::<TaskV1>()?, tasks);
+
+    let stream_frames = post_ndjson(
+        address,
+        "/v1/stream",
+        &stream::Request::Query {
+            stream_version: stream::VERSION,
+            request: Request::query("http-stream", "from todos | sort id"),
+        },
+    )
+    .await?;
+    let operation_id = match &stream_frames[0] {
+        StreamFrame::Accepted { operation_id, .. } => operation_id.clone(),
+        frame => return Err(format!("expected accepted stream frame, got {frame:?}").into()),
+    };
+    assert!(matches!(stream_frames[1], StreamFrame::Schema { .. }));
+    assert_eq!(
+        stream_frames
+            .iter()
+            .filter(|frame| matches!(frame, StreamFrame::Row { .. }))
+            .count(),
+        tasks.len()
+    );
+    assert!(matches!(
+        stream_frames.last(),
+        Some(StreamFrame::Complete { row_count, .. }) if row_count == "4"
+    ));
+    let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let tcp_address = tcp_listener.local_addr()?;
+    let tcp_shutdown = Arc::new(AtomicBool::new(false));
+    let tcp_signal = Arc::clone(&tcp_shutdown);
+    let tcp_engine = state
+        .lock()
+        .await
+        .engine
+        .clone()
+        .ok_or("HTTP engine unavailable for TCP parity check")?;
+    let tcp_server = std::thread::spawn(move || {
+        unionid::server::serve_until_concurrent(tcp_listener, tcp_engine, tcp_signal)
+    });
+    let tcp_frames = tcp_ndjson(
+        tcp_address,
+        &stream::Request::Query {
+            stream_version: stream::VERSION,
+            request: Request::query("tcp-stream", "from todos | sort id"),
+        },
+    )
+    .await?;
+    tcp_shutdown.store(true, Ordering::Release);
+    tcp_server
+        .join()
+        .map_err(|_| "TCP parity server panicked")??;
+    assert_eq!(stream_rows(&stream_frames), stream_rows(&tcp_frames));
+    let cancelled: stream::CancelResponse = post_json(
+        address,
+        "/v1/stream/cancel",
+        &stream::Request::Cancel {
+            stream_version: stream::VERSION,
+            request_id: "http-cancel-complete".into(),
+            operation_id,
+        },
+    )
+    .await?;
+    assert_eq!(
+        cancelled.result.status,
+        unionid::server::CancelStatus::AlreadyTerminal
+    );
 
     let claim = Request::query(
         "claim-todo",
@@ -544,7 +619,7 @@ returning"#,
     )?;
     server.await??;
     println!(
-        "HTTP todo flow passed: typed ADTs/pages, disconnect, lost-response replay, restart, migration, check, backup/restore ({})",
+        "HTTP todo flow passed: typed ADTs/pages, TCP/HTTP NDJSON parity, cancel, disconnect, lost-response replay, restart, migration, check, backup/restore ({})",
         archive.display()
     );
     Ok(())
@@ -591,6 +666,130 @@ async fn query(State(state): State<Shared>, Json(request): Json<Request>) -> Jso
         ),
     };
     Json(response)
+}
+
+struct HttpNdjson {
+    accepted: Option<AcceptedStream>,
+    accepted_bytes: Option<Bytes>,
+    receiver: Option<tokio::sync::mpsc::Receiver<Result<Bytes, std::convert::Infallible>>>,
+}
+
+impl Stream for HttpNdjson {
+    type Item = Result<Bytes, std::convert::Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(bytes) = self.accepted_bytes.take() {
+            return Poll::Ready(Some(Ok(bytes)));
+        }
+        if self.receiver.is_none() {
+            let receiver = self
+                .accepted
+                .take()
+                .expect("HTTP stream starts after yielding accepted")
+                .start();
+            let (sender, output) = tokio::sync::mpsc::channel(1);
+            std::thread::spawn(move || {
+                while let Ok(chunk) = receiver.recv() {
+                    let mut item = Ok(Bytes::from(chunk.into_bytes()));
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        match sender.try_send(item) {
+                            Ok(()) => break,
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(returned))
+                                if Instant::now() < deadline =>
+                            {
+                                item = returned;
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                }
+            });
+            self.receiver = Some(output);
+        }
+        Pin::new(self.receiver.as_mut().unwrap()).poll_recv(context)
+    }
+}
+
+async fn stream_query(
+    State(state): State<Shared>,
+    Json(command): Json<stream::Request>,
+) -> AxumResponse {
+    let stream::Request::Query {
+        stream_version,
+        request,
+    } = command
+    else {
+        return Json(stream::error_response(
+            String::new(),
+            Error::new("E_STREAM_SHAPE", "expected a stream query request"),
+        ))
+        .into_response();
+    };
+    let request_id = request.request_id.clone();
+    if stream_version != stream::VERSION {
+        return Json(stream::error_response(
+            request_id,
+            Error::new("E_STREAM_VERSION", "supported stream version is 1"),
+        ))
+        .into_response();
+    }
+    let Some(engine) = state.lock().await.engine.clone() else {
+        return Json(stream::error_response(request_id, engine_unavailable())).into_response();
+    };
+    let accepted = match stream::accept(
+        &engine,
+        request,
+        Instant::now() + HTTP_EXECUTION_TIMEOUT,
+        None,
+    ) {
+        Ok(accepted) => accepted,
+        Err(error) => return Json(stream::error_response(request_id, error)).into_response(),
+    };
+    let operation_id = accepted.operation_id().to_owned();
+    let accepted_bytes = Bytes::copy_from_slice(accepted.accepted_bytes());
+    AxumResponse::builder()
+        .header("content-type", "application/x-ndjson")
+        .header("x-unionid-operation-id", operation_id)
+        .body(Body::from_stream(HttpNdjson {
+            accepted: Some(accepted),
+            accepted_bytes: Some(accepted_bytes),
+            receiver: None,
+        }))
+        .expect("static HTTP stream response is valid")
+}
+
+async fn cancel_stream(
+    State(state): State<Shared>,
+    Json(command): Json<stream::Request>,
+) -> AxumResponse {
+    let stream::Request::Cancel {
+        stream_version,
+        request_id,
+        operation_id,
+    } = command
+    else {
+        return Json(stream::error_response(
+            String::new(),
+            Error::new("E_STREAM_SHAPE", "expected a stream cancel request"),
+        ))
+        .into_response();
+    };
+    if stream_version != stream::VERSION {
+        return Json(stream::error_response(
+            request_id,
+            Error::new("E_STREAM_VERSION", "supported stream version is 1"),
+        ))
+        .into_response();
+    }
+    let Some(engine) = state.lock().await.engine.clone() else {
+        return Json(stream::error_response(request_id, engine_unavailable())).into_response();
+    };
+    match stream::cancel(&engine, request_id.clone(), operation_id) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => Json(stream::error_response(request_id, error)).into_response(),
+    }
 }
 
 async fn restored_query(
@@ -828,6 +1027,95 @@ async fn post_json<T: Serialize, R: DeserializeOwned>(
         .ok_or("HTTP response has no body")?
         + 4;
     Ok(serde_json::from_slice(&response[body_start..])?)
+}
+
+async fn post_ndjson<T: Serialize>(
+    address: std::net::SocketAddr,
+    path: &str,
+    value: &T,
+) -> Result<Vec<StreamFrame>, Box<dyn std::error::Error>> {
+    let body = serde_json::to_vec(value)?;
+    let mut socket = tokio::net::TcpStream::connect(address).await?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).await?;
+    socket.write_all(&body).await?;
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).await?;
+    let body_start = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or("HTTP stream response has no body")?
+        + 4;
+    let headers = std::str::from_utf8(&response[..body_start])?;
+    let body = if headers
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        decode_chunked(&response[body_start..])?
+    } else {
+        response[body_start..].to_vec()
+    };
+    body.split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).map_err(Into::into))
+        .collect()
+}
+
+fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut output = Vec::new();
+    loop {
+        let line_end = input
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or("invalid chunk header")?;
+        let size_text = std::str::from_utf8(&input[..line_end])?
+            .split(';')
+            .next()
+            .unwrap();
+        let size = usize::from_str_radix(size_text, 16)?;
+        input = &input[line_end + 2..];
+        if size == 0 {
+            break;
+        }
+        if input.len() < size + 2 || &input[size..size + 2] != b"\r\n" {
+            return Err("invalid chunk payload".into());
+        }
+        output.extend_from_slice(&input[..size]);
+        input = &input[size + 2..];
+    }
+    Ok(output)
+}
+
+async fn tcp_ndjson<T: Serialize>(
+    address: std::net::SocketAddr,
+    value: &T,
+) -> Result<Vec<StreamFrame>, Box<dyn std::error::Error>> {
+    let mut socket = tokio::net::TcpStream::connect(address).await?;
+    socket.write_all(&serde_json::to_vec(value)?).await?;
+    socket.write_all(b"\n").await?;
+    socket.shutdown().await?;
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).await?;
+    response
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).map_err(Into::into))
+        .collect()
+}
+
+fn stream_rows(
+    frames: &[StreamFrame],
+) -> Vec<std::collections::BTreeMap<String, unionid::WireValue>> {
+    frames
+        .iter()
+        .filter_map(|frame| match frame {
+            StreamFrame::Row { row, .. } => Some(row.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 async fn post_json_then_lose_response<T: Serialize>(
