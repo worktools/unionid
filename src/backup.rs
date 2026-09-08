@@ -52,7 +52,7 @@ struct BackupPayload<'a> {
 
 pub fn create(db: impl Into<PathBuf>, output: impl AsRef<Path>) -> Result<BackupInfo> {
     let engine = Engine::open_redb(db)?;
-    let (database, receipts) = engine.logical_snapshot();
+    let (database, receipts) = engine.logical_snapshot()?;
     write_database(database, receipts, output.as_ref())
 }
 
@@ -74,7 +74,7 @@ pub fn import_legacy(
         ));
     }
     let engine = Engine::open(wal, snapshot, 0)?;
-    let database = engine.database_snapshot().validate_logical_backup()?;
+    let database = engine.database_snapshot()?.validate_logical_backup()?;
     let receipts = ReceiptMap::new();
     let info = info(&database, &receipts, LEGACY_BACKUP_FORMAT_VERSION)?;
     drop(Engine::restore_redb(db.into(), database, receipts)?);

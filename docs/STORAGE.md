@@ -45,7 +45,7 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 DDL、schema/data migration、格式升级、restore 与 receipt prune 仍走 full-rebuild 路径：重新加载 durable 前态，编码完整候选状态，再按稳定键计算差异。该路径保留同一原子提交契约，但 CPU 和峰值内存仍随完整数据规模增长。
 
-`Engine::open_profile` 和成功 mutation 的 `MutationProfile::durable` 提供不含业务值的内部诊断。open 分离 redb open、bootstrap、各内部表读取、typed `Database` 构造和逻辑验证；commit 分离 prepare、transaction apply 与 sync，full rebuild 还记录前态 reload、完整后态 encode 和 diff。`prepare` 包含这三个 full-rebuild 子阶段，不能与它们重复相加。profile 只在成功 open/commit 后发布；memory Engine 没有 durable profile，read-only redb 会显式标记。类型不包含 schema/field 名、key/value、cursor secret、idempotency key 或 receipt payload，也不改变 storage/catalog/value/index/backup/protocol 格式。
+`Engine::open_profile` 和成功 mutation 的 `MutationProfile::durable` 提供不含业务值的内部诊断。open 分离 redb open、bootstrap、各内部表读取、typed `Database` 构造和逻辑验证；format-5 普通 open 还以 `bounded_view = true` 明确表示它没有遍历 durable rows/indexes，此时相应 entry/byte 计数为零。commit 分离 prepare、transaction apply 与 sync，full rebuild 还记录前态 reload、完整后态 encode 和 diff。`prepare` 包含这三个 full-rebuild 子阶段，不能与它们重复相加。profile 只在成功 open/commit 后发布；memory Engine 没有 durable profile，read-only redb 会显式标记。类型不包含 schema/field 名、key/value、cursor secret、idempotency key 或 receipt payload，也不改变 storage/catalog/value/index/backup/protocol 格式。
 
 每张表从 0 开始单调分配 `u64` RowId，并单独持久化下一分配值。RowId 与内存 `Vec` 位置分离，索引 posting 和 redb row key 都引用 RowId；未来删除产生的缺口合法，后续插入不会复用已删除身份。打开时要求已有 RowId 严格递增且小于分配游标。第一版 redb 文件没有游标时，可从原有连续 row key 推导并在下一次写入保存；旧 snapshot 缺少显式 RowId 时按当时的 vector 顺序升级。
 
@@ -60,7 +60,7 @@ DDL、schema/data migration、格式升级、restore 与 receipt prune 仍走 fu
 | `migration_ledger` | sequence | 版本化 migration record | `UIDM` magic、codec version、JSON entry；与 schema/data/index 同事务提交 |
 | `idempotency_receipts` | 原始 UTF-8 key bytes | 版本化成功回执 | `UIDR` magic、codec version、digest、提交序号、完成时间和原 QueryResponse |
 
-打开数据库时会拒绝未知的存储、catalog、ADT value、索引键、migration 或 receipt codec，并验证 schema hash、ledger 单链及其 head、RowId 唯一性／顺序／分配水位、索引是否与 catalog/rows 一致，以及 receipt key/digest/成功响应/sequence/容量边界。RowId 可以有删除形成的缺口。差异计划测试检查 update/delete/insert 只生成预期的 catalog/row/index 键变化；migration 测试确认 schema、数据、索引和 ledger 一起提交，普通数据提交保留 ledger。集成测试还会在一个未提交 redb transaction 修改多个内部表后直接退出子进程，确认重开只看到完整旧状态；也会在带 receipt 的 Engine commit 成功后不执行析构直接退出，确认重开能重放完整新状态。无效 redb 文件会返回 `E_STORAGE` 并保留原文件，跨进程第二个打开者返回 `E_BUSY`。
+format-5 普通打开会验证 meta、catalog、schema hash、ledger 单链及其 head、receipt codec/容量边界，并确认固定 row/index 表存在；它不会遍历全部 row value 或 index key。按需读取仍会拒绝触及的未知／损坏 value 与 index-key codec。显式 `check` 才遍历全部 rows/indexes，验证 RowId 唯一性／顺序／分配水位和索引是否与 catalog/rows 一致。RowId 可以有删除形成的缺口。差异计划测试检查 update/delete/insert 只生成预期的 catalog/row/index 键变化；migration 测试确认 schema、数据、索引和 ledger 一起提交，普通数据提交保留 ledger。集成测试还会在一个未提交 redb transaction 修改多个内部表后直接退出子进程，确认重开只看到完整旧状态；也会在带 receipt 的 Engine commit 成功后不执行析构直接退出，确认重开能重放完整新状态。无效 redb 文件会返回 `E_STORAGE` 并保留原文件，跨进程第二个打开者返回 `E_BUSY`。
 
 index-key codec 3 使用 catalog 中绑定的 component 类型编码完整 tuple。primitive、命名 sum/record、tuple、option、list 和有限递归 ADT 都遵循查询比较器的 total order；sum variant 与 record field 按稳定 ID 编码。UUID 使用 16-byte network order，bytes 使用 unsigned lexicographic order，descending component 对完整 prefix-free component 编码取反。任一索引键内的 bytes leaf 最多 8192 octets，完整 durable key 最多 64 KiB；建索引、写入、migration 和 restore 共用 `E_INDEX_KEY_LIMIT` 原子拒绝边界。未索引 bytes 的 value 上限为 16 MiB。
 
@@ -76,7 +76,9 @@ M6 使用更宽的 row 与额外复合索引重新测量完整工作负载：10k
 
 M7 的分阶段复测显示：100k open p50 约 5.44 s，其中完整派生索引重算与逻辑验证约 4.72 s，typed `Database` 构造约 0.55 s；row/index 读取合计约 0.15 s。100k migration durable commit p50 约 47.18 s，其中完整候选编码约 41.01 s、重载并验证前态约 5.44 s，而 transaction apply 与 sync 合计约 0.76 s。下一阶段应消除重复全量验证/编码并引入可恢复 generation，而不是只优化 redb I/O。边界、完整样本和解释见 [M7 存储阶段记录](benchmarks/storage-phases-2026-09-09.md)。
 
-[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结下一阶段物理边界：memory/redb 共用 typed row source 和 query IR；redb committed view 绑定一个 MVCC transaction/generation 并按 RowId/index span 解码；format 6 通过 Legacy0 兼容 format 5，再以 shadow generation 分批构建、验证和原子 cutover schema/data migration。该 RFC 尚未改变当前 format-5 文件；具体格式升级只会随对应实现和故障矩阵一起合并。
+[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结物理边界：memory/redb 共用 typed row source 和 query IR；format-5 redb committed view 已绑定一个 MVCC transaction、schema/sequence/receipt root 和严格 32 MiB snapshot-local row cache，并按 RowId/index span 解码实际候选。100k 结构化测量中，普通 open 未遍历 rows/indexes，冷／热唯一索引查询分别只解码 1／0 行，详见 [Legacy0 有界读取记录](benchmarks/bounded-legacy-read-2026-09-09.md)。full scan、check、backup 和 mutation candidate 仍在 #183 继续接入完整有界 pipeline；format 6 将通过 Legacy0 兼容 format 5，再以 shadow generation 分批构建、验证和原子 cutover schema/data migration。
+
+format-5 bounded view 上的 mutation 当前会先把 source 物化为私有 candidate，再复用既有类型、约束和原子 DML 实现；提交到 redb 时仍只编码并核对 write set 中变化的稳定键。这个过渡边界保持结果与文件格式兼容，但 candidate working set 尚未有界，由 #183 继续处理。
 
 ## 与旧原型格式的关系
 

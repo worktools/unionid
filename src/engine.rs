@@ -22,6 +22,7 @@ use crate::migration::{
 use crate::profile::{DurableCommitProfile, StorageOpenProfile};
 use crate::query::{LocatedStatement, PageSpec, Stage, Statement};
 use crate::redb_storage::{CommitFailure, RedbStore};
+use crate::row_source::TypedRowSource;
 use crate::snapshot::SnapshotStore;
 use crate::syntax;
 use crate::wal::Wal;
@@ -37,6 +38,7 @@ pub struct Engine {
     snapshot_every: usize,
     writes_since_snapshot: usize,
     write_failed: bool,
+    read_reopen_required: bool,
     read_only: bool,
     snapshot_execution: bool,
     durable: Option<Box<dyn DurableBackend>>,
@@ -47,10 +49,53 @@ pub struct Engine {
     _locks: Vec<DatabaseLock>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct CommittedView {
     db: Arc<Database>,
+    source: Arc<dyn TypedRowSource>,
     receipts: Arc<ReceiptMap>,
+}
+
+impl Default for CommittedView {
+    fn default() -> Self {
+        Self::memory(Database::default(), ReceiptMap::new())
+    }
+}
+
+impl CommittedView {
+    fn memory(db: Database, receipts: ReceiptMap) -> Self {
+        let db = Arc::new(db);
+        let source: Arc<dyn TypedRowSource> = db.clone();
+        Self {
+            db,
+            source,
+            receipts: Arc::new(receipts),
+        }
+    }
+
+    fn new(
+        db: Arc<Database>,
+        source: Arc<dyn TypedRowSource>,
+        receipts: Arc<ReceiptMap>,
+    ) -> Result<Self> {
+        let identity = source.snapshot_identity();
+        let schema = db.schema_info();
+        if identity.database_instance != db.durable_meta().cursor_instance_id
+            || identity.generation != 0
+            || identity.sequence != db.sequence
+            || identity.schema_hash != schema.hash
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "committed row source identity does not match its catalog snapshot",
+            ));
+        }
+        Ok(Self {
+            db,
+            source,
+            receipts,
+        })
+    }
 }
 
 struct DatabaseLock(File);
@@ -161,6 +206,14 @@ trait DurableBackend: Send {
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)>;
     fn supports_production_scalars(&self) -> bool;
     fn versions(&self) -> StorageVersions;
+    fn committed_view(
+        &self,
+        database: &Database,
+    ) -> Result<(Arc<Database>, Arc<dyn TypedRowSource>)> {
+        let database = Arc::new(database.clone());
+        let source: Arc<dyn TypedRowSource> = database.clone();
+        Ok((database, source))
+    }
     fn upgrade(
         &mut self,
         database: &Database,
@@ -201,6 +254,13 @@ impl DurableBackend for RedbStore {
 
     fn versions(&self) -> StorageVersions {
         RedbStore::versions(self)
+    }
+
+    fn committed_view(
+        &self,
+        database: &Database,
+    ) -> Result<(Arc<Database>, Arc<dyn TypedRowSource>)> {
+        RedbStore::committed_view(self, database)
     }
 
     fn upgrade(
@@ -306,15 +366,13 @@ impl Engine {
             (None, _) => StorageMode::Memory,
         };
         Ok(Self {
-            committed: Arc::new(CommittedView {
-                db: Arc::new(db),
-                receipts: Arc::new(ReceiptMap::new()),
-            }),
+            committed: Arc::new(CommittedView::memory(db, ReceiptMap::new())),
             wal,
             snapshot,
             snapshot_every,
             writes_since_snapshot: 0,
             write_failed: false,
+            read_reopen_required: false,
             read_only: false,
             snapshot_execution: false,
             durable: None,
@@ -329,12 +387,9 @@ impl Engine {
     /// Open the durable redb backend. Every mutating source request is
     /// committed as one synchronous, two-phase redb transaction.
     pub fn open_redb(path: impl Into<PathBuf>) -> Result<Self> {
-        let (redb, db, receipts, open_profile) = RedbStore::open(path)?;
+        let (redb, db, receipts, source, open_profile) = RedbStore::open(path)?;
         Ok(Self {
-            committed: Arc::new(CommittedView {
-                db: Arc::new(db),
-                receipts: Arc::new(receipts),
-            }),
+            committed: Arc::new(CommittedView::new(db, source, Arc::new(receipts))?),
             durable: Some(Box::new(redb)),
             storage_mode: StorageMode::Redb,
             open_profile: Some(open_profile),
@@ -706,7 +761,7 @@ impl Engine {
         for key in keys {
             receipts.remove(&key);
         }
-        let mut candidate = self.committed.db.as_ref().clone();
+        let mut candidate = self.mutable_candidate(None)?;
         candidate.sequence = self
             .committed
             .db
@@ -910,7 +965,11 @@ impl Engine {
         let needs_schema_preview = statements[..last]
             .iter()
             .any(|located| located.statement.changes_schema());
-        let mut preview = self.committed.db.as_ref().clone();
+        let mut preview = if needs_schema_preview {
+            self.mutable_candidate(None)?
+        } else {
+            self.committed.db.as_ref().clone()
+        };
         if needs_schema_preview {
             for located in &statements[..last] {
                 preview
@@ -1151,6 +1210,12 @@ impl Engine {
     ) -> Result<QueryResponse> {
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
         let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
+        if self.read_reopen_required {
+            return Err(Error::new(
+                "E_STORAGE_REOPEN_REQUIRED",
+                "the durable effect was committed but no matching read view is available; reopen the database before reading or retrying",
+            ));
+        }
         if mutating && self.read_only {
             return Err(Error::new(
                 "E_READ_ONLY",
@@ -1177,7 +1242,7 @@ impl Engine {
         }
         let candidate_started = mutating.then(std::time::Instant::now);
         let mut candidate = if mutating {
-            Some(self.committed.db.as_ref().clone())
+            Some(self.mutable_candidate(deadline)?)
         } else {
             None
         };
@@ -1186,7 +1251,11 @@ impl Engine {
             ensure_deadline(deadline)?;
             response = match candidate.as_mut() {
                 Some(target) => target.execute_with_deadline(located.statement, deadline),
-                None => self.committed.db.execute_read(located.statement, deadline),
+                None => self.committed.db.execute_read_from(
+                    self.committed.source.as_ref(),
+                    located.statement,
+                    deadline,
+                ),
             }
             .map_err(|e| e.at(located.span))?;
         }
@@ -1254,7 +1323,7 @@ impl Engine {
         let applied_count =
             validate_files_against_history(files, self.committed.db.migration_history())?;
         let current_schema = self.committed.db.schema_info();
-        let mut candidate = self.committed.db.as_ref().clone();
+        let mut candidate = self.mutable_candidate(None)?;
         let mut pending = Vec::new();
         for file in &files[applied_count..] {
             let before = candidate.schema_info();
@@ -1348,7 +1417,7 @@ impl Engine {
                 "writes are disabled after a storage failure; reopen the database to resolve the commit state",
             ));
         }
-        let mut candidate = self.committed.db.as_ref().clone();
+        let mut candidate = self.mutable_candidate(None)?;
         candidate
             .execute(Statement::Migration {
                 name: file.id.clone(),
@@ -1397,6 +1466,7 @@ impl Engine {
         let _ = candidate.take_write_set();
         let mut durable_commit_micros = 0;
         let mut durable_profile = None;
+        let mut durable_view = None;
         if let Some(durable) = &mut self.durable {
             let receipts = receipt_state
                 .as_ref()
@@ -1412,6 +1482,21 @@ impl Engine {
                 Ok(profile) => {
                     durable_commit_micros = profile.total_micros;
                     durable_profile = Some(profile);
+                    match durable.committed_view(&candidate) {
+                        Ok(view) => durable_view = Some(view),
+                        Err(error) => {
+                            self.durable = None;
+                            self.write_failed = true;
+                            self.read_reopen_required = true;
+                            return Err(Error::new(
+                                "E_STORAGE_REOPEN_REQUIRED",
+                                format!(
+                                    "durable commit succeeded but its read view could not be created: {}; reopen the database before reading or retrying",
+                                    error.message
+                                ),
+                            ));
+                        }
+                    }
                 }
                 Err(CommitFailure::Definite(error)) => {
                     if error.code == "E_STORAGE_UPGRADE_REQUIRED" {
@@ -1457,10 +1542,26 @@ impl Engine {
         let receipts = receipt_state
             .map(Arc::new)
             .unwrap_or_else(|| self.committed.receipts.clone());
-        self.committed = Arc::new(CommittedView {
-            db: Arc::new(candidate),
-            receipts,
-        });
+        let next_view = if let Some((db, source)) = durable_view {
+            match CommittedView::new(db, source, receipts) {
+                Ok(view) => view,
+                Err(error) => {
+                    self.durable = None;
+                    self.write_failed = true;
+                    self.read_reopen_required = true;
+                    return Err(Error::new(
+                        "E_STORAGE_REOPEN_REQUIRED",
+                        format!(
+                            "durable commit succeeded but its read view identity is invalid: {}; reopen the database before reading or retrying",
+                            error.message
+                        ),
+                    ));
+                }
+            }
+        } else {
+            CommittedView::memory(candidate, receipts.as_ref().clone())
+        };
+        self.committed = Arc::new(next_view);
         self.writes_since_snapshot += 1;
         if self.snapshot_every > 0
             && self.writes_since_snapshot >= self.snapshot_every
@@ -1497,18 +1598,32 @@ impl Engine {
                 "integrity check requires reopening after an uncertain commit",
             ));
         }
+        let metadata = self.committed.db.clone();
+        let receipts_before = self.committed.receipts.clone();
+        // redb's physical integrity check requires that this Engine release
+        // its active read transaction first. A concurrently retained service
+        // snapshot still causes redb to reject the maintenance operation.
+        self.committed = Arc::new(CommittedView::memory(
+            metadata.as_ref().clone(),
+            receipts_before.as_ref().clone(),
+        ));
         let durable = self.durable.as_mut().ok_or_else(|| {
             Error::new(
                 "E_CONFIG",
                 "integrity check requires a database opened with Engine::open_redb",
             )
         })?;
-        let (backend_clean, database, receipts) = durable.check_integrity()?;
+        let (backend_clean, database, receipts) = match durable.check_integrity() {
+            Ok(result) => result,
+            Err(error) => {
+                let (database, source) = durable.committed_view(&metadata)?;
+                self.committed = Arc::new(CommittedView::new(database, source, receipts_before)?);
+                return Err(error);
+            }
+        };
         let versions = durable.versions();
-        self.committed = Arc::new(CommittedView {
-            db: Arc::new(database),
-            receipts: Arc::new(receipts),
-        });
+        let (database, source) = durable.committed_view(&database)?;
+        self.committed = Arc::new(CommittedView::new(database, source, Arc::new(receipts))?);
         Ok(StorageIntegrity {
             backend: "redb",
             backend_clean,
@@ -1527,14 +1642,39 @@ impl Engine {
         if self.read_only {
             return Err(Error::new("E_READ_ONLY", "storage upgrade is a mutation"));
         }
+        let database = self.mutable_candidate(None)?;
         let durable = self.durable.as_mut().ok_or_else(|| {
             Error::new(
                 "E_CONFIG",
                 "storage upgrade requires a database opened with Engine::open_redb",
             )
         })?;
-        match durable.upgrade(&self.committed.db, &self.committed.receipts, target) {
-            Ok(result) => Ok(result),
+        match durable.upgrade(&database, &self.committed.receipts, target) {
+            Ok(result) => {
+                let view = durable
+                    .committed_view(&database)
+                    .and_then(|(database, source)| {
+                        CommittedView::new(database, source, self.committed.receipts.clone())
+                    });
+                match view {
+                    Ok(view) => {
+                        self.committed = Arc::new(view);
+                        Ok(result)
+                    }
+                    Err(error) => {
+                        self.durable = None;
+                        self.write_failed = true;
+                        self.read_reopen_required = true;
+                        Err(Error::new(
+                            "E_STORAGE_REOPEN_REQUIRED",
+                            format!(
+                                "storage upgrade committed but its read view could not be created: {}; reopen the database before reading or retrying",
+                                error.message
+                            ),
+                        ))
+                    }
+                }
+            }
             Err(CommitFailure::Definite(error)) => Err(error),
             Err(CommitFailure::Uncertain(error)) => {
                 self.durable = None;
@@ -1589,8 +1729,20 @@ impl Engine {
         self.committed.db.migration_history()
     }
 
-    pub(crate) fn database_snapshot(&self) -> Database {
-        self.committed.db.as_ref().clone()
+    pub(crate) fn database_snapshot(&self) -> Result<Database> {
+        self.committed
+            .db
+            .materialize_from_source(self.committed.source.as_ref(), None)
+    }
+
+    fn mutable_candidate(&self, control: Option<&ExecutionControl>) -> Result<Database> {
+        if self.storage_mode == StorageMode::Redb {
+            self.committed
+                .db
+                .materialize_from_source(self.committed.source.as_ref(), control)
+        } else {
+            Ok(self.committed.db.as_ref().clone())
+        }
     }
 
     /// Capture one complete committed state for execution outside a service's
@@ -1600,6 +1752,7 @@ impl Engine {
         Self {
             committed: self.committed.clone(),
             write_failed: self.write_failed,
+            read_reopen_required: self.read_reopen_required,
             read_only: self.read_only,
             snapshot_execution: true,
             storage_mode: self.storage_mode,
@@ -1612,11 +1765,11 @@ impl Engine {
         }
     }
 
-    pub(crate) fn logical_snapshot(&self) -> (Database, ReceiptMap) {
-        (
-            self.committed.db.as_ref().clone(),
+    pub(crate) fn logical_snapshot(&self) -> Result<(Database, ReceiptMap)> {
+        Ok((
+            self.database_snapshot()?,
             self.committed.receipts.as_ref().clone(),
-        )
+        ))
     }
 
     pub(crate) fn restore_redb(
@@ -1757,9 +1910,14 @@ fn attach_structured_page(statements: &mut [LocatedStatement], page: PageSpec) -
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct FailOnce {
         uncertain: Option<bool>,
+    }
+
+    struct FailCommittedView {
+        committed: Arc<AtomicBool>,
     }
 
     impl DurableBackend for FailOnce {
@@ -1825,6 +1983,53 @@ mod tests {
                     changed: true,
                 }),
             }
+        }
+    }
+
+    impl DurableBackend for FailCommittedView {
+        fn commit(
+            &mut self,
+            _: &Database,
+            _: &ReceiptMap,
+            _: &Database,
+            _: &ReceiptMap,
+            _: Option<&LogicalWriteSet>,
+        ) -> std::result::Result<DurableCommitProfile, CommitFailure> {
+            self.committed.store(true, Ordering::SeqCst);
+            Ok(DurableCommitProfile::default())
+        }
+
+        fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
+            unreachable!()
+        }
+
+        fn supports_production_scalars(&self) -> bool {
+            true
+        }
+
+        fn versions(&self) -> StorageVersions {
+            StorageVersions {
+                format: 5,
+                catalog_codec: 3,
+                value_codec: 2,
+                index_key_codec: 3,
+                migration_codec: 1,
+                receipt_codec: 2,
+                backup_codec: 4,
+            }
+        }
+
+        fn committed_view(&self, _: &Database) -> Result<(Arc<Database>, Arc<dyn TypedRowSource>)> {
+            Err(Error::new("E_STORAGE", "injected committed-view failure"))
+        }
+
+        fn upgrade(
+            &mut self,
+            _: &Database,
+            _: &ReceiptMap,
+            _: u32,
+        ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+            unreachable!()
         }
     }
 
@@ -1896,6 +2101,37 @@ mod tests {
     }
 
     #[test]
+    fn committed_view_failure_requires_reopen_and_blocks_stale_reads() {
+        let committed = Arc::new(AtomicBool::new(false));
+        let mut engine = Engine {
+            durable: Some(Box::new(FailCommittedView {
+                committed: committed.clone(),
+            })),
+            storage_mode: StorageMode::Redb,
+            ..Engine::default()
+        };
+        let mut old_snapshot = engine.read_snapshot();
+
+        let failed = engine.execute("create table committed (id int)");
+        assert!(!failed.ok);
+        assert_eq!(failed.error.unwrap().code, "E_STORAGE_REOPEN_REQUIRED");
+        assert!(committed.load(Ordering::SeqCst));
+        assert!(engine.write_failed);
+        assert!(engine.read_reopen_required);
+        assert!(engine.durable.is_none());
+
+        let blocked_read = engine.execute("from committed");
+        assert!(!blocked_read.ok);
+        assert_eq!(
+            blocked_read.error.unwrap().code,
+            "E_STORAGE_REOPEN_REQUIRED"
+        );
+        let old_read = old_snapshot.execute("from committed");
+        assert!(!old_read.ok);
+        assert_eq!(old_read.error.unwrap().code, "E_TABLE");
+    }
+
+    #[test]
     fn read_snapshot_captures_one_database_and_receipt_commit_root() {
         let mut engine = Engine::memory();
         assert!(engine.execute("create table entries (id int)").ok);
@@ -1918,6 +2154,99 @@ mod tests {
         assert_eq!(snapshot.idempotency_status().unwrap().count, 0);
         assert_eq!(engine.execute("from entries").rows.len(), 1);
         assert_eq!(engine.idempotency_status().unwrap().count, 1);
+    }
+
+    #[test]
+    fn redb_read_snapshot_stays_on_one_mvcc_root_across_commit() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-redb-snapshot-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(
+            "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ninsert entries {id = 1, label = \"old\"}",
+        );
+        assert!(setup.ok, "{}", setup.message);
+        let mut old_snapshot = engine.read_snapshot();
+        let old_sequence = old_snapshot.committed.source.snapshot_identity().sequence;
+
+        let updated = engine
+            .execute_idempotent_with_params(
+                "mvcc-update",
+                DIGEST_A,
+                "update entries\nfilter id == 1\nset label = \"new\"",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(updated.response.ok, "{}", updated.response.message);
+        let old = old_snapshot.execute("from entries | filter id == 1");
+        let new = engine.execute("from entries | filter id == 1");
+        assert!(old.ok, "{}", old.message);
+        assert!(new.ok, "{}", new.message);
+        assert!(old.rows[0]["label"].cmp_eq(&crate::Value::Text("old".into())));
+        assert!(new.rows[0]["label"].cmp_eq(&crate::Value::Text("new".into())));
+        assert_eq!(old_snapshot.idempotency_status().unwrap().count, 0);
+        assert_eq!(engine.idempotency_status().unwrap().count, 1);
+        assert!(engine.committed.source.snapshot_identity().sequence > old_sequence);
+
+        drop(old_snapshot);
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_redb_cache_misses_are_bounded_and_publish_one_cached_row() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-redb-cache-race-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        {
+            let mut setup = Engine::open_redb(&path).unwrap();
+            let response = setup.execute(
+                "create table entries (id int, value text)\ncreate index entries (id)\ninsert entries {id = 1, value = \"one\"}",
+            );
+            assert!(response.ok, "{}", response.message);
+        }
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let mut first = engine.read_snapshot();
+        let mut second = engine.read_snapshot();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let first_barrier = barrier.clone();
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            first.execute("from entries | filter id == 1")
+        });
+        let second = std::thread::spawn(move || {
+            barrier.wait();
+            second.execute("from entries | filter id == 1")
+        });
+        let first = first.join().unwrap();
+        let second = second.join().unwrap();
+        assert!(first.ok, "{}", first.message);
+        assert!(second.ok, "{}", second.message);
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(second.rows.len(), 1);
+        let misses =
+            first.execution.unwrap().row_cache_misses + second.execution.unwrap().row_cache_misses;
+        assert!((1..=2).contains(&misses));
+
+        let cached = engine.execute("from entries | filter id == 1");
+        assert!(cached.ok, "{}", cached.message);
+        let observation = cached.execution.unwrap();
+        assert_eq!(observation.rows_decoded, 0);
+        assert_eq!(observation.row_cache_hits, 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(path);
     }
 
     const DIGEST_A: &str =

@@ -159,7 +159,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。后续顺序为 #181 共享 source seam → #182 Legacy0 bounded read；#184 generation envelope 可在 #181 后准备，#183 完成 full pipeline/check/backup，二者汇合到 #185 resumable migration，最后由 #186 复验接口与容量。
+#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。#181 建立共享 source seam，#182 已实现 format-5 Legacy0 bounded open、durable cursor、MVCC committed view 与 32 MiB cache，并保存 10k/100k 结构证据。后续由 #183 完成 full pipeline/check/backup，#184 实现 generation envelope，二者汇合到 #185 resumable migration，最后由 #186 复验接口与容量。
 
 ## 维护约定
 

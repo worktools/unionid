@@ -76,14 +76,146 @@ fn storage_profiles_separate_successful_open_incremental_and_full_rebuild_phases
     let reopened = Engine::open_redb(&path).unwrap();
     let loaded = reopened.open_profile().unwrap();
     assert!(!loaded.fresh);
-    assert_eq!(loaded.row_entries, 1);
-    assert_eq!(loaded.index_entries, 2);
-    assert!(loaded.row_bytes > 0);
-    assert!(loaded.index_key_bytes > 0);
+    assert!(loaded.bounded_view);
+    assert_eq!(loaded.row_entries, 0);
+    assert_eq!(loaded.index_entries, 0);
+    assert_eq!(loaded.row_bytes, 0);
+    assert_eq!(loaded.index_key_bytes, 0);
     drop(reopened);
 
     let read_only = Engine::open_redb_read_only(&path).unwrap();
     assert!(read_only.open_profile().unwrap().read_only);
+}
+
+#[test]
+fn bounded_redb_reads_decode_candidates_once_per_committed_view() {
+    let dir = TempDir::new();
+    let path = dir.0.join("bounded-read-cache.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(
+            r#"type Entry =
+  id int
+  label text
+table entries Entry
+  key id
+create index entries (label)
+insert many entries [
+  {id = 1, label = "one"},
+  {id = 2, label = "two"},
+  {id = 3, label = "three"},
+]"#,
+        );
+        assert!(setup.ok, "{}", setup.message);
+    }
+
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(engine.open_profile().unwrap().bounded_view);
+    let first = engine.execute("from entries | filter id == 2 | select label");
+    assert!(first.ok, "{}", first.message);
+    assert_eq!(first.rows.len(), 1);
+    let first_observation = first.execution.unwrap();
+    assert_eq!(first_observation.index_entries_examined, 1);
+    assert_eq!(first_observation.rows_decoded, 1);
+    assert_eq!(first_observation.row_cache_misses, 1);
+    assert_eq!(first_observation.row_cache_hits, 0);
+
+    let cached = engine.execute("from entries | filter id == 2 | select label");
+    assert!(cached.ok, "{}", cached.message);
+    let cached_observation = cached.execution.unwrap();
+    assert_eq!(cached_observation.index_entries_examined, 1);
+    assert_eq!(cached_observation.rows_decoded, 0);
+    assert_eq!(cached_observation.row_cache_misses, 0);
+    assert_eq!(cached_observation.row_cache_hits, 1);
+
+    let inserted = engine.execute("insert entries {id = 4, label = \"four\"}");
+    assert!(inserted.ok, "{}", inserted.message);
+    let after_commit = engine.execute("from entries | filter id == 2 | select label");
+    assert!(after_commit.ok, "{}", after_commit.message);
+    let after_commit_observation = after_commit.execution.unwrap();
+    assert_eq!(after_commit_observation.rows_decoded, 1);
+    assert_eq!(after_commit_observation.row_cache_misses, 1);
+    assert_eq!(after_commit_observation.row_cache_hits, 0);
+}
+
+#[test]
+fn reverse_redb_index_keeps_memory_order_inside_equal_typed_keys() {
+    let source = r#"type Entry =
+  id int
+  label text
+table entries Entry
+  key id
+create index entries (label)
+insert many entries [
+  {id = 1, label = "z"},
+  {id = 2, label = "z"},
+  {id = 3, label = "a"},
+]"#;
+    let query = "from entries | sort -label | select id";
+    let mut memory = Engine::memory();
+    assert!(memory.execute(source).ok);
+    let expected = memory.execute(query);
+    assert!(expected.ok, "{}", expected.message);
+
+    let dir = TempDir::new();
+    let path = dir.0.join("reverse-equal-keys.redb");
+    {
+        let mut durable = Engine::open_redb(&path).unwrap();
+        let setup = durable.execute(source);
+        assert!(setup.ok, "{}", setup.message);
+    }
+    let mut durable = Engine::open_redb(&path).unwrap();
+    let actual = durable.execute(query);
+    assert!(actual.ok, "{}", actual.message);
+    assert_eq!(actual.rows.len(), expected.rows.len());
+    for (actual, expected) in actual.rows.iter().zip(&expected.rows) {
+        assert!(actual["id"].cmp_eq(&expected["id"]));
+    }
+    assert!(actual.execution.unwrap().index_entries_examined > 0);
+}
+
+#[test]
+fn bounded_redb_ordered_read_stops_after_residual_take() {
+    let dir = TempDir::new();
+    let path = dir.0.join("bounded-residual-take.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(
+            r#"type Task =
+  id int
+  tenant text
+  priority int
+table tasks Task
+  key id
+create index tasks (tenant, priority, id)
+insert many tasks [
+  {id = 1, tenant = "a", priority = 10},
+  {id = 2, tenant = "a", priority = 20},
+  {id = 3, tenant = "a", priority = 30},
+  {id = 4, tenant = "a", priority = 40},
+  {id = 5, tenant = "b", priority = 10},
+]"#,
+        );
+        assert!(setup.ok, "{}", setup.message);
+    }
+    let mut engine = Engine::open_redb(path).unwrap();
+    let response = engine.execute(
+        r#"from tasks
+filter tenant == "a"
+filter id > 1
+sort {priority, id}
+take 2
+select id"#,
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 2);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(response.rows[1]["id"].cmp_eq(&Value::Int(3)));
+    let observation = response.execution.unwrap();
+    assert_eq!(observation.index_entries_examined, 3);
+    assert_eq!(observation.rows_decoded, 3);
+    assert_eq!(observation.row_cache_misses, 3);
+    assert_eq!(observation.row_cache_hits, 2);
 }
 
 fn open_phase_sum(profile: unionid::StorageOpenProfile) -> u64 {
@@ -1453,9 +1585,47 @@ fn redb_rejects_secondary_indexes_that_do_not_match_rows() {
         transaction.commit().unwrap();
     }
     drop(database);
-    let error = Engine::open_redb(path).err().unwrap();
+    let mut engine = Engine::open_redb(path).unwrap();
+    assert!(engine.open_profile().unwrap().bounded_view);
+    let error = engine.check_integrity().unwrap_err();
     assert_eq!(error.code, "E_STORAGE");
     assert!(error.message.contains("secondary indexes do not match"));
+}
+
+#[test]
+fn bounded_indexed_read_rejects_a_missing_durable_row_on_demand() {
+    let dir = TempDir::new();
+    let path = dir.0.join("missing-indexed-row.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "create table entries (id int)\ncreate index entries (id)\ninsert entries {id = 1}",
+                )
+                .ok
+        );
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        transaction
+            .open_table(REDB_ROWS)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    drop(database);
+
+    let mut engine = Engine::open_redb(path).unwrap();
+    let response = engine.execute("from entries | filter id == 1");
+    assert!(!response.ok);
+    let error = response.error.unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("missing row"));
 }
 
 #[test]
