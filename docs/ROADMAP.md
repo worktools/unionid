@@ -6,7 +6,7 @@
 
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[结构化查询语法 RFC](rfc/0005-structured-prql-query-syntax.md)收敛 PRQL 风格的 delimiter、field set、match expression 与 group inner pipeline；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
-v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。当前进入 [M5 总览 #111](https://github.com/worktools/unionid/issues/111)：先收紧真实生产边界，再改善大结果集、标量类型和 CLI 诊断，最后按独立需求验证语言扩展；join、window 和分布式仍不混入这一轮。
+v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。[M5 总览 #111](https://github.com/worktools/unionid/issues/111) 的核心范围也已完成：生产边界、大结果集读取、标量类型、CLI 诊断和结构化查询语法均有可执行实现与验收证据。#118 与 #120 保留为由真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，不使用没有意义的语句末尾分号；花括号、圆括号、方括号和逗号在能明确结构、层级或 precedence 时正常使用。本轮草案采用 `field type`、`option text`／`list text`、结构化声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不沿用 TypeScript 风格的密集字段注解或逐行 `|>`。
 
@@ -110,10 +110,10 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#140](https://github.com/worktools/unionid/issues/140) | [类型] 固定精度 decimal | 已完成 | [#151](https://github.com/worktools/unionid/pull/151) |
 | [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | 已完成 | [RFC 0006](rfc/0006-consistent-read-snapshots.md) |
 | [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | 已完成 | version 1 JSON 与退出码契约 |
-| [#135](https://github.com/worktools/unionid/issues/135) | [服务] 显式取消与有背压的流式读取 | P1 | [#155](https://github.com/worktools/unionid/issues/155) → [#156](https://github.com/worktools/unionid/issues/156) → [#157](https://github.com/worktools/unionid/issues/157) |
+| [#135](https://github.com/worktools/unionid/issues/135) | [服务] 显式取消与有背压的流式读取 | 已完成 | [#155](https://github.com/worktools/unionid/issues/155) → [#156](https://github.com/worktools/unionid/issues/156) → [#157](https://github.com/worktools/unionid/issues/157) |
 | [#155](https://github.com/worktools/unionid/issues/155) | [设计] 取消与 streaming 契约 RFC | 已完成 | [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) |
 | [#156](https://github.com/worktools/unionid/issues/156) | [并发] 有界 operation registry 与只读取消 | 已完成 | PR #159 |
-| [#157](https://github.com/worktools/unionid/issues/157) | [接口] TCP/HTTP NDJSON 背压流 | 当前 | [#156](https://github.com/worktools/unionid/issues/156) |
+| [#157](https://github.com/worktools/unionid/issues/157) | [接口] TCP/HTTP NDJSON 背压流 | 已完成 | [#156](https://github.com/worktools/unionid/issues/156)；PR #160 |
 | [#122](https://github.com/worktools/unionid/issues/122) | [文档] 中英双语 README 与 ADT/query 产品入口 | P1 | 使用已发布 v0.1.0 和 [#112](https://github.com/worktools/unionid/issues/112) 的真实入口 |
 | [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | P2 | 以真实 schema 复用需求单独验证 |
 | [#119](https://github.com/worktools/unionid/issues/119) | [语言] PRQL 风格结构化查询语法 RFC | P1 | 当前 typed IR 与持久源码兼容契约 |
@@ -121,9 +121,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#143](https://github.com/worktools/unionid/issues/143) | [查询] field-set transforms 与 computed select | P1 | [#142](https://github.com/worktools/unionid/issues/142) |
 | [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | P2 | 先定义 schema identity 与参数契约 |
 
-## 当前执行顺序
+## M5 收口状态
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量、#116 的一致并发读快照，以及 #117 的机器可读 CLI 诊断均已完成。#135 的 #155 RFC 与 #156 核心取消已完成；当前实现 #157 的共享 TCP/HTTP NDJSON producer、背压和故障旅程。#118 与 #120 仍是独立 P2 探索。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量、#116 的一致并发读快照、#117 的机器可读 CLI 诊断，以及 #135/#155–#157 的显式取消和有背压 NDJSON stream 均已完成。#118 与 #120 继续作为独立 P2 探索，仅在出现足够真实调用方和 schema 复用需求后推进，不阻塞 M5 收口。
 
 ## 维护约定
 
