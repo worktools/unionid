@@ -588,7 +588,7 @@ page 100 after "u1.payload.mac"
 
 Rust 应用可用 `QueryResponse::typed_page::<T>()` 或协议 `Response::typed_page::<T>()` 一次取得应用类型 rows 与 `PageInfo`。`PageInfo::next_page()` 和 `previous_page()` 返回可直接传给 `Engine::execute_page` 或 `Request::with_page` 的 `PageSpec`。没有 page 元数据时 `typed_page` 返回 `E_PAGE_SHAPE`，查询失败时保留原错误。
 
-page response 总是一个完整、有界的 JSON 结果，不是 streaming。deadline 超时返回 `E_TIMEOUT` 且不产生 cursor；TCP/HTTP 客户端断开后，当前串行执行器可能继续完成只读请求，但最多到服务 deadline，并始终受 working row、sort memory、page 和响应 byte 上限约束。显式跨请求取消与带背压的 NDJSON/streaming 由 [#135](https://github.com/worktools/unionid/issues/135) 跟踪，并依赖 [#116](https://github.com/worktools/unionid/issues/116) 的一致性读快照。
+page response 总是一个完整、有界的 JSON 结果，不是 streaming。deadline 超时返回 `E_TIMEOUT` 且不产生 cursor；需要可靠续读时，客户端应保存成功 page 返回的 cursor。并发读取使用一致快照，独立的 version 1 stream 协议提供显式取消和带背压的 NDJSON frame；断开、取消、deadline 与 shutdown 会通过 operation registry 传播到仍在执行或发送的读取。stream 的部分结果不能续传，完整结果在进入发送阶段前释放快照。协议帧与资源边界见 [协议参考](PROTOCOL.md)和 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md)。
 
 如果业务依赖“前 N 行”，必须先 sort：
 

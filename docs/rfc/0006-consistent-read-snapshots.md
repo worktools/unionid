@@ -50,8 +50,8 @@ cargo run --release --locked --manifest-path tools/concurrency-eval/Cargo.toml -
 
 确定性测试覆盖旧快照与后续写隔离、快照存活时写入不受阻塞、读槽/queue 上限、shutdown 拒绝新快照和 writer queue 统计。memory/redb 使用同一 committed-state 边界；version 1/2 TCP 与 HTTP adapter 复用同一协议入口。
 
-本 RFC 不提供跨请求 transaction、用户长期快照、显式 operation cancellation 或 streaming response。取消与背压继续由 #135 跟踪。
+本 RFC 不提供跨请求 transaction 或用户长期快照。显式 operation cancellation 与有背压的 streaming response 后续已由 #135 和 [RFC 0007](0007-cancellable-backpressured-streams.md) 实现，但不会把一次 read snapshot 延长为跨请求事务。
 
 ## English Summary
 
-The service publishes each complete committed database and receipt state behind immutable `Arc` references. Reads capture those references under the single writer lock and execute outside it; writes and maintenance remain serialized. At most eight request-scoped snapshots run concurrently, deadlines bound queue waits, shutdown rejects new admissions, and live counters expose active/queued reads and writes. A 10k-row, eight-reader release sample improved throughput by 1.85× with 2.65× peak RSS because each query still owns its working state. Long-lived snapshots, streaming, and explicit cancellation remain out of scope and are tracked by #135.
+The service publishes each complete committed database and receipt state behind immutable `Arc` references. Reads capture those references under the single writer lock and execute outside it; writes and maintenance remain serialized. At most eight request-scoped snapshots run concurrently, deadlines bound queue waits, shutdown rejects new admissions, and live counters expose active/queued reads and writes. A 10k-row, eight-reader release sample improved throughput by 1.85× with 2.65× peak RSS because each query still owns its working state. Cross-request transactions and user-held long-lived snapshots remain out of scope. Cancellation and backpressured streaming were implemented later by #135 and RFC 0007 without extending snapshot lifetime into network emission.
