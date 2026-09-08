@@ -16,6 +16,7 @@ fn formatter_is_idempotent_for_current_examples() {
             "session_events",
             include_str!("../examples/session_events.uid"),
         ),
+        ("invoices", include_str!("../examples/invoices.uid")),
         ("mutations", include_str!("../examples/task_mutations.uid")),
         (
             "recursive_tree",

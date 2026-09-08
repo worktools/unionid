@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use unionid::{
     Engine, Value,
     protocol::Request,
-    scalars::{Bytes, Date, Duration, Timestamp, Uuid},
+    scalars::{Bytes, Date, Decimal, Duration, Timestamp, Uuid},
     server::execute_protocol_request,
 };
 
@@ -22,6 +22,7 @@ struct Content {
     published_on: Date,
     created_at: Timestamp,
     retry_after: Duration,
+    price: Decimal,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,7 +79,7 @@ table tasks Task
     println!("{:#?}", result.typed_rows::<Task>()?);
 
     let setup = database.execute(
-        "type Content = {id uuid, digest bytes, preview bytes, published_on date, created_at timestamp, retry_after duration}\n\
+        "type Content = {id uuid, digest bytes, preview bytes, published_on date, created_at timestamp, retry_after duration, price decimal 18 2}\n\
          table content Content\n  key id\n\
          create unique index content (digest)",
     );
@@ -92,6 +93,7 @@ table tasks Task
         published_on: "2026-09-08".parse()?,
         created_at: "2026-09-08T09:30:15.123456+08:00".parse()?,
         retry_after: "30seconds".parse()?,
+        price: Decimal::parse("19.9", 18, 2)?,
     };
     let request = Request::query("content-insert", "insert content $row\nreturning")
         .with_version(2)?

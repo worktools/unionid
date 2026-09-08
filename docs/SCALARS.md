@@ -2,7 +2,7 @@
 
 ## 当前可用范围
 
-`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`，并已接入原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2、value codec 2 与 storage format 4。`uuid`、`bytes`、`date`、`timestamp` 和 `duration` 还已接入源码声明、字面量、查询、索引、migration 与可运行场景；decimal 的源码/运算仍由 #140 跟踪。
+`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`，并已接入源码语言、原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2、value codec 2、索引/cursor、migration 与 storage format 4。decimal 使用 schema 固定 precision/scale，并只提供精确 checked 运算。
 
 完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。新 redb 数据库使用 storage format 4 和 catalog/value/index-key/receipt codec 3/2/2/2；逻辑 backup 使用 codec 3。旧 format 1–3 和过渡 snapshot 仍拒绝新 schema/receipt，持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；显式执行 `unionid upgrade --db <path> --target 4` 会在一个同步事务中校验并重写 catalog、rows、indexes、receipts 和 meta。失败保留旧格式。
 
@@ -49,11 +49,11 @@ wrapper 调用 `serialize_newtype_struct`，marker 使用保留前缀 `unionid::
 
 `Request` 保持默认 version 1；用 `.with_version(2)?` 显式选择 version 2。v1 在 mutation 前检查参数、最终 query／`returning`／`explain` 结果类型和 introspection schema，无法表达新标量时返回 `E_PROTOCOL_TYPE`。幂等命中仍保持“不解析源码直接重放”的既有语义，同时验证存量回执能否由 v1 表达。v2 使用 RFC 0004 的 canonical wire envelope，响应回显版本，幂等 digest 仍包含版本。
 
-cursor 根据实际 boundary 选择词汇版本：只含旧标量时继续输出 `u1`，任一排序键含新标量时输出 `u2`。两个版本共享 HMAC、database/schema/query/sequence 绑定和大小限制；prefix、payload codec 与 typed vocabulary 不一致时 fail closed。UUID 与 bytes 的源码声明和查询已实现；源码中 `length bytes` 返回 octet 数，`contains bytes needle` 判断连续子序列，被索引 bytes 上限为 8192 octets。时间与 decimal 的源码和运算由 #139/#140 推进。
+cursor 根据实际 boundary 选择词汇版本：只含旧标量时继续输出 `u1`，任一排序键含新标量时输出 `u2`。两个版本共享 HMAC、database/schema/query/sequence 绑定和大小限制；prefix、payload codec 与 typed vocabulary 不一致时 fail closed。全部六类生产标量的源码与查询均已接入；decimal 乘除、avg 与舍入仍明确 deferred。
 
 ## English Description
 
-`unionid::scalars` provides validated domains for six native `ScalarType` / `Value` variants. Scalar identity survives nested application ADTs, serde, protocol-v2 values, value codec 2, and storage format 4. UUID and bytes additionally have executable source types/literals, query/index/key semantics, exact text migration parsers, and durable application journeys. Temporal and decimal source operations remain tracked by #139/#140.
+`unionid::scalars` provides six native production scalars across source, typed Rust ADTs, protocol v2, value/index codecs, cursors, redb, backups, and exact migrations. Decimal precision and scale belong to the schema; addition, subtraction, negation, and sum are checked at every step. Multiplication, division, average, and rounding remain deliberately deferred.
 
 Requests default to protocol 1; `.with_version(2)?` opts in. Version 1 rejects new scalar parameters before mutation, responses echo the requested version, and idempotency digests distinguish versions. Legacy durable formats reject native schemas/receipts and persistent mutations with native parameters. Read-only protocol-v2 use can pass and return native parameters without upgrading storage.
 

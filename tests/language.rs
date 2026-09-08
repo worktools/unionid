@@ -98,6 +98,11 @@ fn executable_examples() {
     assert_eq!(r.rows.len(), 1);
     assert_eq!(r.rows[0]["lifetime"].source_text(), "30minutes");
 
+    let mut invoices = Engine::memory();
+    let r = ok(&mut invoices, include_str!("../examples/invoices.uid"));
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0]["total"].source_text(), "decimal \"200.00\"");
+
     let mut mutations = Engine::memory();
     let r = ok(
         &mut mutations,

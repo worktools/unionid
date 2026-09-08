@@ -711,10 +711,8 @@ impl Catalog {
             (Value::Timestamp(v), ScalarType::Timestamp) => Value::Timestamp(*v),
             (Value::Duration(v), ScalarType::Duration) => Value::Duration(*v),
             (Value::Bytes(v), ScalarType::Bytes) => Value::Bytes(v.clone()),
-            (Value::Decimal(v), ScalarType::Decimal { precision, scale })
-                if v.scale() == *scale =>
-            {
-                Value::Decimal(Decimal::new(v.coefficient(), *precision, *scale)?)
+            (Value::Decimal(v), ScalarType::Decimal { precision, scale }) => {
+                Value::Decimal(v.rescale(*precision, *scale)?)
             }
             (Value::Text(v), ScalarType::Text) => Value::Text(v.clone()),
             (Value::Record(fields), ScalarType::Record(columns)) => {

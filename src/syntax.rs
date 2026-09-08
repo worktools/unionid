@@ -665,6 +665,33 @@ impl Parser {
             "date" => ScalarType::Date,
             "timestamp" => ScalarType::Timestamp,
             "duration" => ScalarType::Duration,
+            "decimal" => {
+                let precision_token = self.bump();
+                let Kind::Number(precision) = precision_token.kind else {
+                    return Err(syntax(
+                        "decimal precision must be an integer",
+                        precision_token.span,
+                    ));
+                };
+                let scale_token = self.bump();
+                let Kind::Number(scale) = scale_token.kind else {
+                    return Err(syntax("decimal scale must be an integer", scale_token.span));
+                };
+                let precision = precision.parse::<u8>().map_err(|_| {
+                    syntax(
+                        "decimal precision must be 1 through 38",
+                        precision_token.span,
+                    )
+                })?;
+                let scale = scale.parse::<u8>().map_err(|_| {
+                    syntax(
+                        "decimal scale must be 0 through precision",
+                        scale_token.span,
+                    )
+                })?;
+                crate::scalars::validate_decimal_type(precision, scale)?;
+                ScalarType::Decimal { precision, scale }
+            }
             "bytes" => ScalarType::Bytes,
             "option" => ScalarType::Option(Box::new(self.ty(depth + 1)?)),
             "list" => ScalarType::List(Box::new(self.ty(depth + 1)?)),
@@ -1513,6 +1540,16 @@ impl Parser {
                     ));
                 }
                 Value::Bytes(source.parse()?)
+            }
+            Kind::Ident(s) if s == "decimal" => {
+                let token = self.bump();
+                let Kind::Text(source) = token.kind else {
+                    return Err(syntax(
+                        "decimal literal expects quoted plain digits",
+                        token.span,
+                    ));
+                };
+                Value::Decimal(crate::scalars::Decimal::infer(&source)?)
             }
             Kind::Ident(mut name) => {
                 while self.eat(Kind::Dot) {
@@ -2754,7 +2791,7 @@ impl Parser {
             }
             Kind::Ident(name)
                 if matches!(name.as_str(), "true" | "false" | "null")
-                    || matches!(name.as_str(), "uuid" | "bytes")
+                    || matches!(name.as_str(), "uuid" | "bytes" | "decimal")
                         && matches!(
                             self.tokens.get(self.pos + 1).map(|token| &token.kind),
                             Some(Kind::Text(_))

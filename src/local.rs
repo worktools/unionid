@@ -947,10 +947,15 @@ fn validate_scalar(
                 ));
             }
             if crate::expression::is_builtin_scalar_function(name) && !visible.contains_key(name) {
-                if arguments.len() != 1 {
+                let expected = crate::expression::builtin_scalar_arity(name)
+                    .expect("known builtin scalar function");
+                if arguments.len() != expected {
                     return Err(Error::new(
                         "E_TYPE",
-                        format!("{name} expects 1 argument, got {}", arguments.len()),
+                        format!(
+                            "{name} expects {expected} argument(s), got {}",
+                            arguments.len()
+                        ),
                     )
                     .at(*span));
                 }
