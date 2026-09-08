@@ -9,6 +9,15 @@ export PATH="$PWD/bin:$PATH"
 
 从源码运行时，先在仓库根目录执行 `cargo build --locked` 和 `export PATH="$PWD/target/debug:$PATH"`，再把下文的 `../tutorial` 替换为 `../examples/getting-started`。
 
+先让自动化确认它拿到的二进制及兼容范围：
+
+```bash
+unionid version --format json
+unionid doctor --format json
+```
+
+两条命令都不创建数据库。JSON 包含软件版本、Rust target、协议版本，以及可读和当前写入的 storage/codec 版本。
+
 ## 1. 创建持久数据库
 
 ```bash
@@ -72,10 +81,11 @@ unionid run --db tasks.redb --file ../tutorial/03_update.uid
 
 ```bash
 unionid run --db tasks.redb --file ../tutorial/04_reopen.uid
+unionid doctor --db tasks.redb --format json
 unionid check --db tasks.redb
 ```
 
-最终查询返回两行，并通过 `derive worker = match state` 解构 ADT 产生新列。`check` 先执行 redb 完整性检查，再验证 catalog、schema hash、row、稳定 RowId、索引和 migration ledger 的逻辑一致性。
+最终查询返回两行，并通过 `derive worker = match state` 解构 ADT 产生新列。`doctor` 不改动原文件，只通过临时副本报告存储版本、schema identity 和 ledger 摘要；`check` 则打开原数据库，先执行 redb 完整性检查，再验证 catalog、schema hash、row、稳定 RowId、索引和 migration ledger 的逻辑一致性。
 
 ## 5. 改用 TCP 服务
 
@@ -119,6 +129,6 @@ python3 tutorial/validate.py \
 
 ## English walkthrough
 
-The four files under `tutorial/` form one executable five-minute journey. Run `01_setup.uid` against a new `--db` path, query the `Running` variant with `02_running.uid`, atomically change the pending row with `03_update.uid`, then launch a new process with `04_reopen.uid` and finish with `unionid check --db tasks.redb`. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
+The four files under `tutorial/` form one executable five-minute journey. Start with `unionid version --format json`, run `01_setup.uid` against a new `--db` path, query the `Running` variant with `02_running.uid`, atomically change the pending row with `03_update.uid`, then launch a new process with `04_reopen.uid`. Finish with `unionid doctor --db tasks.redb --format json` and `unionid check --db tasks.redb`: doctor reports compatibility and schema/ledger summaries from a private copy without changing the source, while check opens and verifies the actual database. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
 
 The TCP commands above execute the same files through `unionid cli --addr`. The Rust example calls `Engine::open_redb` with those same sources. `tutorial/validate.py` runs both paths from an empty directory and compares their typed rows, columns, and schema identity.

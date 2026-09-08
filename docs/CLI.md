@@ -9,6 +9,52 @@ unionid cli --db app.redb --read-only
 unionid cli --addr 127.0.0.1:7878
 ```
 
+## 版本与部署诊断
+
+部署脚本不需要解析面向人的句子。`version` 报告当前二进制及它明确支持的协议、存储和 codec；`doctor` 还可检查一个已经存在的数据库：
+
+```bash
+unionid version --format json
+unionid doctor --format json
+unionid doctor --db app.redb --format json
+```
+
+`version` 的 version 1 JSON 形态如下。未来版本可以增加字段，但不会改变或删除当前字段的含义：
+
+```json
+{"schema_version":1,"software_version":"0.1.0","target":"aarch64-apple-darwin","protocol_versions":[1,2],"readable_storage_formats":[1,2,3,4],"current_storage":{"format":4,"catalog_codec":3,"value_codec":2,"index_key_codec":2,"migration_codec":1,"receipt_codec":2,"backup_codec":3}}
+```
+
+`doctor` 成功结果增加 `ok`，并把同一个版本对象放在 `version`。指定 `--db` 后还会返回 `database.storage`、`storage_versions`、`read_only`、schema identity、migration 边界和 table/type 数量；不返回数据库路径、schema 源码、表名或类型名。未指定数据库时省略 `database`：
+
+```json
+{"schema_version":1,"ok":true,"version":{"schema_version":1,"software_version":"0.1.0","target":"aarch64-apple-darwin","protocol_versions":[1,2],"readable_storage_formats":[1,2,3,4],"current_storage":{"format":4,"catalog_codec":3,"value_codec":2,"index_key_codec":2,"migration_codec":1,"receipt_codec":2,"backup_codec":3}}}
+```
+
+`doctor --db` 要求路径已经存在且是文件。为避免 redb 的打开恢复改变原文件，它只读取一个权限受限的临时字节副本；不会创建、修复、升级或锁定请求的数据库，退出时删除副本。应对静止数据库或一致备份运行它；若源文件在复制时仍有写入，诊断结果不应作为一致快照。需要证明原文件自身可完整打开时使用 `check --db`。
+
+## JSON 错误与退出码
+
+支持 `--format json` 的非查询命令统一返回 version 1 错误 envelope，且只写 stdout：
+
+```json
+{"schema_version":1,"ok":false,"exit_code":5,"error":{"code":"E_IO","message":"open '<redacted>': No such file or directory (os error 2)"}}
+```
+
+错误可能增加 `error.span`。路径和引号包裹的输入会在该 envelope 中脱敏；参数解析错误使用固定提示，不回显参数。退出码是稳定的部署接口：
+
+| 退出码 | 类别 | 典型情况 |
+| --- | --- | --- |
+| 0 | 成功 | 命令完成 |
+| 1 | 未归类 | 未纳入下列稳定类别的内部错误 |
+| 2 | 参数／配置 | CLI 参数无效、必要配置缺失 |
+| 3 | 输入／schema | 语法、类型、schema 或查询错误 |
+| 4 | 连接／占用 | TCP 连接、协议或数据库被占用 |
+| 5 | 存储／不确定 | I/O、codec、backup 或提交结果不确定 |
+| 6 | 完整性 | `check` 命令未通过，包括无法打开待检查文件 |
+
+JSON 成功结果和错误只写 stdout，面向人的诊断只写 stderr。`run --format json` 和 `cli --format json` 为保持协议兼容，继续输出现有 `QueryResponse`，不会套入 CLI envelope；失败时仍使用上表的进程退出码。`--version` 保留 clap 的单行人类输出，自动化应使用显式的 `version --format json`。
+
 持久幂等回执使用独立运维命令。prune 默认只预览，至少需要一个 cutoff，只有 `--confirm` 才删除：
 
 ```bash
@@ -17,7 +63,7 @@ unionid receipts prune --db app.redb --through-sequence 1200 --max-receipts 500
 unionid receipts prune --db app.redb --through-sequence 1200 --max-receipts 500 --confirm
 ```
 
-无 cutoff、`max-receipts` 不在 1–1000，或存储／只读边界不允许操作时返回稳定错误并以状态码 1 退出。清理后的 key 可以再次执行；命令不会按墙钟自动淘汰 receipt。
+无 cutoff、`max-receipts` 不在 1–1000，或存储／只读边界不允许操作时返回稳定错误和对应的分类退出码。清理后的 key 可以再次执行；命令不会按墙钟自动淘汰 receipt。
 
 `run`、本地 `cli` 和 `server` 都支持 `--db <path> --read-only`。该模式只打开已经存在的 redb 文件；路径不存在会返回 `E_CONFIG`，不会创建空数据库。查询、`explain` 和 introspection 正常工作，任何包含 DDL、DML 或待应用 migration 的请求都在构造候选状态或 durable transaction 前以 `E_READ_ONLY` 整批拒绝。远程 `cli` 是否只读取决于服务端配置，客户端参数不能替代服务端边界。
 

@@ -32,6 +32,19 @@ const MIGRATION_CODEC_VERSION: u16 = 1;
 const RECEIPT_CODEC_VERSION: u16 = 1;
 const PRODUCTION_RECEIPT_CODEC_VERSION: u16 = 2;
 
+pub(crate) fn production_versions() -> StorageVersions {
+    let layout = StorageLayout::production();
+    StorageVersions {
+        format: layout.format,
+        catalog_codec: layout.catalog,
+        value_codec: layout.value,
+        index_key_codec: layout.index,
+        migration_codec: layout.migration,
+        receipt_codec: layout.receipt,
+        backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
+    }
+}
+
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
 const ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
