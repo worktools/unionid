@@ -138,7 +138,13 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | --- | --- | --- | --- |
 | [#177](https://github.com/worktools/unionid/issues/177) | [路线图] M7 总览与阶段验收 | P0 | M6 容量证据 |
 | [#178](https://github.com/worktools/unionid/issues/178) | [质量] 分段观测 open 与 full-rebuild migration | 当前 | [#166](https://github.com/worktools/unionid/issues/166) |
-| [#179](https://github.com/worktools/unionid/issues/179) | [设计] 冻结 bounded resident state 与 maintenance generation | P0 | [#178](https://github.com/worktools/unionid/issues/178) |
+| [#179](https://github.com/worktools/unionid/issues/179) | [设计] 冻结 bounded resident state 与 maintenance generation | P0 | [RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md)、[#178](https://github.com/worktools/unionid/issues/178) |
+| [#181](https://github.com/worktools/unionid/issues/181) | [核心] 统一 typed row source 与 committed view | P0 | [#179](https://github.com/worktools/unionid/issues/179) |
+| [#182](https://github.com/worktools/unionid/issues/182) | [存储] Legacy0 有界 redb read 与 row cache | P0 | [#181](https://github.com/worktools/unionid/issues/181) |
+| [#183](https://github.com/worktools/unionid/issues/183) | [执行] 有界 full pipeline、check 与 backup | P1 | [#182](https://github.com/worktools/unionid/issues/182) |
+| [#184](https://github.com/worktools/unionid/issues/184) | [存储] format-6 generation envelope 与升级 | P0 | [#179](https://github.com/worktools/unionid/issues/179) |
+| [#185](https://github.com/worktools/unionid/issues/185) | [迁移] 可恢复 shadow generation 与原子 cutover | P0 | [#183](https://github.com/worktools/unionid/issues/183)、[#184](https://github.com/worktools/unionid/issues/184) |
+| [#186](https://github.com/worktools/unionid/issues/186) | [质量] M7 接口旅程与容量复验 | P1 | [#182](https://github.com/worktools/unionid/issues/182)–[#185](https://github.com/worktools/unionid/issues/185) |
 
 ### 独立 P2 探索
 
@@ -153,7 +159,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。当前 #178 对 open/full rebuild 做分阶段观测；证据完成后进入 #179 RFC，再按 RFC 拆分 bounded indexed/page read、full scan/check 与 migration generation 实现。
+#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。后续顺序为 #181 共享 source seam → #182 Legacy0 bounded read；#184 generation envelope 可在 #181 后准备，#183 完成 full pipeline/check/backup，二者汇合到 #185 resumable migration，最后由 #186 复验接口与容量。
 
 ## 维护约定
 
