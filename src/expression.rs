@@ -328,21 +328,35 @@ pub(crate) fn bind_scalar(
             let result = expected.cloned().or(inferred).ok_or_else(|| {
                 Error::new(
                     "E_TYPE",
-                    "cannot infer unary '-' operand type; use an int or float value",
+                    "cannot infer unary '-' operand type; use an int, float, or duration value",
                 )
             })?;
-            require_numeric(catalog, &result, "unary '-'")?;
+            require_negatable(catalog, &result, "unary '-'")?;
             bind_scalar(catalog, scope, value, Some(&result), reference_kind)?;
             *ty = Some(result.clone());
             result
         }
         ScalarExpression::Arithmetic {
             left,
-            op: _,
+            op,
             right,
             ty,
         } => {
-            let inferred = infer_arithmetic_type(catalog, scope, left, right, reference_kind)?;
+            let left_inferred = infer_scalar(catalog, scope, left, reference_kind)?;
+            let right_inferred = infer_scalar(catalog, scope, right, reference_kind)?;
+            if let Some((left_ty, right_ty, result)) = temporal_arithmetic_signature(
+                catalog,
+                left_inferred.as_ref(),
+                *op,
+                right_inferred.as_ref(),
+                expected,
+            )? {
+                bind_scalar(catalog, scope, left, Some(&left_ty), reference_kind)?;
+                bind_scalar(catalog, scope, right, Some(&right_ty), reference_kind)?;
+                *ty = Some(result.clone());
+                return Ok(result);
+            }
+            let inferred = infer_arithmetic_type(catalog, scope, left, *op, right, reference_kind)?;
             let result = expected.cloned().or(inferred).ok_or_else(|| {
                 Error::new(
                     "E_TYPE",
@@ -424,12 +438,26 @@ pub(crate) fn infer_scalar(
         ScalarExpression::Negate { value, .. } => {
             let ty = infer_scalar(catalog, scope, value, reference_kind)?;
             if let Some(ty) = &ty {
-                require_numeric(catalog, ty, "unary '-'")?;
+                require_negatable(catalog, ty, "unary '-'")?;
             }
             Ok(ty)
         }
-        ScalarExpression::Arithmetic { left, right, .. } => {
-            infer_arithmetic_type(catalog, scope, left, right, reference_kind)
+        ScalarExpression::Arithmetic {
+            left, op, right, ..
+        } => {
+            let left_ty = infer_scalar(catalog, scope, left, reference_kind)?;
+            let right_ty = infer_scalar(catalog, scope, right, reference_kind)?;
+            if let Some((_, _, result)) = temporal_arithmetic_signature(
+                catalog,
+                left_ty.as_ref(),
+                *op,
+                right_ty.as_ref(),
+                None,
+            )? {
+                Ok(Some(result))
+            } else {
+                infer_arithmetic_type(catalog, scope, left, *op, right, reference_kind)
+            }
         }
     }
 }
@@ -438,6 +466,7 @@ fn infer_arithmetic_type(
     catalog: &Catalog,
     scope: &[Column],
     left: &ScalarExpression,
+    op: ArithmeticOp,
     right: &ScalarExpression,
     reference_kind: &str,
 ) -> Result<Option<ScalarType>> {
@@ -461,6 +490,11 @@ fn infer_arithmetic_type(
         (None, None) => None,
     };
     if let Some(ty) = &result {
+        if matches!(op, ArithmeticOp::Multiply | ArithmeticOp::Divide)
+            && matches!(catalog.underlying(ty)?, ScalarType::Duration)
+        {
+            return Err(Error::new("E_TYPE", "duration only supports '+' and '-'"));
+        }
         require_numeric(catalog, ty, "arithmetic")?;
     }
     Ok(result)
@@ -495,14 +529,109 @@ fn require_numeric(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<
     }
 }
 
+fn require_negatable(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<()> {
+    if matches!(
+        catalog.underlying(ty)?,
+        ScalarType::Int | ScalarType::Float | ScalarType::Duration
+    ) {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "E_TYPE",
+            format!(
+                "{context} expects int, float, or duration, got {}",
+                catalog.describe(ty)
+            ),
+        ))
+    }
+}
+
+fn temporal_arithmetic_signature(
+    catalog: &Catalog,
+    left: Option<&ScalarType>,
+    op: ArithmeticOp,
+    right: Option<&ScalarType>,
+    expected: Option<&ScalarType>,
+) -> Result<Option<(ScalarType, ScalarType, ScalarType)>> {
+    let left_kind = match left {
+        Some(ty) => Some(catalog.underlying(ty)?),
+        None => None,
+    };
+    let right_kind = match right {
+        Some(ty) => Some(catalog.underlying(ty)?),
+        None => None,
+    };
+    let expected_kind = match expected {
+        Some(ty) => Some(catalog.underlying(ty)?),
+        None => None,
+    };
+    let timestamp = ScalarType::Timestamp;
+    let duration = ScalarType::Duration;
+    let signature = match (left_kind, op, right_kind) {
+        (
+            Some(ScalarType::Duration),
+            ArithmeticOp::Add | ArithmeticOp::Subtract,
+            Some(ScalarType::Duration),
+        ) => Some((duration.clone(), duration.clone(), duration)),
+        (
+            Some(ScalarType::Timestamp),
+            ArithmeticOp::Add | ArithmeticOp::Subtract,
+            Some(ScalarType::Duration),
+        ) => Some((timestamp.clone(), duration, timestamp)),
+        (Some(ScalarType::Timestamp), ArithmeticOp::Subtract, Some(ScalarType::Timestamp)) => {
+            Some((timestamp.clone(), timestamp, duration))
+        }
+        (Some(ScalarType::Duration), ArithmeticOp::Add | ArithmeticOp::Subtract, None) => {
+            Some((duration.clone(), duration.clone(), duration))
+        }
+        (None, ArithmeticOp::Add | ArithmeticOp::Subtract, Some(ScalarType::Duration))
+            if matches!(expected_kind, Some(ScalarType::Duration)) =>
+        {
+            Some((duration.clone(), duration.clone(), duration))
+        }
+        (Some(ScalarType::Timestamp), ArithmeticOp::Add | ArithmeticOp::Subtract, None)
+            if matches!(expected_kind, Some(ScalarType::Timestamp)) =>
+        {
+            Some((timestamp.clone(), duration, timestamp))
+        }
+        (None, ArithmeticOp::Subtract, Some(ScalarType::Timestamp))
+            if matches!(expected_kind, Some(ScalarType::Duration)) =>
+        {
+            Some((timestamp.clone(), timestamp, duration))
+        }
+        _ => None,
+    };
+    if signature.is_none()
+        && (matches!(
+            left_kind,
+            Some(ScalarType::Timestamp | ScalarType::Duration)
+        ) || matches!(
+            right_kind,
+            Some(ScalarType::Timestamp | ScalarType::Duration)
+        ))
+    {
+        return Err(Error::new(
+            "E_TYPE",
+            "unsupported timestamp/duration arithmetic",
+        ));
+    }
+    Ok(signature)
+}
+
 pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
-    matches!(name, "uuid_parse" | "bytes_parse_hex")
+    matches!(
+        name,
+        "uuid_parse" | "bytes_parse_hex" | "date_parse" | "timestamp_parse" | "duration_parse"
+    )
 }
 
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
     match name {
         "uuid_parse" => Some(ScalarType::Uuid),
         "bytes_parse_hex" => Some(ScalarType::Bytes),
+        "date_parse" => Some(ScalarType::Date),
+        "timestamp_parse" => Some(ScalarType::Timestamp),
+        "duration_parse" => Some(ScalarType::Duration),
         _ => None,
     }
 }
@@ -855,6 +984,9 @@ fn evaluate_scalar<'expression, 'values>(
             let value = match name.as_str() {
                 "uuid_parse" => Value::Uuid(source.parse()?),
                 "bytes_parse_hex" => Value::Bytes(source.parse()?),
+                "date_parse" => Value::Date(source.parse()?),
+                "timestamp_parse" => Value::Timestamp(source.parse()?),
+                "duration_parse" => Value::Duration(source.parse()?),
                 _ => unreachable!("known builtin scalar function"),
             };
             Ok(Some(Evaluated::Owned(value)))
@@ -888,6 +1020,13 @@ fn evaluate_scalar<'expression, 'values>(
                         .ok_or_else(|| Error::new("E_ARITH", "integer overflow in unary '-'"))?,
                 ),
                 Value::Float(value) => finite_float(-value, "unary '-'")?,
+                Value::Duration(value) => Value::Duration(
+                    value
+                        .microseconds()
+                        .checked_neg()
+                        .map(crate::scalars::Duration::from_microseconds)
+                        .ok_or_else(|| Error::new("E_ARITH", "duration overflow in unary '-'"))?,
+                ),
                 _ => return Err(Error::new("E_TYPE", "non-numeric unary '-' operand")),
             };
             Ok(Some(Evaluated::Owned(coerce_arithmetic_result(
@@ -965,6 +1104,41 @@ fn evaluate_arithmetic(left: &Value, op: ArithmeticOp, right: &Value) -> Result<
                 ArithmeticOp::Divide => left / right,
             };
             finite_float(value, "float arithmetic")
+        }
+        (Value::Duration(left), Value::Duration(right)) => {
+            let value = match op {
+                ArithmeticOp::Add => left.microseconds().checked_add(right.microseconds()),
+                ArithmeticOp::Subtract => left.microseconds().checked_sub(right.microseconds()),
+                _ => None,
+            }
+            .ok_or_else(|| Error::new("E_ARITH", "duration arithmetic overflow"))?;
+            Ok(Value::Duration(
+                crate::scalars::Duration::from_microseconds(value),
+            ))
+        }
+        (Value::Timestamp(left), Value::Duration(right)) => {
+            let value = match op {
+                ArithmeticOp::Add => left.epoch_microseconds().checked_add(right.microseconds()),
+                ArithmeticOp::Subtract => {
+                    left.epoch_microseconds().checked_sub(right.microseconds())
+                }
+                _ => None,
+            }
+            .ok_or_else(|| Error::new("E_ARITH", "timestamp arithmetic overflow"))?;
+            Ok(Value::Timestamp(
+                crate::scalars::Timestamp::from_epoch_microseconds(value)?,
+            ))
+        }
+        (Value::Timestamp(left), Value::Timestamp(right))
+            if matches!(op, ArithmeticOp::Subtract) =>
+        {
+            let value = left
+                .epoch_microseconds()
+                .checked_sub(right.epoch_microseconds())
+                .ok_or_else(|| Error::new("E_ARITH", "timestamp difference overflow"))?;
+            Ok(Value::Duration(
+                crate::scalars::Duration::from_microseconds(value),
+            ))
         }
         _ => Err(Error::new(
             "E_TYPE",

@@ -96,6 +96,7 @@ impl GroupAccumulator {
                     *total = Some(match (total.take(), value.unwrapped()) {
                         (None, Value::Int(value)) => Value::Int(*value),
                         (None, Value::Float(value)) => Value::Float(*value),
+                        (None, Value::Duration(value)) => Value::Duration(*value),
                         (Some(Value::Int(total)), Value::Int(value)) => Value::Int(
                             total
                                 .checked_add(*value)
@@ -110,6 +111,16 @@ impl GroupAccumulator {
                                 ));
                             }
                             Value::Float(result)
+                        }
+                        (Some(Value::Duration(total)), Value::Duration(value)) => {
+                            Value::Duration(crate::scalars::Duration::from_microseconds(
+                                total
+                                    .microseconds()
+                                    .checked_add(value.microseconds())
+                                    .ok_or_else(|| {
+                                        Error::new("E_ARITH", "duration sum overflow")
+                                    })?,
+                            ))
                         }
                         _ => {
                             return Err(Error::new(
@@ -150,6 +161,9 @@ impl GroupAccumulator {
                 AggregateState::Sum(None) => match catalog.underlying(output_type)? {
                     ScalarType::Int => Value::Int(0),
                     ScalarType::Float => Value::Float(0.0),
+                    ScalarType::Duration => {
+                        Value::Duration(crate::scalars::Duration::from_microseconds(0))
+                    }
                     _ => {
                         return Err(Error::new("E_TYPE", "bound sum output is not numeric"));
                     }
@@ -776,18 +790,11 @@ impl Database {
             let ty = self.catalog.field_type(&columns, key)?;
             if !matches!(
                 self.catalog.underlying(ty)?,
-                ScalarType::Int
-                    | ScalarType::Text
-                    | ScalarType::Uuid
-                    | ScalarType::Date
-                    | ScalarType::Timestamp
-                    | ScalarType::Duration
-                    | ScalarType::Decimal { .. }
-                    | ScalarType::Bytes
+                ScalarType::Int | ScalarType::Text | ScalarType::Uuid
             ) {
                 return Err(Error::new(
                     "E_TYPE",
-                    "primary keys require an indexable scalar type",
+                    "primary keys require int, text, or uuid",
                 ));
             }
         }
@@ -1927,12 +1934,12 @@ impl Database {
                     let ty = self.aggregate_input_type(schema, assignment)?;
                     if !matches!(
                         self.catalog.underlying(&ty)?,
-                        ScalarType::Int | ScalarType::Float
+                        ScalarType::Int | ScalarType::Float | ScalarType::Duration
                     ) {
                         return Err(Error::new(
                             "E_TYPE",
                             format!(
-                                "sum expects int or float, got {}",
+                                "sum expects int, float, or duration, got {}",
                                 self.catalog.describe(&ty)
                             ),
                         ));

@@ -1,0 +1,29 @@
+type Session = {
+  id uuid,
+  started_on date,
+  opened_at timestamp,
+  expires_at timestamp,
+  retry_after duration,
+}
+
+table sessions Session
+  key id
+
+create index sessions (expires_at)
+
+insert sessions {
+  id = uuid "01991d78-a32d-7c2f-8f31-4c499bf64d9a",
+  started_on = @2026-09-08,
+  opened_at = @2026-09-08T09:30:15.123456+08:00,
+  expires_at = @2026-09-08T02:00:15.123456Z,
+  retry_after = 30seconds,
+}
+
+from sessions
+derive {
+  expected_retry_at = opened_at + retry_after,
+  lifetime = expires_at - opened_at,
+}
+filter expires_at >= @2026-09-08T02:00:00Z
+select {id, started_on, expected_retry_at, lifetime}
+sort id

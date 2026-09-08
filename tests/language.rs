@@ -90,6 +90,14 @@ fn executable_examples() {
     assert_eq!(r.rows.len(), 1);
     assert!(r.rows[0]["preview_octets"].cmp_eq(&Value::Int(4)));
 
+    let mut sessions = Engine::memory();
+    let r = ok(
+        &mut sessions,
+        include_str!("../examples/session_events.uid"),
+    );
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0]["lifetime"].source_text(), "30minutes");
+
     let mut mutations = Engine::memory();
     let r = ok(
         &mut mutations,

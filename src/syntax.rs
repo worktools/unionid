@@ -33,6 +33,7 @@ pub enum InputStatus {
 enum Kind {
     Ident(String),
     Number(String),
+    Temporal(String),
     Text(String),
     Open(char),
     Close(char),
@@ -140,6 +141,20 @@ fn lex_source(source: &str) -> Result<LexOutput> {
                 column: start + 1,
             };
             let kind = match ch {
+                '@' => {
+                    pos += 1;
+                    let value_start = pos;
+                    while pos < chars.len()
+                        && (chars[pos].is_ascii_alphanumeric()
+                            || matches!(chars[pos], '-' | ':' | '+' | '.'))
+                    {
+                        pos += 1;
+                    }
+                    if pos == value_start {
+                        return Err(syntax("temporal literal requires a value after '@'", span));
+                    }
+                    Kind::Temporal(chars[value_start..pos].iter().collect())
+                }
                 '"' => {
                     pos += 1;
                     let mut escaped = false;
@@ -647,6 +662,9 @@ impl Parser {
             "bool" | "boolean" => ScalarType::Bool,
             "text" | "string" => ScalarType::Text,
             "uuid" => ScalarType::Uuid,
+            "date" => ScalarType::Date,
+            "timestamp" => ScalarType::Timestamp,
+            "duration" => ScalarType::Duration,
             "bytes" => ScalarType::Bytes,
             "option" => ScalarType::Option(Box::new(self.ty(depth + 1)?)),
             "list" => ScalarType::List(Box::new(self.ty(depth + 1)?)),
@@ -1441,7 +1459,9 @@ impl Parser {
             Kind::Text(s) => Value::Text(s),
             Kind::Number(raw) => {
                 let s = raw.replace('_', "");
-                if s.contains(['.', 'e', 'E']) {
+                if s.ends_with(char::is_alphabetic) {
+                    Value::Duration(s.parse()?)
+                } else if s.contains(['.', 'e', 'E']) {
                     let v: f64 = s
                         .parse()
                         .map_err(|_| syntax("invalid float literal", token.span))?;
@@ -1456,6 +1476,13 @@ impl Parser {
                             token.span,
                         )
                     })?)
+                }
+            }
+            Kind::Temporal(source) => {
+                if source.contains(['T', 't']) {
+                    Value::Timestamp(source.parse()?)
+                } else {
+                    Value::Date(source.parse()?)
                 }
             }
             Kind::Open('{') => self.record(Kind::Close('}'), depth + 1)?,
@@ -2683,6 +2710,7 @@ impl Parser {
             Kind::Parameter(_)
             | Kind::Text(_)
             | Kind::Number(_)
+            | Kind::Temporal(_)
             | Kind::Open('{')
             | Kind::Open('[')
             | Kind::Open('(') => true,
@@ -2736,9 +2764,11 @@ impl Parser {
                 Ok(ScalarExpression::Literal(self.value(depth + 1)?))
             }
             Kind::Ident(_) => Ok(ScalarExpression::Reference(self.path()?)),
-            Kind::Text(_) | Kind::Number(_) | Kind::Open('{') | Kind::Open('[') => {
-                Ok(ScalarExpression::Literal(self.value(depth + 1)?))
-            }
+            Kind::Text(_)
+            | Kind::Number(_)
+            | Kind::Temporal(_)
+            | Kind::Open('{')
+            | Kind::Open('[') => Ok(ScalarExpression::Literal(self.value(depth + 1)?)),
             _ => {
                 Err(self
                     .error("expected a field, binding, literal, length, or arithmetic expression"))

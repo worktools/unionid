@@ -1,6 +1,6 @@
 # 查询语言参考
 
-本页只描述当前可执行语义。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的 braced match、group inner pipeline 与 canonical formatter 已实现；多项 derive/select、computed select 与 set 字段集已实现；`@` temporal 与 duration unit literal 由 #139 跟踪。
+本页只描述当前可执行语义。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的 braced match、group inner pipeline 与 canonical formatter 已实现；多项 derive/select、computed select 与 set 字段集已实现；`@` date/timestamp 与整数 duration unit literal 已实现。
 
 本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。第一次使用可先运行[五分钟教程](GETTING_STARTED.md)中的持久查询、更新和重开链路。类型、表和 insert/upsert 见 [LANGUAGE.md](LANGUAGE.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)；尚未实现的表达式与 runner 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
 
