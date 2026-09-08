@@ -114,7 +114,7 @@ select {id, digest, payload}"#;
             .unwrap()
             .access
             .kind,
-        QueryAccessKind::FullScan
+        QueryAccessKind::OrderedScan
     );
 
     let mut indexed = Engine::memory();

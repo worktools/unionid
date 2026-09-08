@@ -142,7 +142,7 @@ HTTP 适配、生命周期 endpoint 和完整 todo 场景见 [HTTP 数据协议�
 }
 ~~~
 
-<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。分页响应增加 `page`，cursor 缺失时字段省略；`has_more` 表示当前遍历方向还有数据。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`、可选索引与 lookup 条件、候选行数、源码顺序 stage 和最终结果 schema；分页计划还包含唯一 order、boundary、sequence、`sorted_scan` 和预算。introspection 响应改为包含 <code>introspection</code>，receipt 运维响应包含 `receipts`，这些操作都不执行数据查询。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>；单行 upsert 使用 <code>upsert_action</code>，批量 upsert 使用按输入顺序排列的 <code>upsert_actions</code> array。`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。旧 version 1 request 缺少新增字段时按 `None` 处理。warnings 不改变 <code>ok</code>。
+<code>columns</code> 决定展示和读取顺序，row object 只承载按名称访问的值。分页响应增加 `page`，cursor 缺失时字段省略；`has_more` 表示当前遍历方向还有数据。`explain` 响应额外包含 <code>plan</code>：源表、`full_scan`／`primary_key_lookup`／`secondary_index_lookup`／`composite_lookup`／`range_scan`／`ordered_scan`／`page_seek`、可选索引 shape、equality/range/traversal 元数据、候选行数、源码顺序 stage 和最终结果 schema；分页计划还包含唯一 order、boundary、sequence、`sorted_scan`／`index_seek` 和预算。边界值不会进入响应。introspection 响应改为包含 <code>introspection</code>，receipt 运维响应包含 `receipts`，这些操作都不执行数据查询。失败响应的 <code>error</code> 包含固定 <code>code</code>、可读 <code>message</code> 和可选源码 <code>span</code>。DML 使用 <code>affected_rows</code>；单行 upsert 使用 <code>upsert_action</code>，批量 upsert 使用按输入顺序排列的 <code>upsert_actions</code> array。`returning` 直接复用相同的 typed columns/rows wire codec，不改变 version。旧 version 1 request 缺少新增字段时按 `None` 处理。warnings 不改变 <code>ok</code>。
 
 ## Rust 嵌入接口
 

@@ -164,6 +164,63 @@ fn prepared_queries_reject_schema_changes_and_unsupported_mutations() {
 }
 
 #[test]
+fn prepared_composite_ranges_bind_parameters_before_index_planning() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                r#"type Event = {id int, tenant text, sequence int}
+table events Event
+  key id
+create index events (tenant, sequence, id)
+insert many events [
+  {id = 1, tenant = "acme", sequence = 1},
+  {id = 2, tenant = "acme", sequence = 2},
+  {id = 3, tenant = "acme", sequence = 3},
+  {id = 4, tenant = "other", sequence = 2},
+]"#,
+            )
+            .ok
+    );
+    let source = r#"from events
+filter tenant == $tenant
+filter sequence >= $minimum
+sort {sequence, id}"#;
+    let prepared = engine.prepare(source).unwrap();
+    assert_eq!(prepared.parameter_types()["tenant"], "text");
+    assert_eq!(prepared.parameter_types()["minimum"], "int");
+    let params = BTreeMap::from([
+        ("tenant".into(), Value::Text("acme".into())),
+        ("minimum".into(), Value::Int(2)),
+    ]);
+    let response = engine.execute_prepared(&prepared, params.clone());
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 2);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(response.rows[1]["id"].cmp_eq(&Value::Int(3)));
+
+    let explained_prepared = engine
+        .prepare(
+            r#"explain
+  from events
+  filter tenant == $tenant
+  filter sequence >= $minimum
+  sort {sequence, id}"#,
+        )
+        .unwrap();
+    let explained = engine.execute_prepared(&explained_prepared, params);
+    assert!(explained.ok, "{}", explained.message);
+    let access = &explained.plan.unwrap().access;
+    assert_eq!(access.kind, QueryAccessKind::RangeScan);
+    assert_eq!(access.equality_prefix, ["tenant"]);
+    assert_eq!(access.estimated_rows, 2);
+    assert_eq!(
+        access.condition.as_deref(),
+        Some("tenant == <bound>, sequence in <range>")
+    );
+}
+
+#[test]
 fn prepared_bulk_insert_infers_row_lists_and_honors_deadlines() {
     let mut engine = setup();
     let prepared = engine

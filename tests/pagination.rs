@@ -74,6 +74,107 @@ fn memory_pages_traverse_duplicate_prefixes_in_both_directions() {
 }
 
 #[test]
+fn equality_fixed_unique_index_suffix_proves_page_order() {
+    let mut engine = Engine::memory();
+    let created = engine.execute(
+        r#"type Session = {tenant text, slug text, touched int}
+table sessions Session
+create unique index sessions (tenant, slug)
+insert many sessions [
+  {tenant = "acme", slug = "a", touched = 1},
+  {tenant = "acme", slug = "b", touched = 2},
+  {tenant = "acme", slug = "c", touched = 3},
+  {tenant = "other", slug = "a", touched = 4},
+]"#,
+    );
+    assert!(created.ok, "{}", created.message);
+    let query = r#"from sessions
+filter tenant == "acme"
+sort slug"#;
+    let explained = engine.execute(
+        r#"explain
+  from sessions
+  filter tenant == "acme"
+  sort slug
+  page 2"#,
+    );
+    assert!(explained.ok, "{}", explained.message);
+    let plan = explained.plan.unwrap();
+    assert_eq!(plan.access.kind, unionid::QueryAccessKind::OrderedScan);
+    assert!(!plan.access.page_seek);
+    assert!(plan.access.sort_satisfied);
+    assert_eq!(plan.access.equality_prefix, ["tenant"]);
+    assert_eq!(plan.page.unwrap().access, PageAccessKind::IndexSeek);
+    let first = engine.execute_page(query, PageSpec::forward(2));
+    assert!(first.ok, "{}", first.message);
+    assert_eq!(first.rows.len(), 2);
+    assert!(first.rows[0]["slug"].cmp_eq(&Value::Text("a".into())));
+    assert!(first.rows[1]["slug"].cmp_eq(&Value::Text("b".into())));
+    let next = first.page.unwrap().next_cursor.unwrap();
+    let resumed_plan = engine.execute(&format!(
+        "explain\n  from sessions\n  filter tenant == \"acme\"\n  sort slug\n  page 2 after {}",
+        serde_json::to_string(&next).unwrap()
+    ));
+    assert!(resumed_plan.ok, "{}", resumed_plan.message);
+    assert_eq!(
+        resumed_plan.plan.as_ref().unwrap().access.kind,
+        unionid::QueryAccessKind::PageSeek
+    );
+    assert!(resumed_plan.plan.as_ref().unwrap().access.page_seek);
+    assert_eq!(
+        resumed_plan.plan.unwrap().access.estimated_rows,
+        1,
+        "cursor seek should exclude the first two index entries before execution"
+    );
+    let second = engine.execute_page(query, PageSpec::after(2, next));
+    assert!(second.ok, "{}", second.message);
+    assert_eq!(second.rows.len(), 1);
+    assert!(second.rows[0]["slug"].cmp_eq(&Value::Text("c".into())));
+    let previous = second.page.unwrap().previous_cursor.unwrap();
+    let backward = engine.execute_page(query, PageSpec::before(2, previous));
+    assert!(backward.ok, "{}", backward.message);
+    assert_eq!(backward.rows.len(), 2);
+    assert!(backward.rows[0]["slug"].cmp_eq(&Value::Text("a".into())));
+    assert!(backward.rows[1]["slug"].cmp_eq(&Value::Text("b".into())));
+
+    let rejected = engine.execute("from sessions | sort touched | page 2");
+    assert!(!rejected.ok);
+    assert_eq!(rejected.error.unwrap().code, "E_PAGE_ORDER");
+}
+
+#[test]
+fn composite_index_page_seek_resumes_after_redb_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("composite-page.redb");
+    let query = r#"from sessions
+filter tenant == "acme"
+sort slug"#;
+    let next = {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let created = engine.execute(
+            r#"type Session = {tenant text, slug text}
+table sessions Session
+create unique index sessions (tenant, slug)
+insert many sessions [
+  {tenant = "acme", slug = "a"},
+  {tenant = "acme", slug = "b"},
+  {tenant = "acme", slug = "c"},
+]"#,
+        );
+        assert!(created.ok, "{}", created.message);
+        let first = engine.execute_page(query, PageSpec::forward(1));
+        assert!(first.ok, "{}", first.message);
+        assert!(first.rows[0]["slug"].cmp_eq(&Value::Text("a".into())));
+        first.page.unwrap().next_cursor.unwrap()
+    };
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let second = reopened.execute_page(query, PageSpec::after(1, next));
+    assert!(second.ok, "{}", second.message);
+    assert!(second.rows[0]["slug"].cmp_eq(&Value::Text("b".into())));
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
 fn adt_cursor_boundaries_resume_after_redb_reopen() {
     let dir = TempDir::new();
     let path = dir.0.join("adt-page.redb");

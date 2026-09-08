@@ -1346,12 +1346,11 @@ fn compare(
     })
 }
 
-pub(crate) fn simple_index_equality(expression: &BoolExpression) -> Option<(&str, &Value)> {
+pub(crate) fn simple_index_comparison(
+    expression: &BoolExpression,
+) -> Option<(&str, CmpOp, &Value)> {
     let BoolExpression::Compare {
-        left,
-        op: CmpOp::Eq,
-        right,
-        ..
+        left, op, right, ..
     } = expression
     else {
         return None;
@@ -1363,9 +1362,21 @@ pub(crate) fn simple_index_equality(expression: &BoolExpression) -> Option<(&str
         }
     }
     match (unwrapped(left), unwrapped(right)) {
-        (ScalarExpression::Reference(path), ScalarExpression::Literal(value))
-        | (ScalarExpression::Literal(value), ScalarExpression::Reference(path)) => {
-            Some((path, value))
+        (ScalarExpression::Reference(path), ScalarExpression::Literal(value)) => matches!(
+            op,
+            CmpOp::Eq | CmpOp::Gt | CmpOp::Gte | CmpOp::Lt | CmpOp::Lte
+        )
+        .then_some((path, *op, value)),
+        (ScalarExpression::Literal(value), ScalarExpression::Reference(path)) => {
+            let op = match op {
+                CmpOp::Eq => CmpOp::Eq,
+                CmpOp::Gt => CmpOp::Lt,
+                CmpOp::Gte => CmpOp::Lte,
+                CmpOp::Lt => CmpOp::Gt,
+                CmpOp::Lte => CmpOp::Gte,
+                CmpOp::Ne => return None,
+            };
+            Some((path, op, value))
         }
         _ => None,
     }
