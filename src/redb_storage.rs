@@ -8,23 +8,29 @@ use redb::{
     TableHandle,
 };
 
-use crate::codec::VALUE_CODEC_VERSION;
+use crate::codec::{PRODUCTION_VALUE_CODEC_VERSION, VALUE_CODEC_VERSION};
 use crate::db::{Database, DurableCatalogEntry, DurableMeta};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyReceipt, MAX_IDEMPOTENCY_RECEIPT_BYTES, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap,
     encoded_receipt, ensure_legacy_receipts, validate_receipts,
 };
+use crate::introspection::StorageVersions;
 use crate::migration::MigrationEntry;
+use crate::model::Value;
 
 const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
 const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
 const CURSOR_STORAGE_FORMAT_VERSION: u32 = 3;
+pub(crate) const PRODUCTION_STORAGE_FORMAT_VERSION: u32 = 4;
 const CATALOG_CODEC_VERSION: u16 = 2;
+const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 3;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
+const PRODUCTION_INDEX_KEY_VERSION: u16 = 2;
 const MIGRATION_CODEC_VERSION: u16 = 1;
 const RECEIPT_CODEC_VERSION: u16 = 1;
+const PRODUCTION_RECEIPT_CODEC_VERSION: u16 = 2;
 
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
@@ -38,6 +44,8 @@ const FORMAT_KEY: &str = "storage_format_version";
 const CATALOG_CODEC_KEY: &str = "catalog_codec_version";
 const VALUE_CODEC_KEY: &str = "value_codec_version";
 const INDEX_KEY_CODEC_KEY: &str = "index_key_version";
+const MIGRATION_CODEC_KEY: &str = "migration_codec_version";
+const RECEIPT_CODEC_KEY: &str = "receipt_codec_version";
 const SEQUENCE_KEY: &str = "commit_sequence";
 const SCHEMA_REVISION_KEY: &str = "schema_revision";
 const NEXT_CATALOG_ID_KEY: &str = "next_catalog_id";
@@ -54,9 +62,54 @@ pub(crate) struct RedbStore {
     committed: PreparedState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StorageLayout {
+    format: u32,
+    catalog: u16,
+    value: u16,
+    index: u16,
+    migration: u16,
+    receipt: u16,
+}
+
+impl StorageLayout {
+    const fn legacy(format: u32) -> Self {
+        Self {
+            format,
+            catalog: CATALOG_CODEC_VERSION,
+            value: VALUE_CODEC_VERSION,
+            index: INDEX_KEY_VERSION,
+            migration: MIGRATION_CODEC_VERSION,
+            receipt: RECEIPT_CODEC_VERSION,
+        }
+    }
+
+    const fn production() -> Self {
+        Self {
+            format: PRODUCTION_STORAGE_FORMAT_VERSION,
+            catalog: PRODUCTION_CATALOG_CODEC_VERSION,
+            value: PRODUCTION_VALUE_CODEC_VERSION,
+            index: PRODUCTION_INDEX_KEY_VERSION,
+            migration: MIGRATION_CODEC_VERSION,
+            receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
+        }
+    }
+
+    const fn supports_production_scalars(self) -> bool {
+        self.format >= PRODUCTION_STORAGE_FORMAT_VERSION
+    }
+}
+
 pub(crate) enum CommitFailure {
     Definite(Error),
     Uncertain(Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UpgradeResult {
+    pub(crate) previous_format: u32,
+    pub(crate) format: u32,
+    pub(crate) changed: bool,
 }
 
 impl CommitFailure {
@@ -88,11 +141,7 @@ impl RedbStore {
         let empty = Database::default();
         let mut store = Self {
             database,
-            committed: PreparedState::new(
-                &empty,
-                &ReceiptMap::new(),
-                CURSOR_STORAGE_FORMAT_VERSION,
-            )?,
+            committed: PreparedState::new(&empty, &ReceiptMap::new(), StorageLayout::production())?,
         };
         if fresh {
             store
@@ -100,14 +149,70 @@ impl RedbStore {
                 .map_err(CommitFailure::into_error)?;
         }
         let (loaded, receipts, committed) = store.load()?;
-        let needs_cursor_upgrade = committed.format_version < CURSOR_STORAGE_FORMAT_VERSION;
+        let needs_cursor_upgrade = committed.layout.format < CURSOR_STORAGE_FORMAT_VERSION;
         store.committed = committed;
         if needs_cursor_upgrade {
+            store.committed.layout = StorageLayout::legacy(CURSOR_STORAGE_FORMAT_VERSION);
             store
                 .commit(&loaded, &loaded, &receipts)
                 .map_err(CommitFailure::into_error)?;
         }
         Ok((store, loaded, receipts))
+    }
+
+    pub(crate) fn supports_production_scalars(&self) -> bool {
+        self.committed.layout.supports_production_scalars()
+    }
+
+    pub(crate) fn versions(&self) -> StorageVersions {
+        let layout = self.committed.layout;
+        StorageVersions {
+            format: layout.format,
+            catalog_codec: layout.catalog,
+            value_codec: layout.value,
+            index_key_codec: layout.index,
+            migration_codec: layout.migration,
+            receipt_codec: layout.receipt,
+            backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
+        }
+    }
+
+    pub(crate) fn upgrade(
+        &mut self,
+        database: &Database,
+        receipts: &ReceiptMap,
+        target: u32,
+    ) -> std::result::Result<UpgradeResult, CommitFailure> {
+        if target != PRODUCTION_STORAGE_FORMAT_VERSION {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                format!("unsupported storage upgrade target {target}"),
+            )));
+        }
+        let previous = self.committed.layout;
+        if previous.format == target {
+            return Ok(UpgradeResult {
+                previous_format: previous.format,
+                format: previous.format,
+                changed: false,
+            });
+        }
+        if previous.format > target {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                "storage downgrades are not supported",
+            )));
+        }
+        self.committed.layout = StorageLayout::production();
+        if let Err(error) = self.commit(database, database, receipts) {
+            self.committed.layout = previous;
+            return Err(error);
+        }
+        Ok(UpgradeResult {
+            previous_format: previous.format,
+            format: target,
+            changed: true,
+        })
     }
 
     pub(crate) fn commit(
@@ -117,9 +222,9 @@ impl RedbStore {
         receipts: &ReceiptMap,
     ) -> std::result::Result<(), CommitFailure> {
         validate_receipts(receipts, database.sequence).map_err(CommitFailure::Definite)?;
-        let format_version = CURSOR_STORAGE_FORMAT_VERSION;
-        let next = PreparedState::new(database, receipts, format_version)
-            .map_err(CommitFailure::Definite)?;
+        let layout = self.committed.layout;
+        let next =
+            PreparedState::new(database, receipts, layout).map_err(CommitFailure::Definite)?;
         let prepared = PreparedDelta::between(&self.committed, &next);
         let mut transaction = self
             .database
@@ -133,7 +238,7 @@ impl RedbStore {
             let mut table = transaction
                 .open_table(META)
                 .map_err(|error| CommitFailure::definite("open meta table", error))?;
-            write_meta(&mut table, &prepared.meta, prepared.format_version)
+            write_meta(&mut table, &prepared.meta, prepared.layout)
                 .map_err(CommitFailure::Definite)?;
         }
         {
@@ -195,7 +300,7 @@ impl RedbStore {
             .database
             .begin_read()
             .map_err(|error| storage_error("begin redb read transaction", error))?;
-        let (meta, format_version) = {
+        let (meta, layout) = {
             let table = transaction
                 .open_table(META)
                 .map_err(|error| storage_error("open meta table", error))?;
@@ -215,7 +320,7 @@ impl RedbStore {
                     entry.map_err(|error| storage_error("read catalog entry", error))?;
                 let key = key.value().to_vec();
                 let value = value.value().to_vec();
-                entries.push(decode_catalog_entry(&key, &value)?);
+                entries.push(decode_catalog_entry(&key, &value, layout.catalog)?);
                 stored.insert(key, value);
             }
             (entries, stored)
@@ -250,7 +355,7 @@ impl RedbStore {
             {
                 let (key, _) =
                     entry.map_err(|error| storage_error("read secondary index entry", error))?;
-                validate_index_key(key.value())?;
+                validate_index_key(key.value(), layout.index)?;
                 keys.insert(key.value().to_vec());
             }
             keys
@@ -321,7 +426,7 @@ impl RedbStore {
                         "stored idempotency receipt total exceeds the supported limit",
                     ));
                 }
-                let receipt = decode_receipt(&value)?;
+                let receipt = decode_receipt(&value, layout.receipt)?;
                 if receipts.insert(key, receipt).is_some() {
                     return Err(Error::new("E_STORAGE", "duplicate idempotency receipt key"));
                 }
@@ -332,10 +437,12 @@ impl RedbStore {
             (ReceiptMap::new(), BTreeMap::new())
         };
         let database = Database::from_durable(meta.clone(), entries, rows, migrations)?;
-        database.ensure_legacy_scalars()?;
-        ensure_legacy_receipts(&receipts)?;
+        if !layout.supports_production_scalars() {
+            database.ensure_legacy_scalars()?;
+            ensure_legacy_receipts(&receipts)?;
+        }
         validate_receipts(&receipts, database.sequence)?;
-        if format_version == LEGACY_STORAGE_FORMAT_VERSION && !receipts.is_empty() {
+        if layout.format == LEGACY_STORAGE_FORMAT_VERSION && !receipts.is_empty() {
             return Err(Error::new(
                 "E_STORAGE",
                 "storage format 1 must not contain idempotency receipts",
@@ -344,7 +451,9 @@ impl RedbStore {
         let expected_indexes = database
             .durable_secondary_indexes()?
             .into_iter()
-            .map(|(index_id, value, row_id)| encode_index_key(index_id, &value, row_id))
+            .map(|(index_id, value, row_id)| {
+                encode_index_key(index_id, &value, row_id, layout.index)
+            })
             .collect::<Result<BTreeSet<_>>>()?;
         if stored_indexes != expected_indexes {
             return Err(Error::new(
@@ -352,8 +461,12 @@ impl RedbStore {
                 "durable secondary indexes do not match the stored rows and catalog",
             ));
         }
+        let committed_layout = StorageLayout {
+            catalog: layout.catalog.max(CATALOG_CODEC_VERSION),
+            ..layout
+        };
         let committed = PreparedState {
-            format_version,
+            layout: committed_layout,
             meta,
             catalog: stored_catalog,
             rows: stored_rows,
@@ -366,7 +479,7 @@ impl RedbStore {
 }
 
 struct PreparedState {
-    format_version: u32,
+    layout: StorageLayout,
     meta: DurableMeta,
     catalog: BTreeMap<Vec<u8>, Vec<u8>>,
     rows: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -376,25 +489,29 @@ struct PreparedState {
 }
 
 impl PreparedState {
-    fn new(database: &Database, receipts: &ReceiptMap, format_version: u32) -> Result<Self> {
-        database.ensure_legacy_scalars()?;
-        ensure_legacy_receipts(receipts)?;
+    fn new(database: &Database, receipts: &ReceiptMap, layout: StorageLayout) -> Result<Self> {
+        if !layout.supports_production_scalars() {
+            database.ensure_legacy_scalars()?;
+            ensure_legacy_receipts(receipts)?;
+        }
         let mut catalog = BTreeMap::new();
         for entry in database.durable_catalog_entries() {
             catalog.insert(
                 encode_catalog_key(entry.kind_tag(), entry.stable_id()),
-                encode_catalog_entry(&entry)?,
+                encode_catalog_entry(&entry, layout.catalog)?,
             );
         }
         let rows = database
-            .durable_rows()?
+            .durable_rows_with_codec(layout.value)?
             .into_iter()
             .map(|(table_id, row_id, value)| (encode_row_key(table_id, row_id), value))
             .collect::<BTreeMap<_, _>>();
         let secondary_indexes = database
             .durable_secondary_indexes()?
             .into_iter()
-            .map(|(index_id, value, row_id)| encode_index_key(index_id, &value, row_id))
+            .map(|(index_id, value, row_id)| {
+                encode_index_key(index_id, &value, row_id, layout.index)
+            })
             .collect::<Result<BTreeSet<_>>>()?;
         let migrations = database
             .durable_migrations()
@@ -411,10 +528,15 @@ impl PreparedState {
             .collect::<Result<BTreeMap<_, _>>>()?;
         let receipts = receipts
             .iter()
-            .map(|(key, receipt)| Ok((key.as_bytes().to_vec(), encode_receipt(receipt)?)))
+            .map(|(key, receipt)| {
+                Ok((
+                    key.as_bytes().to_vec(),
+                    encode_receipt(receipt, layout.receipt)?,
+                ))
+            })
             .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(Self {
-            format_version,
+            layout,
             meta: database.durable_meta(),
             catalog,
             rows,
@@ -426,7 +548,7 @@ impl PreparedState {
 }
 
 struct PreparedDelta {
-    format_version: u32,
+    layout: StorageLayout,
     meta: DurableMeta,
     catalog: BytesDelta,
     rows: BytesDelta,
@@ -438,15 +560,14 @@ struct PreparedDelta {
 impl PreparedDelta {
     #[cfg(test)]
     fn new(previous: &Database, database: &Database) -> Result<Self> {
-        let previous =
-            PreparedState::new(previous, &ReceiptMap::new(), LEGACY_STORAGE_FORMAT_VERSION)?;
-        let next = PreparedState::new(database, &ReceiptMap::new(), LEGACY_STORAGE_FORMAT_VERSION)?;
+        let previous = PreparedState::new(previous, &ReceiptMap::new(), StorageLayout::legacy(1))?;
+        let next = PreparedState::new(database, &ReceiptMap::new(), StorageLayout::legacy(1))?;
         Ok(Self::between(&previous, &next))
     }
 
     fn between(previous: &PreparedState, next: &PreparedState) -> Self {
         Self {
-            format_version: next.format_version,
+            layout: next.layout,
             meta: next.meta.clone(),
             catalog: BytesDelta::between(&previous.catalog, &next.catalog),
             rows: BytesDelta::between(&previous.rows, &next.rows),
@@ -623,19 +744,15 @@ fn apply_set_delta(table: &mut redb::Table<'_, &[u8], u8>, delta: &SetDelta) -> 
 fn write_meta(
     table: &mut redb::Table<'_, &str, &[u8]>,
     meta: &DurableMeta,
-    format_version: u32,
+    layout: StorageLayout,
 ) -> Result<()> {
     for (key, value) in [
-        (FORMAT_KEY, format_version.to_be_bytes().to_vec()),
-        (
-            CATALOG_CODEC_KEY,
-            CATALOG_CODEC_VERSION.to_be_bytes().to_vec(),
-        ),
-        (VALUE_CODEC_KEY, VALUE_CODEC_VERSION.to_be_bytes().to_vec()),
-        (
-            INDEX_KEY_CODEC_KEY,
-            INDEX_KEY_VERSION.to_be_bytes().to_vec(),
-        ),
+        (FORMAT_KEY, layout.format.to_be_bytes().to_vec()),
+        (CATALOG_CODEC_KEY, layout.catalog.to_be_bytes().to_vec()),
+        (VALUE_CODEC_KEY, layout.value.to_be_bytes().to_vec()),
+        (INDEX_KEY_CODEC_KEY, layout.index.to_be_bytes().to_vec()),
+        (MIGRATION_CODEC_KEY, layout.migration.to_be_bytes().to_vec()),
+        (RECEIPT_CODEC_KEY, layout.receipt.to_be_bytes().to_vec()),
         (SEQUENCE_KEY, meta.sequence.to_be_bytes().to_vec()),
         (
             SCHEMA_REVISION_KEY,
@@ -661,36 +778,71 @@ fn write_meta(
 
 fn read_meta(
     table: &impl ReadableTable<&'static str, &'static [u8]>,
-) -> Result<(DurableMeta, u32)> {
+) -> Result<(DurableMeta, StorageLayout)> {
     let format_version = u32::from_be_bytes(read_fixed::<4>(table, FORMAT_KEY)?);
     if !matches!(
         format_version,
         LEGACY_STORAGE_FORMAT_VERSION
             | RECEIPT_STORAGE_FORMAT_VERSION
             | CURSOR_STORAGE_FORMAT_VERSION
+            | PRODUCTION_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
     }
     let catalog_version = u16::from_be_bytes(read_fixed::<2>(table, CATALOG_CODEC_KEY)?);
+    let expected = if format_version >= PRODUCTION_STORAGE_FORMAT_VERSION {
+        StorageLayout::production()
+    } else {
+        StorageLayout::legacy(format_version)
+    };
     if !matches!(
         catalog_version,
-        LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION
-    ) {
+        LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION | PRODUCTION_CATALOG_CODEC_VERSION
+    ) || (format_version >= PRODUCTION_STORAGE_FORMAT_VERSION
+        && catalog_version != expected.catalog)
+    {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported {CATALOG_CODEC_KEY}"),
         ));
     }
-    expect_version(
-        VALUE_CODEC_KEY,
-        read_fixed::<2>(table, VALUE_CODEC_KEY)?,
-        VALUE_CODEC_VERSION.to_be_bytes(),
-    )?;
-    expect_version(
-        INDEX_KEY_CODEC_KEY,
-        read_fixed::<2>(table, INDEX_KEY_CODEC_KEY)?,
-        INDEX_KEY_VERSION.to_be_bytes(),
-    )?;
+    let value = u16::from_be_bytes(read_fixed::<2>(table, VALUE_CODEC_KEY)?);
+    let index = u16::from_be_bytes(read_fixed::<2>(table, INDEX_KEY_CODEC_KEY)?);
+    if value != expected.value {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported {VALUE_CODEC_KEY}"),
+        ));
+    }
+    if index != expected.index {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported {INDEX_KEY_CODEC_KEY}"),
+        ));
+    }
+    let migration =
+        read_optional_version(table, MIGRATION_CODEC_KEY)?.unwrap_or(MIGRATION_CODEC_VERSION);
+    let receipt = read_optional_version(table, RECEIPT_CODEC_KEY)?.unwrap_or(RECEIPT_CODEC_VERSION);
+    if migration != expected.migration {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported {MIGRATION_CODEC_KEY}"),
+        ));
+    }
+    if receipt != expected.receipt {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported {RECEIPT_CODEC_KEY}"),
+        ));
+    }
+    let layout = StorageLayout {
+        format: format_version,
+        catalog: catalog_version,
+        value,
+        index,
+        migration,
+        receipt,
+    };
     let sequence = u64::from_be_bytes(read_fixed::<8>(table, SEQUENCE_KEY)?);
     let schema_revision = u64::from_be_bytes(read_fixed::<8>(table, SCHEMA_REVISION_KEY)?);
     let next_catalog_id = u64::from_be_bytes(read_fixed::<8>(table, NEXT_CATALOG_ID_KEY)?);
@@ -714,18 +866,40 @@ fn read_meta(
             cursor_instance_id: *identity.instance_id(),
             cursor_secret: *identity.secret(),
         },
-        format_version,
+        layout,
     ))
 }
 
-fn encode_receipt(receipt: &IdempotencyReceipt) -> Result<Vec<u8>> {
+fn read_optional_version(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    key: &str,
+) -> Result<Option<u16>> {
+    table
+        .get(key)
+        .map_err(|error| storage_error("read meta entry", error))?
+        .map(|value| {
+            value
+                .value()
+                .try_into()
+                .map(u16::from_be_bytes)
+                .map_err(|_| {
+                    Error::new(
+                        "E_STORAGE",
+                        format!("invalid byte length for meta key '{key}'"),
+                    )
+                })
+        })
+        .transpose()
+}
+
+fn encode_receipt(receipt: &IdempotencyReceipt, version: u16) -> Result<Vec<u8>> {
     let mut value = Vec::from(RECEIPT_MAGIC.as_slice());
-    value.extend_from_slice(&RECEIPT_CODEC_VERSION.to_be_bytes());
+    value.extend_from_slice(&version.to_be_bytes());
     value.extend(encoded_receipt(receipt)?);
     Ok(value)
 }
 
-fn decode_receipt(value: &[u8]) -> Result<IdempotencyReceipt> {
+fn decode_receipt(value: &[u8], expected_version: u16) -> Result<IdempotencyReceipt> {
     if value.len() < 6 || &value[..4] != RECEIPT_MAGIC {
         return Err(Error::new(
             "E_STORAGE",
@@ -733,7 +907,7 @@ fn decode_receipt(value: &[u8]) -> Result<IdempotencyReceipt> {
         ));
     }
     let version = u16::from_be_bytes(value[4..6].try_into().unwrap());
-    if version != RECEIPT_CODEC_VERSION {
+    if version != expected_version {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported idempotency receipt codec version {version}"),
@@ -764,14 +938,6 @@ fn read_bytes(
         .map_err(|error| storage_error("read meta entry", error))?
         .map(|value| value.value().to_vec())
         .ok_or_else(|| Error::new("E_STORAGE", format!("missing meta key '{key}'")))
-}
-
-fn expect_version<const N: usize>(key: &str, actual: [u8; N], expected: [u8; N]) -> Result<()> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(Error::new("E_STORAGE", format!("unsupported {key}")))
-    }
 }
 
 fn encode_catalog_key(kind: u8, stable_id: u64) -> Vec<u8> {
@@ -813,12 +979,23 @@ fn decode_migration_entry(value: &[u8]) -> Result<MigrationEntry> {
     })
 }
 
-fn encode_catalog_entry(entry: &DurableCatalogEntry) -> Result<Vec<u8>> {
+fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec<u8>> {
+    if !matches!(
+        version,
+        LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION | PRODUCTION_CATALOG_CODEC_VERSION
+    ) {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported catalog codec version {version}"),
+        ));
+    }
     let mut value = Vec::from(CATALOG_MAGIC.as_slice());
-    value.extend_from_slice(&CATALOG_CODEC_VERSION.to_be_bytes());
+    value.extend_from_slice(&version.to_be_bytes());
     let mut json = serde_json::to_value(entry)
         .map_err(|error| Error::new("E_STORAGE", format!("encode catalog entry: {error}")))?;
-    if let DurableCatalogEntry::Index { definition, .. } = entry {
+    if version >= CATALOG_CODEC_VERSION
+        && let DurableCatalogEntry::Index { definition, .. } = entry
+    {
         let kind = if definition.kind.is_unique() {
             "unique"
         } else {
@@ -837,7 +1014,11 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry) -> Result<Vec<u8>> {
     Ok(value)
 }
 
-fn decode_catalog_entry(key: &[u8], value: &[u8]) -> Result<DurableCatalogEntry> {
+fn decode_catalog_entry(
+    key: &[u8],
+    value: &[u8],
+    expected_version: u16,
+) -> Result<DurableCatalogEntry> {
     if key.len() != 9 {
         return Err(Error::new("E_STORAGE", "invalid durable catalog key"));
     }
@@ -845,10 +1026,12 @@ fn decode_catalog_entry(key: &[u8], value: &[u8]) -> Result<DurableCatalogEntry>
         return Err(Error::new("E_STORAGE", "invalid catalog codec magic"));
     }
     let version = u16::from_be_bytes(value[4..6].try_into().unwrap());
-    if !matches!(
-        version,
-        LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION
-    ) {
+    let supported_legacy_entry = expected_version <= CATALOG_CODEC_VERSION
+        && matches!(
+            version,
+            LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION
+        );
+    if !supported_legacy_entry && version != expected_version {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported catalog codec version {version}"),
@@ -883,40 +1066,178 @@ fn decode_row_key(key: &[u8]) -> Result<(u64, u64)> {
     ))
 }
 
-fn encode_index_key(index_id: u64, value: &str, row_id: u64) -> Result<Vec<u8>> {
-    let value_len = u32::try_from(value.len())
-        .map_err(|_| Error::new("E_LIMIT", "secondary index key exceeds u32 length"))?;
-    let mut key = Vec::with_capacity(26 + value.len());
+fn encode_index_key(index_id: u64, value: &Value, row_id: u64, version: u16) -> Result<Vec<u8>> {
+    let mut key = Vec::new();
     key.extend_from_slice(INDEX_MAGIC);
-    key.extend_from_slice(&INDEX_KEY_VERSION.to_be_bytes());
+    key.extend_from_slice(&version.to_be_bytes());
     key.extend_from_slice(&index_id.to_be_bytes());
-    key.extend_from_slice(&value_len.to_be_bytes());
-    key.extend_from_slice(value.as_bytes());
+    match version {
+        INDEX_KEY_VERSION => {
+            let value = value.index_key();
+            let value_len = u32::try_from(value.len())
+                .map_err(|_| Error::new("E_LIMIT", "secondary index key exceeds u32 length"))?;
+            key.extend_from_slice(&value_len.to_be_bytes());
+            key.extend_from_slice(value.as_bytes());
+        }
+        PRODUCTION_INDEX_KEY_VERSION => encode_ordered_value(value, &mut key, 0)?,
+        _ => {
+            return Err(Error::new(
+                "E_STORAGE",
+                format!("unsupported secondary index key version {version}"),
+            ));
+        }
+    }
     key.extend_from_slice(&row_id.to_be_bytes());
     Ok(key)
 }
 
-fn validate_index_key(key: &[u8]) -> Result<()> {
-    if key.len() < 26 || &key[..4] != INDEX_MAGIC {
+fn validate_index_key(key: &[u8], expected_version: u16) -> Result<()> {
+    if key.len() < 23 || &key[..4] != INDEX_MAGIC {
         return Err(Error::new("E_STORAGE", "invalid secondary index key"));
     }
     let version = u16::from_be_bytes(key[4..6].try_into().unwrap());
-    if version != INDEX_KEY_VERSION {
+    if version != expected_version {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported secondary index key version {version}"),
         ));
     }
-    let value_len = u32::from_be_bytes(key[14..18].try_into().unwrap()) as usize;
-    if key.len() != 26usize.saturating_add(value_len) {
+    if version == INDEX_KEY_VERSION {
+        if key.len() < 26 {
+            return Err(Error::new(
+                "E_STORAGE",
+                "invalid secondary index key length",
+            ));
+        }
+        let value_len = u32::from_be_bytes(key[14..18].try_into().unwrap()) as usize;
+        if key.len() != 26usize.saturating_add(value_len) {
+            return Err(Error::new(
+                "E_STORAGE",
+                "invalid secondary index key length",
+            ));
+        }
+        std::str::from_utf8(&key[18..18 + value_len])
+            .map_err(|error| Error::new("E_STORAGE", format!("index key is not UTF-8: {error}")))?;
+    }
+    Ok(())
+}
+
+fn encode_ordered_value(value: &Value, output: &mut Vec<u8>, depth: usize) -> Result<()> {
+    if depth > crate::model::MAX_DEPTH {
         return Err(Error::new(
-            "E_STORAGE",
-            "invalid secondary index key length",
+            "E_LIMIT",
+            "secondary index value is too deeply nested",
         ));
     }
-    std::str::from_utf8(&key[18..18 + value_len])
-        .map_err(|error| Error::new("E_STORAGE", format!("index key is not UTF-8: {error}")))?;
+    match value {
+        Value::Null => output.push(0x00),
+        Value::Bool(false) => output.extend_from_slice(&[0x01, 0x00]),
+        Value::Bool(true) => output.extend_from_slice(&[0x01, 0x01]),
+        Value::Int(value) => {
+            output.push(0x02);
+            output.extend_from_slice(&((*value as u64) ^ (1_u64 << 63)).to_be_bytes());
+        }
+        Value::Float(value) => {
+            output.push(0x03);
+            let bits = if *value == 0.0 {
+                0.0_f64.to_bits()
+            } else {
+                value.to_bits()
+            };
+            let ordered = if bits & (1_u64 << 63) == 0 {
+                bits ^ (1_u64 << 63)
+            } else {
+                !bits
+            };
+            output.extend_from_slice(&ordered.to_be_bytes());
+        }
+        Value::Text(value) => {
+            output.push(0x04);
+            encode_escaped(value.as_bytes(), output);
+        }
+        Value::Uuid(value) => {
+            output.push(0x05);
+            output.extend_from_slice(value.as_bytes());
+        }
+        Value::Date(value) => {
+            output.push(0x06);
+            output.extend_from_slice(&((value.epoch_days() as u32) ^ (1_u32 << 31)).to_be_bytes());
+        }
+        Value::Timestamp(value) => {
+            output.push(0x07);
+            output.extend_from_slice(
+                &((value.epoch_microseconds() as u64) ^ (1_u64 << 63)).to_be_bytes(),
+            );
+        }
+        Value::Duration(value) => {
+            output.push(0x08);
+            output
+                .extend_from_slice(&((value.microseconds() as u64) ^ (1_u64 << 63)).to_be_bytes());
+        }
+        Value::Decimal(value) => {
+            output.push(0x09);
+            output.extend_from_slice(&value.scale().to_be_bytes());
+            output.extend_from_slice(
+                &((value.coefficient() as u128) ^ (1_u128 << 127)).to_be_bytes(),
+            );
+        }
+        Value::Bytes(value) => {
+            output.push(0x0a);
+            encode_escaped(value.as_slice(), output);
+        }
+        Value::Named { type_id, value } => {
+            output.push(0x0b);
+            output.extend_from_slice(&type_id.to_be_bytes());
+            encode_ordered_value(value, output, depth + 1)?;
+        }
+        Value::Enum(value) => {
+            output.push(0x0c);
+            output.extend_from_slice(&value.id.to_be_bytes());
+            encode_escaped(value.variant.as_bytes(), output);
+            encode_ordered_items(&value.args, output, depth)?;
+        }
+        Value::Record(fields) => {
+            output.push(0x0d);
+            output.extend_from_slice(&(fields.len() as u64).to_be_bytes());
+            for (name, value) in fields {
+                encode_escaped(name.as_bytes(), output);
+                encode_ordered_value(value, output, depth + 1)?;
+            }
+        }
+        Value::Tuple(values) => {
+            output.push(0x0e);
+            encode_ordered_items(values, output, depth)?;
+        }
+        Value::List(values) => {
+            output.push(0x0f);
+            encode_ordered_items(values, output, depth)?;
+        }
+        Value::Option(None) => output.extend_from_slice(&[0x10, 0x00]),
+        Value::Option(Some(value)) => {
+            output.extend_from_slice(&[0x10, 0x01]);
+            encode_ordered_value(value, output, depth + 1)?;
+        }
+    }
     Ok(())
+}
+
+fn encode_ordered_items(values: &[Value], output: &mut Vec<u8>, depth: usize) -> Result<()> {
+    output.extend_from_slice(&(values.len() as u64).to_be_bytes());
+    for value in values {
+        encode_ordered_value(value, output, depth + 1)?;
+    }
+    Ok(())
+}
+
+fn encode_escaped(bytes: &[u8], output: &mut Vec<u8>) {
+    for byte in bytes {
+        if *byte == 0 {
+            output.extend_from_slice(&[0, 0xff]);
+        } else {
+            output.push(*byte);
+        }
+    }
+    output.extend_from_slice(&[0, 0]);
 }
 
 fn resolve_path(path: PathBuf) -> Result<PathBuf> {
@@ -996,5 +1317,30 @@ mod tests {
         assert_eq!(delta.rows.writes.len(), 2);
         assert_eq!(delta.secondary_indexes.deletes.len(), 3);
         assert_eq!(delta.secondary_indexes.inserts.len(), 3);
+    }
+
+    #[test]
+    fn production_index_keys_preserve_scalar_order_and_zero_bytes() {
+        fn payload(value: Value) -> Vec<u8> {
+            let key = encode_index_key(7, &value, 11, PRODUCTION_INDEX_KEY_VERSION).unwrap();
+            key[14..key.len() - 8].to_vec()
+        }
+
+        assert!(payload(Value::Int(-1)) < payload(Value::Int(0)));
+        assert!(payload(Value::Int(0)) < payload(Value::Int(1)));
+        assert!(payload(Value::Text("a".into())) < payload(Value::Text("a\0".into())));
+        assert!(
+            payload(Value::Bytes(crate::scalars::Bytes::new(vec![0]).unwrap()))
+                < payload(Value::Bytes(
+                    crate::scalars::Bytes::new(vec![0, 1]).unwrap()
+                ))
+        );
+        assert!(
+            payload(Value::Decimal(
+                crate::scalars::Decimal::new(-1, 6, 2).unwrap()
+            )) < payload(Value::Decimal(
+                crate::scalars::Decimal::new(1, 6, 2).unwrap()
+            ))
+        );
     }
 }

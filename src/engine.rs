@@ -12,7 +12,7 @@ use crate::idempotency::{
     MAX_IDEMPOTENCY_RECEIPTS, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap, boundary,
     receipt_encoded_len, validate_digest, validate_key, validate_new_receipt, validate_receipts,
 };
-use crate::introspection::{Introspection, StorageMode};
+use crate::introspection::{Introspection, StorageMode, StorageVersions};
 use crate::migration::{
     MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
     MigrationStatus, describe_step, validate_files_against_history,
@@ -56,6 +56,14 @@ pub struct StorageIntegrity {
     pub backend: &'static str,
     pub backend_clean: bool,
     pub schema: crate::db::SchemaInfo,
+    pub versions: StorageVersions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StorageUpgrade {
+    pub previous_format: u32,
+    pub format: u32,
+    pub changed: bool,
 }
 
 /// A parsed query or supported parameterized operation bound to one schema
@@ -97,6 +105,14 @@ trait DurableBackend: Send {
         receipts: &ReceiptMap,
     ) -> std::result::Result<(), CommitFailure>;
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)>;
+    fn supports_production_scalars(&self) -> bool;
+    fn versions(&self) -> StorageVersions;
+    fn upgrade(
+        &mut self,
+        database: &Database,
+        receipts: &ReceiptMap,
+        target: u32,
+    ) -> std::result::Result<StorageUpgrade, CommitFailure>;
 }
 
 impl DurableBackend for RedbStore {
@@ -111,6 +127,28 @@ impl DurableBackend for RedbStore {
 
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
         RedbStore::check_integrity(self)
+    }
+
+    fn supports_production_scalars(&self) -> bool {
+        RedbStore::supports_production_scalars(self)
+    }
+
+    fn versions(&self) -> StorageVersions {
+        RedbStore::versions(self)
+    }
+
+    fn upgrade(
+        &mut self,
+        database: &Database,
+        receipts: &ReceiptMap,
+        target: u32,
+    ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+        let result = RedbStore::upgrade(self, database, receipts, target)?;
+        Ok(StorageUpgrade {
+            previous_format: result.previous_format,
+            format: result.format,
+            changed: result.changed,
+        })
     }
 }
 
@@ -819,7 +857,11 @@ impl Engine {
         }
         if prepared.mutating
             && parameters.values().any(crate::Value::requires_protocol_v2)
-            && (self.durable.is_some() || self.snapshot.is_some())
+            && (self
+                .durable
+                .as_ref()
+                .is_some_and(|durable| !durable.supports_production_scalars())
+                || self.snapshot.is_some())
         {
             return self.with_schema(QueryResponse::failure(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
@@ -898,7 +940,12 @@ impl Engine {
         }
         let native_parameters = parameters.values().any(crate::Value::requires_protocol_v2);
         if native_parameters
-            && (self.durable.is_some() || self.wal.is_some() || self.snapshot.is_some())
+            && (self
+                .durable
+                .as_ref()
+                .is_some_and(|durable| !durable.supports_production_scalars())
+                || self.wal.is_some()
+                || self.snapshot.is_some())
             && statements
                 .iter()
                 .any(|located| located.statement.is_mutating())
@@ -1248,13 +1295,48 @@ impl Engine {
             )
         })?;
         let (backend_clean, database, receipts) = durable.check_integrity()?;
+        let versions = durable.versions();
         self.db = database;
         self.receipts = receipts;
         Ok(StorageIntegrity {
             backend: "redb",
             backend_clean,
             schema: self.db.schema_info(),
+            versions,
         })
+    }
+
+    pub fn upgrade_storage(&mut self, target: u32) -> Result<StorageUpgrade> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "storage upgrade requires reopening after an uncertain commit",
+            ));
+        }
+        if self.read_only {
+            return Err(Error::new("E_READ_ONLY", "storage upgrade is a mutation"));
+        }
+        let durable = self.durable.as_mut().ok_or_else(|| {
+            Error::new(
+                "E_CONFIG",
+                "storage upgrade requires a database opened with Engine::open_redb",
+            )
+        })?;
+        match durable.upgrade(&self.db, &self.receipts, target) {
+            Ok(result) => Ok(result),
+            Err(CommitFailure::Definite(error)) => Err(error),
+            Err(CommitFailure::Uncertain(error)) => {
+                self.durable = None;
+                self.write_failed = true;
+                Err(Error::new(
+                    "E_STORAGE",
+                    format!(
+                        "storage upgrade commit result is uncertain: {}; reopen the database and run check before retrying",
+                        error.message
+                    ),
+                ))
+            }
+        }
     }
 
     pub fn schema(&self) -> String {
@@ -1272,6 +1354,7 @@ impl Engine {
             types: self.db.type_names(),
             fields: self.db.field_names(),
             storage: self.storage_mode,
+            storage_versions: self.durable.as_ref().map(|durable| durable.versions()),
             read_only: self.read_only,
             migration_count: self.db.migration_history().len(),
             migration_head: self
@@ -1467,6 +1550,45 @@ mod tests {
         fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
             unreachable!()
         }
+
+        fn supports_production_scalars(&self) -> bool {
+            true
+        }
+
+        fn versions(&self) -> StorageVersions {
+            StorageVersions {
+                format: 4,
+                catalog_codec: 3,
+                value_codec: 2,
+                index_key_codec: 2,
+                migration_codec: 1,
+                receipt_codec: 2,
+                backup_codec: 3,
+            }
+        }
+
+        fn upgrade(
+            &mut self,
+            _: &Database,
+            _: &ReceiptMap,
+            _: u32,
+        ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+            match self.uncertain.take() {
+                Some(false) => Err(CommitFailure::Definite(Error::new(
+                    "E_STORAGE",
+                    "injected upgrade pre-commit failure",
+                ))),
+                Some(true) => Err(CommitFailure::Uncertain(Error::new(
+                    "E_STORAGE",
+                    "injected upgrade commit failure",
+                ))),
+                None => Ok(StorageUpgrade {
+                    previous_format: 3,
+                    format: 4,
+                    changed: true,
+                }),
+            }
+        }
     }
 
     fn engine_with_failure(uncertain: bool) -> Engine {
@@ -1476,6 +1598,16 @@ mod tests {
             })),
             ..Engine::default()
         }
+    }
+
+    #[test]
+    fn uncertain_storage_upgrade_disables_the_open_engine() {
+        let mut engine = engine_with_failure(true);
+        let error = engine.upgrade_storage(4).unwrap_err();
+        assert_eq!(error.code, "E_STORAGE");
+        assert!(error.message.contains("result is uncertain"));
+        assert!(engine.write_failed);
+        assert!(engine.durable.is_none());
     }
 
     const DIGEST_A: &str =

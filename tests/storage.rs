@@ -26,6 +26,27 @@ const TEST_IDEMPOTENCY_DIGEST: &str =
 const TEST_IDEMPOTENCY_DIGEST_B: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+fn create_empty_format3(path: &std::path::Path) {
+    drop(Engine::open_redb(path).unwrap());
+    let database = RedbDatabase::open(path).unwrap();
+    let mut transaction = database.begin_write().unwrap();
+    transaction.set_durability(Durability::Immediate).unwrap();
+    transaction.set_two_phase_commit(true);
+    let mut meta = transaction.open_table(REDB_META).unwrap();
+    for (key, value) in [
+        ("storage_format_version", 3_u32.to_be_bytes().to_vec()),
+        ("catalog_codec_version", 2_u16.to_be_bytes().to_vec()),
+        ("value_codec_version", 1_u16.to_be_bytes().to_vec()),
+        ("index_key_version", 1_u16.to_be_bytes().to_vec()),
+        ("migration_codec_version", 1_u16.to_be_bytes().to_vec()),
+        ("receipt_codec_version", 1_u16.to_be_bytes().to_vec()),
+    ] {
+        meta.insert(key, value.as_slice()).unwrap();
+    }
+    drop(meta);
+    transaction.commit().unwrap();
+}
+
 #[test]
 fn idempotent_effect_and_receipt_commit_together_and_survive_reopen() {
     let dir = TempDir::new();
@@ -60,7 +81,7 @@ fn idempotent_effect_and_receipt_commit_together_and_survive_reopen() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            3_u32.to_be_bytes()
+            4_u32.to_be_bytes()
         );
         let receipts = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
         assert_eq!(receipts.len().unwrap(), 1);
@@ -268,6 +289,7 @@ fn typed_bulk_upserts_commit_atomically_and_survive_redb_reopen() {
 fn redb_v1_catalog_indexes_open_as_ordinary_and_upgrade_on_commit() {
     let dir = TempDir::new();
     let path = dir.0.join("legacy-index.redb");
+    create_empty_format3(&path);
     {
         let mut engine = Engine::open_redb(&path).unwrap();
         assert!(
@@ -330,6 +352,10 @@ fn redb_v1_catalog_indexes_open_as_ordinary_and_upgrade_on_commit() {
     let database = RedbDatabase::open(&path).unwrap();
     let transaction = database.begin_read().unwrap();
     let meta = transaction.open_table(REDB_META).unwrap();
+    assert_eq!(
+        meta.get("storage_format_version").unwrap().unwrap().value(),
+        3_u32.to_be_bytes()
+    );
     assert_eq!(
         meta.get("catalog_codec_version").unwrap().unwrap().value(),
         2_u16.to_be_bytes()
@@ -774,6 +800,7 @@ fn redb_incremental_commit_handles_schema_and_multi_table_batches() {
 fn redb_upgrades_and_persists_the_per_table_row_id_cursor() {
     let dir = TempDir::new();
     let path = dir.0.join("state.redb");
+    create_empty_format3(&path);
     {
         let mut engine = Engine::open_redb(path.clone()).unwrap();
         assert!(
@@ -940,7 +967,7 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            3_u32.to_be_bytes()
+            4_u32.to_be_bytes()
         );
         transaction.open_table(REDB_CATALOG).unwrap();
         transaction.open_table(REDB_ROWS).unwrap();
@@ -965,11 +992,112 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
 }
 
 #[test]
+fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
+    let dir = TempDir::new();
+    let path = dir.0.join("upgrade.redb");
+    create_empty_format3(&path);
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ncreate index entries (label)\ninsert entries { id = 1, label = \"one\" }",
+                )
+                .ok
+        );
+        engine
+            .execute_idempotent_with_params(
+                "upgrade-receipt",
+                TEST_IDEMPOTENCY_DIGEST,
+                "insert entries { id = 2, label = \"two\" }\nreturning id",
+                std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        let rejected = engine.upgrade_storage(5).unwrap_err();
+        assert_eq!(rejected.code, "E_STORAGE_UPGRADE");
+        let upgraded = engine.upgrade_storage(4).unwrap();
+        assert_eq!(upgraded.previous_format, 3);
+        assert_eq!(upgraded.format, 4);
+        assert!(upgraded.changed);
+        assert!(!engine.upgrade_storage(4).unwrap().changed);
+        let versions = engine.introspection().storage_versions.unwrap();
+        assert_eq!(
+            (
+                versions.format,
+                versions.catalog_codec,
+                versions.value_codec,
+                versions.index_key_codec,
+                versions.migration_codec,
+                versions.receipt_codec,
+                versions.backup_codec,
+            ),
+            (4, 3, 2, 2, 1, 2, 3)
+        );
+        assert!(engine.check_integrity().unwrap().backend_clean);
+    }
+
+    let database = RedbDatabase::open(&path).unwrap();
+    let transaction = database.begin_read().unwrap();
+    let meta = transaction.open_table(REDB_META).unwrap();
+    for (key, expected) in [
+        ("storage_format_version", 4_u32.to_be_bytes().to_vec()),
+        ("catalog_codec_version", 3_u16.to_be_bytes().to_vec()),
+        ("value_codec_version", 2_u16.to_be_bytes().to_vec()),
+        ("index_key_version", 2_u16.to_be_bytes().to_vec()),
+        ("migration_codec_version", 1_u16.to_be_bytes().to_vec()),
+        ("receipt_codec_version", 2_u16.to_be_bytes().to_vec()),
+    ] {
+        assert_eq!(meta.get(key).unwrap().unwrap().value(), expected);
+    }
+    let catalog = transaction.open_table(REDB_CATALOG).unwrap();
+    assert!(
+        catalog
+            .iter()
+            .unwrap()
+            .all(|entry| { entry.unwrap().1.value()[4..6] == 3_u16.to_be_bytes() })
+    );
+    let rows = transaction.open_table(REDB_ROWS).unwrap();
+    assert!(
+        rows.iter()
+            .unwrap()
+            .all(|entry| { entry.unwrap().1.value()[4..6] == 2_u16.to_be_bytes() })
+    );
+    let indexes = transaction.open_table(REDB_SECONDARY_INDEX).unwrap();
+    assert!(
+        indexes
+            .iter()
+            .unwrap()
+            .all(|entry| { entry.unwrap().0.value()[4..6] == 2_u16.to_be_bytes() })
+    );
+    let receipts = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
+    assert!(
+        receipts
+            .iter()
+            .unwrap()
+            .all(|entry| { entry.unwrap().1.value()[4..6] == 2_u16.to_be_bytes() })
+    );
+    drop(receipts);
+    drop(indexes);
+    drop(rows);
+    drop(catalog);
+    drop(meta);
+    drop(transaction);
+    drop(database);
+
+    let mut reopened = Engine::open_redb(path).unwrap();
+    assert_eq!(reopened.execute("from entries | sort id").rows.len(), 2);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
 fn redb_unknown_codec_versions_fail_closed() {
     for (key, value) in [
         ("catalog_codec_version", 99_u16.to_be_bytes()),
         ("value_codec_version", 99_u16.to_be_bytes()),
         ("index_key_version", 99_u16.to_be_bytes()),
+        ("migration_codec_version", 99_u16.to_be_bytes()),
+        ("receipt_codec_version", 99_u16.to_be_bytes()),
     ] {
         let dir = TempDir::new();
         let path = dir.0.join("state.redb");

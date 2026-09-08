@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use unionid::{
-    Engine, Value,
+    Engine, Value, backup,
     codec::{decode_value, encode_value, encode_value_v2},
     model::{Catalog, Column, ScalarType},
     protocol::{Request, WireValue},
@@ -252,7 +252,7 @@ fn protocol_v2_introspection_receipts_retries_and_errors_echo_the_version() {
 }
 
 #[test]
-fn legacy_durable_formats_reject_native_writes_without_changing_state() {
+fn format4_persists_native_receipts_and_replays_them_after_reopen() {
     let path = std::env::temp_dir().join(format!(
         "unionid-native-{}-{}.redb",
         std::process::id(),
@@ -281,13 +281,13 @@ fn legacy_durable_formats_reject_native_writes_without_changing_state() {
             WireValue::from(&Value::from(Uuid::from_bytes([0; 16]))),
         );
         let response = execute_protocol_request(&mut engine, request);
-        assert_eq!(response.error.unwrap().code, "E_STORAGE_UPGRADE_REQUIRED");
+        assert!(response.ok, "{:?}", response.error);
         assert!(engine.check_integrity().is_ok());
-        assert_eq!(engine.execute("from items").rows.len(), 1);
+        assert_eq!(engine.execute("from items").rows.len(), 2);
         let status = execute_protocol_request(&mut engine, Request::receipt_status("status"));
         assert_eq!(
             serde_json::to_value(status).unwrap()["receipts"]["result"]["count"],
-            0
+            1
         );
         // Read-only use of a native parameter does not require a durable format change.
         let request = Request::query("read", "from items | derive native = $value")
@@ -298,9 +298,39 @@ fn legacy_durable_formats_reject_native_writes_without_changing_state() {
         assert!(execute_protocol_request(&mut engine, request).ok);
     }
     let mut engine = Engine::open_redb(path.clone()).unwrap();
-    assert_eq!(engine.execute("from items").rows.len(), 1);
+    assert_eq!(engine.execute("from items").rows.len(), 2);
+    let mut replay = Request::query(
+        "replay",
+        "insert items { id = 2 }\nfrom items | derive native = $value",
+    )
+    .with_version(2)
+    .unwrap()
+    .with_idempotency_key("native-write")
+    .unwrap();
+    replay.params.insert(
+        "value".into(),
+        WireValue::from(&Value::from(Uuid::from_bytes([0; 16]))),
+    );
+    assert!(
+        execute_protocol_request(&mut engine, replay)
+            .idempotency
+            .unwrap()
+            .replayed
+    );
     engine.check_integrity().unwrap();
     drop(engine);
+    let backup_path = path.with_extension("backup.json");
+    let restored_path = path.with_extension("restored.redb");
+    assert_eq!(
+        backup::create(&path, &backup_path).unwrap().format_version,
+        3
+    );
+    backup::restore(&backup_path, &restored_path).unwrap();
+    let restored = Engine::open_redb(&restored_path).unwrap();
+    assert_eq!(restored.idempotency_status().unwrap().count, 1);
+    drop(restored);
+    std::fs::remove_file(backup_path).unwrap();
+    std::fs::remove_file(restored_path).unwrap();
     std::fs::remove_file(path).unwrap();
 }
 

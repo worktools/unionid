@@ -4,7 +4,7 @@
 
 `unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`。当前开发分支已将它们接入原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2 参数/返回值、完整 v1 typed-boundary 预检与独立 value codec 2。`Value::from_serde` 保留各标量身份，`Value::to_serde` 可解码回应用类型。这是 [#137](https://github.com/worktools/unionid/issues/137) 的进行中实现；新类型的源码声明与持久格式升级仍未交付。
 
-完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。现有 redb 格式、逻辑 backup 和过渡 snapshot 明确拒绝新 schema/receipt。持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；只读请求可用 protocol v2 传入新值并派生返回。显式 format-4 升级完成后才能持久化这些值，构造 wrapper 不会触发升级。
+完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。新 redb 数据库使用 storage format 4 和 catalog/value/index-key/receipt codec 3/2/2/2；逻辑 backup 使用 codec 3。旧 format 1–3 和过渡 snapshot 仍拒绝新 schema/receipt，持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；显式执行 `unionid upgrade --db <path> --target 4` 会在一个同步事务中校验并重写 catalog、rows、indexes、receipts 和 meta。失败保留旧格式。
 
 ## Rust 值与规范表示
 
@@ -49,7 +49,7 @@ wrapper 调用 `serialize_newtype_struct`，marker 使用保留前缀 `unionid::
 
 `Request` 保持默认 version 1；用 `.with_version(2)?` 显式选择 version 2。v1 在 mutation 前检查参数、最终 query／`returning`／`explain` 结果类型和 introspection schema，无法表达新标量时返回 `E_PROTOCOL_TYPE`。幂等命中仍保持“不解析源码直接重放”的既有语义，同时验证存量回执能否由 v1 表达。v2 使用 RFC 0004 的 canonical wire envelope，响应回显版本，幂等 digest 仍包含版本。
 
-cursor 根据实际 boundary 选择词汇版本：只含旧标量时继续输出 `u1`，任一排序键含新标量时输出 `u2`。两个版本共享 HMAC、database/schema/query/sequence 绑定和大小限制；prefix、payload codec 与 typed vocabulary 不一致时 fail closed。请勿把当前接入阶段视为已完成的生产标量发布；#137 继续跟踪完整持久 codec 集、format 4 升级和恢复验收。
+cursor 根据实际 boundary 选择词汇版本：只含旧标量时继续输出 `u1`，任一排序键含新标量时输出 `u2`。两个版本共享 HMAC、database/schema/query/sequence 绑定和大小限制；prefix、payload codec 与 typed vocabulary 不一致时 fail closed。#137 继续跟踪进程中断、旧 binary 和完整恢复验收；源码声明与运算由 #138–#140 推进。
 
 ## English Description
 
@@ -59,7 +59,7 @@ Requests default to protocol 1; `.with_version(2)?` opts in. Version 1 rejects n
 
 Protocol-v1 preflight now covers parameters, final query/returning/explain result types, and introspection before publishing a mutation. Idempotent hits preserve parse-free replay while checking that the stored result is expressible. Cursors remain `u1` for legacy-only boundaries and use `u2` when any boundary key is a production scalar; prefix, payload codec, and typed vocabulary must agree.
 
-This is work in progress under #137. Source declarations, the full durable codec-version set, explicit format-4 upgrades, and recovery acceptance remain pending. Do not treat this branch as complete production scalar support.
+New redb databases use storage format 4 with catalog/value/index-key/receipt codecs 3/2/2/2, and logical backups use codec 3. Formats 1–3 remain readable with legacy schemas and require `unionid upgrade --db <path> --target 4` before native scalar writes. The upgrader validates and rewrites catalog, rows, indexes, receipts, and meta in one synchronous transaction. #137 still tracks process-interruption, old-binary, and complete recovery acceptance; #138–#140 add source declarations and operations.
 
 Canonical serde uses text for UUID/date/timestamp, string microseconds for duration, string coefficient plus numeric scale for decimal, and unpadded base64url for bytes. Decoding validates both canonical forms and domain bounds. Reserved `unionid::scalar::v1::<type>` newtype markers carry identity to typed serializers; this payload version is independent of protocol/storage versions. JSON itself erases markers, so application Rust types restore identity.
 

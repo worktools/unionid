@@ -6,7 +6,7 @@ use unionid::migration::load_directory;
 use unionid::{Engine, MigrationFile, Value};
 
 #[test]
-fn backup_v2_preserves_idempotency_receipts_and_replay_identity() {
+fn backup_v3_preserves_idempotency_receipts_and_replay_identity() {
     const DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let dir = TempDir::new();
     let source = dir.0.join("idempotency-source.redb");
@@ -29,7 +29,7 @@ fn backup_v2_preserves_idempotency_receipts_and_replay_identity() {
     }
 
     let created = backup::create(&source, &archive).unwrap();
-    assert_eq!(created.format_version, 2);
+    assert_eq!(created.format_version, 3);
     assert_eq!(created.receipt_count, 1);
     let recovered = backup::restore(&archive, &restored).unwrap();
     assert_eq!(created, recovered);
@@ -141,7 +141,7 @@ fn corrupt_or_unknown_backups_do_not_create_or_replace_a_target() {
     let text = std::fs::read_to_string(&archive).unwrap();
     std::fs::write(
         &corrupt,
-        text.replacen("\"format_version\":1", "\"format_version\":99", 1),
+        text.replacen("\"format_version\":3", "\"format_version\":99", 1),
     )
     .unwrap();
     assert!(backup::restore(&corrupt, &target).is_err());

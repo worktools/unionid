@@ -3038,6 +3038,13 @@ impl Database {
     }
 
     pub(crate) fn durable_rows(&self) -> Result<Vec<(u64, u64, Vec<u8>)>> {
+        self.durable_rows_with_codec(crate::codec::VALUE_CODEC_VERSION)
+    }
+
+    pub(crate) fn durable_rows_with_codec(
+        &self,
+        codec_version: u16,
+    ) -> Result<Vec<(u64, u64, Vec<u8>)>> {
         let mut encoded = Vec::new();
         for object in self.objects.values() {
             let DbObject::Table(table) = object;
@@ -3057,14 +3064,27 @@ impl Database {
                 encoded.push((
                     table.id,
                     row.id,
-                    crate::codec::encode_value(&self.catalog, &ty, &value)?,
+                    match codec_version {
+                        crate::codec::VALUE_CODEC_VERSION => {
+                            crate::codec::encode_value(&self.catalog, &ty, &value)?
+                        }
+                        crate::codec::PRODUCTION_VALUE_CODEC_VERSION => {
+                            crate::codec::encode_value_v2(&self.catalog, &ty, &value)?
+                        }
+                        _ => {
+                            return Err(Error::new(
+                                "E_STORAGE",
+                                format!("unsupported value codec version {codec_version}"),
+                            ));
+                        }
+                    },
                 ));
             }
         }
         Ok(encoded)
     }
 
-    pub(crate) fn durable_secondary_indexes(&self) -> Result<Vec<(u64, String, u64)>> {
+    pub(crate) fn durable_secondary_indexes(&self) -> Result<Vec<(u64, Value, u64)>> {
         let mut entries = Vec::new();
         for (table, definitions) in &self.index_definitions {
             for (column, definition) in definitions {
@@ -3078,14 +3098,38 @@ impl Database {
                             format!("missing in-memory index '{table}.{column}'"),
                         )
                     })?;
-                for (value_key, row_ids) in posting {
+                for row in &self.table(table)?.rows {
+                    let value = Value::Record(row.fields.clone())
+                        .field(column)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::new(
+                                "E_STORAGE",
+                                format!("indexed field '{table}.{column}' is missing"),
+                            )
+                        })?;
+                    let value_key = value.index_key();
+                    let row_ids = posting.get(&value_key).ok_or_else(|| {
+                        Error::new(
+                            "E_STORAGE",
+                            format!("missing in-memory index value for '{table}.{column}'"),
+                        )
+                    })?;
+                    if !row_ids.contains(&row.id) {
+                        return Err(Error::new(
+                            "E_STORAGE",
+                            format!("missing row {} in index '{table}.{column}'", row.id),
+                        ));
+                    }
                     for row_id in row_ids {
-                        entries.push((definition.id, value_key.clone(), *row_id));
+                        if *row_id == row.id {
+                            entries.push((definition.id, value.clone(), *row_id));
+                        }
                     }
                 }
             }
         }
-        entries.sort();
+        entries.sort_by_key(|(index_id, _, row_id)| (*index_id, *row_id));
         Ok(entries)
     }
 

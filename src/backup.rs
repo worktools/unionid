@@ -12,6 +12,7 @@ use crate::idempotency::{ReceiptMap, ensure_legacy_receipts, validate_receipts};
 
 const LEGACY_BACKUP_FORMAT_VERSION: u32 = 1;
 const RECEIPT_BACKUP_FORMAT_VERSION: u32 = 2;
+pub const PRODUCTION_BACKUP_FORMAT_VERSION: u32 = 3;
 const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,15 +78,9 @@ fn write_database(database: Database, receipts: ReceiptMap, output: &Path) -> Re
             format!("backup output '{}' already exists", output.display()),
         ));
     }
-    database.ensure_legacy_scalars()?;
     let database = database.validate_logical_backup()?;
-    ensure_legacy_receipts(&receipts)?;
     validate_receipts(&receipts, database.sequence)?;
-    let format_version = if receipts.is_empty() {
-        LEGACY_BACKUP_FORMAT_VERSION
-    } else {
-        RECEIPT_BACKUP_FORMAT_VERSION
-    };
+    let format_version = PRODUCTION_BACKUP_FORMAT_VERSION;
     let info = info(&database, &receipts, format_version)?;
     let envelope = BackupEnvelope {
         format_version: info.format_version,
@@ -132,7 +127,9 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
         .map_err(|error| Error::new("E_BACKUP", format!("decode backup: {error}")))?;
     if !matches!(
         envelope.format_version,
-        LEGACY_BACKUP_FORMAT_VERSION | RECEIPT_BACKUP_FORMAT_VERSION
+        LEGACY_BACKUP_FORMAT_VERSION
+            | RECEIPT_BACKUP_FORMAT_VERSION
+            | PRODUCTION_BACKUP_FORMAT_VERSION
     ) {
         return Err(Error::new(
             "E_BACKUP",
@@ -142,7 +139,10 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             ),
         ));
     }
-    envelope.database.ensure_legacy_scalars()?;
+    if envelope.format_version < PRODUCTION_BACKUP_FORMAT_VERSION {
+        envelope.database.ensure_legacy_scalars()?;
+        ensure_legacy_receipts(&envelope.receipts)?;
+    }
     let database = envelope.database.validate_logical_backup()?;
     if envelope.format_version == LEGACY_BACKUP_FORMAT_VERSION && !envelope.receipts.is_empty() {
         return Err(Error::new(
@@ -150,7 +150,6 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             "backup format 1 must not contain idempotency receipts",
         ));
     }
-    ensure_legacy_receipts(&envelope.receipts)?;
     validate_receipts(&envelope.receipts, database.sequence)?;
     let actual = info(&database, &envelope.receipts, envelope.format_version)?;
     if actual.checksum != envelope.checksum || actual.schema != envelope.schema {
