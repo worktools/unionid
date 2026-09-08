@@ -21,6 +21,7 @@ pub mod protocol;
 pub mod query;
 mod redb_storage;
 mod repl;
+pub mod scalars;
 pub mod schema;
 mod serde_value;
 pub mod server;

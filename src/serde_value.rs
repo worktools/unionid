@@ -140,9 +140,17 @@ impl Serializer for ValueSerializer {
 
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
         self,
-        _name: &'static str,
+        name: &'static str,
         value: &T,
     ) -> Result<Value> {
+        // Keep the scalar identity boundary closed until native Value variants
+        // and their protocol/storage versions are available together.
+        if name.starts_with("unionid::scalar::") {
+            return Err(Error::new(
+                "E_SERDE",
+                format!("native scalar '{name}' is not yet supported by database values"),
+            ));
+        }
         value.serialize(self)
     }
 
