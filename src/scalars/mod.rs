@@ -3,12 +3,14 @@
 //! These wrappers validate logical values. Database and protocol integration is
 //! delivered separately; constructing a wrapper does not upgrade a database.
 mod decimal;
+mod serde;
 mod temporal;
 
 pub use decimal::Decimal;
 pub use temporal::{Date, Duration, Timestamp};
 
 use crate::error::{Error, Result};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::fmt;
 use std::str::FromStr;
 
@@ -93,6 +95,22 @@ impl fmt::Display for Uuid {
 pub struct Bytes(Vec<u8>);
 
 impl Bytes {
+    /// Decode canonical unpadded base64url, as used by the scalar serde payload.
+    /// The encoded bound is checked before allocating the decoded buffer.
+    pub fn from_base64url(source: &str) -> Result<Self> {
+        if source.len() > (MAX_BYTES * 4).div_ceil(3) {
+            return Err(literal("bytes exceed 16 MiB"));
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(source)
+            .map_err(|_| literal("expected canonical unpadded base64url"))?;
+        Self::new(bytes)
+    }
+
+    pub fn to_base64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(&self.0)
+    }
+
     pub fn new(value: Vec<u8>) -> Result<Self> {
         if value.len() > MAX_BYTES {
             return Err(literal("bytes exceed 16 MiB"));
