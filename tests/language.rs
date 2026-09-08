@@ -82,6 +82,14 @@ fn executable_examples() {
     assert!(r.rows[1]["local_change"].cmp_eq(&Value::Text("added".into())));
     assert!(r.rows[2]["local_change"].cmp_eq(&Value::Text("none".into())));
 
+    let mut content = Engine::memory();
+    let r = ok(
+        &mut content,
+        include_str!("../examples/content_metadata.uid"),
+    );
+    assert_eq!(r.rows.len(), 1);
+    assert!(r.rows[0]["preview_octets"].cmp_eq(&Value::Int(4)));
+
     let mut mutations = Engine::memory();
     let r = ok(
         &mut mutations,

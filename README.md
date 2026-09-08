@@ -24,6 +24,10 @@ It is designed around two defining ideas:
 
 A task state therefore does not need to be simulated with `status = "running"` and nullable payload columns. The schema describes every valid shape precisely, and queries match those shapes directly.
 
+当前还可直接声明 `uuid` 与 `bytes`：UUID 可作为主键，bytes 支持索引、排序、`contains` 与 octet `length`。可运行的 content-addressed metadata 示例见 [`content_metadata.uid`](examples/content_metadata.uid)。
+
+The executable language also supports native `uuid` and `bytes`: UUIDs can be primary keys, while bytes support indexes, ordering, subsequence `contains`, and octet `length`. See [`content_metadata.uid`](examples/content_metadata.uid).
+
 ## ADT 数据模型与查询 / ADT data model and queries
 
 下面的 schema 同时使用积类型 `Task` 和和类型 `State`。`Running`、`Done`、`Failed` 各自拥有不同 payload；不属于该 variant 的字段根本不存在。

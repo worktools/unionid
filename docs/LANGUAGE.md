@@ -1,6 +1,6 @@
 # 当前可运行的语言预览
 
-本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)。
+本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)、[UUID/bytes 内容元数据](../examples/content_metadata.uid)。
 
 当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys (aggregate {...})`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`not/and/or`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
@@ -37,14 +37,14 @@ insert tasks {
 ```
 
 - 无分号。花括号用于 record、projection、match branches 和多项 sort 等明确结构边界的地方，圆括号表达 precedence、tuple、嵌套调用或 group inner pipeline，方括号表达 list；delimiter 内相邻项用逗号分隔，formatter 保留 trailing comma。类型名和变体名以大写字母开头；当前标识符为 ASCII 字母、数字与下划线，首字符不能是数字；文本值支持 UTF-8。
-- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。`uuid`、时间、定点 decimal 和 bytes 的目标契约见 [RFC 0004](rfc/0004-production-scalars.md)，在对应实现合并前不能作为当前语法使用。
+- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid` 和 `bytes`。UUID 字面量写作 `uuid "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"`，接受 RFC 9562 带连字符大小写输入并规范输出小写；bytes 源码字面量写作小写偶数长度 hex，例如 `bytes "00ff"`，空字符串表示空 bytes。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。时间与定点 decimal 仍只有 Rust/wire/codec 基础，尚不能作为当前源码类型或字面量使用。
 - 支持命名 record/sum、嵌套积类型、tuple，以及内建 `option T`、`list T`，例如 `type Point = (float, float)`、`option (list Contact)`。
 - record 类型规范写成 braced field set，如 `{email text, nickname option text}`；变体的 record payload 同样使用 `{}`。旧缩进 record 与 variant payload 继续作为 migration、WAL 和已有脚本的兼容输入，formatter 只输出 braced 形式。
 - record 值使用 `field = value`，内联字段之间用逗号；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载与多个位置参数通过括号区分。
 - 字段默认值写成 `field type = value`，例如 `nickname option text = None`、`tags list text = []`。默认值必须是可按字段类型检查的纯字面值，在 schema 声明时完成校验并存为完整 typed value；不能引用其他字段、参数、时钟或函数。
 - 没有默认值的字段全部必填，即使类型为 option 也必须显式写 `None`。缺失字段逐层使用它自身声明的默认值；显式值不会因为类型错误而退回默认值。重复、缺失、未知字段及错误负载均报错。
 - 命名类型保留身份；有歧义时可用 `State.Pending` 或 `State.Running {...}` 限定构造器。
-- `table tasks Task` 要求 Task 是 record；可选的缩进 `key id` 声明 int/text 主键，拒绝重复键。无 key 时允许重复行。
+- `table tasks Task` 要求 Task 是 record；可选的缩进 `key id` 声明 indexable scalar 主键，UUID 可直接作为生产 ID，拒绝重复键。无 key 时允许重复行。
 
 普通 secondary index 加速完整 typed value 的等值过滤；`unique` 在同一相等语义上增加约束：
 
@@ -54,6 +54,8 @@ create unique index tasks (owner.email)
 ```
 
 索引路径可以指向嵌套 record 字段。unique index 支持 primitive、命名 sum/record、tuple、option 和 list；比较的是完整类型和值，`None` 也是普通 typed value，因此同一 unique index 最多出现一次 `None`。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert/upsert、单行 upsert、update、migration、restore 和 redb 完整性检查都在发布候选状态前执行同一约束。当前只支持单字段路径，不支持复合、partial 或 SQL `NULL` 语义。
+
+被任意普通、unique 或主键索引覆盖的 bytes 值最大为 8192 octets；创建索引、写入、migration 或 restore 超限时返回 `E_INDEX_KEY_LIMIT` 并原子回滚。未索引 bytes 仍受 16 MiB value 上限。
 
 批量写入使用明确的 `many` 关键字和已有 list/record 值语法：
 
@@ -159,7 +161,7 @@ let response = engine.execute_prepared(&insert, BTreeMap::from([("row".into(), r
 let tasks: Vec<Task> = response.typed_rows()?;
 ```
 
-转换保留 struct、enum 的 unit/newtype/tuple/struct payload、Option、tuple 与 sequence 形状；prepared binder 再按目标 named ADT schema 补上 nominal identity 并严格检查。读取时内部 type/variant/field ID 不泄漏到应用类型。enum 使用 serde 默认的 externally tagged representation；自定义 representation 需与数据库 constructor 形状一致。unionid `int` 对应 i64，超范围 unsigned integer、非有限 float、bytes 和非文本 map key 返回 `E_SERDE`。完整可运行代码见 [`examples/parameters.rs`](../examples/parameters.rs)。
+转换保留 struct、enum 的 unit/newtype/tuple/struct payload、Option、tuple 与 sequence 形状；prepared binder 再按目标 named ADT schema 补上 nominal identity 并严格检查。读取时内部 type/variant/field ID 不泄漏到应用类型。enum 使用 serde 默认的 externally tagged representation；自定义 representation 需与数据库 constructor 形状一致。unionid `int` 对应 i64；超范围 unsigned integer、非有限 float、没有 `unionid::scalars::Bytes` 身份的普通 serde bytes，以及非文本 map key 返回 `E_SERDE`。UUID/bytes 应使用 `unionid::scalars::{Uuid, Bytes}` wrapper。完整可运行代码见 [`examples/parameters.rs`](../examples/parameters.rs)。
 
 ## 更新与删除
 

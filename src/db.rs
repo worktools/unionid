@@ -776,11 +776,18 @@ impl Database {
             let ty = self.catalog.field_type(&columns, key)?;
             if !matches!(
                 self.catalog.underlying(ty)?,
-                ScalarType::Int | ScalarType::Text
+                ScalarType::Int
+                    | ScalarType::Text
+                    | ScalarType::Uuid
+                    | ScalarType::Date
+                    | ScalarType::Timestamp
+                    | ScalarType::Duration
+                    | ScalarType::Decimal { .. }
+                    | ScalarType::Bytes
             ) {
                 return Err(Error::new(
                     "E_TYPE",
-                    "primary keys currently require int or text",
+                    "primary keys require an indexable scalar type",
                 ));
             }
         }
@@ -856,6 +863,11 @@ impl Database {
 
     fn build_index(&self, name: &str, column: &str) -> Result<BTreeMap<String, Vec<RowId>>> {
         let table = self.table(name)?;
+        for row in &table.rows {
+            if let Some(value) = row_field(&row.fields, column) {
+                validate_index_value(value, name, column)?;
+            }
+        }
         Ok(build_posting(&table.rows, column))
     }
 
@@ -1173,6 +1185,13 @@ impl Database {
 
     fn insert_fields(&mut self, name: &str, fields: BTreeMap<String, Value>) -> Result<RowId> {
         let table = self.table(name)?;
+        if let Some(definitions) = self.index_definitions.get(name) {
+            for definition in definitions.values() {
+                if let Some(value) = row_field(&fields, &definition.column) {
+                    validate_index_value(value, name, &definition.column)?;
+                }
+            }
+        }
         if let Some(key) = &table.primary_key {
             let value = row_field(&fields, key)
                 .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
@@ -1690,6 +1709,15 @@ impl Database {
     fn replace_rows_and_indexes(&mut self, name: &str, rows: Vec<Row>) -> Result<()> {
         self.validate_primary_keys(name, &rows)?;
         self.validate_unique_indexes(name, &rows)?;
+        if let Some(definitions) = self.index_definitions.get(name) {
+            for definition in definitions.values() {
+                for row in &rows {
+                    if let Some(value) = row_field(&row.fields, &definition.column) {
+                        validate_index_value(value, name, &definition.column)?;
+                    }
+                }
+            }
+        }
         let columns = self
             .indexes
             .get(name)
@@ -3037,6 +3065,7 @@ impl Database {
         entries
     }
 
+    #[cfg(test)]
     pub(crate) fn durable_rows(&self) -> Result<Vec<(u64, u64, Vec<u8>)>> {
         self.durable_rows_with_codec(crate::codec::VALUE_CODEC_VERSION)
     }
@@ -3152,7 +3181,7 @@ impl Database {
         Self::from_durable(
             self.durable_meta(),
             self.durable_catalog_entries(),
-            self.durable_rows()?,
+            self.durable_rows_with_codec(crate::codec::PRODUCTION_VALUE_CODEC_VERSION)?,
             self.migration_history.clone(),
         )
     }
@@ -3494,6 +3523,29 @@ fn build_posting(rows: &[Row], column: &str) -> BTreeMap<String, Vec<RowId>> {
         }
     }
     posting
+}
+
+fn validate_index_value(value: &Value, table: &str, column: &str) -> Result<()> {
+    fn oversized(value: &Value) -> bool {
+        match value.unwrapped() {
+            Value::Bytes(value) => value.as_slice().len() > crate::scalars::MAX_INDEXED_BYTES,
+            Value::Enum(value) => value.args.iter().any(oversized),
+            Value::Record(fields) => fields.values().any(oversized),
+            Value::Tuple(values) | Value::List(values) => values.iter().any(oversized),
+            Value::Option(Some(value)) => oversized(value),
+            _ => false,
+        }
+    }
+    if oversized(value) {
+        return Err(Error::new(
+            "E_INDEX_KEY_LIMIT",
+            format!(
+                "indexed bytes in '{table}.{column}' exceed {} bytes",
+                crate::scalars::MAX_INDEXED_BYTES
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn paths_overlap(left: &str, right: &str) -> bool {

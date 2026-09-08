@@ -1,0 +1,29 @@
+type Content = {
+  id uuid,
+  digest bytes,
+  preview bytes,
+}
+
+table content Content
+  key id
+
+create unique index content (digest)
+
+insert many content [
+  {
+    id = uuid "018f67a4-2f44-7aa3-8f2b-14f7a2f66210",
+    digest = bytes "00ff10",
+    preview = bytes "89504e470d0a1a0a",
+  },
+  {
+    id = uuid "018f67a4-2f44-7aa3-8f2b-14f7a2f66211",
+    digest = bytes "00ff11",
+    preview = bytes "ffd8ffe0",
+  },
+]
+
+from content
+filter contains preview bytes "ffd8"
+derive preview_octets = length preview
+select {id, digest, preview_octets}
+sort id

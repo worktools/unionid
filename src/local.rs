@@ -445,9 +445,6 @@ impl LocalScope {
                         format!("local value '{name}' cannot be called as a function"),
                     ));
                 }
-                let index = visible.get(&name).copied().ok_or_else(|| {
-                    Error::new("E_QUERY", format!("unknown local function '{name}'")).at(span)
-                })?;
                 let mut expanded_arguments = Vec::with_capacity(arguments.len());
                 for argument in arguments {
                     expanded_arguments.push(self.expand_scalar_in(
@@ -460,6 +457,18 @@ impl LocalScope {
                         call_depth,
                     )?);
                 }
+                if crate::expression::is_builtin_scalar_function(&name)
+                    && !visible.contains_key(&name)
+                {
+                    return Ok(ScalarExpression::Call {
+                        name,
+                        arguments: expanded_arguments,
+                        span,
+                    });
+                }
+                let index = visible.get(&name).copied().ok_or_else(|| {
+                    Error::new("E_QUERY", format!("unknown local function '{name}'")).at(span)
+                })?;
                 let expanded = self
                     .expand_call(catalog, schema, index, expanded_arguments, call_depth)
                     .map_err(|error| error.at(span))?;
@@ -936,6 +945,28 @@ fn validate_scalar(
                     "E_QUERY",
                     format!("function values are not supported; '{name}' is a local value"),
                 ));
+            }
+            if crate::expression::is_builtin_scalar_function(name) && !visible.contains_key(name) {
+                if arguments.len() != 1 {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        format!("{name} expects 1 argument, got {}", arguments.len()),
+                    )
+                    .at(*span));
+                }
+                for argument in arguments {
+                    validate_scalar(
+                        catalog,
+                        schema,
+                        binding_name,
+                        argument,
+                        parameters,
+                        visible,
+                        definitions,
+                        shadowed,
+                    )?;
+                }
+                return Ok(());
             }
             let Some(index) = visible.get(name).copied() else {
                 let message = if name == binding_name {

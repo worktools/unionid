@@ -146,16 +146,19 @@ fn bind_in_scope(
         BoolExpression::Contains { collection, item } => {
             let inferred_collection = infer_scalar(catalog, scope, collection, reference_kind)?;
             let (collection_ty, item_ty) = if let Some(collection_ty) = inferred_collection {
-                let ScalarType::List(item_ty) = catalog.underlying(&collection_ty)? else {
-                    return Err(Error::new(
-                        "E_TYPE",
-                        format!(
-                            "contains expects a list, got {}",
-                            catalog.describe(&collection_ty)
-                        ),
-                    ));
+                let item_ty = match catalog.underlying(&collection_ty)? {
+                    ScalarType::List(item_ty) => item_ty.as_ref().clone(),
+                    ScalarType::Bytes => ScalarType::Bytes,
+                    _ => {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!(
+                                "contains expects a list or bytes, got {}",
+                                catalog.describe(&collection_ty)
+                            ),
+                        ));
+                    }
                 };
-                let item_ty = item_ty.as_ref().clone();
                 (collection_ty, item_ty)
             } else {
                 let item_ty =
@@ -280,6 +283,24 @@ pub(crate) fn bind_scalar(
             bind_scalar(catalog, scope, value, Some(ty), reference_kind)?;
             ty.clone()
         }
+        ScalarExpression::Call {
+            name, arguments, ..
+        } if is_builtin_scalar_function(name) => {
+            if arguments.len() != 1 {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!("{name} expects 1 argument, got {}", arguments.len()),
+                ));
+            }
+            bind_scalar(
+                catalog,
+                scope,
+                &mut arguments[0],
+                Some(&ScalarType::Text),
+                reference_kind,
+            )?;
+            builtin_scalar_result(name).expect("known builtin")
+        }
         ScalarExpression::Call { name, .. } => {
             return Err(Error::new(
                 "E_QUERY",
@@ -290,12 +311,12 @@ pub(crate) fn bind_scalar(
             let ty = bind_scalar(catalog, scope, value, None, reference_kind)?;
             if !matches!(
                 catalog.underlying(&ty)?,
-                ScalarType::List(_) | ScalarType::Text
+                ScalarType::List(_) | ScalarType::Text | ScalarType::Bytes
             ) {
                 return Err(Error::new(
                     "E_TYPE",
                     format!(
-                        "length expects a list or text, got {}",
+                        "length expects a list, text, or bytes, got {}",
                         catalog.describe(&ty)
                     ),
                 ));
@@ -363,6 +384,22 @@ pub(crate) fn infer_scalar(
         ScalarExpression::Parameter { ty, .. } => Ok(ty.clone()),
         ScalarExpression::Literal(value) => infer_literal(value),
         ScalarExpression::Ascribed { ty, .. } => Ok(Some(ty.clone())),
+        ScalarExpression::Call {
+            name, arguments, ..
+        } if is_builtin_scalar_function(name) => {
+            if arguments.len() != 1 {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!("{name} expects 1 argument, got {}", arguments.len()),
+                ));
+            }
+            if let Some(argument) = infer_scalar(catalog, scope, &arguments[0], reference_kind)?
+                && !same_type(&argument, &ScalarType::Text)
+            {
+                return Err(Error::new("E_TYPE", format!("{name} expects text")));
+            }
+            Ok(builtin_scalar_result(name))
+        }
         ScalarExpression::Call { name, .. } => Err(Error::new(
             "E_QUERY",
             format!("local function '{name}' was not expanded before type inference"),
@@ -371,13 +408,13 @@ pub(crate) fn infer_scalar(
             if let Some(ty) = infer_scalar(catalog, scope, value, reference_kind)?
                 && !matches!(
                     catalog.underlying(&ty)?,
-                    ScalarType::List(_) | ScalarType::Text
+                    ScalarType::List(_) | ScalarType::Text | ScalarType::Bytes
                 )
             {
                 return Err(Error::new(
                     "E_TYPE",
                     format!(
-                        "length expects a list or text, got {}",
+                        "length expects a list, text, or bytes, got {}",
                         catalog.describe(&ty)
                     ),
                 ));
@@ -434,7 +471,9 @@ fn is_constant(expression: &ScalarExpression) -> bool {
         ScalarExpression::Literal(_) => true,
         ScalarExpression::Parameter { .. } => true,
         ScalarExpression::Reference(_) => false,
-        ScalarExpression::Call { .. } => false,
+        ScalarExpression::Call {
+            name, arguments, ..
+        } => is_builtin_scalar_function(name) && arguments.iter().all(is_constant),
         ScalarExpression::Ascribed { value, .. }
         | ScalarExpression::Length(value)
         | ScalarExpression::Negate { value, .. } => is_constant(value),
@@ -453,6 +492,18 @@ fn require_numeric(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<
                 catalog.describe(ty)
             ),
         ))
+    }
+}
+
+pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
+    matches!(name, "uuid_parse" | "bytes_parse_hex")
+}
+
+fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
+    match name {
+        "uuid_parse" => Some(ScalarType::Uuid),
+        "bytes_parse_hex" => Some(ScalarType::Bytes),
+        _ => None,
     }
 }
 
@@ -692,9 +743,13 @@ fn evaluate_resolved(
             let Some(item) = evaluate_scalar(catalog, item, values)? else {
                 return Ok(false);
             };
-            Ok(
-                matches!(collection.as_value().unwrapped(), Value::List(values) if values.iter().any(|value| value.cmp_eq(item.as_value()))),
-            )
+            Ok(match collection.as_value().unwrapped() {
+                Value::List(values) => values.iter().any(|value| value.cmp_eq(item.as_value())),
+                Value::Bytes(haystack) => {
+                    matches!(item.as_value().unwrapped(), Value::Bytes(needle) if needle.as_slice().is_empty() || haystack.as_slice().windows(needle.as_slice().len()).any(|window| window == needle.as_slice()))
+                }
+                _ => false,
+            })
         }
         BoolExpression::Any {
             collection,
@@ -785,6 +840,25 @@ fn evaluate_scalar<'expression, 'values>(
                 "local function argument",
             )?)))
         }
+        ScalarExpression::Call {
+            name, arguments, ..
+        } if is_builtin_scalar_function(name) => {
+            let Some(argument) = arguments.first() else {
+                return Err(Error::new("E_TYPE", format!("{name} expects 1 argument")));
+            };
+            let Some(argument) = evaluate_scalar(catalog, argument, values)? else {
+                return Ok(None);
+            };
+            let Value::Text(source) = argument.as_value().unwrapped() else {
+                return Err(Error::new("E_TYPE", format!("{name} expects text")));
+            };
+            let value = match name.as_str() {
+                "uuid_parse" => Value::Uuid(source.parse()?),
+                "bytes_parse_hex" => Value::Bytes(source.parse()?),
+                _ => unreachable!("known builtin scalar function"),
+            };
+            Ok(Some(Evaluated::Owned(value)))
+        }
         ScalarExpression::Call { name, .. } => Err(Error::new(
             "E_QUERY",
             format!("local function '{name}' was not expanded before execution"),
@@ -796,6 +870,7 @@ fn evaluate_scalar<'expression, 'values>(
             let length = match value.as_value().unwrapped() {
                 Value::List(values) => values.len(),
                 Value::Text(value) => value.chars().count(),
+                Value::Bytes(value) => value.as_slice().len(),
                 _ => return Ok(None),
             };
             let length = i64::try_from(length)

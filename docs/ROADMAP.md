@@ -105,8 +105,8 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#132](https://github.com/worktools/unionid/issues/132) | [接口] Rust/TCP/HTTP 分页与取消旅程 | P1 | [#131](https://github.com/worktools/unionid/issues/131) |
 | [#135](https://github.com/worktools/unionid/issues/135) | [服务] 显式取消与有背压的流式读取 | P2 | [#116](https://github.com/worktools/unionid/issues/116)；由 #132 拆出 |
 | [#115](https://github.com/worktools/unionid/issues/115) | [类型] 生产标量契约 | P1 | 先冻结时间、十进制与二进制编码边界 |
-| [#137](https://github.com/worktools/unionid/issues/137) | [类型] 生产标量兼容与 codec 基础 | P1 | [#115](https://github.com/worktools/unionid/issues/115) RFC；后续标量共同前置 |
-| [#138](https://github.com/worktools/unionid/issues/138) | [类型] UUID 与 bytes 端到端能力 | P1 | [#137](https://github.com/worktools/unionid/issues/137) |
+| [#137](https://github.com/worktools/unionid/issues/137) | [类型] 生产标量兼容与 codec 基础 | 已完成 | [#147](https://github.com/worktools/unionid/pull/147)、[#148](https://github.com/worktools/unionid/pull/148) |
+| [#138](https://github.com/worktools/unionid/issues/138) | [类型] UUID 与 bytes 端到端能力 | 进行中 | [#137](https://github.com/worktools/unionid/issues/137) 已完成 |
 | [#139](https://github.com/worktools/unionid/issues/139) | [类型] date、timestamp 与 duration | P1 | [#137](https://github.com/worktools/unionid/issues/137)、[#142](https://github.com/worktools/unionid/issues/142) |
 | [#140](https://github.com/worktools/unionid/issues/140) | [类型] 固定精度 decimal | P1 | [#137](https://github.com/worktools/unionid/issues/137) |
 | [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | P1 | [#112](https://github.com/worktools/unionid/issues/112)、[#114](https://github.com/worktools/unionid/issues/114) |
@@ -120,7 +120,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect 以及 #130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程已完成。当前一起接受 [RFC 0005](rfc/0005-structured-prql-query-syntax.md) 与 [RFC 0004](rfc/0004-production-scalars.md)： #142 的结构 parser/formatter 与 #143 的 set 字段集已合并；当前完成 #143 剩余的 derive/select 字段集与 computed select，再推进 #137–#140 生产标量；#139 的 temporal literal 复用 #142 的 token/delimiter 基础。随后继续 #116 和 #117。显式取消与 streaming 已拆到 #135，等待 #116 的一致性读快照。#118 与 #120 仍是独立 P2 探索。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集，以及 #137 的生产标量兼容基础均已完成。当前推进 #138 的 UUID/bytes 端到端切片，之后依次实现 #139 的时间类型与 #140 的 decimal；#139 的 temporal literal 复用 #142 的 token/delimiter 基础。随后继续 #116 和 #117。显式取消与 streaming 已拆到 #135，等待 #116 的一致性读快照。#118 与 #120 仍是独立 P2 探索。
 
 ## 维护约定
 
