@@ -6,6 +6,12 @@ unionid 的稳定网络边界是 JSON Lines 协议 version 1：每个请求和�
 
 version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。内置服务使用 JSON Lines；HTTP adapter 应在 `POST /v1/query` 的 JSON body 中直接使用同一结构，并调用 `server::execute_protocol_request`，或用 `execute_protocol_request_until` 设置 adapter 自己的 deadline。这样 TCP、HTTP 和嵌入式 adapter 共享版本检查、参数解码、schema identity、deadline、introspection、错误与返回行语义，而不是各自解释 query。
 
+## 生产标量接入状态
+
+开发中的 version 2 增加 UUID、date、timestamp、duration、decimal 和 bytes wire value，canonical envelope 见 [RFC 0004](rfc/0004-production-scalars.md)。Rust request builder 默认仍为 version 1，可用 `.with_version(2)?` 选择 version 2；同一个 request_id 不影响幂等 identity，版本仍参与 canonical digest。
+
+当前已实现新参数解码、返回行、版本回显和 v1 参数预检；v1 在执行 mutation 前以 `E_PROTOCOL_TYPE` 拒绝嵌套新参数。旧 redb 格式只允许新参数的只读用法；持久写入返回 `E_STORAGE_UPGRADE_REQUIRED`。完整结果/schema 预检、cursor 和 format-4 升级仍由 #137 跟踪，尚不构成完整生产标量支持。Rust 与 codec 当前范围见 [SCALARS.md](SCALARS.md)。
+
 ## 请求
 
 ~~~json
@@ -14,7 +20,7 @@ version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。�
 
 | 字段 | 规则 |
 | --- | --- |
-| <code>version</code> | 当前只能是 1；其他值返回 <code>E_PROTOCOL_VERSION</code> |
+| <code>version</code> | 支持 1 和开发中的 2；响应回显请求版本，其他值返回 <code>E_PROTOCOL_VERSION</code> |
 | <code>request_id</code> | 客户端提供的 UTF-8 string，最多 1 KiB，响应原样返回；它只用于关联请求，不提供去重或 exactly-once |
 | <code>query</code> | 完整 unionid 源码，最多 1 MiB |
 | <code>introspect</code> | 可选的 `schema`／`tables`／`types`／`storage`；使用时 query 必须为空且不能携带 params/schema |

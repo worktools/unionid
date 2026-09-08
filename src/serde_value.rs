@@ -143,13 +143,10 @@ impl Serializer for ValueSerializer {
         name: &'static str,
         value: &T,
     ) -> Result<Value> {
-        // Keep the scalar identity boundary closed until native Value variants
-        // and their protocol/storage versions are available together.
         if name.starts_with("unionid::scalar::") {
-            return Err(Error::new(
-                "E_SERDE",
-                format!("native scalar '{name}' is not yet supported by database values"),
-            ));
+            let payload = serde_json::to_value(value)
+                .map_err(|error| Error::new("E_SERDE", error.to_string()))?;
+            return crate::scalars::decode_marker(name, payload);
         }
         value.serialize(self)
     }
@@ -414,6 +411,24 @@ fn json_value(value: &Value, depth: usize) -> Result<serde_json::Value> {
             .ok_or_else(|| Error::new("E_SERDE", "cannot decode a non-finite float"))?,
         Value::Bool(value) => serde_json::Value::Bool(*value),
         Value::Text(value) => serde_json::Value::String(value.clone()),
+        Value::Uuid(value) => {
+            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+        }
+        Value::Date(value) => {
+            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+        }
+        Value::Timestamp(value) => {
+            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+        }
+        Value::Duration(value) => {
+            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+        }
+        Value::Decimal(value) => {
+            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+        }
+        Value::Bytes(value) => {
+            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+        }
         Value::Null | Value::Option(None) => serde_json::Value::Null,
         Value::Named { value, .. } => json_value(value, depth + 1)?,
         Value::Option(Some(value)) => json_value(value, depth + 1)?,

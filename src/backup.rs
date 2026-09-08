@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::Engine;
 use crate::db::{Database, SchemaInfo};
 use crate::error::{Error, Result};
-use crate::idempotency::{ReceiptMap, validate_receipts};
+use crate::idempotency::{ReceiptMap, ensure_legacy_receipts, validate_receipts};
 
 const LEGACY_BACKUP_FORMAT_VERSION: u32 = 1;
 const RECEIPT_BACKUP_FORMAT_VERSION: u32 = 2;
@@ -77,7 +77,9 @@ fn write_database(database: Database, receipts: ReceiptMap, output: &Path) -> Re
             format!("backup output '{}' already exists", output.display()),
         ));
     }
+    database.ensure_legacy_scalars()?;
     let database = database.validate_logical_backup()?;
+    ensure_legacy_receipts(&receipts)?;
     validate_receipts(&receipts, database.sequence)?;
     let format_version = if receipts.is_empty() {
         LEGACY_BACKUP_FORMAT_VERSION
@@ -140,6 +142,7 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             ),
         ));
     }
+    envelope.database.ensure_legacy_scalars()?;
     let database = envelope.database.validate_logical_backup()?;
     if envelope.format_version == LEGACY_BACKUP_FORMAT_VERSION && !envelope.receipts.is_empty() {
         return Err(Error::new(
@@ -147,6 +150,7 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             "backup format 1 must not contain idempotency receipts",
         ));
     }
+    ensure_legacy_receipts(&envelope.receipts)?;
     validate_receipts(&envelope.receipts, database.sequence)?;
     let actual = info(&database, &envelope.receipts, envelope.format_version)?;
     if actual.checksum != envelope.checksum || actual.schema != envelope.schema {

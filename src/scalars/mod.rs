@@ -4,9 +4,11 @@
 //! delivered separately; constructing a wrapper does not upgrade a database.
 mod decimal;
 mod serde;
+pub(crate) use serde::decode_marker;
 mod temporal;
 
 pub use decimal::Decimal;
+pub(crate) use decimal::validate_type as validate_decimal_type;
 pub use temporal::{Date, Duration, Timestamp};
 
 use crate::error::{Error, Result};
@@ -140,3 +142,12 @@ impl fmt::Display for Bytes {
         Ok(())
     }
 }
+
+macro_rules! scalar_value {
+    ($($ty:ident),+ $(,)?) => {$(
+        impl From<$ty> for crate::Value {
+            fn from(value: $ty) -> Self { Self::$ty(value) }
+        }
+    )+};
+}
+scalar_value!(Uuid, Date, Timestamp, Duration, Decimal, Bytes);

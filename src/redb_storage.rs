@@ -13,7 +13,7 @@ use crate::db::{Database, DurableCatalogEntry, DurableMeta};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyReceipt, MAX_IDEMPOTENCY_RECEIPT_BYTES, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap,
-    encoded_receipt, validate_receipts,
+    encoded_receipt, ensure_legacy_receipts, validate_receipts,
 };
 use crate::migration::MigrationEntry;
 
@@ -332,6 +332,8 @@ impl RedbStore {
             (ReceiptMap::new(), BTreeMap::new())
         };
         let database = Database::from_durable(meta.clone(), entries, rows, migrations)?;
+        database.ensure_legacy_scalars()?;
+        ensure_legacy_receipts(&receipts)?;
         validate_receipts(&receipts, database.sequence)?;
         if format_version == LEGACY_STORAGE_FORMAT_VERSION && !receipts.is_empty() {
             return Err(Error::new(
@@ -375,6 +377,8 @@ struct PreparedState {
 
 impl PreparedState {
     fn new(database: &Database, receipts: &ReceiptMap, format_version: u32) -> Result<Self> {
+        database.ensure_legacy_scalars()?;
+        ensure_legacy_receipts(receipts)?;
         let mut catalog = BTreeMap::new();
         for entry in database.durable_catalog_entries() {
             catalog.insert(

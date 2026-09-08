@@ -137,3 +137,22 @@ impl ScalarRepr for Decimal {
 }
 
 scalar_serde!(Uuid, Date, Timestamp, Duration, Decimal, Bytes);
+
+pub(crate) fn decode_marker(name: &str, payload: serde_json::Value) -> Result<crate::Value> {
+    use crate::{Error, Value};
+    match name {
+        Uuid::MARKER => serde_json::from_value::<Uuid>(payload).map(Value::Uuid),
+        Date::MARKER => serde_json::from_value::<Date>(payload).map(Value::Date),
+        Timestamp::MARKER => serde_json::from_value::<Timestamp>(payload).map(Value::Timestamp),
+        Duration::MARKER => serde_json::from_value::<Duration>(payload).map(Value::Duration),
+        Decimal::MARKER => serde_json::from_value::<Decimal>(payload).map(Value::Decimal),
+        Bytes::MARKER => serde_json::from_value::<Bytes>(payload).map(Value::Bytes),
+        _ => {
+            return Err(Error::new(
+                "E_SERDE",
+                format!("unknown scalar marker '{name}'"),
+            ));
+        }
+    }
+    .map_err(|error| Error::new("E_SERDE", error.to_string()))
+}

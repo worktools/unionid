@@ -540,7 +540,14 @@ impl Database {
         let ty = self.catalog.field_type(&source.schema, column)?;
         if !matches!(
             self.catalog.underlying(ty)?,
-            ScalarType::Int | ScalarType::Text
+            ScalarType::Int
+                | ScalarType::Text
+                | ScalarType::Uuid
+                | ScalarType::Date
+                | ScalarType::Timestamp
+                | ScalarType::Duration
+                | ScalarType::Decimal { .. }
+                | ScalarType::Bytes
         ) {
             return Err(Error::new(
                 "E_TYPE",
@@ -759,7 +766,14 @@ impl Database {
                 let ty = self.catalog.field_type(&table.schema, key)?;
                 if !matches!(
                     self.catalog.underlying(ty)?,
-                    ScalarType::Int | ScalarType::Text
+                    ScalarType::Int
+                        | ScalarType::Text
+                        | ScalarType::Uuid
+                        | ScalarType::Date
+                        | ScalarType::Timestamp
+                        | ScalarType::Duration
+                        | ScalarType::Decimal { .. }
+                        | ScalarType::Bytes
                 ) {
                     return Err(Error::new(
                         "E_TYPE",
@@ -866,6 +880,12 @@ fn type_contains_ref(ty: &ScalarType, target: u64) -> bool {
         | ScalarType::Float
         | ScalarType::Bool
         | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes
         | ScalarType::Named(_) => false,
     }
 }
@@ -910,6 +930,12 @@ fn type_reaches(
         | ScalarType::Float
         | ScalarType::Bool
         | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes
         | ScalarType::Named(_) => false,
     }
 }

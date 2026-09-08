@@ -211,6 +211,22 @@ fn as_storage_error(error: Error) -> Error {
     Error::new("E_STORAGE", error.message)
 }
 
+pub(crate) fn ensure_legacy_receipts(receipts: &ReceiptMap) -> Result<()> {
+    if receipts.values().any(|receipt| {
+        receipt
+            .response
+            .rows
+            .iter()
+            .any(|row| row.values().any(crate::Value::requires_protocol_v2))
+    }) {
+        return Err(Error::new(
+            "E_STORAGE_UPGRADE_REQUIRED",
+            "production scalar receipts require upgraded storage/backup codecs",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

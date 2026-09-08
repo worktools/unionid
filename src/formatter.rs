@@ -1116,6 +1116,13 @@ fn type_text(value: &ScalarType) -> String {
         ScalarType::Float => "float".into(),
         ScalarType::Bool => "bool".into(),
         ScalarType::Text => "text".into(),
+        ScalarType::Uuid => "uuid".into(),
+        ScalarType::Date => "date".into(),
+        ScalarType::Timestamp => "timestamp".into(),
+        ScalarType::Duration => "duration".into(),
+        ScalarType::Bytes => "bytes".into(),
+        ScalarType::Decimal { precision, scale } => format!("decimal {precision} {scale}"),
+
         ScalarType::Named(name) => name.clone(),
         ScalarType::Ref(id) => format!("type#{id}"),
         ScalarType::Option(value) => format!("option {}", type_argument(value)),

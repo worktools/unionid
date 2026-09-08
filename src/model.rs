@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::scalars::{Bytes, Date, Decimal, Duration, Timestamp, Uuid};
 
 pub const MAX_DEPTH: usize = 64;
 
@@ -13,6 +14,12 @@ pub enum ScalarType {
     Float,
     Bool,
     Text,
+    Uuid,
+    Date,
+    Timestamp,
+    Duration,
+    Decimal { precision: u8, scale: u8 },
+    Bytes,
     Enum(EnumType),
     Record(Vec<Column>),
     Tuple(Vec<ScalarType>),
@@ -51,6 +58,12 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Text(String),
+    Uuid(Uuid),
+    Date(Date),
+    Timestamp(Timestamp),
+    Duration(Duration),
+    Decimal(Decimal),
+    Bytes(Bytes),
     Null,
     Enum(EnumValue),
     Record(BTreeMap<String, Value>),
@@ -85,6 +98,12 @@ impl Value {
             (Self::Float(a), Self::Float(b)) => a == b,
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Uuid(a), Self::Uuid(b)) => a == b,
+            (Self::Date(a), Self::Date(b)) => a == b,
+            (Self::Timestamp(a), Self::Timestamp(b)) => a == b,
+            (Self::Duration(a), Self::Duration(b)) => a == b,
+            (Self::Decimal(a), Self::Decimal(b)) => a == b,
+            (Self::Bytes(a), Self::Bytes(b)) => a == b,
             (Self::Null, Self::Null) => true,
             (
                 Self::Named {
@@ -118,6 +137,14 @@ impl Value {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => Some(a.cmp(b)),
             (Self::Float(a), Self::Float(b)) => a.partial_cmp(b),
+            (Self::Uuid(a), Self::Uuid(b)) => Some(a.cmp(b)),
+            (Self::Date(a), Self::Date(b)) => Some(a.cmp(b)),
+            (Self::Timestamp(a), Self::Timestamp(b)) => Some(a.cmp(b)),
+            (Self::Duration(a), Self::Duration(b)) => Some(a.cmp(b)),
+            (Self::Bytes(a), Self::Bytes(b)) => Some(a.cmp(b)),
+            (Self::Decimal(a), Self::Decimal(b)) if a.scale() == b.scale() => {
+                Some(a.coefficient().cmp(&b.coefficient()))
+            }
             (Self::Text(a), Self::Text(b)) => Some(a.cmp(b)),
             (
                 Self::Named {
@@ -130,6 +157,23 @@ impl Value {
                 },
             ) if a == b => av.cmp_ord(bv),
             _ => None,
+        }
+    }
+
+    /// Whether this value requires the production-scalar protocol boundary.
+    pub fn requires_protocol_v2(&self) -> bool {
+        match self {
+            Self::Uuid(_)
+            | Self::Date(_)
+            | Self::Timestamp(_)
+            | Self::Duration(_)
+            | Self::Decimal(_)
+            | Self::Bytes(_) => true,
+            Self::Named { value, .. } | Self::Option(Some(value)) => value.requires_protocol_v2(),
+            Self::Enum(value) => value.args.iter().any(Self::requires_protocol_v2),
+            Self::Record(fields) => fields.values().any(Self::requires_protocol_v2),
+            Self::Tuple(items) | Self::List(items) => items.iter().any(Self::requires_protocol_v2),
+            _ => false,
         }
     }
 
@@ -146,6 +190,12 @@ impl Value {
             Self::Float(v) => serde_json::json!(["float", if *v == 0.0 { 0 } else { v.to_bits() }]),
             Self::Bool(v) => serde_json::json!(["bool", v]),
             Self::Text(v) => serde_json::json!(["text", v]),
+            Self::Uuid(v) => serde_json::json!(["uuid", v]),
+            Self::Date(v) => serde_json::json!(["date", v]),
+            Self::Timestamp(v) => serde_json::json!(["timestamp", v]),
+            Self::Duration(v) => serde_json::json!(["duration", v]),
+            Self::Decimal(v) => serde_json::json!(["decimal", v]),
+            Self::Bytes(v) => serde_json::json!(["bytes", v]),
             Self::Null => serde_json::json!(["null"]),
             Self::Named { type_id, value } => {
                 serde_json::json!(["named", type_id, value.index_value()])
@@ -326,6 +376,10 @@ impl Catalog {
     fn resolve_inner(&mut self, ty: ScalarType, depth: usize) -> Result<ScalarType> {
         check_depth(depth)?;
         Ok(match ty {
+            ScalarType::Decimal { precision, scale } => {
+                crate::scalars::validate_decimal_type(precision, scale)?;
+                ScalarType::Decimal { precision, scale }
+            }
             ScalarType::Named(name) => ScalarType::Ref(
                 self.types
                     .get(&name)
@@ -557,6 +611,63 @@ impl Catalog {
         Ok(ids)
     }
 
+    /// Check the complete type, including empty containers and recursive references.
+    pub fn requires_protocol_v2(&self, ty: &ScalarType) -> Result<bool> {
+        fn visit(
+            catalog: &Catalog,
+            ty: &ScalarType,
+            seen: &mut BTreeSet<u64>,
+            depth: usize,
+        ) -> Result<bool> {
+            check_depth(depth)?;
+            Ok(match ty {
+                ScalarType::Uuid
+                | ScalarType::Date
+                | ScalarType::Timestamp
+                | ScalarType::Duration
+                | ScalarType::Bytes => true,
+                ScalarType::Decimal { precision, scale } => {
+                    crate::scalars::validate_decimal_type(*precision, *scale)?;
+                    true
+                }
+                ScalarType::Ref(id) if seen.insert(*id) => {
+                    visit(catalog, &catalog.definition(*id)?.ty, seen, depth + 1)?
+                }
+                ScalarType::Record(fields) => {
+                    let mut result = false;
+                    for field in fields {
+                        result |= visit(catalog, &field.ty, seen, depth + 1)?;
+                    }
+                    result
+                }
+                ScalarType::Enum(sum) => {
+                    let mut result = false;
+                    for variant in &sum.variants {
+                        for ty in &variant.args {
+                            result |= visit(catalog, ty, seen, depth + 1)?;
+                        }
+                    }
+                    result
+                }
+                ScalarType::Tuple(items) => {
+                    let mut result = false;
+                    for ty in items {
+                        result |= visit(catalog, ty, seen, depth + 1)?;
+                    }
+                    result
+                }
+                ScalarType::Option(inner) | ScalarType::List(inner) => {
+                    visit(catalog, inner, seen, depth + 1)?
+                }
+                ScalarType::Named(name) => {
+                    return Err(Error::new("E_SCHEMA", format!("unresolved type '{name}'")));
+                }
+                _ => false,
+            })
+        }
+        visit(self, ty, &mut BTreeSet::new(), 0)
+    }
+
     pub fn coerce(&self, value: &Value, ty: &ScalarType, path: &str) -> Result<Value> {
         self.coerce_inner(value, ty, path, 0)
     }
@@ -595,6 +706,16 @@ impl Catalog {
                 Value::Float(if *v == 0.0 { 0.0 } else { *v })
             }
             (Value::Bool(v), ScalarType::Bool) => Value::Bool(*v),
+            (Value::Uuid(v), ScalarType::Uuid) => Value::Uuid(*v),
+            (Value::Date(v), ScalarType::Date) => Value::Date(*v),
+            (Value::Timestamp(v), ScalarType::Timestamp) => Value::Timestamp(*v),
+            (Value::Duration(v), ScalarType::Duration) => Value::Duration(*v),
+            (Value::Bytes(v), ScalarType::Bytes) => Value::Bytes(v.clone()),
+            (Value::Decimal(v), ScalarType::Decimal { precision, scale })
+                if v.scale() == *scale =>
+            {
+                Value::Decimal(Decimal::new(v.coefficient(), *precision, *scale)?)
+            }
             (Value::Text(v), ScalarType::Text) => Value::Text(v.clone()),
             (Value::Record(fields), ScalarType::Record(columns)) => {
                 let mut out = BTreeMap::new();
@@ -718,6 +839,13 @@ impl Catalog {
             ScalarType::Float => "float".into(),
             ScalarType::Bool => "bool".into(),
             ScalarType::Text => "text".into(),
+            ScalarType::Uuid => "uuid".into(),
+            ScalarType::Date => "date".into(),
+            ScalarType::Timestamp => "timestamp".into(),
+            ScalarType::Duration => "duration".into(),
+            ScalarType::Bytes => "bytes".into(),
+            ScalarType::Decimal { precision, scale } => format!("decimal {precision} {scale}"),
+
             ScalarType::Ref(id) => self
                 .definition(*id)
                 .map(|d| d.name.clone())
@@ -802,7 +930,16 @@ impl Catalog {
 
 fn type_is_finite(ty: &ScalarType, finite: &BTreeSet<u64>) -> bool {
     match ty {
-        ScalarType::Int | ScalarType::Float | ScalarType::Bool | ScalarType::Text => true,
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes => true,
         ScalarType::Ref(id) => finite.contains(id),
         ScalarType::Option(_) | ScalarType::List(_) => true,
         ScalarType::Tuple(items) => items.iter().all(|item| type_is_finite(item, finite)),
@@ -819,6 +956,9 @@ fn type_is_finite(ty: &ScalarType, finite: &BTreeSet<u64>) -> bool {
 
 fn validate_type_references(catalog: &Catalog, ty: &ScalarType, depth: usize) -> Result<()> {
     check_depth(depth)?;
+    if let ScalarType::Decimal { precision, scale } = ty {
+        crate::scalars::validate_decimal_type(*precision, *scale)?;
+    }
     match ty {
         ScalarType::Ref(id) => {
             catalog.definition(*id)?;
@@ -849,7 +989,16 @@ fn validate_type_references(catalog: &Catalog, ty: &ScalarType, depth: usize) ->
                 format!("unresolved type reference '{name}'"),
             ));
         }
-        ScalarType::Int | ScalarType::Float | ScalarType::Bool | ScalarType::Text => {}
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes => {}
     }
     Ok(())
 }
@@ -925,6 +1074,12 @@ fn collect_type_references(ty: &ScalarType, references: &mut BTreeSet<u64>) {
         | ScalarType::Float
         | ScalarType::Bool
         | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes
         | ScalarType::Named(_) => {}
     }
 }
@@ -962,6 +1117,12 @@ fn structural_id_count(ty: &ScalarType, depth: usize) -> Result<u64> {
         | ScalarType::Float
         | ScalarType::Bool
         | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes
         | ScalarType::Named(_)
         | ScalarType::Ref(_) => 0,
     };
@@ -975,6 +1136,12 @@ impl Value {
             Self::Float(value) => format!("{value:?}"),
             Self::Bool(value) => value.to_string(),
             Self::Text(value) => serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
+            Self::Uuid(value) => format!("uuid \"{value}\""),
+            Self::Decimal(value) => format!("decimal \"{value}\""),
+            Self::Bytes(value) => format!("bytes \"{value}\""),
+            Self::Date(value) => format!("@{value}"),
+            Self::Timestamp(value) => format!("@{value}"),
+            Self::Duration(value) => value.to_string(),
             Self::Null => "null".into(),
             Self::Named { value, .. } => value.source_text(),
             Self::Record(fields) => format!(

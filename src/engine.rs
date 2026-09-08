@@ -733,6 +733,15 @@ impl Engine {
                 "parameterized writes require redb or memory mode; the transitional WAL stores source text",
             )));
         }
+        if prepared.mutating
+            && parameters.values().any(crate::Value::requires_protocol_v2)
+            && (self.durable.is_some() || self.snapshot.is_some())
+        {
+            return self.with_schema(QueryResponse::failure(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "production scalar writes require storage format 4",
+            )));
+        }
         let mut statements = prepared.statements.clone();
         let result = crate::params::bind(&mut statements, &parameters)
             .and_then(|()| self.try_execute_statements(statements, None, deadline, None));
@@ -802,6 +811,18 @@ impl Engine {
         let mut statements = syntax::parse(source)?;
         if let Some(page) = page {
             attach_structured_page(&mut statements, page)?;
+        }
+        let native_parameters = parameters.values().any(crate::Value::requires_protocol_v2);
+        if native_parameters
+            && (self.durable.is_some() || self.wal.is_some() || self.snapshot.is_some())
+            && statements
+                .iter()
+                .any(|located| located.statement.is_mutating())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "production scalar writes require storage format 4",
+            ));
         }
         crate::params::bind(&mut statements, &parameters)?;
         let contains_parameters = !parameters.is_empty();

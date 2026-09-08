@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
     MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, ReceiptOperation, ReceiptOperationResult,
-    Request as ProtocolRequest, Response as ProtocolResponse, VERSION,
+    Request as ProtocolRequest, Response as ProtocolResponse, VERSION, supported_version,
 };
 use crate::{Engine, Error, QueryResponse};
 
@@ -78,7 +78,7 @@ impl OutgoingResponse {
             Self::Legacy(_) => serde_json::to_value(QueryResponse::failure(error))
                 .expect("limit response serialization cannot fail"),
             Self::Versioned(response) => serde_json::json!({
-                "version": VERSION,
+                "version": response.version,
                 "request_id": response.request_id,
                 "ok": false,
                 "message": error.to_string(),
@@ -464,14 +464,21 @@ fn execute_json_request(input: &str, engine: &mut Engine) -> OutgoingResponse {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    let version = decoded
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(VERSION);
     let request = match serde_json::from_value::<ProtocolRequest>(decoded) {
         Ok(request) => request,
         Err(error) => {
-            return protocol_error(
+            let mut response = ProtocolResponse::failure(
                 request_id,
                 Error::new("E_PROTOCOL", format!("invalid versioned request: {error}")),
-                engine,
+                engine.schema_info(),
             );
+            response.version = version;
+            return OutgoingResponse::Versioned(Box::new(response));
         }
     };
     OutgoingResponse::Versioned(Box::new(execute_protocol_request(engine, request)))
@@ -495,13 +502,24 @@ pub fn execute_protocol_request_until(
     request: ProtocolRequest,
     deadline: Instant,
 ) -> ProtocolResponse {
-    if request.version != VERSION {
+    let version = request.version;
+    let mut response = execute_versioned_request(engine, request, deadline);
+    response.version = version;
+    response
+}
+
+fn execute_versioned_request(
+    engine: &mut Engine,
+    request: ProtocolRequest,
+    deadline: Instant,
+) -> ProtocolResponse {
+    if !supported_version(request.version) {
         return ProtocolResponse::failure(
             request.request_id,
             Error::new(
                 "E_PROTOCOL_VERSION",
                 format!(
-                    "unsupported protocol version {}; supported version is {VERSION}",
+                    "unsupported protocol version {}; supported versions are 1 and 2",
                     request.version
                 ),
             ),
@@ -673,14 +691,6 @@ fn legacy_error(error: Error) -> OutgoingResponse {
     OutgoingResponse::Legacy(Box::new(QueryResponse::failure(error)))
 }
 
-fn protocol_error(request_id: String, error: Error, engine: &Engine) -> OutgoingResponse {
-    OutgoingResponse::Versioned(Box::new(ProtocolResponse::failure(
-        request_id,
-        error,
-        engine.schema_info(),
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,5 +733,24 @@ mod tests {
         };
         assert_eq!(response.error.unwrap().code, "E_LIMIT");
         assert_eq!(engine.execute("from items").error.unwrap().code, "E_TABLE");
+    }
+
+    #[test]
+    fn version_two_parse_and_limit_errors_keep_the_request_version() {
+        let mut engine = Engine::memory();
+        let input = r#"{"version":2,"request_id":"bad-v2","query":"create table items (id int)","unknown":true}"#;
+        let OutgoingResponse::Versioned(response) = execute_json_request(input, &mut engine) else {
+            panic!("expected a versioned response");
+        };
+        assert_eq!(response.version, 2);
+        assert_eq!(response.request_id, "bad-v2");
+        assert_eq!(response.error.unwrap().code, "E_PROTOCOL");
+        assert_eq!(engine.execute("from items").error.unwrap().code, "E_TABLE");
+        let mut response =
+            ProtocolResponse::from_query("large-v2", QueryResponse::ok_message("ok"));
+        response.version = 2;
+        let fallback = OutgoingResponse::Versioned(Box::new(response)).limit_fallback();
+        assert_eq!(fallback["version"], 2);
+        assert_eq!(fallback["error"]["code"], "E_LIMIT");
     }
 }

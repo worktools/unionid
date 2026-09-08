@@ -477,6 +477,16 @@ fn infer_literal(value: &Value) -> Result<Option<ScalarType>> {
         Value::Float(_) => Some(ScalarType::Float),
         Value::Bool(_) => Some(ScalarType::Bool),
         Value::Text(_) => Some(ScalarType::Text),
+        Value::Uuid(_) => Some(ScalarType::Uuid),
+        Value::Date(_) => Some(ScalarType::Date),
+        Value::Timestamp(_) => Some(ScalarType::Timestamp),
+        Value::Duration(_) => Some(ScalarType::Duration),
+        Value::Bytes(_) => Some(ScalarType::Bytes),
+        Value::Decimal(value) => Some(ScalarType::Decimal {
+            precision: value.precision(),
+            scale: value.scale(),
+        }),
+
         Value::Named { type_id, .. } => Some(ScalarType::Ref(*type_id)),
         Value::Tuple(values) => values
             .iter()
@@ -519,7 +529,15 @@ fn require_bool(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<()>
 fn orderable(catalog: &Catalog, ty: &ScalarType) -> Result<bool> {
     Ok(matches!(
         catalog.underlying(ty)?,
-        ScalarType::Int | ScalarType::Float | ScalarType::Text
+        ScalarType::Int
+            | ScalarType::Float
+            | ScalarType::Text
+            | ScalarType::Uuid
+            | ScalarType::Date
+            | ScalarType::Timestamp
+            | ScalarType::Duration
+            | ScalarType::Decimal { .. }
+            | ScalarType::Bytes
     ))
 }
 
@@ -528,7 +546,22 @@ pub(crate) fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
         (ScalarType::Int, ScalarType::Int)
         | (ScalarType::Float, ScalarType::Float)
         | (ScalarType::Bool, ScalarType::Bool)
-        | (ScalarType::Text, ScalarType::Text) => true,
+        | (ScalarType::Text, ScalarType::Text)
+        | (ScalarType::Uuid, ScalarType::Uuid)
+        | (ScalarType::Date, ScalarType::Date)
+        | (ScalarType::Timestamp, ScalarType::Timestamp)
+        | (ScalarType::Duration, ScalarType::Duration)
+        | (ScalarType::Bytes, ScalarType::Bytes) => true,
+        (
+            ScalarType::Decimal {
+                precision: a,
+                scale: b,
+            },
+            ScalarType::Decimal {
+                precision: c,
+                scale: d,
+            },
+        ) => a == c && b == d,
         (ScalarType::Ref(left), ScalarType::Ref(right)) => left == right,
         (ScalarType::Option(left), ScalarType::Option(right))
         | (ScalarType::List(left), ScalarType::List(right)) => same_type(left, right),

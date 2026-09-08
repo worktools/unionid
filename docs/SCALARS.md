@@ -2,9 +2,9 @@
 
 ## 当前可用范围
 
-`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes` 的 Rust 值校验与 serde 表示。这是 [#137](https://github.com/worktools/unionid/issues/137) 的基础切片；当前查询语言、`ScalarType`、`Value`、网络协议和持久化尚未接入这些类型。`Value::from_serde` 遇到这些 wrapper（包括嵌套在应用 ADT 中）返回 `E_SERDE`，防止静默转换成 text 或 record。
+`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`。当前开发分支已将它们接入原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2 参数/返回值与独立 value codec 2。`Value::from_serde` 保留各标量身份，`Value::to_serde` 可解码回应用类型。这是 [#137](https://github.com/worktools/unionid/issues/137) 的进行中实现；新类型的源码声明、完整协议结果预检、cursor 与持久格式升级仍未交付。
 
-完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。数据库的显式 format-4 升级、protocol v2 和 codec 转换仍需完成后才能存储这些值。构造 Rust wrapper 不会触发数据库升级。
+完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。现有 redb 格式、逻辑 backup 和过渡 snapshot 明确拒绝新 schema/receipt。持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；只读请求可用 protocol v2 传入新值并派生返回。显式 format-4 升级完成后才能持久化这些值，构造 wrapper 不会触发升级。
 
 ## Rust 值与规范表示
 
@@ -43,12 +43,20 @@ wrapper 调用 `serialize_newtype_struct`，marker 使用保留前缀 `unionid::
 
 现有普通应用 newtype 继续透明转换。保留前缀供 unionid 使用，应用不要把自己的 newtype 重命名到这个命名空间。
 
+## 二进制与协议接入
+
+`codec::encode_value` 继续写旧版 codec 1，`codec::encode_value_v2` 显式写 codec 2；`decode_value` 分派这两个版本并拒绝未知版本。旧类型的 payload 不变，新类型采用 RFC 的固定宽度字节或 length + bytes 编码。codec 1 对完整 type graph 预检，因此空的 `list uuid` 或 `None : option uuid` 也不能绕过版本限制。整个 encoded value 仍受既有 `MAX_VALUE_BYTES` 限制，包含 framing 开销。
+
+`Request` 保持默认 version 1；用 `.with_version(2)?` 显式选择 version 2。v1 的新参数在 mutation 前被拒绝为 `E_PROTOCOL_TYPE`；v2 使用 RFC 0004 的 canonical wire envelope，响应回显版本，幂等 digest 仍包含版本。请勿把当前接入阶段视为已完成的生产标量发布；#137 继续跟踪结果 schema 预检、完整 codec 版本集和升级恢复验收。
+
 ## English Description
 
-`unionid::scalars` provides validated Rust domains and canonical serde payloads for six production scalars. This is a foundation slice of #137. Query syntax, native `ScalarType` / `Value` variants, protocol v2, durable codecs, and the explicit format-4 upgrade remain pending. `Value::from_serde` rejects these wrappers with `E_SERDE`, including nested wrappers, so their identities cannot silently become ordinary text or records.
+`unionid::scalars` provides validated domains for six native `ScalarType` / `Value` variants. The current development branch preserves scalar identity through nested application ADTs, serde, protocol-v2 values, and the explicit `encode_value_v2` binary codec. The legacy encoder retains codec 1 and rejects new types even inside empty containers. Old-type binary payloads remain unchanged; the existing encoded-value budget includes framing overhead.
 
-UUID/date/timestamp payloads are canonical strings. Duration uses a signed decimal microsecond string. Decimal uses a string coefficient and numeric scale; declared schema precision is checked separately. Bytes use canonical unpadded base64url and retain a 16 MiB decoded bound. Source parsing may normalize equivalent spellings; serde decoding requires canonical forms and revalidates all domain limits. Decimal rescaling is exact and never rounds.
+Requests default to protocol 1; `.with_version(2)?` opts in. Version 1 rejects new scalar parameters before mutation, responses echo the requested version, and idempotency digests distinguish versions. Legacy durable formats reject native schemas/receipts and persistent mutations with native parameters. Read-only protocol-v2 use can pass and return native parameters without upgrading storage.
 
-Reserved `unionid::scalar::v1::<type>` newtype markers carry identity to typed serializers. Their version is independent of protocol and storage versions. JSON erases newtype markers; application structs, enums, options, tuples, and lists recover scalar identity through their declared Rust types. These payloads are not protocol-v2 envelopes. Existing application newtypes retain transparent conversion.
+This is work in progress under #137. Source declarations, complete result-schema preflight, cursor integration, the full codec-version set, explicit format-4 upgrades, and recovery acceptance remain pending. Do not treat this branch as complete production scalar support.
 
-Validation lives in `tests/scalars.rs` and `tests/scalar_serde.rs`: logical vectors, calendar boundaries, precision/overflow, canonical rejection, binary limits, nested application ADTs, and the database conversion guard. End-to-end storage and wire validation remains tracked by #137–#140.
+Canonical serde uses text for UUID/date/timestamp, string microseconds for duration, string coefficient plus numeric scale for decimal, and unpadded base64url for bytes. Decoding validates both canonical forms and domain bounds. Reserved `unionid::scalar::v1::<type>` newtype markers carry identity to typed serializers; this payload version is independent of protocol/storage versions. JSON itself erases markers, so application Rust types restore identity.
+
+Tests in `tests/scalars.rs`, `tests/scalar_serde.rs`, and `tests/native_scalars.rs` cover logical/wire/binary vectors, calendar and precision boundaries, nested ADTs, canonical rejection, empty-container type checks, protocol versions, retries, and legacy redb write rejection/reopen.

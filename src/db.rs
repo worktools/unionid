@@ -2587,7 +2587,15 @@ impl Database {
     fn orderable(&self, ty: &ScalarType) -> Result<bool> {
         Ok(matches!(
             self.catalog.underlying(ty)?,
-            ScalarType::Int | ScalarType::Float | ScalarType::Text
+            ScalarType::Int
+                | ScalarType::Float
+                | ScalarType::Text
+                | ScalarType::Uuid
+                | ScalarType::Date
+                | ScalarType::Timestamp
+                | ScalarType::Duration
+                | ScalarType::Decimal { .. }
+                | ScalarType::Bytes
         ))
     }
     /// Indexes are derived data. Rebuild on load so older key encodings cannot
@@ -2815,6 +2823,12 @@ impl Database {
                 | ScalarType::Float
                 | ScalarType::Bool
                 | ScalarType::Text
+                | ScalarType::Uuid
+                | ScalarType::Date
+                | ScalarType::Timestamp
+                | ScalarType::Duration
+                | ScalarType::Decimal { .. }
+                | ScalarType::Bytes
                 | ScalarType::Named(_)
                 | ScalarType::Ref(_) => {}
             }
@@ -2883,6 +2897,25 @@ impl Database {
             .collect::<Vec<_>>();
         impact.sort();
         impact
+    }
+
+    pub(crate) fn ensure_legacy_scalars(&self) -> Result<()> {
+        let mut native = false;
+        for definition in self.catalog.types.values() {
+            native |= self.catalog.requires_protocol_v2(&definition.ty)?;
+        }
+        for table in self.schema_tables() {
+            for column in &table.schema {
+                native |= self.catalog.requires_protocol_v2(&column.ty)?;
+            }
+        }
+        if native {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "production scalar schemas require storage format 4",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn durable_meta(&self) -> DurableMeta {
@@ -3307,6 +3340,12 @@ fn type_reaches(catalog: &Catalog, ty: &ScalarType, target: u64, seen: &mut BTre
         | ScalarType::Float
         | ScalarType::Bool
         | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes
         | ScalarType::Named(_) => false,
     }
 }

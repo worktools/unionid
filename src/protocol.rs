@@ -17,7 +17,13 @@ use crate::introspection::{Introspection, IntrospectionKind};
 use crate::model::{EnumValue, Value};
 use crate::query::PageSpec;
 
+/// Default version retained for existing callers.
 pub const VERSION: u32 = 1;
+pub const PRODUCTION_VERSION: u32 = 2;
+pub fn supported_version(version: u32) -> bool {
+    matches!(version, VERSION | PRODUCTION_VERSION)
+}
+
 pub const MAX_INTROSPECTION_BYTES: usize = 1024 * 1024;
 pub const MAX_REQUEST_ID_BYTES: usize = 1024;
 
@@ -72,12 +78,36 @@ impl Request {
         Ok(self)
     }
 
+    /// Select a supported protocol version without changing request semantics.
+    pub fn with_version(mut self, version: u32) -> Result<Self, Error> {
+        if !supported_version(version) {
+            return Err(Error::new(
+                "E_PROTOCOL_VERSION",
+                "supported protocol versions are 1 and 2",
+            ));
+        }
+        self.version = version;
+        Ok(self)
+    }
+
     pub fn with_page(mut self, page: PageSpec) -> Self {
         self.page = Some(page);
         self
     }
 
     pub fn decode_params(&self) -> Result<BTreeMap<String, Value>, Error> {
+        if !supported_version(self.version) {
+            return Err(Error::new(
+                "E_PROTOCOL_VERSION",
+                "supported protocol versions are 1 and 2",
+            ));
+        }
+        if self.version == VERSION && self.params.values().any(WireValue::requires_v2) {
+            return Err(Error::new(
+                "E_PROTOCOL_TYPE",
+                "production scalar parameters require protocol version 2",
+            ));
+        }
         self.params
             .iter()
             .map(|(name, value)| {
@@ -202,6 +232,25 @@ pub enum WireValue {
     Text {
         value: String,
     },
+    Uuid {
+        value: String,
+    },
+    Date {
+        value: String,
+    },
+    Timestamp {
+        value: String,
+    },
+    Duration {
+        microseconds: String,
+    },
+    Decimal {
+        coefficient: String,
+        scale: u8,
+    },
+    Bytes {
+        base64url: String,
+    },
     Null,
     Variant {
         name: String,
@@ -226,6 +275,24 @@ pub enum WireValue {
     },
 }
 
+impl WireValue {
+    pub fn requires_v2(&self) -> bool {
+        match self {
+            Self::Uuid { .. }
+            | Self::Date { .. }
+            | Self::Timestamp { .. }
+            | Self::Duration { .. }
+            | Self::Decimal { .. }
+            | Self::Bytes { .. } => true,
+            Self::Named { value, .. } | Self::Option { value: Some(value) } => value.requires_v2(),
+            Self::Variant { args, .. } => args.iter().any(Self::requires_v2),
+            Self::Record { fields } => fields.values().any(Self::requires_v2),
+            Self::Tuple { items } | Self::List { items } => items.iter().any(Self::requires_v2),
+            _ => false,
+        }
+    }
+}
+
 impl From<&Value> for WireValue {
     fn from(value: &Value) -> Self {
         match value {
@@ -238,6 +305,25 @@ impl From<&Value> for WireValue {
             Value::Bool(value) => Self::Bool { value: *value },
             Value::Text(value) => Self::Text {
                 value: value.clone(),
+            },
+            Value::Uuid(value) => Self::Uuid {
+                value: value.to_string(),
+            },
+            Value::Date(value) => Self::Date {
+                value: value.to_string(),
+            },
+            Value::Timestamp(value) => Self::Timestamp {
+                value: value.to_string(),
+            },
+            Value::Duration(value) => Self::Duration {
+                microseconds: value.microseconds().to_string(),
+            },
+            Value::Decimal(value) => Self::Decimal {
+                coefficient: value.coefficient().to_string(),
+                scale: value.scale(),
+            },
+            Value::Bytes(value) => Self::Bytes {
+                base64url: value.to_base64url(),
             },
             Value::Null => Self::Null,
             Value::Enum(value) => Self::Variant {
@@ -287,6 +373,20 @@ impl TryFrom<WireValue> for Value {
             }
             WireValue::Bool { value } => Value::Bool(value),
             WireValue::Text { value } => Value::Text(value),
+            WireValue::Uuid { value } => Value::Uuid(decode_scalar(serde_json::json!(value))?),
+            WireValue::Date { value } => Value::Date(decode_scalar(serde_json::json!(value))?),
+            WireValue::Timestamp { value } => {
+                Value::Timestamp(decode_scalar(serde_json::json!(value))?)
+            }
+            WireValue::Duration { microseconds } => {
+                Value::Duration(decode_scalar(serde_json::json!(microseconds))?)
+            }
+            WireValue::Decimal { coefficient, scale } => Value::Decimal(decode_scalar(
+                serde_json::json!({"coefficient":coefficient,"scale":scale}),
+            )?),
+            WireValue::Bytes { base64url } => {
+                Value::Bytes(decode_scalar(serde_json::json!(base64url))?)
+            }
             WireValue::Null => Value::Null,
             WireValue::Variant {
                 name,
@@ -317,6 +417,10 @@ impl TryFrom<WireValue> for Value {
             },
         })
     }
+}
+
+fn decode_scalar<T: serde::de::DeserializeOwned>(payload: serde_json::Value) -> Result<T, Error> {
+    serde_json::from_value(payload).map_err(|error| Error::new("E_PARAM_TYPE", error.to_string()))
 }
 
 fn decode_values(values: Vec<WireValue>) -> Result<Vec<Value>, Error> {
@@ -380,6 +484,23 @@ impl Response {
     /// nominal IDs stay on the wire while Rust code receives ordinary structs
     /// and enums shaped like the source-language records and constructors.
     pub fn typed_rows<T: serde::de::DeserializeOwned>(&self) -> Result<Vec<T>, Error> {
+        if !supported_version(self.version) {
+            return Err(Error::new(
+                "E_PROTOCOL_VERSION",
+                "unsupported response version",
+            ));
+        }
+        if self.version == VERSION
+            && self
+                .rows
+                .iter()
+                .any(|row| row.values().any(WireValue::requires_v2))
+        {
+            return Err(Error::new(
+                "E_PROTOCOL_TYPE",
+                "production scalar rows require protocol version 2",
+            ));
+        }
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
