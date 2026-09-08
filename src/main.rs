@@ -431,7 +431,7 @@ fn print_version(json: bool) -> Result<(), String> {
         );
     } else {
         println!(
-            "unionid {}\ntarget {}\nprotocols 1,2; streams 1\nstorage read 1,2,3,4; write {}\ncodecs catalog/value/index/migration/receipt/backup {}/{}/{}/{}/{}/{}",
+            "unionid {}\ntarget {}\nprotocols 1,2; streams 1\nstorage read 1,2,3,4,5; write {}\ncodecs catalog/value/index/migration/receipt/backup {}/{}/{}/{}/{}/{}",
             report.software_version,
             report.target,
             report.current_storage.format,

@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -133,8 +133,13 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
     {
         return Err(Error::new("E_LIMIT", "backup exceeds 1 GiB limit"));
     }
-    let encoded =
-        std::fs::read(path).map_err(|error| Error::new("E_IO", format!("read backup: {error}")))?;
+    let mut encoded = Vec::new();
+    file.take(MAX_BACKUP_BYTES + 1)
+        .read_to_end(&mut encoded)
+        .map_err(|error| Error::new("E_IO", format!("read backup: {error}")))?;
+    if encoded.len() as u64 > MAX_BACKUP_BYTES {
+        return Err(Error::new("E_LIMIT", "backup exceeds 1 GiB limit"));
+    }
     let raw: RawBackupEnvelope = serde_json::from_slice(&encoded)
         .map_err(|error| Error::new("E_BACKUP", format!("decode backup: {error}")))?;
     let envelope: BackupEnvelope = serde_json::from_slice(&encoded)

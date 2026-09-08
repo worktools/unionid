@@ -3311,17 +3311,17 @@ impl Database {
         self.repair_catalog_ids()?;
         self.repair_row_ids()?;
         self.indexes.clear();
-        for (table, column) in keys {
+        for (table, shape) in keys {
             if !self
                 .index_definitions
                 .get(&table)
-                .is_some_and(|definitions| definitions.contains_key(&column))
+                .is_some_and(|definitions| definitions.contains_key(&shape))
             {
                 let (table_id, field_path) = {
                     let source = self.table(&table)?;
                     (
                         source.id,
-                        self.catalog.field_path_ids(&source.schema, &column)?,
+                        self.catalog.field_path_ids(&source.schema, &shape)?,
                     )
                 };
                 let definition = IndexDefinition {
@@ -3330,7 +3330,7 @@ impl Database {
                     column: String::new(),
                     field_path: Vec::new(),
                     components: vec![IndexComponentDefinition {
-                        column: column.clone(),
+                        column: shape.clone(),
                         field_path,
                         descending: false,
                     }],
@@ -3339,27 +3339,24 @@ impl Database {
                 self.index_definitions
                     .entry(table.clone())
                     .or_default()
-                    .insert(column.clone(), definition);
+                    .insert(shape.clone(), definition);
             }
-            let components = self.index_definitions[&table][&column].effective_components();
+            let definition = &self.index_definitions[&table][&shape];
+            let components = definition.effective_components();
             let posting = self.build_index(&table, &components)?;
-            if self
-                .index_definitions
-                .get(&table)
-                .and_then(|definitions| definitions.get(&column))
-                .is_some_and(|definition| {
-                    definition.kind.is_unique() && posting.values().any(|rows| rows.len() > 1)
-                })
-            {
+            if definition.kind.is_unique() && posting.values().any(|rows| rows.len() > 1) {
                 return Err(Error::new(
                     "E_CONSTRAINT",
-                    format!("duplicate value for unique index '{table}.{column}'"),
+                    format!(
+                        "duplicate value for unique index '{table} ({})'",
+                        definition.display_shape()
+                    ),
                 ));
             }
             self.indexes
                 .entry(table)
                 .or_default()
-                .insert(column, posting);
+                .insert(shape, posting);
         }
         Ok(())
     }
