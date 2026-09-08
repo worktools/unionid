@@ -203,9 +203,9 @@ See runnable code in [`parameters.rs`](examples/parameters.rs). The complete HTT
 
 ## 当前边界 / Current boundaries
 
-v0.1.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。当前不提供内置认证、TLS、join、window 或分布式执行。
+v0.1.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。M6 实测中，10k/100k 的单行持久写入 p95 都约为 10 ms，有序复合 range/page 仍为微秒级；但 100k 完整打开约 5.6 s，深层 migration 约 50 s，峰值内存约 1.44 GiB。详见[工作负载记录](docs/benchmarks/workload-2026-09-09.md)。当前不提供内置认证、TLS、join、window 或分布式执行。
 
-v0.1.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound, not the routine target. Built-in authentication, TLS, joins, windows, and distributed execution are currently out of scope.
+v0.1.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound, not the routine target. In the M6 measurement, single-row durable-write p95 is about 10 ms at both 10k and 100k, and bounded composite range/page access remains in microseconds; a 100k open takes about 5.6 s, while a deep migration takes about 50 s and peaks near 1.44 GiB RSS. See the [workload record](docs/benchmarks/workload-2026-09-09.md). Built-in authentication, TLS, joins, windows, and distributed execution are currently out of scope.
 
 ## 文档 / Documentation
 

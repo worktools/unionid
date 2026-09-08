@@ -66,4 +66,4 @@ receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明�
 
 adapter 可先调用 `ConcurrentEngine::register_read(request, deadline)`，把返回 handle 的 server-issued `o1` capability 发送并 flush 给客户端后，再调用 `ReadOperation::start()`。`ConcurrentEngine::cancel` 只接受 canonical capability，并在线性化点返回 `accepted`、`already_terminal + outcome` 或 `unknown`；`register_read_with_shutdown` 额外把进程关闭信号接入同一检查顺序。operation registry 不保存 query/params，统计只暴露 registered/queued/executing/cancelling、累计 cancelled 和上限，capability 不得进入日志或持久化数据。
 
-服务限制是 v0.1 的明确支持边界，而非容量承诺。1 万/10 万行实际负载、恢复和 migration 数据由 #24 的发布基准记录。
+服务限制是 v0.1 的明确支持边界，而非容量承诺。M6 的 [1 万/10 万行工作负载记录](benchmarks/workload-2026-09-09.md)显示，增量单行写入和有序复合访问不会随总行数明显增长；完整 open、常驻内存和深层 migration 仍随工作集显著增长。独立的 [open/check 恢复记录](benchmarks/recovery-2026-09-07.md)补充恢复路径数据。部署前应使用真实 value 宽度、索引数量和 migration 复测。
