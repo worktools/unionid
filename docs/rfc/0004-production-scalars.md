@@ -1,6 +1,6 @@
 # RFC 0004：生产标量契约
 
-- 状态：提议
+- 状态：已接受并由 #147–#151 实现
 - 日期：2026-09-07
 - 父任务：[#115](https://github.com/worktools/unionid/issues/115)
 - 实现任务：[#137](https://github.com/worktools/unionid/issues/137)、[#138](https://github.com/worktools/unionid/issues/138)、[#139](https://github.com/worktools/unionid/issues/139)、[#140](https://github.com/worktools/unionid/issues/140)
