@@ -255,3 +255,29 @@ fn diff_drops_tables_and_dependent_types_in_reference_order() {
         Engine::check_schema(target).unwrap().normalized
     );
 }
+
+#[test]
+fn schema_diff_preserves_composite_order_and_direction() {
+    let current = "type Task = {id int, tenant text, priority int}\ntable tasks Task\n  key id\ncreate index tasks (tenant, priority)";
+    let target = "type Task = {id int, tenant text, priority int}\ntable tasks Task\n  key id\ncreate unique index tasks (tenant, -priority)";
+    let mut engine = Engine::memory();
+    ok(&mut engine, current);
+    let diff = engine
+        .diff_schema(target, "m0001_index_shape", None)
+        .unwrap();
+    assert!(diff.runnable);
+    assert!(
+        diff.migration_source
+            .contains("drop index tasks (tenant, priority)")
+    );
+    assert!(
+        diff.migration_source
+            .contains("add unique index tasks (tenant, -priority)")
+    );
+    let migration = MigrationFile::parse(diff.migration_source).unwrap();
+    engine.apply_migrations(&[migration]).unwrap();
+    assert_eq!(
+        engine.schema(),
+        Engine::check_schema(target).unwrap().normalized
+    );
+}

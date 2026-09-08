@@ -10,7 +10,7 @@ version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。�
 
 version 2 增加 UUID、date、timestamp、duration、decimal 和 bytes wire value，canonical envelope 见 [RFC 0004](rfc/0004-production-scalars.md)。Rust request builder 默认仍为 version 1，可用 `.with_version(2)?` 选择 version 2；同一个 request_id 不影响幂等 identity，版本仍参与 canonical digest。六类生产标量均已接入源码语言、Rust typed API、wire、codec 与 redb；decimal wire 使用 coefficient string 与 numeric scale，schema precision 由 column type 保留。
 
-当前已实现新参数解码、返回行、版本回显和完整 v1 typed-boundary 预检；v1 在执行 mutation 前检查嵌套参数、最终 query／`returning`／`explain` 结果类型及 introspection schema，并以 `E_PROTOCOL_TYPE` 拒绝无法表达的请求。幂等命中保持不解析源码的重放语义。新 redb 数据库使用 storage format 4；旧 format 1–3 只允许新参数的只读用法，必须显式执行 `unionid upgrade --db <path> --target 4` 后才能持久写入。Rust 与 codec 当前范围见 [SCALARS.md](SCALARS.md)。
+当前已实现新参数解码、返回行、版本回显和完整 v1 typed-boundary 预检；v1 在执行 mutation 前检查嵌套参数、最终 query／`returning`／`explain` 结果类型及 introspection schema，并以 `E_PROTOCOL_TYPE` 拒绝无法表达的请求。幂等命中保持不解析源码的重放语义。新 redb 数据库使用 storage format 5；旧 format 1–3 必须显式升级到 4 才能持久写入生产标量，format 4 创建复合或降序索引前必须升级到 5。Rust 与 codec 当前范围见 [SCALARS.md](SCALARS.md)。
 
 ## 请求
 

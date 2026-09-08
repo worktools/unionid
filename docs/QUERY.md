@@ -324,7 +324,7 @@ explain
 
 当前只有第一个改变或观察行的 stage 是单纯 `field == literal` 或 `literal == field` 时才选择等值索引；前置 `let` 不改变行，可以跳过。planner 不会把 filter 越过 derive、aggregate、select、sort 或 take，也不会从复合布尔表达式中抽取条件，因为提前缩小候选集可能隐藏前序表达式错误或改变短路行为。索引 lookup 未命中时直接产生 0 个候选行。
 
-当前可执行版本仍只有单 field path 的完整 equality lookup。有序复合声明、equality-prefix range、index-order scan 与 page seek 的目标语义已在 [RFC 0009](rfc/0009-ordered-composite-indexes.md) 冻结，由 #165 实现；在该实现合并前，文档中的 `create index tasks (status, -priority, id)` 只属于设计示例，不能作为现有语法执行。
+当前可执行版本已经支持 `create index tasks (status, -priority, id)` 的 inline/multiline 语法、方向化 schema identity、复合 unique 约束、memory/redb typed tuple key、migration/diff、storage format 5 与 backup 4。查询 planner 目前仍只使用单 field path 的完整 equality lookup；equality-prefix range、index-order scan 与 page seek 由 #173 接入。在 planner 报告新访问方式之前，复合索引主要提供持久 schema/约束语义，不应被解释为已经加速范围或排序。
 
 所有可存储的静态类型都使用与 `cmp_eq` 相同的稳定结构键，包括命名类型、record、tuple、sum、option 和 list。Option 的 `None` 与 sum 的不同 constructor 有不同键，不会按 null 或缺失值混合。索引从 row 派生，insert/update/delete、redb 恢复和 migration 后都会维护或重建；是否存在索引不能改变查询结果。
 

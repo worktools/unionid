@@ -3,10 +3,10 @@
 use crate::error::Result;
 use crate::model::{Column, EnumType, ScalarType, Value};
 use crate::query::{
-    Aggregate, AggregateFunction, ArithmeticOp, BoolExpression, DeriveMatch, LocalBinding,
-    MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueField,
-    MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression, SchemaMigration, SetValue,
-    Stage, Statement,
+    Aggregate, AggregateFunction, ArithmeticOp, BoolExpression, DeriveMatch, IndexComponent,
+    LocalBinding, MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue,
+    MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
+    SchemaMigration, SetValue, Stage, Statement,
 };
 
 /// Parse a script and return its canonical semicolon-free representation.
@@ -99,17 +99,10 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
         }
         Statement::CreateIndex {
             table,
-            column,
+            components,
             unique,
         } => {
-            line(
-                output,
-                depth,
-                &format!(
-                    "create {}index {table} ({column})",
-                    if *unique { "unique " } else { "" }
-                ),
-            );
+            format_index_declaration(output, "create", table, components, *unique, depth);
         }
         Statement::Insert {
             table,
@@ -822,23 +815,99 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
         ),
         SchemaMigration::AddIndex {
             table,
-            column,
+            components,
             unique,
-        } => line(
-            output,
-            depth,
-            &format!(
-                "add {}index {table}.{column}",
-                if *unique { "unique " } else { "" }
-            ),
-        ),
-        SchemaMigration::DropIndex { table, column } => {
-            line(output, depth, &format!("drop index {table}.{column}"))
+        } => migration_index(output, "add", table, components, *unique, depth),
+        SchemaMigration::DropIndex { table, components } => {
+            migration_index(output, "drop", table, components, false, depth)
         }
         SchemaMigration::SetKey { table, column } => {
             line(output, depth, &format!("set key {table}.{column}"))
         }
         SchemaMigration::DropKey { table } => line(output, depth, &format!("drop key {table}")),
+    }
+}
+
+pub(crate) fn index_shape(components: &[IndexComponent]) -> String {
+    components
+        .iter()
+        .map(|component| {
+            format!(
+                "{}{}",
+                if component.descending { "-" } else { "" },
+                component.column
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(crate) fn format_index_declaration(
+    output: &mut String,
+    verb: &str,
+    table: &str,
+    components: &[IndexComponent],
+    unique: bool,
+    depth: usize,
+) {
+    let shape = index_shape(components);
+    let prefix = format!(
+        "{verb} {}index {table}",
+        if unique { "unique " } else { "" }
+    );
+    if components.len() <= 4 && prefix.len() + shape.len() + 3 <= 88 {
+        line(output, depth, &format!("{prefix} ({shape})"));
+    } else {
+        line(output, depth, &format!("{prefix} ("));
+        for component in components {
+            line(
+                output,
+                depth + 1,
+                &format!(
+                    "{}{}",
+                    if component.descending { "-" } else { "" },
+                    component.column
+                ),
+            );
+        }
+        line(output, depth, ")");
+    }
+}
+
+fn migration_index(
+    output: &mut String,
+    verb: &str,
+    table: &str,
+    components: &[IndexComponent],
+    unique: bool,
+    depth: usize,
+) {
+    if let Some(source) = migration_index_text(verb, table, components, unique) {
+        line(output, depth, &source);
+    } else {
+        format_index_declaration(output, verb, table, components, unique, depth);
+    }
+}
+
+pub(crate) fn migration_index_text(
+    verb: &str,
+    table: &str,
+    components: &[IndexComponent],
+    unique: bool,
+) -> Option<String> {
+    if components.len() == 1 && !components[0].descending {
+        Some(format!(
+            "{verb} {}index {table}.{}",
+            if unique { "unique " } else { "" },
+            components[0].column
+        ))
+    } else {
+        let shape = index_shape(components);
+        let source = format!(
+            "{verb} {}index {table} ({shape})",
+            if unique { "unique " } else { "" }
+        );
+        (source.len() <= 120).then_some(source)
     }
 }
 

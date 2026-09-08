@@ -2,9 +2,9 @@
 
 ## 当前可用范围
 
-`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`，并已接入源码语言、原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2、value codec 2、索引/cursor、migration 与 storage format 4。decimal 使用 schema 固定 precision/scale，并只提供精确 checked 运算。
+`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`，并已接入源码语言、原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2、value codec 2、索引/cursor、migration 与 storage format 4–5。decimal 使用 schema 固定 precision/scale，并只提供精确 checked 运算。
 
-完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。新 redb 数据库使用 storage format 4 和 catalog/value/index-key/receipt codec 3/2/2/2；逻辑 backup 使用 codec 3。旧 format 1–3 和过渡 snapshot 仍拒绝新 schema/receipt，持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；显式执行 `unionid upgrade --db <path> --target 4` 会在一个同步事务中校验并重写 catalog、rows、indexes、receipts 和 meta。失败保留旧格式。
+完整标量契约见 [RFC 0004](rfc/0004-production-scalars.md)。format 4 仍是生产标量兼容边界，使用 catalog/value/index-key/receipt codec 3/2/2/2；当前新 redb 数据库使用 format 5 和 codec 4/2/3/2，逻辑 backup 使用 format 4。旧 format 1–3 和过渡 snapshot 仍拒绝新 schema/receipt，持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；显式升级到 4 会校验并重写标量相关 durable state，复合/降序索引则要求继续显式升级到 5。失败保留完整旧格式。
 
 ## Rust 值与规范表示
 
@@ -59,7 +59,7 @@ Requests default to protocol 1; `.with_version(2)?` opts in. Version 1 rejects n
 
 Protocol-v1 preflight now covers parameters, final query/returning/explain result types, and introspection before publishing a mutation. Idempotent hits preserve parse-free replay while checking that the stored result is expressible. Cursors remain `u1` for legacy-only boundaries and use `u2` when any boundary key is a production scalar; prefix, payload codec, and typed vocabulary must agree.
 
-New redb databases use storage format 4 with catalog/value/index-key/receipt codecs 3/2/2/2, and logical backups use codec 3. Formats 1–3 remain readable with legacy schemas and require `unionid upgrade --db <path> --target 4` before native scalar writes. The upgrader validates and rewrites catalog, rows, indexes, receipts, and meta in one synchronous transaction. UUID and bytes are now available in source; indexed bytes are limited to 8192 octets and fail atomically with `E_INDEX_KEY_LIMIT`.
+Storage format 4 remains the production-scalar compatibility boundary with catalog/value/index-key/receipt codecs 3/2/2/2. New redb databases now use format 5 with codecs 4/2/3/2, and logical backups use format 4. Formats 1–3 require `unionid upgrade --db <path> --target 4` before native scalar writes; composite or descending indexes require target 5. Each upgrade validates and rewrites the affected durable state in one synchronous transaction. UUID and bytes are available in source; indexed bytes are limited to 8192 octets and fail atomically with `E_INDEX_KEY_LIMIT`.
 
 Canonical serde uses text for UUID/date/timestamp, string microseconds for duration, string coefficient plus numeric scale for decimal, and unpadded base64url for bytes. Decoding validates both canonical forms and domain bounds. Reserved `unionid::scalar::v1::<type>` newtype markers carry identity to typed serializers; this payload version is independent of protocol/storage versions. JSON itself erases markers, so application Rust types restore identity.
 

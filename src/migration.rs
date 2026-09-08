@@ -256,18 +256,23 @@ pub fn describe_step(step: &SchemaMigration) -> (String, bool) {
         ),
         SchemaMigration::AddIndex {
             table,
-            column,
+            components,
             unique,
         } => (
             format!(
-                "add {}index {table}.{column}",
-                if *unique { "unique " } else { "" }
+                "add {}index {table} ({})",
+                if *unique { "unique " } else { "" },
+                crate::formatter::index_shape(components),
             ),
             false,
         ),
-        SchemaMigration::DropIndex { table, column } => {
-            (format!("drop index {table}.{column}"), true)
-        }
+        SchemaMigration::DropIndex { table, components } => (
+            format!(
+                "drop index {table} ({})",
+                crate::formatter::index_shape(components)
+            ),
+            true,
+        ),
         SchemaMigration::SetKey { table, column } => (format!("set key {table}.{column}"), false),
         SchemaMigration::DropKey { table } => (format!("drop key {table}"), true),
     }

@@ -22,12 +22,15 @@ use crate::model::Value;
 const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
 const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
 const CURSOR_STORAGE_FORMAT_VERSION: u32 = 3;
-pub(crate) const PRODUCTION_STORAGE_FORMAT_VERSION: u32 = 4;
+const SCALAR_STORAGE_FORMAT_VERSION: u32 = 4;
+pub(crate) const PRODUCTION_STORAGE_FORMAT_VERSION: u32 = 5;
 const CATALOG_CODEC_VERSION: u16 = 2;
-const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 3;
+const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
+const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
-const PRODUCTION_INDEX_KEY_VERSION: u16 = 2;
+const SCALAR_INDEX_KEY_VERSION: u16 = 2;
+const PRODUCTION_INDEX_KEY_VERSION: u16 = crate::ordered_key::INDEX_KEY_CODEC_VERSION;
 const MIGRATION_CODEC_VERSION: u16 = 1;
 const RECEIPT_CODEC_VERSION: u16 = 1;
 const PRODUCTION_RECEIPT_CODEC_VERSION: u16 = 2;
@@ -131,8 +134,29 @@ impl StorageLayout {
         }
     }
 
+    const fn scalar() -> Self {
+        Self {
+            format: SCALAR_STORAGE_FORMAT_VERSION,
+            catalog: SCALAR_CATALOG_CODEC_VERSION,
+            value: PRODUCTION_VALUE_CODEC_VERSION,
+            index: SCALAR_INDEX_KEY_VERSION,
+            migration: MIGRATION_CODEC_VERSION,
+            receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
+        }
+    }
+
+    const fn for_format(format: u32) -> Self {
+        if format >= PRODUCTION_STORAGE_FORMAT_VERSION {
+            Self::production()
+        } else if format == SCALAR_STORAGE_FORMAT_VERSION {
+            Self::scalar()
+        } else {
+            Self::legacy(format)
+        }
+    }
+
     const fn supports_production_scalars(self) -> bool {
-        self.format >= PRODUCTION_STORAGE_FORMAT_VERSION
+        self.format >= SCALAR_STORAGE_FORMAT_VERSION
     }
 }
 
@@ -222,7 +246,10 @@ impl RedbStore {
         receipts: &ReceiptMap,
         target: u32,
     ) -> std::result::Result<UpgradeResult, CommitFailure> {
-        if target != PRODUCTION_STORAGE_FORMAT_VERSION {
+        if !matches!(
+            target,
+            SCALAR_STORAGE_FORMAT_VERSION | PRODUCTION_STORAGE_FORMAT_VERSION
+        ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
                 format!("unsupported storage upgrade target {target}"),
@@ -242,7 +269,7 @@ impl RedbStore {
                 "storage downgrades are not supported",
             )));
         }
-        self.committed.layout = StorageLayout::production();
+        self.committed.layout = StorageLayout::for_format(target);
         if let Err(error) = self.commit(database, database, receipts) {
             self.committed.layout = previous;
             return Err(error);
@@ -536,7 +563,7 @@ impl RedbStore {
             .durable_secondary_indexes()?
             .into_iter()
             .map(|(index_id, value, row_id)| {
-                encode_index_key(index_id, &value, row_id, layout.index)
+                encode_index_key(&database, index_id, &value, row_id, layout.index)
             })
             .collect::<Result<BTreeSet<_>>>()?;
         if stored_indexes != expected_indexes {
@@ -594,7 +621,7 @@ impl PreparedState {
             .durable_secondary_indexes()?
             .into_iter()
             .map(|(index_id, value, row_id)| {
-                encode_index_key(index_id, &value, row_id, layout.index)
+                encode_index_key(database, index_id, &value, row_id, layout.index)
             })
             .collect::<Result<BTreeSet<_>>>()?;
         let migrations = database
@@ -768,7 +795,7 @@ impl PreparedDelta {
                     "index entry does not match its incremental write-set key",
                 ));
             }
-            let key = encode_index_key(*index_id, &change.value, *row_id, layout.index)?;
+            let key = encode_index_key(database, *index_id, &change.value, *row_id, layout.index)?;
             match (change.before, change.after) {
                 (true, false) => secondary_deletes.push(key),
                 (false, true) => secondary_inserts.push(key),
@@ -1070,21 +1097,20 @@ fn read_meta(
         LEGACY_STORAGE_FORMAT_VERSION
             | RECEIPT_STORAGE_FORMAT_VERSION
             | CURSOR_STORAGE_FORMAT_VERSION
+            | SCALAR_STORAGE_FORMAT_VERSION
             | PRODUCTION_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
     }
     let catalog_version = u16::from_be_bytes(read_fixed::<2>(table, CATALOG_CODEC_KEY)?);
-    let expected = if format_version >= PRODUCTION_STORAGE_FORMAT_VERSION {
-        StorageLayout::production()
-    } else {
-        StorageLayout::legacy(format_version)
-    };
+    let expected = StorageLayout::for_format(format_version);
     if !matches!(
         catalog_version,
-        LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION | PRODUCTION_CATALOG_CODEC_VERSION
-    ) || (format_version >= PRODUCTION_STORAGE_FORMAT_VERSION
-        && catalog_version != expected.catalog)
+        LEGACY_CATALOG_CODEC_VERSION
+            | CATALOG_CODEC_VERSION
+            | SCALAR_CATALOG_CODEC_VERSION
+            | PRODUCTION_CATALOG_CODEC_VERSION
+    ) || (format_version >= SCALAR_STORAGE_FORMAT_VERSION && catalog_version != expected.catalog)
     {
         return Err(Error::new(
             "E_STORAGE",
@@ -1267,7 +1293,10 @@ fn decode_migration_entry(value: &[u8]) -> Result<MigrationEntry> {
 fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec<u8>> {
     if !matches!(
         version,
-        LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION | PRODUCTION_CATALOG_CODEC_VERSION
+        LEGACY_CATALOG_CODEC_VERSION
+            | CATALOG_CODEC_VERSION
+            | SCALAR_CATALOG_CODEC_VERSION
+            | PRODUCTION_CATALOG_CODEC_VERSION
     ) {
         return Err(Error::new(
             "E_STORAGE",
@@ -1278,6 +1307,44 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
     value.extend_from_slice(&version.to_be_bytes());
     let mut json = serde_json::to_value(entry)
         .map_err(|error| Error::new("E_STORAGE", format!("encode catalog entry: {error}")))?;
+    if let DurableCatalogEntry::Index { definition, .. } = entry {
+        let components = definition.effective_components();
+        if version < PRODUCTION_CATALOG_CODEC_VERSION
+            && (components.len() != 1 || components[0].descending)
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "composite or descending indexes require storage format 5; run storage upgrade --to 5",
+            ));
+        }
+        let object = json
+            .get_mut("value")
+            .and_then(|value| value.get_mut("definition"))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("index catalog JSON has a definition object");
+        if version < PRODUCTION_CATALOG_CODEC_VERSION {
+            object.remove("components");
+            object.insert(
+                "column".into(),
+                serde_json::Value::String(components[0].column.clone()),
+            );
+            object.insert(
+                "field_path".into(),
+                serde_json::to_value(&components[0].field_path).map_err(|error| {
+                    Error::new("E_STORAGE", format!("encode index field path: {error}"))
+                })?,
+            );
+        } else {
+            object.remove("column");
+            object.remove("field_path");
+            object.insert(
+                "components".into(),
+                serde_json::to_value(components).map_err(|error| {
+                    Error::new("E_STORAGE", format!("encode index components: {error}"))
+                })?,
+            );
+        }
+    }
     if version >= CATALOG_CODEC_VERSION
         && let DurableCatalogEntry::Index { definition, .. } = entry
     {
@@ -1351,7 +1418,16 @@ fn decode_row_key(key: &[u8]) -> Result<(u64, u64)> {
     ))
 }
 
-fn encode_index_key(index_id: u64, value: &Value, row_id: u64, version: u16) -> Result<Vec<u8>> {
+fn encode_index_key(
+    database: &Database,
+    index_id: u64,
+    value: &Value,
+    row_id: u64,
+    version: u16,
+) -> Result<Vec<u8>> {
+    if version == PRODUCTION_INDEX_KEY_VERSION {
+        return database.encode_secondary_index_key_v3(index_id, value, row_id);
+    }
     let mut key = Vec::new();
     key.extend_from_slice(INDEX_MAGIC);
     key.extend_from_slice(&version.to_be_bytes());
@@ -1364,7 +1440,7 @@ fn encode_index_key(index_id: u64, value: &Value, row_id: u64, version: u16) -> 
             key.extend_from_slice(&value_len.to_be_bytes());
             key.extend_from_slice(value.as_bytes());
         }
-        PRODUCTION_INDEX_KEY_VERSION => encode_ordered_value(value, &mut key, 0)?,
+        SCALAR_INDEX_KEY_VERSION => encode_ordered_value(value, &mut key, 0)?,
         _ => {
             return Err(Error::new(
                 "E_STORAGE",
@@ -1386,6 +1462,9 @@ fn validate_index_key(key: &[u8], expected_version: u16) -> Result<()> {
             "E_STORAGE",
             format!("unsupported secondary index key version {version}"),
         ));
+    }
+    if version == PRODUCTION_INDEX_KEY_VERSION {
+        return crate::ordered_key::validate_complete(key);
     }
     if version == INDEX_KEY_VERSION {
         if key.len() < 26 {
@@ -1638,9 +1717,16 @@ mod tests {
     }
 
     #[test]
-    fn production_index_keys_preserve_scalar_order_and_zero_bytes() {
+    fn scalar_index_keys_preserve_scalar_order_and_zero_bytes() {
         fn payload(value: Value) -> Vec<u8> {
-            let key = encode_index_key(7, &value, 11, PRODUCTION_INDEX_KEY_VERSION).unwrap();
+            let key = encode_index_key(
+                &Database::default(),
+                7,
+                &value,
+                11,
+                SCALAR_INDEX_KEY_VERSION,
+            )
+            .unwrap();
             key[14..key.len() - 8].to_vec()
         }
 

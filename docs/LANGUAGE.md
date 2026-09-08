@@ -55,11 +55,15 @@ insert tasks {
 ```text
 create index tasks (state)
 create unique index tasks (owner.email)
+create index tasks (state, -priority, id)
+create unique index sessions (tenant, token)
 ```
 
-索引路径可以指向嵌套 record 字段。unique index 支持 primitive、命名 sum/record、tuple、option 和 list；比较的是完整类型和值，`None` 也是普通 typed value，因此同一 unique index 最多出现一次 `None`。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert/upsert、单行 upsert、update、migration、restore 和 redb 完整性检查都在发布候选状态前执行同一约束。当前只支持单字段路径，不支持复合、partial 或 SQL `NULL` 语义。
+索引由 1–16 个有序字段路径组成，路径可以指向嵌套 record 字段。没有标记表示升序，`-` 表示降序；方向和 component 次序都属于索引身份。内联成员用逗号分隔，较长声明可在括号内每行写一个成员而省略逗号。完全相同的 field tuple 不能重复声明，即使 ordinary/unique kind 不同；`(state, priority)` 与 `(state, -priority)` 是不同 shape。
 
-被任意普通、unique 或主键索引覆盖的 bytes 值最大为 8192 octets；创建索引、写入、migration 或 restore 超限时返回 `E_INDEX_KEY_LIMIT` 并原子回滚。未索引 bytes 仍受 16 MiB value 上限。
+unique index 支持 primitive、命名 sum/record、tuple、option 和 list；复合 unique 对完整 tuple 强制唯一。`None` 也是普通 typed value。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert/upsert、单行 upsert、update/delete、migration、restore 和 redb 完整性检查都维护同一 tuple 约束。当前 planner 仍只使用单字段完整 equality lookup；复合范围、索引顺序和 page seek 由后续查询切片接入。
+
+被任意普通、unique 或主键索引覆盖的 bytes leaf 最大为 8192 octets，完整持久索引 key 最大为 64 KiB；创建索引、写入、migration 或 restore 超限时返回 `E_INDEX_KEY_LIMIT` 并原子回滚。未索引 bytes 仍受 16 MiB value 上限。
 
 批量写入使用明确的 `many` 关键字和已有 list/record 值语法：
 

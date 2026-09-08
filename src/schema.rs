@@ -608,9 +608,17 @@ fn diff_tables(
         .schema_indexes()
         .into_iter()
         .map(|(table, definition)| {
+            let components = definition
+                .effective_components()
+                .into_iter()
+                .map(|component| crate::query::IndexComponent {
+                    column: component.column,
+                    descending: component.descending,
+                })
+                .collect::<Vec<_>>();
             (
-                format!("{table}.{}", definition.column),
-                (table, definition.column.as_str(), definition.kind),
+                format!("{table}({})", crate::formatter::index_shape(&components)),
+                (table, components, definition.kind),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -618,44 +626,63 @@ fn diff_tables(
         .schema_indexes()
         .into_iter()
         .map(|(table, definition)| {
+            let components = definition
+                .effective_components()
+                .into_iter()
+                .map(|component| crate::query::IndexComponent {
+                    column: component.column,
+                    descending: component.descending,
+                })
+                .collect::<Vec<_>>();
             (
-                format!("{table}.{}", definition.column),
-                (table, definition.column.as_str(), definition.kind),
+                format!("{table}({})", crate::formatter::index_shape(&components)),
+                (table, components, definition.kind),
             )
         })
         .collect::<BTreeMap<_, _>>();
-    for (identity, (table, column, kind)) in &target_indexes {
+    for (identity, (table, components, kind)) in &target_indexes {
+        let primary = components.len() == 1
+            && !components[0].descending
+            && target_tables[*table].primary_key.as_deref() == Some(components[0].column.as_str());
         if !renamed_to.contains(table)
             && current_indexes
                 .get(identity)
                 .is_none_or(|(_, _, current_kind)| current_kind != kind)
-            && target_tables[*table]
-                .primary_key
-                .as_deref()
-                .is_none_or(|key| key != *column)
+            && !primary
         {
-            generated.push(operation(
-                format!(
-                    "add {}index {table}.{column}",
-                    if kind.is_unique() { "unique " } else { "" }
-                ),
-                false,
-            ));
+            let description =
+                crate::formatter::migration_index_text("add", table, components, kind.is_unique())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "add {}index {table} ({})",
+                            if kind.is_unique() { "unique " } else { "" },
+                            crate::formatter::index_shape(components)
+                        )
+                    });
+            generated.push(operation(description, false));
         }
     }
-    for (identity, (table, column, kind)) in &current_indexes {
+    for (identity, (table, components, kind)) in &current_indexes {
         if !renamed_from.contains(table)
             && target_indexes
                 .get(identity)
                 .is_none_or(|(_, _, target_kind)| target_kind != kind)
             && target_tables.contains_key(table)
         {
-            let remains_primary = target_tables[*table]
-                .primary_key
-                .as_deref()
-                .is_some_and(|key| key == *column);
+            let remains_primary = components.len() == 1
+                && !components[0].descending
+                && target_tables[*table].primary_key.as_deref()
+                    == Some(components[0].column.as_str());
             if !remains_primary {
-                generated.push(operation(format!("drop index {table}.{column}"), true));
+                let description =
+                    crate::formatter::migration_index_text("drop", table, components, false)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "drop index {table} ({})",
+                                crate::formatter::index_shape(components)
+                            )
+                        });
+                generated.push(operation(description, true));
             }
         }
     }

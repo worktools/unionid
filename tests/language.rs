@@ -2999,6 +2999,66 @@ set identity = {contact = Postal {city = "Paris"}, tags = []}"#,
 }
 
 #[test]
+fn composite_indexes_preserve_directional_identity_and_unique_tuples() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Task =\n  id int\n  tenant text\n  priority int\ntable tasks Task\n  key id\ncreate unique index tasks (tenant, -priority)\ncreate index tasks (tenant, priority)\ninsert tasks {id = 1, tenant = \"acme\", priority = 4}",
+    );
+
+    let duplicate = engine.execute("insert tasks {id = 2, tenant = \"acme\", priority = 4}");
+    assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    let remaining = ok(&mut engine, "from tasks | sort id");
+    assert_eq!(remaining.rows.len(), 1);
+    assert!(remaining.rows[0]["id"].cmp_eq(&Value::Int(1)));
+
+    let duplicate_shape = engine.execute("create index tasks (tenant, -priority)");
+    assert_eq!(
+        duplicate_shape.error.as_ref().unwrap().code,
+        "E_INDEX_DUPLICATE"
+    );
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index tasks (tenant, -priority)")
+    );
+    assert!(
+        engine
+            .schema()
+            .contains("create index tasks (tenant, priority)")
+    );
+}
+
+#[test]
+fn composite_unique_indexes_are_atomic_across_mutation_paths() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Entry = {id int, tenant text, slot int}\ntable entries Entry\n  key id\ncreate unique index entries (tenant, slot)\ninsert entries {id = 1, tenant = \"a\", slot = 1}\ninsert entries {id = 2, tenant = \"a\", slot = 2}",
+    );
+    let before = rows(&mut engine, "from entries | sort id");
+
+    for source in [
+        "update entries | filter id == 2 | set slot = 1",
+        "upsert entries {id = 2, tenant = \"a\", slot = 1}",
+        "insert many entries [{id = 3, tenant = \"b\", slot = 1}, {id = 4, tenant = \"b\", slot = 1}]",
+    ] {
+        let rejected = engine.execute(source);
+        assert_eq!(rejected.error.as_ref().unwrap().code, "E_CONSTRAINT");
+        assert_eq!(rows(&mut engine, "from entries | sort id"), before);
+    }
+
+    ok(
+        &mut engine,
+        "delete entries | filter id == 1\ninsert entries {id = 3, tenant = \"a\", slot = 1}",
+    );
+    let result = ok(&mut engine, "from entries | sort id | select id");
+    assert_eq!(result.rows.len(), 2);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(result.rows[1]["id"].cmp_eq(&Value::Int(3)));
+}
+
+#[test]
 fn creating_or_migrating_a_unique_index_over_duplicates_is_atomic() {
     let mut engine = Engine::memory();
     ok(

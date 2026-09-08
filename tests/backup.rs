@@ -1,12 +1,13 @@
 mod common;
 
 use common::TempDir;
+use sha2::{Digest, Sha256};
 use unionid::backup;
 use unionid::migration::load_directory;
 use unionid::{Engine, MigrationFile, Value};
 
 #[test]
-fn backup_v3_preserves_idempotency_receipts_and_replay_identity() {
+fn backup_v4_preserves_idempotency_receipts_and_replay_identity() {
     const DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let dir = TempDir::new();
     let source = dir.0.join("idempotency-source.redb");
@@ -29,7 +30,7 @@ fn backup_v3_preserves_idempotency_receipts_and_replay_identity() {
     }
 
     let created = backup::create(&source, &archive).unwrap();
-    assert_eq!(created.format_version, 3);
+    assert_eq!(created.format_version, 4);
     assert_eq!(created.receipt_count, 1);
     let recovered = backup::restore(&archive, &restored).unwrap();
     assert_eq!(created, recovered);
@@ -47,6 +48,84 @@ fn backup_v3_preserves_idempotency_receipts_and_replay_identity() {
     assert!(replay.replayed);
     assert_eq!(replay.committed_sequence, committed_sequence);
     assert_eq!(engine.execute("from entries").rows.len(), 1);
+}
+
+#[test]
+fn backup_v3_single_column_indexes_restore_through_the_legacy_shape() {
+    let dir = TempDir::new();
+    let source = dir.0.join("backup3-source.redb");
+    let current = dir.0.join("current.backup.json");
+    let legacy = dir.0.join("legacy-v3.backup.json");
+    let restored = dir.0.join("legacy-v3-restored.redb");
+    {
+        let mut engine = Engine::open_redb(&source).unwrap();
+        assert!(engine
+            .execute("type Entry = {id int, label text}\ntable entries Entry\n  key id\ncreate index entries (label)\ninsert entries {id = 1, label = \"saved\"}")
+            .ok);
+    }
+    backup::create(&source, &current).unwrap();
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&current).unwrap()).unwrap();
+    envelope["format_version"] = serde_json::json!(3);
+    for table in envelope["database"]["index_definitions"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        for definition in table.as_object_mut().unwrap().values_mut() {
+            let object = definition.as_object_mut().unwrap();
+            let first = object["components"][0].clone();
+            object.insert("column".into(), first["column"].clone());
+            object.insert("field_path".into(), first["field_path"].clone());
+            object.remove("components");
+        }
+    }
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "database": envelope["database"].clone(),
+        "receipts": envelope.get("receipts").cloned().unwrap_or_else(|| serde_json::json!({})),
+    }))
+    .unwrap();
+    envelope["checksum"] = serde_json::json!(format!("sha256:{:x}", Sha256::digest(payload)));
+    std::fs::write(&legacy, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let info = backup::restore(&legacy, &restored).unwrap();
+    assert_eq!(info.format_version, 3);
+    let mut engine = Engine::open_redb(restored).unwrap();
+    assert!(engine.schema().contains("create index entries (label)"));
+    assert_eq!(
+        engine
+            .execute("from entries | filter label == \"saved\"")
+            .rows
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn backup_v4_round_trips_composite_index_shapes() {
+    let dir = TempDir::new();
+    let source = dir.0.join("composite-source.redb");
+    let archive = dir.0.join("composite.backup.json");
+    let restored = dir.0.join("composite-restored.redb");
+    {
+        let mut engine = Engine::open_redb(&source).unwrap();
+        assert!(engine
+            .execute("type Entry = {id int, tenant text, priority int}\ntable entries Entry\n  key id\ncreate unique index entries (tenant, -priority)\ninsert entries {id = 1, tenant = \"acme\", priority = 2}")
+            .ok);
+    }
+    let created = backup::create(&source, &archive).unwrap();
+    assert_eq!(created.format_version, 4);
+    backup::restore(&archive, &restored).unwrap();
+
+    let mut engine = Engine::open_redb(restored).unwrap();
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index entries (tenant, -priority)")
+    );
+    let duplicate = engine.execute("insert entries {id = 2, tenant = \"acme\", priority = 2}");
+    assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert!(engine.check_integrity().unwrap().backend_clean);
 }
 
 #[test]
@@ -141,7 +220,7 @@ fn corrupt_or_unknown_backups_do_not_create_or_replace_a_target() {
     let text = std::fs::read_to_string(&archive).unwrap();
     std::fs::write(
         &corrupt,
-        text.replacen("\"format_version\":3", "\"format_version\":99", 1),
+        text.replacen("\"format_version\":4", "\"format_version\":99", 1),
     )
     .unwrap();
     assert!(backup::restore(&corrupt, &target).is_err());

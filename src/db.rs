@@ -11,14 +11,14 @@ use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
 };
 use crate::query::{
-    Aggregate, AggregateAssignment, AggregateFunction, PageDirection, PageSpec, Pipeline,
-    Returning, SetAssignment, SetValue, SortKey, Stage, Statement,
+    Aggregate, AggregateAssignment, AggregateFunction, IndexComponent, PageDirection, PageSpec,
+    Pipeline, Returning, SetAssignment, SetValue, SortKey, Stage, Statement,
 };
 
 mod migration;
 
 type PostingRows = imbl::Vector<RowId>;
-type IndexPosting = imbl::OrdMap<String, PostingRows>;
+type IndexPosting = imbl::OrdMap<Vec<u8>, PostingRows>;
 type TableIndexes = imbl::OrdMap<String, IndexPosting>;
 type Indexes = imbl::OrdMap<String, TableIndexes>;
 
@@ -524,13 +524,56 @@ impl IndexKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexComponentDefinition {
+    pub column: String,
+    pub field_path: Vec<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexDefinition {
     pub id: u64,
     pub table_id: u64,
+    // Kept so legacy catalog codecs and logical backups can still deserialize.
+    // New definitions derive their complete shape from `components`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub column: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub field_path: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<IndexComponentDefinition>,
     #[serde(default, skip_serializing_if = "IndexKind::is_ordinary")]
     pub kind: IndexKind,
+}
+
+impl IndexDefinition {
+    pub(crate) fn effective_components(&self) -> Vec<IndexComponentDefinition> {
+        if self.components.is_empty() {
+            vec![IndexComponentDefinition {
+                column: self.column.clone(),
+                field_path: self.field_path.clone(),
+                descending: false,
+            }]
+        } else {
+            self.components.clone()
+        }
+    }
+
+    pub(crate) fn shape_key(&self) -> String {
+        index_shape_key(&self.effective_components())
+    }
+
+    pub(crate) fn display_shape(&self) -> String {
+        display_index_shape(&self.effective_components())
+    }
+
+    pub(crate) fn is_primary_index(&self, primary_key: Option<&str>) -> bool {
+        let components = self.effective_components();
+        components.len() == 1
+            && !components[0].descending
+            && primary_key == Some(components[0].column.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -818,7 +861,7 @@ impl QueryResponse {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Database {
     objects: BTreeMap<String, DbObject>,
-    #[serde(default)]
+    #[serde(skip, default)]
     indexes: Indexes,
     #[serde(default)]
     index_definitions: BTreeMap<String, BTreeMap<String, IndexDefinition>>,
@@ -871,32 +914,39 @@ impl Database {
 
     fn record_index_changes(
         &mut self,
+        table: &str,
         definitions: &BTreeMap<String, IndexDefinition>,
         changes: &[RowChange],
-    ) {
+    ) -> Result<()> {
         for definition in definitions.values() {
+            let components = definition.effective_components();
             for change in changes {
                 let before = change
                     .before
                     .as_ref()
-                    .and_then(|row| row_field(&row.fields, &definition.column));
+                    .map(|row| index_value(&row.fields, &components, table))
+                    .transpose()?;
                 let after = change
                     .after
                     .as_ref()
-                    .and_then(|row| row_field(&row.fields, &definition.column));
-                if before.is_some_and(|before| {
-                    after.is_some_and(|after| before.index_key() == after.index_key())
+                    .map(|row| index_value(&row.fields, &components, table))
+                    .transpose()?;
+                if before.as_ref().is_some_and(|before| {
+                    after
+                        .as_ref()
+                        .is_some_and(|after| before.index_key() == after.index_key())
                 }) {
                     continue;
                 }
-                if let Some(value) = before {
+                if let Some(value) = &before {
                     self.record_index_entry(definition.id, value, change.row_id(), true, false);
                 }
-                if let Some(value) = after {
+                if let Some(value) = &after {
                     self.record_index_entry(definition.id, value, change.row_id(), false, true);
                 }
             }
         }
+        Ok(())
     }
 
     fn record_index_entry(
@@ -970,9 +1020,9 @@ impl Database {
             }
             Statement::CreateIndex {
                 table,
-                column,
+                components,
                 unique,
-            } => self.create_index(&table, &column, unique),
+            } => self.create_index(&table, &components, unique),
             Statement::Insert {
                 table,
                 values,
@@ -1086,42 +1136,80 @@ impl Database {
             }),
         );
         if let Some(key) = key {
-            self.create_index(&name, &key, false)?;
+            self.create_index(
+                &name,
+                &[IndexComponent {
+                    column: key,
+                    descending: false,
+                }],
+                false,
+            )?;
         }
         Ok(QueryResponse::ok_message(format!("table '{name}' created")))
     }
 
-    fn create_index(&mut self, name: &str, column: &str, unique: bool) -> Result<QueryResponse> {
-        let (table_id, field_path) = {
+    fn create_index(
+        &mut self,
+        name: &str,
+        components: &[IndexComponent],
+        unique: bool,
+    ) -> Result<QueryResponse> {
+        if components.is_empty() || components.len() > crate::query::MAX_INDEX_COMPONENTS {
+            return Err(Error::new(
+                "E_INDEX_SHAPE",
+                format!(
+                    "an index requires 1 to {} fields",
+                    crate::query::MAX_INDEX_COMPONENTS
+                ),
+            ));
+        }
+        let (table_id, definitions) = {
             let table = self.table(name)?;
-            self.catalog.field_type(&table.schema, column)?;
-            (
-                table.id,
-                self.catalog.field_path_ids(&table.schema, column)?,
-            )
+            let mut seen = BTreeSet::new();
+            let mut definitions = Vec::with_capacity(components.len());
+            for component in components {
+                if !seen.insert(component.column.as_str()) {
+                    return Err(Error::new(
+                        "E_INDEX_SHAPE",
+                        format!("duplicate index field '{}'", component.column),
+                    ));
+                }
+                self.catalog.field_type(&table.schema, &component.column)?;
+                definitions.push(IndexComponentDefinition {
+                    column: component.column.clone(),
+                    field_path: self
+                        .catalog
+                        .field_path_ids(&table.schema, &component.column)?,
+                    descending: component.descending,
+                });
+            }
+            (table.id, definitions)
         };
+        let shape = index_shape_key(&definitions);
+        let display = display_index_shape(&definitions);
         if self
             .indexes
             .get(name)
-            .is_some_and(|cols| cols.contains_key(column))
+            .is_some_and(|indexes| indexes.contains_key(&shape))
         {
             return Err(Error::new(
-                "E_INDEX",
-                format!("index on '{name}.{column}' already exists"),
+                "E_INDEX_DUPLICATE",
+                format!("index on '{name} ({display})' already exists"),
             ));
         }
-        let posting = self.build_index(name, column)?;
+        let posting = self.build_index(name, &definitions)?;
         if unique && posting.values().any(|rows| rows.len() > 1) {
             return Err(Error::new(
                 "E_CONSTRAINT",
-                format!("duplicate value for unique index '{name}.{column}'"),
+                format!("duplicate value for unique index '{name} ({display})'"),
             ));
         }
         let definition = IndexDefinition {
             id: self.catalog.allocate()?,
             table_id,
-            column: column.into(),
-            field_path,
+            column: String::new(),
+            field_path: Vec::new(),
+            components: definitions,
             kind: if unique {
                 IndexKind::Unique
             } else {
@@ -1131,25 +1219,78 @@ impl Database {
         self.index_definitions
             .entry(name.into())
             .or_default()
-            .insert(column.into(), definition);
+            .insert(shape.clone(), definition);
         self.indexes
             .entry(name.into())
             .or_default()
-            .insert(column.into(), posting);
+            .insert(shape, posting);
         Ok(QueryResponse::ok_message(format!(
-            "{}index created on '{name}.{column}'",
+            "{}index created on '{name} ({display})'",
             if unique { "unique " } else { "" }
         )))
     }
 
-    fn build_index(&self, name: &str, column: &str) -> Result<IndexPosting> {
+    fn build_index(
+        &self,
+        name: &str,
+        components: &[IndexComponentDefinition],
+    ) -> Result<IndexPosting> {
         let table = self.table(name)?;
+        let mut posting = IndexPosting::new();
         for row in &table.rows {
-            if let Some(value) = row_field(&row.fields, column) {
-                validate_index_value(value, name, column)?;
-            }
+            let key = self.index_tuple_key(name, components, &row.fields)?;
+            posting.entry(key).or_default().push_back(row.id);
         }
-        Ok(build_posting(&table.rows, column))
+        Ok(posting)
+    }
+
+    fn index_tuple_key(
+        &self,
+        table_name: &str,
+        components: &[IndexComponentDefinition],
+        fields: &BTreeMap<String, Value>,
+    ) -> Result<Vec<u8>> {
+        let table = self.table(table_name)?;
+        let values = index_values(fields, components, table_name)?;
+        let types = components
+            .iter()
+            .map(|component| self.catalog.field_type(&table.schema, &component.column))
+            .collect::<Result<Vec<_>>>()?;
+        let bound = components
+            .iter()
+            .zip(types)
+            .zip(values)
+            .map(|((component, ty), value)| crate::ordered_key::Component {
+                ty,
+                value,
+                descending: component.descending,
+            })
+            .collect::<Vec<_>>();
+        let key = crate::ordered_key::encode_tuple(&self.catalog, &bound)?;
+        if 23usize.saturating_add(key.len()) > crate::ordered_key::MAX_COMPLETE_INDEX_KEY_BYTES {
+            return Err(Error::new(
+                "E_INDEX_KEY_LIMIT",
+                format!(
+                    "encoded secondary index key is {} bytes; limit is {}",
+                    23usize.saturating_add(key.len()),
+                    crate::ordered_key::MAX_COMPLETE_INDEX_KEY_BYTES
+                ),
+            ));
+        }
+        Ok(key)
+    }
+
+    fn single_index_key(&self, table: &str, column: &str, value: &Value) -> Result<Vec<u8>> {
+        let table = self.table(table)?;
+        let ty = self.catalog.field_type(&table.schema, column)?;
+        crate::ordered_key::encode_tuple(
+            &self.catalog,
+            &[crate::ordered_key::Component {
+                ty,
+                value,
+                descending: false,
+            }],
+        )
     }
 
     fn insert(
@@ -1257,11 +1398,12 @@ impl Database {
         let returned = self.returning_rows(returning.as_ref(), &[&fields])?;
         let key_value = row_field(&fields, &key)
             .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
+        let key_bytes = self.single_index_key(name, &key, key_value)?;
         let existing_id = self
             .indexes
             .get(name)
             .and_then(|columns| columns.get(&key))
-            .and_then(|posting| posting.get(&key_value.index_key()))
+            .and_then(|posting| posting.get(&key_bytes))
             .and_then(|ids| ids.front())
             .copied();
         let action = if let Some(id) = existing_id {
@@ -1362,9 +1504,12 @@ impl Database {
         let mut changes = Vec::with_capacity(fields.len());
         for (position, fields) in fields.into_iter().enumerate() {
             check_deadline_periodically(control, position)?;
-            let key_value = row_field(&fields, &key)
-                .expect("bulk upsert rows were checked for their primary key")
-                .index_key();
+            let key_value = self.single_index_key(
+                name,
+                &key,
+                row_field(&fields, &key)
+                    .expect("bulk upsert rows were checked for their primary key"),
+            )?;
             if let Some(id) = primary_posting
                 .get(&key_value)
                 .and_then(|ids| ids.front())
@@ -1487,21 +1632,23 @@ impl Database {
 
     fn insert_fields(&mut self, name: &str, fields: BTreeMap<String, Value>) -> Result<RowId> {
         let table = self.table(name)?;
-        if let Some(definitions) = self.index_definitions.get(name) {
-            for definition in definitions.values() {
-                if let Some(value) = row_field(&fields, &definition.column) {
-                    validate_index_value(value, name, &definition.column)?;
-                }
-            }
+        let definitions = self
+            .index_definitions
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        for definition in definitions.values() {
+            index_value(&fields, &definition.effective_components(), name)?;
         }
         if let Some(key) = &table.primary_key {
             let value = row_field(&fields, key)
                 .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
+            let key_bytes = self.single_index_key(name, key, value)?;
             if self
                 .indexes
                 .get(name)
                 .and_then(|cols| cols.get(key))
-                .is_some_and(|posting| posting.contains_key(&value.index_key()))
+                .is_some_and(|posting| posting.contains_key(&key_bytes))
             {
                 return Err(Error::new(
                     "E_CONSTRAINT",
@@ -1509,46 +1656,46 @@ impl Database {
                 ));
             }
         }
-        if let Some(definitions) = self.index_definitions.get(name) {
-            for definition in definitions
-                .values()
-                .filter(|definition| definition.kind.is_unique())
+        for definition in definitions
+            .values()
+            .filter(|definition| definition.kind.is_unique())
+        {
+            let key = self.index_tuple_key(name, &definition.effective_components(), &fields)?;
+            let shape = definition.shape_key();
+            if self
+                .indexes
+                .get(name)
+                .and_then(|indexes| indexes.get(&shape))
+                .is_some_and(|posting| posting.contains_key(&key))
             {
-                let value = row_field(&fields, &definition.column).ok_or_else(|| {
-                    Error::new(
-                        "E_FIELD",
-                        format!("missing unique field '{name}.{}'", definition.column),
-                    )
-                })?;
-                if self
-                    .indexes
-                    .get(name)
-                    .and_then(|columns| columns.get(&definition.column))
-                    .is_some_and(|posting| posting.contains_key(&value.index_key()))
-                {
-                    return Err(Error::new(
-                        "E_CONSTRAINT",
-                        format!(
-                            "duplicate value for unique index '{name}.{}'",
-                            definition.column
-                        ),
-                    ));
-                }
+                return Err(Error::new(
+                    "E_CONSTRAINT",
+                    format!(
+                        "duplicate value for unique index '{name} ({})'",
+                        definition.display_shape()
+                    ),
+                ));
             }
         }
         let id = table.next_row_id;
         let next_row_id = id
             .checked_add(1)
             .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
-        if let Some(cols) = self.indexes.get_mut(name) {
-            let columns = cols.keys().cloned().collect::<Vec<_>>();
-            for column in columns {
-                if let Some(value) = row_field(&fields, &column) {
-                    let posting = cols
-                        .get_mut(&column)
-                        .expect("index column came from the same map");
-                    posting.entry(value.index_key()).or_default().push_back(id);
-                }
+        let index_entries = definitions
+            .values()
+            .map(|definition| {
+                Ok((
+                    definition.shape_key(),
+                    self.index_tuple_key(name, &definition.effective_components(), &fields)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(indexes) = self.indexes.get_mut(name) {
+            for (shape, key) in index_entries {
+                let posting = indexes
+                    .get_mut(&shape)
+                    .expect("index shape came from the same definitions");
+                posting.entry(key).or_default().push_back(id);
             }
         }
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
@@ -1559,12 +1706,7 @@ impl Database {
         let inserted = table.rows.back().expect("inserted row is present").clone();
         let changes = [RowChange::inserted(inserted)];
         self.record_row_changes(name, &changes);
-        let definitions = self
-            .index_definitions
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        self.record_index_changes(&definitions, &changes);
+        self.record_index_changes(name, &definitions, &changes)?;
         self.record_table_watermark(name, id, next_row_id);
         Ok(id)
     }
@@ -2011,19 +2153,15 @@ impl Database {
             .filter(|definition| definition.kind.is_unique())
         {
             let mut seen = BTreeSet::new();
+            let components = definition.effective_components();
             for row in rows {
-                let value = row_field(&row.fields, &definition.column).ok_or_else(|| {
-                    Error::new(
-                        "E_FIELD",
-                        format!("missing unique field '{name}.{}'", definition.column),
-                    )
-                })?;
+                let value = index_value(&row.fields, &components, name)?;
                 if !seen.insert(value.index_key()) {
                     return Err(Error::new(
                         "E_CONSTRAINT",
                         format!(
-                            "duplicate value for unique index '{name}.{}'",
-                            definition.column
+                            "duplicate value for unique index '{name} ({})'",
+                            definition.display_shape()
                         ),
                     ));
                 }
@@ -2057,13 +2195,7 @@ impl Database {
             }
             if let Some(after) = &change.after {
                 for definition in definitions.values() {
-                    let value = row_field(&after.fields, &definition.column).ok_or_else(|| {
-                        Error::new(
-                            "E_FIELD",
-                            format!("missing indexed field '{name}.{}'", definition.column),
-                        )
-                    })?;
-                    validate_index_value(value, name, &definition.column)?;
+                    index_value(&after.fields, &definition.effective_components(), name)?;
                 }
             }
         }
@@ -2071,46 +2203,40 @@ impl Database {
         // Remove every before image first so atomic swaps between unique keys
         // validate against the final candidate rather than statement order.
         for definition in definitions.values() {
-            let posting = indexes.get_mut(&definition.column).ok_or_else(|| {
+            let shape = definition.shape_key();
+            let display = definition.display_shape();
+            let components = definition.effective_components();
+            let posting = indexes.get_mut(&shape).ok_or_else(|| {
                 Error::new(
                     "E_INDEX",
-                    format!("missing in-memory index '{name}.{}'", definition.column),
+                    format!("missing in-memory index '{name} ({display})'"),
                 )
             })?;
             for change in changes {
                 let Some(before) = change.before.as_ref() else {
                     continue;
                 };
-                let value = row_field(&before.fields, &definition.column).ok_or_else(|| {
-                    Error::new(
-                        "E_FIELD",
-                        format!("missing indexed field '{name}.{}'", definition.column),
-                    )
-                })?;
-                let key = value.index_key();
-                if change.after.as_ref().is_some_and(|after| {
-                    row_field(&after.fields, &definition.column)
-                        .is_some_and(|value| value.index_key() == key)
-                }) {
+                let key = self.index_tuple_key(name, &components, &before.fields)?;
+                if change
+                    .after
+                    .as_ref()
+                    .map(|after| self.index_tuple_key(name, &components, &after.fields))
+                    .transpose()?
+                    .is_some_and(|after_key| after_key == key)
+                {
                     continue;
                 }
                 let remove_key = {
                     let ids = posting.get_mut(&key).ok_or_else(|| {
                         Error::new(
                             "E_INDEX",
-                            format!(
-                                "index '{name}.{}' is missing row ID {}",
-                                definition.column, before.id
-                            ),
+                            format!("index '{name} ({display})' is missing row ID {}", before.id),
                         )
                     })?;
                     let position = ids.binary_search(&before.id).map_err(|_| {
                         Error::new(
                             "E_INDEX",
-                            format!(
-                                "index '{name}.{}' is missing row ID {}",
-                                definition.column, before.id
-                            ),
+                            format!("index '{name} ({display})' is missing row ID {}", before.id),
                         )
                     })?;
                     ids.remove(position);
@@ -2123,42 +2249,42 @@ impl Database {
         }
 
         for definition in definitions.values() {
-            let unique = definition.kind.is_unique()
-                || primary_key.as_deref() == Some(definition.column.as_str());
-            let posting = indexes.get_mut(&definition.column).ok_or_else(|| {
+            let unique =
+                definition.kind.is_unique() || definition.is_primary_index(primary_key.as_deref());
+            let shape = definition.shape_key();
+            let display = definition.display_shape();
+            let components = definition.effective_components();
+            let posting = indexes.get_mut(&shape).ok_or_else(|| {
                 Error::new(
                     "E_INDEX",
-                    format!("missing in-memory index '{name}.{}'", definition.column),
+                    format!("missing in-memory index '{name} ({display})'"),
                 )
             })?;
             for change in changes {
                 let Some(after) = change.after.as_ref() else {
                     continue;
                 };
-                let value = row_field(&after.fields, &definition.column).ok_or_else(|| {
-                    Error::new(
-                        "E_FIELD",
-                        format!("missing indexed field '{name}.{}'", definition.column),
-                    )
-                })?;
-                let key = value.index_key();
-                if change.before.as_ref().is_some_and(|before| {
-                    row_field(&before.fields, &definition.column)
-                        .is_some_and(|value| value.index_key() == key)
-                }) {
+                let key = self.index_tuple_key(name, &components, &after.fields)?;
+                if change
+                    .before
+                    .as_ref()
+                    .map(|before| self.index_tuple_key(name, &components, &before.fields))
+                    .transpose()?
+                    .is_some_and(|before_key| before_key == key)
+                {
                     continue;
                 }
                 let ids = posting.entry(key).or_default();
                 if unique && !ids.is_empty() {
                     return Err(Error::new(
                         "E_CONSTRAINT",
-                        if primary_key.as_deref() == Some(definition.column.as_str()) {
-                            format!("duplicate primary key '{name}.{}'", definition.column)
-                        } else {
+                        if definition.is_primary_index(primary_key.as_deref()) {
                             format!(
-                                "duplicate value for unique index '{name}.{}'",
-                                definition.column
+                                "duplicate primary key '{name}.{}'",
+                                primary_key.as_deref().unwrap_or_default()
                             )
+                        } else {
+                            format!("duplicate value for unique index '{name} ({display})'")
                         },
                     ));
                 }
@@ -2167,8 +2293,8 @@ impl Database {
                         return Err(Error::new(
                             "E_INDEX",
                             format!(
-                                "index '{name}.{}' already contains row ID {}",
-                                definition.column, after.id
+                                "index '{name} ({display})' already contains row ID {}",
+                                after.id
                             ),
                         ));
                     }
@@ -2185,7 +2311,7 @@ impl Database {
             self.indexes.insert(name.to_owned(), indexes);
         }
         self.record_row_changes(name, changes);
-        self.record_index_changes(&definitions, changes);
+        self.record_index_changes(name, &definitions, changes)?;
         Ok(())
     }
 
@@ -2904,31 +3030,33 @@ impl Database {
                 Stage::Filter(expression) => crate::expression::simple_index_equality(expression),
                 _ => None,
             });
-        if let Some((column, value)) = indexed_filter
-            && let Some(posting) = self
+        if let Some((column, value)) = indexed_filter {
+            let key = self.single_index_key(&pipeline.from, column, value)?;
+            if let Some(posting) = self
                 .indexes
                 .get(&pipeline.from)
                 .and_then(|columns| columns.get(column))
-        {
-            let candidates: Vec<RowId> = posting
-                .get(&value.index_key())
-                .map(|rows| rows.iter().copied().collect())
-                .unwrap_or_default();
-            let kind = if table.primary_key.as_deref() == Some(column) {
-                QueryAccessKind::PrimaryKeyLookup
-            } else {
-                QueryAccessKind::SecondaryIndexLookup
-            };
-            return Ok(PlannedAccess {
-                plan: QueryAccessPlan {
-                    kind,
-                    index: Some(format!("{}.{}", pipeline.from, column)),
-                    condition: Some(format!("{} == {}", column, value.source_text())),
-                    estimated_rows: candidates.len(),
-                    table_rows: table.rows.len(),
-                },
-                candidates: Some(candidates),
-            });
+            {
+                let candidates: Vec<RowId> = posting
+                    .get(&key)
+                    .map(|rows| rows.iter().copied().collect())
+                    .unwrap_or_default();
+                let kind = if table.primary_key.as_deref() == Some(column) {
+                    QueryAccessKind::PrimaryKeyLookup
+                } else {
+                    QueryAccessKind::SecondaryIndexLookup
+                };
+                return Ok(PlannedAccess {
+                    plan: QueryAccessPlan {
+                        kind,
+                        index: Some(format!("{}.{}", pipeline.from, column)),
+                        condition: Some(format!("{} == {}", column, value.source_text())),
+                        estimated_rows: candidates.len(),
+                        table_rows: table.rows.len(),
+                    },
+                    candidates: Some(candidates),
+                });
+            }
         }
         Ok(PlannedAccess {
             plan: QueryAccessPlan {
@@ -3199,8 +3327,13 @@ impl Database {
                 let definition = IndexDefinition {
                     id: self.catalog.allocate()?,
                     table_id,
-                    column: column.clone(),
-                    field_path,
+                    column: String::new(),
+                    field_path: Vec::new(),
+                    components: vec![IndexComponentDefinition {
+                        column: column.clone(),
+                        field_path,
+                        descending: false,
+                    }],
                     kind: IndexKind::Ordinary,
                 };
                 self.index_definitions
@@ -3208,7 +3341,8 @@ impl Database {
                     .or_default()
                     .insert(column.clone(), definition);
             }
-            let posting = self.build_index(&table, &column)?;
+            let components = self.index_definitions[&table][&column].effective_components();
+            let posting = self.build_index(&table, &components)?;
             if self
                 .index_definitions
                 .get(&table)
@@ -3306,7 +3440,27 @@ impl Database {
             format_version: u32,
             types: Vec<&'a crate::model::TypeDefinition>,
             tables: Vec<SchemaTable<'a>>,
-            indexes: Vec<&'a IndexDefinition>,
+            indexes: Vec<SchemaIndex>,
+        }
+
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum SchemaIndex {
+            Legacy {
+                id: u64,
+                table_id: u64,
+                column: String,
+                field_path: Vec<u64>,
+                #[serde(skip_serializing_if = "IndexKind::is_ordinary")]
+                kind: IndexKind,
+            },
+            Composite {
+                id: u64,
+                table_id: u64,
+                components: Vec<IndexComponentDefinition>,
+                #[serde(skip_serializing_if = "IndexKind::is_ordinary")]
+                kind: IndexKind,
+            },
         }
 
         let mut types = self.catalog.types.values().collect::<Vec<_>>();
@@ -3329,12 +3483,34 @@ impl Database {
                 primary_key: &table.primary_key,
             })
             .collect();
-        let mut indexes = self
+        let mut index_definitions = self
             .index_definitions
             .values()
             .flat_map(|definitions| definitions.values())
             .collect::<Vec<_>>();
-        indexes.sort_by_key(|definition| definition.id);
+        index_definitions.sort_by_key(|definition| definition.id);
+        let indexes = index_definitions
+            .into_iter()
+            .map(|definition| {
+                let components = definition.effective_components();
+                if components.len() == 1 && !components[0].descending {
+                    SchemaIndex::Legacy {
+                        id: definition.id,
+                        table_id: definition.table_id,
+                        column: components[0].column.clone(),
+                        field_path: components[0].field_path.clone(),
+                        kind: definition.kind,
+                    }
+                } else {
+                    SchemaIndex::Composite {
+                        id: definition.id,
+                        table_id: definition.table_id,
+                        components,
+                        kind: definition.kind,
+                    }
+                }
+            })
+            .collect();
         let manifest = SchemaManifest {
             format_version: 1,
             types,
@@ -3628,38 +3804,41 @@ impl Database {
     pub(crate) fn durable_secondary_indexes(&self) -> Result<Vec<(u64, Value, u64)>> {
         let mut entries = Vec::new();
         for (table, definitions) in &self.index_definitions {
-            for (column, definition) in definitions {
+            for (shape, definition) in definitions {
                 let posting = self
                     .indexes
                     .get(table)
-                    .and_then(|columns| columns.get(column))
+                    .and_then(|indexes| indexes.get(shape))
                     .ok_or_else(|| {
                         Error::new(
                             "E_STORAGE",
-                            format!("missing in-memory index '{table}.{column}'"),
+                            format!(
+                                "missing in-memory index '{table} ({})'",
+                                definition.display_shape()
+                            ),
                         )
                     })?;
+                let components = definition.effective_components();
                 for row in &self.table(table)?.rows {
-                    let value = Value::Record(row.fields.clone())
-                        .field(column)
-                        .cloned()
-                        .ok_or_else(|| {
-                            Error::new(
-                                "E_STORAGE",
-                                format!("indexed field '{table}.{column}' is missing"),
-                            )
-                        })?;
-                    let value_key = value.index_key();
+                    let value = index_value(&row.fields, &components, table)?;
+                    let value_key = self.index_tuple_key(table, &components, &row.fields)?;
                     let row_ids = posting.get(&value_key).ok_or_else(|| {
                         Error::new(
                             "E_STORAGE",
-                            format!("missing in-memory index value for '{table}.{column}'"),
+                            format!(
+                                "missing in-memory index value for '{table} ({})'",
+                                definition.display_shape()
+                            ),
                         )
                     })?;
                     if !row_ids.contains(&row.id) {
                         return Err(Error::new(
                             "E_STORAGE",
-                            format!("missing row {} in index '{table}.{column}'", row.id),
+                            format!(
+                                "missing row {} in index '{table} ({})'",
+                                row.id,
+                                definition.display_shape()
+                            ),
                         ));
                     }
                     for row_id in row_ids {
@@ -3672,6 +3851,63 @@ impl Database {
         }
         entries.sort_by_key(|(index_id, _, row_id)| (*index_id, *row_id));
         Ok(entries)
+    }
+
+    pub(crate) fn encode_secondary_index_key_v3(
+        &self,
+        index_id: u64,
+        value: &Value,
+        row_id: RowId,
+    ) -> Result<Vec<u8>> {
+        let (table_name, definition) = self
+            .index_definitions
+            .iter()
+            .find_map(|(table, definitions)| {
+                definitions
+                    .values()
+                    .find(|definition| definition.id == index_id)
+                    .map(|definition| (table.as_str(), definition))
+            })
+            .ok_or_else(|| {
+                Error::new(
+                    "E_STORAGE",
+                    format!("secondary index ID {index_id} is not in the catalog"),
+                )
+            })?;
+        let table = self.table(table_name)?;
+        let components = definition.effective_components();
+        let values = if components.len() == 1 {
+            vec![value]
+        } else {
+            let Value::Tuple(values) = value else {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "composite secondary index value is not a tuple",
+                ));
+            };
+            if values.len() != components.len() {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "composite secondary index tuple has the wrong arity",
+                ));
+            }
+            values.iter().collect()
+        };
+        let types = components
+            .iter()
+            .map(|component| self.catalog.field_type(&table.schema, &component.column))
+            .collect::<Result<Vec<_>>>()?;
+        let bound = components
+            .iter()
+            .zip(types)
+            .zip(values)
+            .map(|((component, ty), value)| crate::ordered_key::Component {
+                ty,
+                value,
+                descending: component.descending,
+            })
+            .collect::<Vec<_>>();
+        crate::ordered_key::encode_complete(&self.catalog, index_id, &bound, row_id)
     }
 
     pub fn migration_history(&self) -> &[MigrationEntry] {
@@ -3751,11 +3987,11 @@ impl Database {
                     );
                 }
                 DurableCatalogEntry::Index { table, definition } => {
-                    let column = definition.column.clone();
+                    let shape = definition.shape_key();
                     if index_definitions
                         .entry(table)
                         .or_default()
-                        .insert(column, definition)
+                        .insert(shape, definition)
                         .is_some()
                     {
                         return Err(Error::new(
@@ -3793,7 +4029,10 @@ impl Database {
                 if definition.table_id != table.id {
                     return Err(Error::new(
                         "E_STORAGE",
-                        format!("index '{}' has the wrong table ID", definition.column),
+                        format!(
+                            "index '{}' has the wrong table ID",
+                            definition.display_shape()
+                        ),
                     ));
                 }
             }
@@ -3949,23 +4188,31 @@ impl Database {
         let mut indexes = self.schema_indexes();
         indexes.sort_by_key(|(_, definition)| definition.id);
         for (table, definition) in indexes {
-            if self
-                .table(table)
-                .ok()
-                .and_then(|table| table.primary_key.as_deref())
-                == Some(definition.column.as_str())
-            {
+            if definition.is_primary_index(
+                self.table(table)
+                    .ok()
+                    .and_then(|table| table.primary_key.as_deref()),
+            ) {
                 continue;
             }
-            lines.push(format!(
-                "create {}index {table} ({})",
-                if definition.kind.is_unique() {
-                    "unique "
-                } else {
-                    ""
-                },
-                definition.column
-            ));
+            let components = definition
+                .effective_components()
+                .into_iter()
+                .map(|component| IndexComponent {
+                    column: component.column,
+                    descending: component.descending,
+                })
+                .collect::<Vec<_>>();
+            let mut source = String::new();
+            crate::formatter::format_index_declaration(
+                &mut source,
+                "create",
+                table,
+                &components,
+                definition.kind.is_unique(),
+                0,
+            );
+            lines.extend(source.lines().map(str::to_owned));
         }
         lines.join("\n")
     }
@@ -4076,17 +4323,89 @@ fn sort_by_typed<T>(
     error.map_or(Ok(()), Err)
 }
 
-fn build_posting(rows: &imbl::Vector<Arc<Row>>, column: &str) -> IndexPosting {
-    let mut posting = IndexPosting::new();
-    for row in rows {
-        if let Some(value) = row_field(&row.fields, column) {
-            posting
-                .entry(value.index_key())
-                .or_default()
-                .push_back(row.id);
-        }
+fn index_shape_key(components: &[IndexComponentDefinition]) -> String {
+    components
+        .iter()
+        .map(|component| {
+            format!(
+                "{}{}",
+                if component.descending { "-" } else { "" },
+                component.column
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn query_index_shape_key(components: &[IndexComponent]) -> String {
+    components
+        .iter()
+        .map(|component| {
+            format!(
+                "{}{}",
+                if component.descending { "-" } else { "" },
+                component.column
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn display_index_shape(components: &[IndexComponentDefinition]) -> String {
+    components
+        .iter()
+        .map(|component| {
+            format!(
+                "{}{}",
+                if component.descending { "-" } else { "" },
+                component.column
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn index_value(
+    fields: &BTreeMap<String, Value>,
+    components: &[IndexComponentDefinition],
+    table: &str,
+) -> Result<Value> {
+    let mut values = Vec::with_capacity(components.len());
+    for component in components {
+        let value = row_field(fields, &component.column).ok_or_else(|| {
+            Error::new(
+                "E_FIELD",
+                format!("missing indexed field '{table}.{}'", component.column),
+            )
+        })?;
+        validate_index_value(value, table, &component.column)?;
+        values.push(value.clone());
     }
-    posting
+    if values.len() == 1 {
+        Ok(values.pop().unwrap())
+    } else {
+        Ok(Value::Tuple(values))
+    }
+}
+
+fn index_values<'a>(
+    fields: &'a BTreeMap<String, Value>,
+    components: &[IndexComponentDefinition],
+    table: &str,
+) -> Result<Vec<&'a Value>> {
+    components
+        .iter()
+        .map(|component| {
+            let value = row_field(fields, &component.column).ok_or_else(|| {
+                Error::new(
+                    "E_FIELD",
+                    format!("missing indexed field '{table}.{}'", component.column),
+                )
+            })?;
+            validate_index_value(value, table, &component.column)?;
+            Ok(value)
+        })
+        .collect()
 }
 
 fn validate_index_value(value: &Value, table: &str, column: &str) -> Result<()> {

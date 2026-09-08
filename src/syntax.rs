@@ -802,12 +802,10 @@ impl Parser {
             };
             self.expect_word("index")?;
             let table = self.identifier()?;
-            self.expect(Kind::Open('('))?;
-            let column = self.path()?;
-            self.expect(Kind::Close(')'))?;
+            let components = self.index_components()?;
             Ok(Statement::CreateIndex {
                 table,
-                column,
+                components,
                 unique,
             })
         }
@@ -889,19 +887,19 @@ impl Parser {
                 })
             } else if self.word("index") {
                 self.bump();
-                let (table, column) = self.migration_table_path()?;
+                let (table, components) = self.migration_index_shape()?;
                 Ok(SchemaMigration::AddIndex {
                     table,
-                    column,
+                    components,
                     unique: false,
                 })
             } else if self.word("unique") {
                 self.bump();
                 self.expect_word("index")?;
-                let (table, column) = self.migration_table_path()?;
+                let (table, components) = self.migration_index_shape()?;
                 Ok(SchemaMigration::AddIndex {
                     table,
-                    column,
+                    components,
                     unique: true,
                 })
             } else {
@@ -932,8 +930,8 @@ impl Parser {
                 Ok(SchemaMigration::DropDefault { owner, field })
             } else if self.word("index") {
                 self.bump();
-                let (table, column) = self.migration_table_path()?;
-                Ok(SchemaMigration::DropIndex { table, column })
+                let (table, components) = self.migration_index_shape()?;
+                Ok(SchemaMigration::DropIndex { table, components })
             } else if self.word("key") {
                 self.bump();
                 Ok(SchemaMigration::DropKey {
@@ -1032,6 +1030,63 @@ impl Parser {
         }
     }
 
+    fn migration_index_shape(&mut self) -> Result<(String, Vec<crate::query::IndexComponent>)> {
+        let table = self.identifier()?;
+        if *self.kind() == Kind::Open('(') {
+            return Ok((table, self.index_components()?));
+        }
+        self.expect(Kind::Dot)?;
+        let column = self.path()?;
+        Ok((
+            table,
+            vec![crate::query::IndexComponent {
+                column,
+                descending: false,
+            }],
+        ))
+    }
+
+    fn index_components(&mut self) -> Result<Vec<crate::query::IndexComponent>> {
+        self.expect(Kind::Open('('))?;
+        self.newlines();
+        if self.eat(Kind::Close(')')) {
+            return Err(self.error("index requires at least one field"));
+        }
+        let mut components = Vec::new();
+        let mut seen = BTreeSet::new();
+        loop {
+            let descending = self.eat(Kind::Minus);
+            let column = self.path()?;
+            if !seen.insert(column.clone()) {
+                return Err(self.error(format!("duplicate index field '{column}'")));
+            }
+            components.push(crate::query::IndexComponent { column, descending });
+            if components.len() > crate::query::MAX_INDEX_COMPONENTS {
+                return Err(self.error(format!(
+                    "an index supports at most {} fields",
+                    crate::query::MAX_INDEX_COMPONENTS
+                )));
+            }
+            if self.eat(Kind::Comma) {
+                self.newlines();
+                if self.eat(Kind::Close(')')) {
+                    break;
+                }
+                continue;
+            }
+            if self.eat(Kind::Newline) {
+                self.newlines();
+                if self.eat(Kind::Close(')')) {
+                    break;
+                }
+                continue;
+            }
+            self.expect(Kind::Close(')'))?;
+            break;
+        }
+        Ok(components)
+    }
+
     fn migration_member(&mut self, kind: &str) -> Result<(String, String)> {
         let owner = self.identifier()?;
         self.expect(Kind::Dot)?;
@@ -1042,12 +1097,6 @@ impl Parser {
             )));
         }
         Ok((owner, member))
-    }
-
-    fn migration_table_path(&mut self) -> Result<(String, String)> {
-        let table = self.identifier()?;
-        self.expect(Kind::Dot)?;
-        Ok((table, self.path()?))
     }
 
     fn migration_variant_args(&mut self) -> Result<Vec<ScalarType>> {

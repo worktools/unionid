@@ -2,6 +2,15 @@ use crate::error::Span;
 use crate::model::{Column, ScalarType, Value};
 use serde::{Deserialize, Serialize};
 
+pub const MAX_INDEX_COMPONENTS: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexComponent {
+    pub column: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub descending: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum Statement {
     DefineType {
@@ -19,7 +28,7 @@ pub enum Statement {
     },
     CreateIndex {
         table: String,
-        column: String,
+        components: Vec<IndexComponent>,
         unique: bool,
     },
     Insert {
@@ -160,12 +169,12 @@ pub enum SchemaMigration {
     },
     AddIndex {
         table: String,
-        column: String,
+        components: Vec<IndexComponent>,
         unique: bool,
     },
     DropIndex {
         table: String,
-        column: String,
+        components: Vec<IndexComponent>,
     },
     SetKey {
         table: String,

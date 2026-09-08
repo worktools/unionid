@@ -1,6 +1,6 @@
 # ADT value codec
 
-状态：格式版本 1/2，2026-09-08。本文定义 unionid 逻辑值的持久化编码。实现位于 `src/codec.rs`；storage format 4 的 redb `rows` 表使用 value codec 2，旧 storage format 继续读取 codec 1。过渡 WAL/snapshot 只保留为旧原型兼容入口。
+状态：格式版本 1/2，2026-09-08。本文定义 unionid 逻辑值的持久化编码。实现位于 `src/codec.rs`；storage format 4–5 的 redb `rows` 表使用 value codec 2，旧 storage format 继续读取 codec 1。storage format 5 只升级 catalog 与有序 index key，不改 row value payload。过渡 WAL/snapshot 只保留为旧原型兼容入口。
 
 ## 目标与调用约束
 

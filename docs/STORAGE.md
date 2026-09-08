@@ -53,16 +53,16 @@ cargo run -- check --db ./data/unionid.redb --format json
 | --- | --- | --- | --- |
 | `meta` | UTF-8 名称 | 固定宽度数字或 UTF-8 hash | 存储格式、codec 版本、提交序号、schema revision、ID 水位、schema hash、cursor instance ID 与 secret |
 | `catalog` | `(kind, stable_id)` | 版本化 catalog definition | 命名类型、用户表和索引定义；表记录也保存 RowId 分配游标 |
-| `rows` | `(table_id, row_id)` | 版本 1 ADT value codec | 完整类型化 record；字段与变体按稳定 ID 编码 |
-| `secondary_index` | 版本化 `(index_id, equality_key, row_id)` | unit | 当前等值索引的派生记录 |
+| `rows` | `(table_id, row_id)` | 版本 2 ADT value codec | 完整类型化 record；字段与变体按稳定 ID 编码 |
+| `secondary_index` | 版本化 `(index_id, component_count, typed_components, row_id)` | unit | ordinary/unique 复合索引的有序派生记录；每个 component 带方向 |
 | `migration_ledger` | sequence | 版本化 migration record | `UIDM` magic、codec version、JSON entry；与 schema/data/index 同事务提交 |
 | `idempotency_receipts` | 原始 UTF-8 key bytes | 版本化成功回执 | `UIDR` magic、codec version、digest、提交序号、完成时间和原 QueryResponse |
 
 打开数据库时会拒绝未知的存储、catalog、ADT value、索引键、migration 或 receipt codec，并验证 schema hash、ledger 单链及其 head、RowId 唯一性／顺序／分配水位、索引是否与 catalog/rows 一致，以及 receipt key/digest/成功响应/sequence/容量边界。RowId 可以有删除形成的缺口。差异计划测试检查 update/delete/insert 只生成预期的 catalog/row/index 键变化；migration 测试确认 schema、数据、索引和 ledger 一起提交，普通数据提交保留 ledger。集成测试还会在一个未提交 redb transaction 修改多个内部表后直接退出子进程，确认重开只看到完整旧状态；也会在带 receipt 的 Engine commit 成功后不执行析构直接退出，确认重开能重放完整新状态。无效 redb 文件会返回 `E_STORAGE` 并保留原文件，跨进程第二个打开者返回 `E_BUSY`。
 
-UUID 使用 16-byte network order 参与有序 index codec。bytes 使用 unsigned lexicographic order；任一索引键内的 bytes 值最多 8192 octets，建索引、写入、migration 和 restore 共用 `E_INDEX_KEY_LIMIT` 原子拒绝边界。未索引 bytes 的 value 上限为 16 MiB。
+index-key codec 3 使用 catalog 中绑定的 component 类型编码完整 tuple。primitive、命名 sum/record、tuple、option、list 和有限递归 ADT 都遵循查询比较器的 total order；sum variant 与 record field 按稳定 ID 编码。UUID 使用 16-byte network order，bytes 使用 unsigned lexicographic order，descending component 对完整 prefix-free component 编码取反。任一索引键内的 bytes leaf 最多 8192 octets，完整 durable key 最多 64 KiB；建索引、写入、migration 和 restore 共用 `E_INDEX_KEY_LIMIT` 原子拒绝边界。未索引 bytes 的 value 上限为 16 MiB。
 
-storage format 1 表示没有持久回执，format 2 增加 durable idempotency receipt。format 3 在 meta 中增加 128-bit database instance ID 和 256-bit cursor HMAC secret；打开 format 1/2 时会生成并通过同步事务升级，之后无写入重开仍可恢复 cursor。secret 不进入 introspection、日志、错误或逻辑 backup；restore 生成新身份，所以源数据库 cursor 不能用于副本。旧二进制不能安全打开更高格式。memory Engine 使用进程内随机身份；WAL/snapshot 兼容入口不承诺跨重启 cursor。幂等语义见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)，分页语义见 [RFC 0003](rfc/0003-stable-cursor-pagination.md)。
+storage format 1 表示没有持久回执，format 2 增加 durable idempotency receipt。format 3 在 meta 中增加 128-bit database instance ID 和 256-bit cursor HMAC secret；format 4 增加生产标量 codec；当前 format 5 增加有序复合索引的 catalog codec 4 与 index-key codec 3。打开 format 1/2 时会生成 cursor 身份并通过同步事务升级到 3；format 3→4 与 4→5 使用显式 `upgrade`。format 4 可以继续读写已有单列升序索引，但新增复合或降序 shape 会返回 `E_STORAGE_UPGRADE_REQUIRED`。升级保留逻辑 schema identity、rows、RowId、ledger、receipts、数据库/cursor 身份和 sequence。secret 不进入 introspection、日志、错误或逻辑 backup；restore 生成新身份，所以源数据库 cursor 不能用于副本。旧二进制不能安全打开更高格式。memory Engine 使用进程内随机身份；WAL/snapshot 兼容入口不承诺跨重启 cursor。幂等语义见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)，分页语义见 [RFC 0003](rfc/0003-stable-cursor-pagination.md)，复合索引契约见 [RFC 0009](rfc/0009-ordered-composite-indexes.md)。
 
 macOS/Linux 测试还在隔离子进程中用操作系统 `RLIMIT_FSIZE` 把 redb 文件上限固定在已提交基线大小，再写入 900,000 字节 typed text 强制触发真实文件增长失败。子进程忽略 `SIGXFSZ`，使底层写入以错误返回 Engine：若失败发生在 `commit` 前，响应明确中止且句柄允许再次尝试；若 `commit` 返回错误，响应标记结果不确定并禁用后续写。父进程重开并运行完整性检查，接受完整旧状态或完整新状态，再核对 typed row、主键索引、schema 和 migration ledger，不接受部分内部表。
 

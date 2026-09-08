@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,8 @@ use crate::idempotency::{ReceiptMap, ensure_legacy_receipts, validate_receipts};
 
 const LEGACY_BACKUP_FORMAT_VERSION: u32 = 1;
 const RECEIPT_BACKUP_FORMAT_VERSION: u32 = 2;
-pub const PRODUCTION_BACKUP_FORMAT_VERSION: u32 = 3;
+const SCALAR_BACKUP_FORMAT_VERSION: u32 = 3;
+pub const PRODUCTION_BACKUP_FORMAT_VERSION: u32 = 4;
 const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,6 +33,15 @@ struct BackupEnvelope {
     database: Database,
     #[serde(default, skip_serializing_if = "ReceiptMap::is_empty")]
     receipts: ReceiptMap,
+}
+
+#[derive(Deserialize)]
+struct RawBackupEnvelope {
+    format_version: u32,
+    checksum: String,
+    database: Box<serde_json::value::RawValue>,
+    #[serde(default)]
+    receipts: Option<Box<serde_json::value::RawValue>>,
 }
 
 #[derive(Serialize)]
@@ -123,12 +133,17 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
     {
         return Err(Error::new("E_LIMIT", "backup exceeds 1 GiB limit"));
     }
-    let envelope: BackupEnvelope = serde_json::from_reader(BufReader::new(file))
+    let encoded =
+        std::fs::read(path).map_err(|error| Error::new("E_IO", format!("read backup: {error}")))?;
+    let raw: RawBackupEnvelope = serde_json::from_slice(&encoded)
+        .map_err(|error| Error::new("E_BACKUP", format!("decode backup: {error}")))?;
+    let envelope: BackupEnvelope = serde_json::from_slice(&encoded)
         .map_err(|error| Error::new("E_BACKUP", format!("decode backup: {error}")))?;
     if !matches!(
         envelope.format_version,
         LEGACY_BACKUP_FORMAT_VERSION
             | RECEIPT_BACKUP_FORMAT_VERSION
+            | SCALAR_BACKUP_FORMAT_VERSION
             | PRODUCTION_BACKUP_FORMAT_VERSION
     ) {
         return Err(Error::new(
@@ -139,7 +154,30 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             ),
         ));
     }
-    if envelope.format_version < PRODUCTION_BACKUP_FORMAT_VERSION {
+    if raw.format_version != envelope.format_version || raw.checksum != envelope.checksum {
+        return Err(Error::new(
+            "E_BACKUP",
+            "backup envelope metadata is inconsistent",
+        ));
+    }
+    let payload = if raw.format_version == LEGACY_BACKUP_FORMAT_VERSION {
+        raw.database.get().as_bytes().to_vec()
+    } else {
+        let receipts = raw.receipts.as_ref().map_or("{}", |value| value.get());
+        format!(
+            "{{\"database\":{},\"receipts\":{receipts}}}",
+            raw.database.get()
+        )
+        .into_bytes()
+    };
+    let checksum = format!("sha256:{:x}", Sha256::digest(payload));
+    if checksum != envelope.checksum {
+        return Err(Error::new(
+            "E_BACKUP",
+            "backup checksum does not match its payload",
+        ));
+    }
+    if envelope.format_version < SCALAR_BACKUP_FORMAT_VERSION {
         envelope.database.ensure_legacy_scalars()?;
         ensure_legacy_receipts(&envelope.receipts)?;
     }
@@ -151,14 +189,21 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
         ));
     }
     validate_receipts(&envelope.receipts, database.sequence)?;
-    let actual = info(&database, &envelope.receipts, envelope.format_version)?;
-    if actual.checksum != envelope.checksum || actual.schema != envelope.schema {
+    let schema = database.schema_info();
+    if schema != envelope.schema {
         return Err(Error::new(
             "E_BACKUP",
-            "backup checksum or schema metadata does not match",
+            "backup schema metadata does not match",
         ));
     }
-    Ok((database, envelope.receipts, actual))
+    let info = BackupInfo {
+        format_version: envelope.format_version,
+        checksum: envelope.checksum,
+        schema,
+        migration_count: database.migration_history().len(),
+        receipt_count: envelope.receipts.len(),
+    };
+    Ok((database, envelope.receipts, info))
 }
 
 fn info(database: &Database, receipts: &ReceiptMap, format_version: u32) -> Result<BackupInfo> {

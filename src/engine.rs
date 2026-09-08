@@ -1393,6 +1393,9 @@ impl Engine {
             match result {
                 Ok(()) => {}
                 Err(CommitFailure::Definite(error)) => {
+                    if error.code == "E_STORAGE_UPGRADE_REQUIRED" {
+                        return Err(error);
+                    }
                     return Err(Error::new(
                         "E_STORAGE",
                         format!(
