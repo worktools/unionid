@@ -50,7 +50,7 @@ TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON by
 
 客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；带 `idempotency_key` 的 version 1 mutation 通过“数据效果与回执同事务”提供 exactly-once effect，但网络仍只是 best-effort delivery。未收到响应时，重开连接并原样重发 query、wire params、schema precondition 和 key；不要改变内容或猜测结果。规范 digest 和 commit uncertain 恢复见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)。
 
-分页读取没有 effect。客户端断开后，已进入 snapshot 的读取可能继续到内置 25 秒 deadline；working rows、排序内存、page 大小和响应编码仍然有界，连接 worker 随执行或 socket write 结束而释放。HTTP adapter 可调用 `ConcurrentEngine::execute_protocol_request_until` 使用更短的绝对 deadline；超时返回 `E_TIMEOUT`，不发布半页或 cursor。关闭连接不是显式取消协议。需要 request registry、operation ID 和 NDJSON 背压的长期读取由 [#135](https://github.com/worktools/unionid/issues/135) 跟踪。
+分页读取没有 effect。客户端断开后，已进入 snapshot 的读取可能继续到内置 25 秒 deadline；working rows、排序内存、page 大小和响应编码仍然有界，连接 worker 随执行或 socket write 结束而释放。HTTP adapter 可调用 `ConcurrentEngine::execute_protocol_request_until` 使用更短的绝对 deadline；超时返回 `E_TIMEOUT`，不发布半页或 cursor。关闭连接不是显式取消协议。长期读取的 operation capability、状态机、NDJSON frame 和背压边界已由 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) 冻结，核心与 adapter 实现分别由 [#156](https://github.com/worktools/unionid/issues/156)、[#157](https://github.com/worktools/unionid/issues/157) 跟踪；在两项完成前，当前服务仍只提供完整 response/page。
 
 receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明确 cutoff、最多 1000 条的单次边界和 confirm 原子清理。清理意味着旧 key 可以再次执行，保留窗口必须覆盖所有自动与人工重试。receipt 运维端点与数据库写入权限等价，HTTP adapter 必须鉴权并审计。
 
