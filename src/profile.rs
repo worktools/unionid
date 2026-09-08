@@ -2,6 +2,23 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Value-free counters for one query or mutation-target execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ExecutionObservation {
+    pub index_entries_examined: usize,
+    pub rows_decoded: usize,
+    pub row_cache_hits: usize,
+    pub row_cache_misses: usize,
+    pub batches: usize,
+    pub working_peak_bytes: usize,
+}
+
+impl ExecutionObservation {
+    pub(crate) fn observe_working_bytes(&mut self, bytes: usize) {
+        self.working_peak_bytes = self.working_peak_bytes.max(bytes);
+    }
+}
+
 /// Timings and cardinalities captured while opening a durable redb database.
 ///
 /// The profile is published only after a successful open and never contains
