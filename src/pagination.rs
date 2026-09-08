@@ -16,8 +16,10 @@ pub const MAX_CURSOR_BYTES: usize = 8_192;
 pub const MAX_CURSOR_PAYLOAD_BYTES: usize = 6_144;
 pub const MAX_CURSOR_SORT_KEYS: usize = 16;
 
-const CURSOR_PREFIX: &str = "u1";
-const CURSOR_CODEC_VERSION: u32 = 1;
+const LEGACY_CURSOR_PREFIX: &str = "u1";
+const PRODUCTION_CURSOR_PREFIX: &str = "u2";
+const LEGACY_CURSOR_CODEC_VERSION: u32 = 1;
+const PRODUCTION_CURSOR_CODEC_VERSION: u32 = 2;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -125,8 +127,14 @@ pub(crate) fn encode(
             format!("cursor sort key count exceeds {MAX_CURSOR_SORT_KEYS}"),
         ));
     }
+    let production = keys.iter().any(|key| key.value.requires_v2());
+    let (prefix, codec) = if production {
+        (PRODUCTION_CURSOR_PREFIX, PRODUCTION_CURSOR_CODEC_VERSION)
+    } else {
+        (LEGACY_CURSOR_PREFIX, LEGACY_CURSOR_CODEC_VERSION)
+    };
     let payload = CursorPayload {
-        codec: CURSOR_CODEC_VERSION,
+        codec,
         database: URL_SAFE_NO_PAD.encode(identity.instance_id),
         schema_revision: schema.revision.to_string(),
         schema_hash: schema.hash.clone(),
@@ -146,7 +154,7 @@ pub(crate) fn encode(
     }
     let signature = signature(&identity.secret, &payload)?;
     let token = format!(
-        "{CURSOR_PREFIX}.{}.{}",
+        "{prefix}.{}.{}",
         URL_SAFE_NO_PAD.encode(&payload),
         URL_SAFE_NO_PAD.encode(signature)
     );
@@ -174,15 +182,15 @@ pub(crate) fn decode(
     let prefix = parts.next();
     let payload_text = parts.next();
     let signature_text = parts.next();
-    if prefix != Some(CURSOR_PREFIX)
-        || payload_text.is_none()
-        || signature_text.is_none()
-        || parts.next().is_some()
-    {
-        return Err(Error::new(
-            "E_CURSOR_CODEC",
-            "invalid version 1 cursor syntax",
-        ));
+    let expected_codec = match prefix {
+        Some(LEGACY_CURSOR_PREFIX) => LEGACY_CURSOR_CODEC_VERSION,
+        Some(PRODUCTION_CURSOR_PREFIX) => PRODUCTION_CURSOR_CODEC_VERSION,
+        _ => {
+            return Err(Error::new("E_CURSOR_CODEC", "unsupported cursor prefix"));
+        }
+    };
+    if payload_text.is_none() || signature_text.is_none() || parts.next().is_some() {
+        return Err(Error::new("E_CURSOR_CODEC", "invalid cursor syntax"));
     }
     let payload = URL_SAFE_NO_PAD
         .decode(payload_text.unwrap())
@@ -200,16 +208,26 @@ pub(crate) fn decode(
 
     let payload: CursorPayload = serde_json::from_slice(&payload)
         .map_err(|_| Error::new("E_CURSOR_CODEC", "cursor payload is invalid"))?;
-    if payload.codec != CURSOR_CODEC_VERSION {
+    if payload.codec != expected_codec {
         return Err(Error::new(
             "E_CURSOR_CODEC",
-            format!("unsupported cursor codec version {}", payload.codec),
+            format!(
+                "cursor prefix and codec version {} do not match",
+                payload.codec
+            ),
         ));
     }
     if payload.keys.len() > MAX_CURSOR_SORT_KEYS {
         return Err(Error::new(
             "E_CURSOR_LIMIT",
             format!("cursor sort key count exceeds {MAX_CURSOR_SORT_KEYS}"),
+        ));
+    }
+    let production = payload.keys.iter().any(|key| key.value.requires_v2());
+    if production != (expected_codec == PRODUCTION_CURSOR_CODEC_VERSION) {
+        return Err(Error::new(
+            "E_CURSOR_CODEC",
+            "cursor prefix does not match its typed boundary vocabulary",
         ));
     }
     let database = URL_SAFE_NO_PAD
@@ -341,5 +359,79 @@ mod tests {
             error.code.as_str(),
             "E_CURSOR_CODEC" | "E_CURSOR_INTEGRITY"
         ));
+    }
+
+    #[test]
+    fn cursor_prefix_tracks_the_typed_boundary_vocabulary() {
+        let legacy = encode(
+            &identity(),
+            &schema(),
+            8,
+            "sha256:legacy",
+            PageDirection::Forward,
+            20,
+            vec![CursorKey {
+                field_path: vec![1],
+                column: "id".into(),
+                descending: false,
+                value: WireValue::Int { value: "42".into() },
+            }],
+        )
+        .unwrap();
+        assert!(legacy.starts_with("u1."));
+
+        let production = encode(
+            &identity(),
+            &schema(),
+            8,
+            "sha256:production",
+            PageDirection::Forward,
+            20,
+            vec![CursorKey {
+                field_path: vec![2],
+                column: "uuid".into(),
+                descending: false,
+                value: WireValue::Uuid {
+                    value: "00000000-0000-0000-0000-000000000001".into(),
+                },
+            }],
+        )
+        .unwrap();
+        assert!(production.starts_with("u2."));
+        assert_eq!(
+            decode(
+                &identity(),
+                &production,
+                CursorExpectation {
+                    schema: &schema(),
+                    snapshot_sequence: 8,
+                    plan_digest: "sha256:production",
+                    direction: PageDirection::Forward,
+                    limit: 20,
+                },
+            )
+            .unwrap()
+            .keys
+            .len(),
+            1
+        );
+
+        let wrong_prefix = production.replacen("u2.", "u1.", 1);
+        assert_eq!(
+            decode(
+                &identity(),
+                &wrong_prefix,
+                CursorExpectation {
+                    schema: &schema(),
+                    snapshot_sequence: 8,
+                    plan_digest: "sha256:production",
+                    direction: PageDirection::Forward,
+                    limit: 20,
+                },
+            )
+            .unwrap_err()
+            .code,
+            "E_CURSOR_CODEC"
+        );
     }
 }

@@ -600,6 +600,11 @@ fn execute_versioned_request(
                 engine.schema_info(),
             );
         }
+        if request.version == VERSION
+            && let Err(error) = engine.preflight_protocol_v1_introspection()
+        {
+            return ProtocolResponse::failure(request.request_id, error, engine.schema_info());
+        }
         return introspection_protocol_response(request.request_id, engine.introspection());
     }
     let digest = if request.idempotency_key.is_some() {
@@ -628,6 +633,27 @@ fn execute_versioned_request(
             return ProtocolResponse::failure(request.request_id, error, engine.schema_info());
         }
     };
+    if request.version == VERSION {
+        let replay = match (&request.idempotency_key, &digest) {
+            (Some(key), Some(digest)) => match engine.preflight_protocol_v1_receipt(key, digest) {
+                Ok(replay) => replay,
+                Err(error) => {
+                    return ProtocolResponse::failure(
+                        request.request_id,
+                        error,
+                        engine.schema_info(),
+                    );
+                }
+            },
+            _ => false,
+        };
+        if !replay
+            && let Err(error) =
+                engine.preflight_protocol_v1(&request.query, &parameters, request.page.clone())
+        {
+            return ProtocolResponse::failure(request.request_id, error, engine.schema_info());
+        }
+    }
     if let (Some(key), Some(digest)) = (request.idempotency_key, digest) {
         return match engine.execute_idempotent_with_params_until(
             &key,

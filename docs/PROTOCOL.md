@@ -10,7 +10,7 @@ version 1 的 `Request` / `Response` 是与 transport 无关的数据协议。�
 
 开发中的 version 2 增加 UUID、date、timestamp、duration、decimal 和 bytes wire value，canonical envelope 见 [RFC 0004](rfc/0004-production-scalars.md)。Rust request builder 默认仍为 version 1，可用 `.with_version(2)?` 选择 version 2；同一个 request_id 不影响幂等 identity，版本仍参与 canonical digest。
 
-当前已实现新参数解码、返回行、版本回显和 v1 参数预检；v1 在执行 mutation 前以 `E_PROTOCOL_TYPE` 拒绝嵌套新参数。旧 redb 格式只允许新参数的只读用法；持久写入返回 `E_STORAGE_UPGRADE_REQUIRED`。完整结果/schema 预检、cursor 和 format-4 升级仍由 #137 跟踪，尚不构成完整生产标量支持。Rust 与 codec 当前范围见 [SCALARS.md](SCALARS.md)。
+当前已实现新参数解码、返回行、版本回显和完整 v1 typed-boundary 预检；v1 在执行 mutation 前检查嵌套参数、最终 query／`returning`／`explain` 结果类型及 introspection schema，并以 `E_PROTOCOL_TYPE` 拒绝无法表达的请求。幂等命中保持不解析源码的重放语义。旧 redb 格式只允许新参数的只读用法；持久写入返回 `E_STORAGE_UPGRADE_REQUIRED`。format-4 升级仍由 #137 跟踪，尚不构成完整生产标量支持。Rust 与 codec 当前范围见 [SCALARS.md](SCALARS.md)。
 
 ## 请求
 
@@ -65,6 +65,8 @@ Rust 客户端使用 `Request::with_idempotency_key`，不发送或手写 digest
 ~~~
 
 `direction` 为 `forward` 或 `backward`，省略时是 forward；第一页省略 cursor。Rust 可写 `Request::query(...).with_page(PageSpec::forward(100))`。`Response::typed_page::<T>()` 同时返回应用 row 与 `PageInfo`；`PageInfo::next_page()` / `previous_page()` 直接构造下一次 `with_page` 所需的结构，不需要应用读取或拼接 wire cursor tag：
+
+cursor 的 prefix 由实际排序 boundary 决定。全部键都属于 version 1 vocabulary 时，即使请求使用 protocol v2，也继续输出 `u1`；boundary 中出现 UUID、时间、decimal 或 bytes 时输出 `u2`。`u2` 只扩充 typed value vocabulary，HMAC、schema/query/sequence 绑定和 8192-byte token 上限不变。
 
 ~~~rust
 let mut page = PageSpec::forward(100);

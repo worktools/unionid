@@ -49,6 +49,7 @@ struct PreparedPage {
 struct BoundReturning {
     fields: Vec<String>,
     columns: Vec<ResponseColumn>,
+    types: Vec<ScalarType>,
 }
 
 struct GroupAccumulator {
@@ -1422,18 +1423,23 @@ impl Database {
         } else {
             returning.fields.clone()
         };
+        let types = fields
+            .iter()
+            .map(|field| self.catalog.field_type(&table.schema, field).cloned())
+            .collect::<Result<Vec<_>>>()?;
         let columns = fields
             .iter()
-            .map(|field| {
-                self.catalog
-                    .field_type(&table.schema, field)
-                    .map(|ty| ResponseColumn {
-                        name: field.clone(),
-                        ty: self.catalog.describe(ty),
-                    })
+            .zip(&types)
+            .map(|(field, ty)| ResponseColumn {
+                name: field.clone(),
+                ty: self.catalog.describe(ty),
             })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Some(BoundReturning { fields, columns }))
+            .collect();
+        Ok(Some(BoundReturning {
+            fields,
+            columns,
+            types,
+        }))
     }
 
     fn returning_rows(
@@ -1786,6 +1792,69 @@ impl Database {
         }
         self.prepare_page(pipeline)?;
         Ok(schema)
+    }
+
+    /// Bind a statement far enough to know every type exposed by its response.
+    /// This does not inspect or mutate rows; callers may use a cloned database
+    /// to account for schema changes made by earlier statements in a script.
+    pub(crate) fn prepare_response_types(
+        &self,
+        statement: &mut Statement,
+    ) -> Result<Vec<ScalarType>> {
+        let columns = match statement {
+            Statement::Pipeline(pipeline) | Statement::Explain(pipeline) => {
+                return self
+                    .prepare_pipeline(pipeline)
+                    .map(|columns| columns.into_iter().map(|column| column.ty).collect());
+            }
+            Statement::Insert {
+                table, returning, ..
+            }
+            | Statement::InsertMany {
+                table, returning, ..
+            }
+            | Statement::Upsert {
+                table, returning, ..
+            }
+            | Statement::UpsertMany {
+                table, returning, ..
+            }
+            | Statement::InsertParameter {
+                table, returning, ..
+            }
+            | Statement::InsertManyParameter {
+                table, returning, ..
+            }
+            | Statement::UpsertParameter {
+                table, returning, ..
+            }
+            | Statement::UpsertManyParameter {
+                table, returning, ..
+            } => self.bind_returning(table, returning.as_ref())?,
+            Statement::Update {
+                target,
+                assignments,
+                returning,
+            } => {
+                let columns = self.bind_returning(&target.from, returning.as_ref())?;
+                self.bind_update_operation(target, assignments)?;
+                columns
+            }
+            Statement::Delete { target, returning } => {
+                let columns = self.bind_returning(&target.from, returning.as_ref())?;
+                self.bind_delete_operation(target)?;
+                columns
+            }
+            Statement::DefineType { .. }
+            | Statement::CreateTable { .. }
+            | Statement::TypedTable { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::Migration { .. } => None,
+        };
+        let Some(columns) = columns else {
+            return Ok(Vec::new());
+        };
+        Ok(columns.types)
     }
 
     fn bind_aggregate(&self, schema: &[Column], aggregate: &mut Aggregate) -> Result<Vec<Column>> {
@@ -2899,7 +2968,7 @@ impl Database {
         impact
     }
 
-    pub(crate) fn ensure_legacy_scalars(&self) -> Result<()> {
+    pub(crate) fn has_production_scalars(&self) -> Result<bool> {
         let mut native = false;
         for definition in self.catalog.types.values() {
             native |= self.catalog.requires_protocol_v2(&definition.ty)?;
@@ -2909,7 +2978,11 @@ impl Database {
                 native |= self.catalog.requires_protocol_v2(&column.ty)?;
             }
         }
-        if native {
+        Ok(native)
+    }
+
+    pub(crate) fn ensure_legacy_scalars(&self) -> Result<()> {
+        if self.has_production_scalars()? {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
                 "production scalar schemas require storage format 4",

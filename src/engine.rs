@@ -701,6 +701,90 @@ impl Engine {
         })
     }
 
+    /// Validate the complete response type boundary used by protocol version 1.
+    /// Binding runs against a database clone when earlier schema statements must
+    /// affect the final statement; no live row or catalog mutation is published.
+    pub(crate) fn preflight_protocol_v1(
+        &self,
+        source: &str,
+        parameters: &std::collections::BTreeMap<String, crate::Value>,
+        page: Option<PageSpec>,
+    ) -> Result<()> {
+        let mut statements = syntax::parse(source)?;
+        if let Some(page) = page {
+            attach_structured_page(&mut statements, page)?;
+        }
+        crate::params::bind(&mut statements, parameters)?;
+        let Some(last) = statements.len().checked_sub(1) else {
+            return Ok(());
+        };
+        let needs_schema_preview = statements[..last]
+            .iter()
+            .any(|located| located.statement.changes_schema());
+        let mut preview = self.db.clone();
+        if needs_schema_preview {
+            for located in &statements[..last] {
+                preview
+                    .execute(located.statement.clone())
+                    .map_err(|error| error.at(located.span))?;
+            }
+        }
+        let types = preview
+            .prepare_response_types(&mut statements[last].statement)
+            .map_err(|error| error.at(statements[last].span))?;
+        for ty in types {
+            if preview.catalog.requires_protocol_v2(&ty)? {
+                return Err(Error::new(
+                    "E_PROTOCOL_TYPE",
+                    "response type requires protocol version 2",
+                )
+                .at(statements[last].span));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn preflight_protocol_v1_introspection(&self) -> Result<()> {
+        if self.db.has_production_scalars()? {
+            Err(Error::new(
+                "E_PROTOCOL_TYPE",
+                "schema introspection requires protocol version 2",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Return true when the idempotent request will replay without parsing its
+    /// query. This preserves the established retry contract while still
+    /// preventing a legacy protocol response from exposing a native scalar.
+    pub(crate) fn preflight_protocol_v1_receipt(&self, key: &str, digest: &str) -> Result<bool> {
+        let Some(receipt) = self.receipts.get(key) else {
+            return Ok(false);
+        };
+        if receipt.digest != digest {
+            return Err(Error::new(
+                "E_IDEMPOTENCY_CONFLICT",
+                format!(
+                    "idempotency key has digest {}; new request has digest {digest}",
+                    receipt.digest
+                ),
+            ));
+        }
+        if receipt
+            .response
+            .rows
+            .iter()
+            .any(|row| row.values().any(crate::Value::requires_protocol_v2))
+        {
+            return Err(Error::new(
+                "E_PROTOCOL_TYPE",
+                "stored response requires protocol version 2",
+            ));
+        }
+        Ok(true)
+    }
+
     pub fn query(
         &mut self,
         prepared: &PreparedQuery,
@@ -1734,5 +1818,134 @@ mod tests {
         let repeated = read_only.apply_migrations(&[file]).unwrap();
         assert!(repeated.applied.is_empty());
         assert_eq!(repeated.skipped, ["m0001_initial"]);
+    }
+
+    #[test]
+    fn protocol_v1_preflight_rejects_native_results_without_publishing_prior_mutations() {
+        use crate::model::{Column, ScalarType};
+        use crate::query::Statement;
+        use crate::scalars::Uuid;
+
+        let mut engine = Engine::memory();
+        engine
+            .db
+            .execute(Statement::DefineType {
+                name: "NativeRow".into(),
+                ty: ScalarType::Record(vec![
+                    Column {
+                        name: "id".into(),
+                        ty: ScalarType::Int,
+                        default: None,
+                        id: 0,
+                    },
+                    Column {
+                        name: "native".into(),
+                        ty: ScalarType::Uuid,
+                        default: None,
+                        id: 0,
+                    },
+                ]),
+            })
+            .unwrap();
+        engine
+            .db
+            .execute(Statement::TypedTable {
+                table: "native_rows".into(),
+                row_type: "NativeRow".into(),
+                key: None,
+            })
+            .unwrap();
+        engine
+            .db
+            .execute(Statement::Insert {
+                table: "native_rows".into(),
+                values: crate::Value::Record(BTreeMap::from([
+                    ("id".into(), crate::Value::Int(1)),
+                    (
+                        "native".into(),
+                        crate::Value::Uuid(Uuid::from_bytes([1; 16])),
+                    ),
+                ])),
+                returning: None,
+            })
+            .unwrap();
+        assert!(
+            engine
+                .execute("type Plain = { id int }\ntable plain Plain\ninsert plain { id = 1 }")
+                .ok
+        );
+
+        let error = engine
+            .preflight_protocol_v1(
+                "insert plain { id = 2 }\nfrom native_rows | select { native }",
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "E_PROTOCOL_TYPE");
+        assert_eq!(engine.execute("from plain").rows.len(), 1);
+        assert!(
+            engine
+                .preflight_protocol_v1("from native_rows | select { id }", &BTreeMap::new(), None,)
+                .is_ok()
+        );
+        for source in [
+            "delete native_rows | take 1 | returning { native }",
+            "explain from native_rows | select { native }",
+        ] {
+            assert_eq!(
+                engine
+                    .preflight_protocol_v1(source, &BTreeMap::new(), None)
+                    .unwrap_err()
+                    .code,
+                "E_PROTOCOL_TYPE",
+                "{source}"
+            );
+        }
+        assert_eq!(engine.execute("from native_rows").rows.len(), 1);
+        assert_eq!(
+            engine
+                .preflight_protocol_v1_introspection()
+                .unwrap_err()
+                .code,
+            "E_PROTOCOL_TYPE"
+        );
+    }
+
+    #[test]
+    fn protocol_v1_receipt_preflight_preserves_parse_free_replay() {
+        let mut engine = Engine::memory();
+        assert!(engine.execute("create table entries (id int)").ok);
+        engine
+            .execute_idempotent_with_params(
+                "replay",
+                DIGEST_A,
+                "insert entries { id = 1 }",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            engine
+                .preflight_protocol_v1_receipt("replay", DIGEST_A)
+                .unwrap()
+        );
+        assert_eq!(
+            engine
+                .preflight_protocol_v1_receipt("replay", DIGEST_B)
+                .unwrap_err()
+                .code,
+            "E_IDEMPOTENCY_CONFLICT"
+        );
+        let replay = engine
+            .execute_idempotent_with_params(
+                "replay",
+                DIGEST_A,
+                "this source is deliberately not parsed",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(replay.replayed);
     }
 }

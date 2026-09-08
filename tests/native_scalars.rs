@@ -303,3 +303,48 @@ fn legacy_durable_formats_reject_native_writes_without_changing_state() {
     drop(engine);
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn protocol_v2_pages_use_u2_only_when_the_boundary_contains_a_native_scalar() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "type Row = { id int }\ntable items Row\n  key id\ninsert many items [{ id = 1 }, { id = 2 }, { id = 3 }]"
+            )
+            .ok
+    );
+    let uuid = Uuid::from_bytes([7; 16]);
+    let query = "from items | derive uuid = $uuid | sort { uuid, id } | select { id, uuid }";
+    let first_request = Request::query("native-page-1", query)
+        .with_version(2)
+        .unwrap()
+        .with_serde_param("uuid", &uuid)
+        .unwrap()
+        .with_page(unionid::query::PageSpec::forward(2));
+    let first = execute_protocol_request(&mut engine, first_request);
+    assert!(first.ok, "{}", first.message);
+    let cursor = first.page.unwrap().next_cursor.unwrap();
+    assert!(cursor.starts_with("u2."));
+
+    let second_request = Request::query("native-page-2", query)
+        .with_version(2)
+        .unwrap()
+        .with_serde_param("uuid", &uuid)
+        .unwrap()
+        .with_page(unionid::query::PageSpec::after(2, cursor));
+    let second = execute_protocol_request(&mut engine, second_request);
+    assert!(second.ok, "{}", second.message);
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows[0]["id"], WireValue::Int { value: "3".into() });
+
+    let legacy = execute_protocol_request(
+        &mut engine,
+        Request::query("legacy-page", "from items | sort id")
+            .with_version(2)
+            .unwrap()
+            .with_page(unionid::query::PageSpec::forward(2)),
+    );
+    assert!(legacy.ok, "{}", legacy.message);
+    assert!(legacy.page.unwrap().next_cursor.unwrap().starts_with("u1."));
+}
