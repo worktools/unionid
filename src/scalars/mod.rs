@@ -17,6 +17,7 @@ use std::fmt;
 use std::str::FromStr;
 
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_INDEXED_BYTES: usize = 8 * 1024;
 
 fn literal(message: &str) -> Error {
     Error::new("E_SCALAR_LITERAL", message)

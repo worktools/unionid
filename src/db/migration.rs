@@ -551,7 +551,7 @@ impl Database {
         ) {
             return Err(Error::new(
                 "E_TYPE",
-                "primary keys currently require int or text",
+                "primary keys require an indexable scalar type",
             ));
         }
         let mut seen = BTreeSet::new();
@@ -777,7 +777,9 @@ impl Database {
                 ) {
                     return Err(Error::new(
                         "E_TYPE",
-                        format!("primary key '{table_name}.{key}' must remain int or text"),
+                        format!(
+                            "primary key '{table_name}.{key}' must remain an indexable scalar type"
+                        ),
                     ));
                 }
             }

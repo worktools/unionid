@@ -646,6 +646,8 @@ impl Parser {
             "float" | "f64" | "double" => ScalarType::Float,
             "bool" | "boolean" => ScalarType::Bool,
             "text" | "string" => ScalarType::Text,
+            "uuid" => ScalarType::Uuid,
+            "bytes" => ScalarType::Bytes,
             "option" => ScalarType::Option(Box::new(self.ty(depth + 1)?)),
             "list" => ScalarType::List(Box::new(self.ty(depth + 1)?)),
             "enum" => {
@@ -1462,6 +1464,29 @@ impl Parser {
             Kind::Ident(s) if s == "true" => Value::Bool(true),
             Kind::Ident(s) if s == "false" => Value::Bool(false),
             Kind::Ident(s) if s == "null" => Value::Null,
+            Kind::Ident(s) if s == "uuid" => {
+                let token = self.bump();
+                let Kind::Text(source) = token.kind else {
+                    return Err(syntax("uuid literal expects quoted text", token.span));
+                };
+                Value::Uuid(source.parse()?)
+            }
+            Kind::Ident(s) if s == "bytes" => {
+                let token = self.bump();
+                let Kind::Text(source) = token.kind else {
+                    return Err(syntax(
+                        "bytes literal expects quoted lowercase hex",
+                        token.span,
+                    ));
+                };
+                if source.bytes().any(|byte| matches!(byte, b'A'..=b'F')) {
+                    return Err(syntax(
+                        "bytes source literal must use lowercase hex",
+                        token.span,
+                    ));
+                }
+                Value::Bytes(source.parse()?)
+            }
             Kind::Ident(mut name) => {
                 while self.eat(Kind::Dot) {
                     name.push('.');
@@ -2701,6 +2726,11 @@ impl Parser {
             }
             Kind::Ident(name)
                 if matches!(name.as_str(), "true" | "false" | "null")
+                    || matches!(name.as_str(), "uuid" | "bytes")
+                        && matches!(
+                            self.tokens.get(self.pos + 1).map(|token| &token.kind),
+                            Some(Kind::Text(_))
+                        )
                     || name.starts_with(|ch: char| ch.is_ascii_uppercase()) =>
             {
                 Ok(ScalarExpression::Literal(self.value(depth + 1)?))

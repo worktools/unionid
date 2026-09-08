@@ -8,6 +8,10 @@ fn formatter_is_idempotent_for_current_examples() {
         ("events", include_str!("../examples/events.uid")),
         ("job_queue", include_str!("../examples/job_queue.uid")),
         ("sync", include_str!("../examples/sync_conflicts.uid")),
+        (
+            "content_metadata",
+            include_str!("../examples/content_metadata.uid"),
+        ),
         ("mutations", include_str!("../examples/task_mutations.uid")),
         (
             "recursive_tree",

@@ -1,12 +1,24 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use unionid::{Engine, Value};
+use unionid::{
+    Engine, Value,
+    protocol::Request,
+    scalars::{Bytes, Uuid},
+    server::execute_protocol_request,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Task {
     id: i64,
     title: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Content {
+    id: Uuid,
+    digest: Bytes,
+    preview: Bytes,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,5 +73,27 @@ table tasks Task
         return Err(error.into());
     }
     println!("{:#?}", result.typed_rows::<Task>()?);
+
+    let setup = database.execute(
+        "type Content = {id uuid, digest bytes, preview bytes}\n\
+         table content Content\n  key id\n\
+         create unique index content (digest)",
+    );
+    if let Some(error) = setup.error {
+        return Err(error.into());
+    }
+    let content = Content {
+        id: "018f67a4-2f44-7aa3-8f2b-14f7a2f66210".parse()?,
+        digest: "00ff10".parse()?,
+        preview: "89504e470d0a1a0a".parse()?,
+    };
+    let request = Request::query("content-insert", "insert content $row\nreturning")
+        .with_version(2)?
+        .with_serde_param("row", &content)?;
+    let response = execute_protocol_request(&mut database, request);
+    if let Some(error) = response.error {
+        return Err(error.into());
+    }
+    assert_eq!(response.typed_rows::<Content>()?, [content]);
     Ok(())
 }
