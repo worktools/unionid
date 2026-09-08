@@ -18,6 +18,8 @@ const CRASH_PATH_ENV: &str = "UNIONID_TEST_REDB_CRASH_PATH";
 const CRASH_MODE_ENV: &str = "UNIONID_TEST_REDB_CRASH_MODE";
 const DISK_LIMIT_PATH_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_PATH";
 const DISK_LIMIT_RESULT_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_RESULT";
+const UPGRADE_PATH_ENV: &str = "UNIONID_TEST_REDB_UPGRADE_PATH";
+const UPGRADE_READY_ENV: &str = "UNIONID_TEST_REDB_UPGRADE_READY";
 const CRASH_BEFORE_COMMIT: i32 = 91;
 const CRASH_AFTER_COMMIT: i32 = 92;
 const DISK_LIMIT_FAILURE: i32 = 93;
@@ -554,6 +556,73 @@ fn redb_disk_limit_child() {
 }
 
 #[test]
+fn redb_upgrade_child() {
+    let Ok(path) = std::env::var(UPGRADE_PATH_ENV) else {
+        return;
+    };
+    let ready = std::env::var(UPGRADE_READY_ENV).unwrap();
+    let mut engine = Engine::open_redb(path).unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    engine.upgrade_storage(4).unwrap();
+}
+
+#[test]
+fn interrupted_format4_upgrade_recovers_as_complete_old_or_new_state() {
+    let dir = TempDir::new();
+    let path = dir.0.join("interrupted-upgrade.redb");
+    let ready = dir.0.join("upgrade-ready");
+    create_empty_format3(&path);
+    let mut source = String::from(
+        "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ncreate index entries (label)\ninsert many entries [",
+    );
+    for id in 0..5_000 {
+        if id > 0 {
+            source.push_str(", ");
+        }
+        source.push_str(&format!("{{ id = {id}, label = \"value-{id}\" }}"));
+    }
+    source.push(']');
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let inserted = engine.execute(&source);
+        assert!(inserted.ok, "{}", inserted.message);
+    }
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "redb_upgrade_child", "--nocapture"])
+        .env(UPGRADE_PATH_ENV, &path)
+        .env(UPGRADE_READY_ENV, &ready)
+        .spawn()
+        .unwrap();
+    for _ in 0..1_000 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        ready.exists(),
+        "upgrade child did not reach the upgrade boundary"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    let _ = child.kill();
+    child.wait().unwrap();
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let format = reopened.introspection().storage_versions.unwrap().format;
+    assert!(matches!(format, 3 | 4));
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+    let rows = reopened.execute("from entries | filter label == \"value-4999\"");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(4_999)));
+    if format == 3 {
+        assert!(reopened.upgrade_storage(4).unwrap().changed);
+    }
+    assert_eq!(reopened.introspection().storage_versions.unwrap().format, 4);
+}
+
+#[test]
 fn redb_real_disk_growth_failure_is_classified_and_recovers_atomically() {
     let dir = TempDir::new();
     let path = dir.0.join("limited.redb");
@@ -995,6 +1064,9 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
 fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
     let dir = TempDir::new();
     let path = dir.0.join("upgrade.redb");
+    let backup_path = dir.0.join("upgrade.backup.json");
+    let restored_path = dir.0.join("upgrade-restored.redb");
+    let original_schema;
     create_empty_format3(&path);
     {
         let mut engine = Engine::open_redb(&path).unwrap();
@@ -1014,6 +1086,7 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
                 None,
             )
             .unwrap();
+        original_schema = engine.schema_info();
         let rejected = engine.upgrade_storage(5).unwrap_err();
         assert_eq!(rejected.code, "E_STORAGE_UPGRADE");
         let upgraded = engine.upgrade_storage(4).unwrap();
@@ -1035,6 +1108,7 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
             (4, 3, 2, 2, 1, 2, 3)
         );
         assert!(engine.check_integrity().unwrap().backend_clean);
+        assert_eq!(engine.schema_info(), original_schema);
     }
 
     let database = RedbDatabase::open(&path).unwrap();
@@ -1085,9 +1159,41 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
     drop(transaction);
     drop(database);
 
-    let mut reopened = Engine::open_redb(path).unwrap();
+    let mut reopened = Engine::open_redb(&path).unwrap();
     assert_eq!(reopened.execute("from entries | sort id").rows.len(), 2);
     assert!(reopened.check_integrity().unwrap().backend_clean);
+    assert_eq!(reopened.schema_info(), original_schema);
+    drop(reopened);
+
+    assert_eq!(
+        unionid::backup::create(&path, &backup_path)
+            .unwrap()
+            .format_version,
+        3
+    );
+    unionid::backup::restore(&backup_path, &restored_path).unwrap();
+    let mut restored = Engine::open_redb(restored_path).unwrap();
+    assert_eq!(restored.schema_info(), original_schema);
+    assert_eq!(restored.execute("from entries | sort id").rows.len(), 2);
+    assert_eq!(
+        restored
+            .execute("explain from entries | filter label == \"two\"")
+            .plan
+            .unwrap()
+            .access
+            .kind,
+        QueryAccessKind::SecondaryIndexLookup
+    );
+    let receipt = restored
+        .execute_idempotent_with_params(
+            "upgrade-receipt",
+            TEST_IDEMPOTENCY_DIGEST,
+            "this source is ignored for a matching restored receipt",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(receipt.replayed);
 }
 
 #[test]
