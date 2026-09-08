@@ -4,6 +4,7 @@
 pub mod backup;
 pub mod cli;
 pub mod codec;
+mod control;
 pub mod db;
 pub mod engine;
 pub mod error;

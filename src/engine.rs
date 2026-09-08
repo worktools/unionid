@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::control::ExecutionControl;
 use crate::db::{Database, QueryResponse};
 use crate::error::{Error, Result};
 use crate::idempotency::{
@@ -360,12 +361,55 @@ impl Engine {
         expected_schema: Option<&crate::db::SchemaInfo>,
         deadline: std::time::Instant,
     ) -> QueryResponse {
+        let control = ExecutionControl::deadline(deadline);
         self.execute_with_params_at_schema_and_deadline(
             source,
             parameters,
             expected_schema,
-            Some(deadline),
+            Some(&control),
         )
+    }
+
+    pub(crate) fn execute_read_statements_controlled(
+        &mut self,
+        mut statements: Vec<LocatedStatement>,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        control: &ExecutionControl,
+    ) -> QueryResponse {
+        let result = (|| {
+            control.checkpoint()?;
+            if let Some(expected) = expected_schema
+                && expected != &self.db.schema_info()
+            {
+                return Err(Error::new(
+                    "E_SCHEMA_CHANGED",
+                    format!(
+                        "request expects schema revision {} ({}) but the database is at revision {} ({})",
+                        expected.revision,
+                        expected.hash,
+                        self.db.schema_info().revision,
+                        self.db.schema_info().hash
+                    ),
+                ));
+            }
+            crate::params::bind(&mut statements, &parameters)?;
+            control.checkpoint()?;
+            if statements
+                .iter()
+                .any(|statement| statement.statement.is_mutating())
+            {
+                return Err(Error::new(
+                    "E_STREAM_SHAPE",
+                    "registered read contains a mutating statement",
+                ));
+            }
+            self.try_execute_statements(statements, None, Some(control), None)
+        })();
+        match result {
+            Ok(response) => response,
+            Err(error) => self.with_schema(QueryResponse::failure(error)),
+        }
     }
 
     /// Execute a structured bounded-page request through the same pipeline
@@ -378,11 +422,12 @@ impl Engine {
         page: PageSpec,
         deadline: std::time::Instant,
     ) -> QueryResponse {
+        let control = ExecutionControl::deadline(deadline);
         match self.try_execute_with_params_and_idempotency(
             source,
             parameters,
             expected_schema,
-            Some(deadline),
+            Some(&control),
             None,
             Some(page),
         ) {
@@ -421,13 +466,14 @@ impl Engine {
         expected_schema: Option<&crate::db::SchemaInfo>,
         deadline: std::time::Instant,
     ) -> Result<IdempotentExecution> {
+        let control = ExecutionControl::deadline(deadline);
         self.execute_idempotent_with_deadline(
             key,
             digest,
             source,
             parameters,
             expected_schema,
-            Some(deadline),
+            Some(&control),
         )
     }
 
@@ -438,7 +484,7 @@ impl Engine {
         source: &str,
         parameters: std::collections::BTreeMap<String, crate::Value>,
         expected_schema: Option<&crate::db::SchemaInfo>,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<&ExecutionControl>,
     ) -> Result<IdempotentExecution> {
         validate_key(key)?;
         validate_digest(digest)?;
@@ -640,7 +686,7 @@ impl Engine {
         source: &str,
         parameters: std::collections::BTreeMap<String, crate::Value>,
         expected_schema: Option<&crate::db::SchemaInfo>,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<&ExecutionControl>,
     ) -> QueryResponse {
         match self.try_execute_with_params(source, parameters, expected_schema, deadline) {
             Ok(response) => response,
@@ -845,7 +891,7 @@ impl Engine {
         &mut self,
         prepared: &PreparedQuery,
         parameters: std::collections::BTreeMap<String, crate::Value>,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<&ExecutionControl>,
     ) -> QueryResponse {
         if prepared.schema != self.db.schema_info() {
             return self.with_schema(QueryResponse::failure(Error::new(
@@ -901,7 +947,8 @@ impl Engine {
         parameters: std::collections::BTreeMap<String, crate::Value>,
         deadline: std::time::Instant,
     ) -> QueryResponse {
-        self.execute_prepared_with_deadline(prepared, parameters, Some(deadline))
+        let control = ExecutionControl::deadline(deadline);
+        self.execute_prepared_with_deadline(prepared, parameters, Some(&control))
     }
 
     fn try_execute_with_params(
@@ -909,7 +956,7 @@ impl Engine {
         source: &str,
         parameters: std::collections::BTreeMap<String, crate::Value>,
         expected_schema: Option<&crate::db::SchemaInfo>,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
         self.try_execute_with_params_and_idempotency(
             source,
@@ -926,7 +973,7 @@ impl Engine {
         source: &str,
         parameters: std::collections::BTreeMap<String, crate::Value>,
         expected_schema: Option<&crate::db::SchemaInfo>,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<&ExecutionControl>,
         idempotency: Option<PendingIdempotency<'_>>,
         page: Option<PageSpec>,
     ) -> Result<QueryResponse> {
@@ -1002,7 +1049,7 @@ impl Engine {
         &mut self,
         statements: Vec<LocatedStatement>,
         wal_source: Option<&str>,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<&ExecutionControl>,
         idempotency: Option<PendingIdempotency<'_>>,
     ) -> Result<QueryResponse> {
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
@@ -1480,15 +1527,8 @@ impl Engine {
     }
 }
 
-fn ensure_deadline(deadline: Option<std::time::Instant>) -> Result<()> {
-    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-        Err(Error::new(
-            "E_TIMEOUT",
-            "request execution deadline exceeded",
-        ))
-    } else {
-        Ok(())
-    }
+fn ensure_deadline(control: Option<&ExecutionControl>) -> Result<()> {
+    control.map_or(Ok(()), ExecutionControl::checkpoint)
 }
 
 fn unix_time_ms() -> Result<u64> {

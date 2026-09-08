@@ -103,7 +103,6 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#130](https://github.com/worktools/unionid/issues/130) | [设计] 冻结稳定 cursor、快照与取消契约 | P1 | [#114](https://github.com/worktools/unionid/issues/114) 的设计子任务；已由 #133 完成 |
 | [#131](https://github.com/worktools/unionid/issues/131) | [查询] 有界 keyset page 与 version 1 cursor | P1 | [#130](https://github.com/worktools/unionid/issues/130) |
 | [#132](https://github.com/worktools/unionid/issues/132) | [接口] Rust/TCP/HTTP 分页与取消旅程 | P1 | [#131](https://github.com/worktools/unionid/issues/131) |
-| [#135](https://github.com/worktools/unionid/issues/135) | [服务] 显式取消与有背压的流式读取 | P2 | [#116](https://github.com/worktools/unionid/issues/116)；由 #132 拆出 |
 | [#115](https://github.com/worktools/unionid/issues/115) | [类型] 生产标量契约 | 已完成 | [#147](https://github.com/worktools/unionid/pull/147)–[#151](https://github.com/worktools/unionid/pull/151) |
 | [#137](https://github.com/worktools/unionid/issues/137) | [类型] 生产标量兼容与 codec 基础 | 已完成 | [#147](https://github.com/worktools/unionid/pull/147)、[#148](https://github.com/worktools/unionid/pull/148) |
 | [#138](https://github.com/worktools/unionid/issues/138) | [类型] UUID 与 bytes 端到端能力 | 已完成 | [#149](https://github.com/worktools/unionid/pull/149) |
@@ -112,8 +111,8 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | 已完成 | [RFC 0006](rfc/0006-consistent-read-snapshots.md) |
 | [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | 已完成 | version 1 JSON 与退出码契约 |
 | [#135](https://github.com/worktools/unionid/issues/135) | [服务] 显式取消与有背压的流式读取 | P1 | [#155](https://github.com/worktools/unionid/issues/155) → [#156](https://github.com/worktools/unionid/issues/156) → [#157](https://github.com/worktools/unionid/issues/157) |
-| [#155](https://github.com/worktools/unionid/issues/155) | [设计] 取消与 streaming 契约 RFC | 当前 | [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) |
-| [#156](https://github.com/worktools/unionid/issues/156) | [并发] 有界 operation registry 与只读取消 | P1 | [#155](https://github.com/worktools/unionid/issues/155) |
+| [#155](https://github.com/worktools/unionid/issues/155) | [设计] 取消与 streaming 契约 RFC | 已完成 | [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) |
+| [#156](https://github.com/worktools/unionid/issues/156) | [并发] 有界 operation registry 与只读取消 | 当前 | [#155](https://github.com/worktools/unionid/issues/155) |
 | [#157](https://github.com/worktools/unionid/issues/157) | [接口] TCP/HTTP NDJSON 背压流 | P1 | [#156](https://github.com/worktools/unionid/issues/156) |
 | [#122](https://github.com/worktools/unionid/issues/122) | [文档] 中英双语 README 与 ADT/query 产品入口 | P1 | 使用已发布 v0.1.0 和 [#112](https://github.com/worktools/unionid/issues/112) 的真实入口 |
 | [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | P2 | 以真实 schema 复用需求单独验证 |
@@ -124,7 +123,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量、#116 的一致并发读快照，以及 #117 的机器可读 CLI 诊断均已完成。#135 已修正过时的 deferred 状态并拆为 #155 RFC、#156 核心取消、#157 TCP/HTTP streaming；当前先冻结 RFC 0007，再按依赖实现。#118 与 #120 仍是独立 P2 探索。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量、#116 的一致并发读快照，以及 #117 的机器可读 CLI 诊断均已完成。#135 已修正过时的 deferred 状态并拆为 #155 RFC、#156 核心取消、#157 TCP/HTTP streaming；RFC 0007 已冻结并完成，当前实现 #156 的 registry、统一 execution control 与资源收敛测试。#118 与 #120 仍是独立 P2 探索。
 
 ## 维护约定
 
