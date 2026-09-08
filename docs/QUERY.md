@@ -207,6 +207,8 @@ derive next_attempt = match state {
 
 `int / int` 使用向零截断的整数除法。整数加减乘除和一元负号执行 checked 运算；溢出与除零返回 `E_ARITH`。float 运算拒绝除以正负零，也拒绝产生 NaN 或无限值；负零归一为正零。`and/or` 继续短路求值，因此未执行分支中的算术错误不会触发。
 
+`decimal P S` 只与完全相同的 decimal 类型做 `+`、`-` 和一元负号；literal 可由字段上下文精确补零到目标 scale。每个中间结果与 `sum` 的每一步都检查 P 位范围，超限返回 `E_ARITH` 并回滚请求。乘法、除法、avg、隐式 rescale 和舍入未定义，使用时返回 `E_TYPE`。
+
 ## Typed 批量写入
 
 `insert many` 使用已有 list/record 值语法，一次提交多行：
@@ -667,7 +669,7 @@ filter (
 | 分组汇总 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | count/sum/min/max、命名数值、ADT key、空输入、溢出、后续 stage 与资源上限 | `basic_aggregates_*`、`grouped_aggregates_*`、`aggregates_reject_*`、`aggregate_group_limits_*` |
 | 查询局部定义 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | 常量、单/多参数纯函数、match binding、aggregate 输入、显式类型、词法遮蔽、prepared 参数、调用与展开预算 | `query_local_*`、`local_function_*`、`prepared_queries_infer_parameters_through_local_functions` |
 | 布尔与集合表达式 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
-| 数值表达式 | 测试内脚本 | int/float 类型、优先级、跨行括号、命名数值类型、整数除法、短路及运行时错误 | `typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
+| 数值表达式 | [invoices.uid](../examples/invoices.uid) 与测试内脚本 | int/float/decimal 类型、固定 scale、逐步 precision、优先级、跨行括号、整数除法、短路及运行时错误 | `decimal_*`、`typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 | 稳定游标分页 | HTTP todolist 与接口测试 | typed page helper、重复排序前缀、正反向、redb 重开、TCP/HTTP 断开、deadline、migration 和 cursor 错误 | `tests/pagination.rs`、`tests/pagination_interfaces.rs`、`examples/todolist.rs` |
 | UUID 与二进制 metadata | [content_metadata.uid](../examples/content_metadata.uid) | UUID 主键、hex bytes、unique index、contains/length、typed protocol v2、cursor、migration 与 backup/restore | `tests/uuid_bytes.rs` |

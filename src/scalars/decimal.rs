@@ -116,6 +116,39 @@ impl Decimal {
         };
         Self::new(coefficient, precision, scale)
     }
+
+    pub(crate) fn checked_add(self, other: Self) -> Result<Self> {
+        if self.scale != other.scale {
+            return Err(Error::new("E_TYPE", "decimal scales must match"));
+        }
+        let coefficient = self
+            .coefficient
+            .checked_add(other.coefficient)
+            .ok_or_else(|| Error::new("E_ARITH", "decimal addition overflow"))?;
+        Self::new(coefficient, 38, self.scale)
+            .map_err(|_| Error::new("E_ARITH", "decimal addition exceeds 38 digits"))
+    }
+
+    pub(crate) fn checked_sub(self, other: Self) -> Result<Self> {
+        if self.scale != other.scale {
+            return Err(Error::new("E_TYPE", "decimal scales must match"));
+        }
+        let coefficient = self
+            .coefficient
+            .checked_sub(other.coefficient)
+            .ok_or_else(|| Error::new("E_ARITH", "decimal subtraction overflow"))?;
+        Self::new(coefficient, 38, self.scale)
+            .map_err(|_| Error::new("E_ARITH", "decimal subtraction exceeds 38 digits"))
+    }
+
+    pub(crate) fn checked_neg(self) -> Result<Self> {
+        let coefficient = self
+            .coefficient
+            .checked_neg()
+            .ok_or_else(|| Error::new("E_ARITH", "decimal negation overflow"))?;
+        Self::new(coefficient, 38, self.scale)
+            .map_err(|_| Error::new("E_ARITH", "decimal negation exceeds 38 digits"))
+    }
 }
 
 impl fmt::Display for Decimal {

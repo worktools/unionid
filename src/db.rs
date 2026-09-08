@@ -97,6 +97,7 @@ impl GroupAccumulator {
                         (None, Value::Int(value)) => Value::Int(*value),
                         (None, Value::Float(value)) => Value::Float(*value),
                         (None, Value::Duration(value)) => Value::Duration(*value),
+                        (None, Value::Decimal(value)) => Value::Decimal(*value),
                         (Some(Value::Int(total)), Value::Int(value)) => Value::Int(
                             total
                                 .checked_add(*value)
@@ -121,6 +122,26 @@ impl GroupAccumulator {
                                         Error::new("E_ARITH", "duration sum overflow")
                                     })?,
                             ))
+                        }
+                        (Some(Value::Decimal(total)), Value::Decimal(value)) => {
+                            let result = total.checked_add(*value)?;
+                            let ScalarType::Decimal { precision, scale } = assignment
+                                .output_type
+                                .as_ref()
+                                .ok_or_else(|| Error::new("E_TYPE", "decimal sum is not bound"))?
+                            else {
+                                return Err(Error::new(
+                                    "E_TYPE",
+                                    "decimal sum output is not decimal",
+                                ));
+                            };
+                            Value::Decimal(result.rescale(*precision, *scale).map_err(|error| {
+                                if error.code == "E_DECIMAL_RANGE" {
+                                    Error::new("E_ARITH", error.message)
+                                } else {
+                                    error
+                                }
+                            })?)
                         }
                         _ => {
                             return Err(Error::new(
@@ -164,6 +185,10 @@ impl GroupAccumulator {
                     ScalarType::Duration => {
                         Value::Duration(crate::scalars::Duration::from_microseconds(0))
                     }
+                    ScalarType::Decimal { precision, scale } => Value::Decimal(
+                        crate::scalars::Decimal::new(0, *precision, *scale)
+                            .expect("bound decimal type is valid"),
+                    ),
                     _ => {
                         return Err(Error::new("E_TYPE", "bound sum output is not numeric"));
                     }
@@ -1934,12 +1959,15 @@ impl Database {
                     let ty = self.aggregate_input_type(schema, assignment)?;
                     if !matches!(
                         self.catalog.underlying(&ty)?,
-                        ScalarType::Int | ScalarType::Float | ScalarType::Duration
+                        ScalarType::Int
+                            | ScalarType::Float
+                            | ScalarType::Duration
+                            | ScalarType::Decimal { .. }
                     ) {
                         return Err(Error::new(
                             "E_TYPE",
                             format!(
-                                "sum expects int, float, or duration, got {}",
+                                "sum expects int, float, duration, or decimal, got {}",
                                 self.catalog.describe(&ty)
                             ),
                         ));

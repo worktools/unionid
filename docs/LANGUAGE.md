@@ -1,6 +1,6 @@
 # 当前可运行的语言预览
 
-本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)、[UUID/bytes 内容元数据](../examples/content_metadata.uid)。
+本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)、[UUID/bytes 内容元数据](../examples/content_metadata.uid)、[时间/session](../examples/session_events.uid)、[decimal 账单](../examples/invoices.uid)。
 
 当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys (aggregate {...})`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`not/and/or`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
@@ -37,9 +37,11 @@ insert tasks {
 ```
 
 - 无分号。花括号用于 record、projection、match branches 和多项 sort 等明确结构边界的地方，圆括号表达 precedence、tuple、嵌套调用或 group inner pipeline，方括号表达 list；delimiter 内相邻项用逗号分隔，formatter 保留 trailing comma。类型名和变体名以大写字母开头；当前标识符为 ASCII 字母、数字与下划线，首字符不能是数字；文本值支持 UTF-8。
-- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid`、`date`、`timestamp`、`duration` 和 `bytes`。date 写作 `@2026-09-08`；timestamp 必须带 `Z` 或 numeric offset，例如 `@2026-09-08T09:30:15.123456+08:00`，并规范为 UTC 微秒；duration 使用 `30seconds` 等整数精确单位。UUID 字面量写作 `uuid "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"`；bytes 写作小写偶数长度 hex，例如 `bytes "00ff"`。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。定点 decimal 仍只有 Rust/wire/codec 基础，尚不能作为当前源码类型或字面量使用。
+- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid`、`date`、`timestamp`、`duration`、`decimal P S` 和 `bytes`。decimal precision 为 1..38、scale 为 0..precision，字面量写作 `decimal "19.90"` 并按目标 scale 精确补零，绝不舍入。date 写作 `@2026-09-08`；timestamp 必须带 `Z` 或 numeric offset；duration 使用 `30seconds` 等整数精确单位。UUID 使用 typed string，bytes 使用小写偶数长度 hex。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。
 
 - duration 支持 checked `+`、`-`、一元负号和 `sum`；`timestamp +/- duration` 得到 timestamp，`timestamp - timestamp` 得到 duration。溢出返回 `E_ARITH`。date 不做 calendar 算术，也没有隐式当前时间、本地时区或 DST 规则。旧 text 数据可在 migration 中用 `date_parse`、`timestamp_parse` 和 `duration_parse` 精确转换。
+
+- 相同 `decimal P S` 支持 checked `+`、`-`、一元负号和 `sum`，每个中间结果都按目标 precision 检查。乘法、除法、avg 和任何舍入保持未实现；旧 text 用 `decimal_parse old P S`，已有 decimal 用 `decimal_rescale old P S` 精确迁移，丢弃非零位时返回 `E_DECIMAL_RANGE`。
 - 支持命名 record/sum、嵌套积类型、tuple，以及内建 `option T`、`list T`，例如 `type Point = (float, float)`、`option (list Contact)`。
 - record 类型规范写成 braced field set，如 `{email text, nickname option text}`；变体的 record payload 同样使用 `{}`。旧缩进 record 与 variant payload 继续作为 migration、WAL 和已有脚本的兼容输入，formatter 只输出 braced 形式。
 - record 值使用 `field = value`，内联字段之间用逗号；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载与多个位置参数通过括号区分。

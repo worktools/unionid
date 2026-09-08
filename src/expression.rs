@@ -286,6 +286,37 @@ pub(crate) fn bind_scalar(
         ScalarExpression::Call {
             name, arguments, ..
         } if is_builtin_scalar_function(name) => {
+            if matches!(name.as_str(), "decimal_parse" | "decimal_rescale") {
+                if arguments.len() != 3 {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        format!("{name} expects 3 arguments, got {}", arguments.len()),
+                    ));
+                }
+                let target = decimal_target(&arguments[1], &arguments[2])?;
+                let input = if name == "decimal_parse" {
+                    ScalarType::Text
+                } else {
+                    infer_scalar(catalog, scope, &arguments[0], reference_kind)?
+                        .ok_or_else(|| Error::new("E_TYPE", "cannot infer decimal_rescale input"))?
+                };
+                if name == "decimal_rescale"
+                    && !matches!(catalog.underlying(&input)?, ScalarType::Decimal { .. })
+                {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        "decimal_rescale expects decimal input",
+                    ));
+                }
+                bind_scalar(
+                    catalog,
+                    scope,
+                    &mut arguments[0],
+                    Some(&input),
+                    reference_kind,
+                )?;
+                return Ok(target);
+            }
             if arguments.len() != 1 {
                 return Err(Error::new(
                     "E_TYPE",
@@ -401,6 +432,25 @@ pub(crate) fn infer_scalar(
         ScalarExpression::Call {
             name, arguments, ..
         } if is_builtin_scalar_function(name) => {
+            if matches!(name.as_str(), "decimal_parse" | "decimal_rescale") {
+                if arguments.len() != 3 {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        format!("{name} expects 3 arguments, got {}", arguments.len()),
+                    ));
+                }
+                if name == "decimal_rescale"
+                    && let Some(input) =
+                        infer_scalar(catalog, scope, &arguments[0], reference_kind)?
+                    && !matches!(catalog.underlying(&input)?, ScalarType::Decimal { .. })
+                {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        "decimal_rescale expects decimal input",
+                    ));
+                }
+                return Ok(Some(decimal_target(&arguments[1], &arguments[2])?));
+            }
             if arguments.len() != 1 {
                 return Err(Error::new(
                     "E_TYPE",
@@ -491,9 +541,15 @@ fn infer_arithmetic_type(
     };
     if let Some(ty) = &result {
         if matches!(op, ArithmeticOp::Multiply | ArithmeticOp::Divide)
-            && matches!(catalog.underlying(ty)?, ScalarType::Duration)
+            && matches!(
+                catalog.underlying(ty)?,
+                ScalarType::Duration | ScalarType::Decimal { .. }
+            )
         {
-            return Err(Error::new("E_TYPE", "duration only supports '+' and '-'"));
+            return Err(Error::new(
+                "E_TYPE",
+                "duration and decimal only support '+' and '-'",
+            ));
         }
         require_numeric(catalog, ty, "arithmetic")?;
     }
@@ -516,13 +572,16 @@ fn is_constant(expression: &ScalarExpression) -> bool {
 }
 
 fn require_numeric(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<()> {
-    if matches!(catalog.underlying(ty)?, ScalarType::Int | ScalarType::Float) {
+    if matches!(
+        catalog.underlying(ty)?,
+        ScalarType::Int | ScalarType::Float | ScalarType::Decimal { .. }
+    ) {
         Ok(())
     } else {
         Err(Error::new(
             "E_TYPE",
             format!(
-                "{context} expects int or float, got {}",
+                "{context} expects int or float, or a fixed decimal, got {}",
                 catalog.describe(ty)
             ),
         ))
@@ -532,14 +591,14 @@ fn require_numeric(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<
 fn require_negatable(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<()> {
     if matches!(
         catalog.underlying(ty)?,
-        ScalarType::Int | ScalarType::Float | ScalarType::Duration
+        ScalarType::Int | ScalarType::Float | ScalarType::Duration | ScalarType::Decimal { .. }
     ) {
         Ok(())
     } else {
         Err(Error::new(
             "E_TYPE",
             format!(
-                "{context} expects int, float, or duration, got {}",
+                "{context} expects int or float, duration, or a fixed decimal, got {}",
                 catalog.describe(ty)
             ),
         ))
@@ -621,8 +680,24 @@ fn temporal_arithmetic_signature(
 pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
     matches!(
         name,
-        "uuid_parse" | "bytes_parse_hex" | "date_parse" | "timestamp_parse" | "duration_parse"
+        "uuid_parse"
+            | "bytes_parse_hex"
+            | "date_parse"
+            | "timestamp_parse"
+            | "duration_parse"
+            | "decimal_parse"
+            | "decimal_rescale"
     )
+}
+
+pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
+    if matches!(name, "decimal_parse" | "decimal_rescale") {
+        Some(3)
+    } else if is_builtin_scalar_function(name) {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
@@ -634,6 +709,21 @@ fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
         "duration_parse" => Some(ScalarType::Duration),
         _ => None,
     }
+}
+
+fn decimal_target(precision: &ScalarExpression, scale: &ScalarExpression) -> Result<ScalarType> {
+    let literal = |expression: &ScalarExpression, name: &str| match expression {
+        ScalarExpression::Literal(Value::Int(value)) => u8::try_from(*value)
+            .map_err(|_| Error::new("E_DECIMAL_TYPE", format!("decimal {name} is out of range"))),
+        _ => Err(Error::new(
+            "E_DECIMAL_TYPE",
+            format!("decimal {name} must be an integer literal"),
+        )),
+    };
+    let precision = literal(precision, "precision")?;
+    let scale = literal(scale, "scale")?;
+    crate::scalars::validate_decimal_type(precision, scale)?;
+    Ok(ScalarType::Decimal { precision, scale })
 }
 
 fn reference_type<'a>(
@@ -972,6 +1062,28 @@ fn evaluate_scalar<'expression, 'values>(
         ScalarExpression::Call {
             name, arguments, ..
         } if is_builtin_scalar_function(name) => {
+            if matches!(name.as_str(), "decimal_parse" | "decimal_rescale") {
+                let target = decimal_target(&arguments[1], &arguments[2])?;
+                let ScalarType::Decimal { precision, scale } = target else {
+                    unreachable!()
+                };
+                let Some(argument) = evaluate_scalar(catalog, &arguments[0], values)? else {
+                    return Ok(None);
+                };
+                let decimal = match (name.as_str(), argument.as_value().unwrapped()) {
+                    ("decimal_parse", Value::Text(source)) => {
+                        crate::scalars::Decimal::parse(source, precision, scale)?
+                    }
+                    ("decimal_rescale", Value::Decimal(value)) => {
+                        value.rescale(precision, scale)?
+                    }
+                    ("decimal_parse", _) => {
+                        return Err(Error::new("E_TYPE", "decimal_parse expects text"));
+                    }
+                    _ => return Err(Error::new("E_TYPE", "decimal_rescale expects decimal")),
+                };
+                return Ok(Some(Evaluated::Owned(Value::Decimal(decimal))));
+            }
             let Some(argument) = arguments.first() else {
                 return Err(Error::new("E_TYPE", format!("{name} expects 1 argument")));
             };
@@ -1027,6 +1139,7 @@ fn evaluate_scalar<'expression, 'values>(
                         .map(crate::scalars::Duration::from_microseconds)
                         .ok_or_else(|| Error::new("E_ARITH", "duration overflow in unary '-'"))?,
                 ),
+                Value::Decimal(value) => Value::Decimal(value.checked_neg()?),
                 _ => return Err(Error::new("E_TYPE", "non-numeric unary '-' operand")),
             };
             Ok(Some(Evaluated::Owned(coerce_arithmetic_result(
@@ -1075,7 +1188,15 @@ fn coerce_arithmetic_result(
     let ty = ty
         .as_ref()
         .ok_or_else(|| Error::new("E_TYPE", "arithmetic expression was not bound"))?;
-    catalog.coerce(&value, ty, "arithmetic result")
+    catalog
+        .coerce(&value, ty, "arithmetic result")
+        .map_err(|error| {
+            if matches!(ty, ScalarType::Decimal { .. }) && error.code == "E_DECIMAL_RANGE" {
+                Error::new("E_ARITH", error.message)
+            } else {
+                error
+            }
+        })
 }
 
 fn evaluate_arithmetic(left: &Value, op: ArithmeticOp, right: &Value) -> Result<Value> {
@@ -1105,6 +1226,14 @@ fn evaluate_arithmetic(left: &Value, op: ArithmeticOp, right: &Value) -> Result<
             };
             finite_float(value, "float arithmetic")
         }
+        (Value::Decimal(left), Value::Decimal(right)) => match op {
+            ArithmeticOp::Add => Ok(Value::Decimal(left.checked_add(*right)?)),
+            ArithmeticOp::Subtract => Ok(Value::Decimal(left.checked_sub(*right)?)),
+            ArithmeticOp::Multiply | ArithmeticOp::Divide => Err(Error::new(
+                "E_TYPE",
+                "decimal multiplication and division are not supported",
+            )),
+        },
         (Value::Duration(left), Value::Duration(right)) => {
             let value = match op {
                 ArithmeticOp::Add => left.microseconds().checked_add(right.microseconds()),

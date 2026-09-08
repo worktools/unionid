@@ -36,7 +36,7 @@ payload 规则如下：
 | `date`（v2） | Unix epoch day，`i32` |
 | `timestamp`（v2） | Unix epoch microseconds，`i64` |
 | `duration`（v2） | microseconds，`i64` |
-| `decimal p s`（v2） | 已由目标类型固定 scale 的 coefficient，`i128` |
+| `decimal p s`（v2） | 已由目标 schema 固定 scale 的 coefficient，`i128`；precision/scale 不重复写入 row payload |
 | `bytes`（v2） | byte length `u32`，随后是原始 bytes |
 | `text` | UTF-8 byte length `u32`，随后是 bytes |
 | 命名类型引用 | type ID `u64`，随后按该类型定义编码 |
@@ -48,7 +48,7 @@ payload 规则如下：
 
 record 编码前按 field ID 排序，因此源码字段重排不改变字节。type、field 和 variant 的名称均不写入 payload；显式 rename 保留 ID 时，旧字节可由新名称正常解码。tuple 与 sum 负载的位置是其类型契约的一部分。直接自递归类型继续写入同一个 type ID，并只对实际存在的有限子值递归编码；schema manifest 不展开这个引用，因此不需要新的 codec version。codec 1 会预检完整类型图，不能用空 list 或 None 绕过对生产标量的拒绝；codec 2 对旧标量保持相同 payload。
 
-编码是 canonical 的：同一 catalog、类型和逻辑值总是得到相同字节。两个版本都不接受非有限浮点、未知 tag、重复／未知 field ID、未知 variant ID、错误的 type ID、数量与 schema 不符、非法 UTF-8、截断或尾随字节。未知 codec version 直接以 `E_CODEC` 拒绝。
+编码是 canonical 的：同一 catalog、类型和逻辑值总是得到相同字节。decimal 解码按 catalog 中的 `P S` 重新验证 coefficient 范围，不能用 payload 绕过 precision；scale 变化必须由显式精确 migration 重写。两个版本都不接受非有限浮点、未知 tag、重复／未知 field ID、未知 variant ID、错误的 type ID、数量与 schema 不符、非法 UTF-8、截断或尾随字节。未知 codec version 直接以 `E_CODEC` 拒绝。
 
 ## Schema evolution
 

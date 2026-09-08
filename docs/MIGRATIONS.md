@@ -77,7 +77,7 @@ drop key table
 - `add unique index` 对 primitive、sum/product、tuple、option 与 list 的完整 typed value 施加唯一约束；`None` 不作例外。应用前扫描已有行，重复值使整个 migration 回滚。普通索引与 unique index 互换时，声明式 diff 生成先 drop、再 add 的显式步骤。
 - 修改命名 ADT 会扫描所有表及其 record/tuple/list/option/sum 嵌套路径。所有稳定 RowId 均保留；受影响的 secondary indexes 在提交前重建并验证。
 - 直接自递归命名 ADT 使用相同的全引用路径重写。rename、默认回填和 typed conversion 会遍历每个实际存在的有限值，并受 64 层 migration value 深度预算约束。删除最后一个终止变体或把类型改成无法构造有限值的循环会在提交前返回 `E_SCHEMA`，整个 migration 回滚。
-- text 导入 UUID/bytes/temporal 必须显式使用纯函数 `uuid_parse old`、`bytes_parse_hex old`、`date_parse old`、`timestamp_parse old` 或 `duration_parse old`；没有隐式 cast。任一行解析失败返回 `E_SCALAR_LITERAL`，并回滚 schema、全部 rows 与 indexes。UUID 输出规范为小写 RFC 9562 文本，bytes parser 保存原 octets，timestamp parser 规范为 UTC 微秒。
+- text 导入生产标量必须显式使用 `uuid_parse`、`bytes_parse_hex`、`date_parse`、`timestamp_parse`、`duration_parse` 或 `decimal_parse old P S`；decimal 间改变 precision/scale 使用 `decimal_rescale old P S`。没有隐式 cast 或舍入；任一坏行或非精确 rescale 回滚 schema、全部 rows、indexes 与 ledger。
 - 被其他类型或表直接／间接引用的 named type 不能删除。新增、删除或改名后的类型与变体仍遵守大写名称规则。
 
 ## 版本化 runner
