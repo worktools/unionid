@@ -30,8 +30,7 @@ use crate::wal::Wal;
 /// complete committed state through immutable `Arc` references.
 #[derive(Default)]
 pub struct Engine {
-    db: Arc<Database>,
-    receipts: Arc<ReceiptMap>,
+    committed: Arc<CommittedState>,
     wal: Option<Wal>,
     snapshot: Option<SnapshotStore>,
     snapshot_every: usize,
@@ -43,6 +42,12 @@ pub struct Engine {
     storage_mode: StorageMode,
     snapshot_storage_versions: Option<StorageVersions>,
     _locks: Vec<DatabaseLock>,
+}
+
+#[derive(Clone, Default)]
+struct CommittedState {
+    db: Arc<Database>,
+    receipts: Arc<ReceiptMap>,
 }
 
 struct DatabaseLock(File);
@@ -245,8 +250,10 @@ impl Engine {
             (None, _) => StorageMode::Memory,
         };
         Ok(Self {
-            db: Arc::new(db),
-            receipts: Arc::new(ReceiptMap::new()),
+            committed: Arc::new(CommittedState {
+                db: Arc::new(db),
+                receipts: Arc::new(ReceiptMap::new()),
+            }),
             wal,
             snapshot,
             snapshot_every,
@@ -266,8 +273,10 @@ impl Engine {
     pub fn open_redb(path: impl Into<PathBuf>) -> Result<Self> {
         let (redb, db, receipts) = RedbStore::open(path)?;
         Ok(Self {
-            db: Arc::new(db),
-            receipts: Arc::new(receipts),
+            committed: Arc::new(CommittedState {
+                db: Arc::new(db),
+                receipts: Arc::new(receipts),
+            }),
             durable: Some(Box::new(redb)),
             storage_mode: StorageMode::Redb,
             ..Self::default()
@@ -380,7 +389,7 @@ impl Engine {
         let result = (|| {
             control.checkpoint()?;
             if let Some(expected) = expected_schema
-                && expected != &self.db.schema_info()
+                && expected != &self.committed.db.schema_info()
             {
                 return Err(Error::new(
                     "E_SCHEMA_CHANGED",
@@ -388,8 +397,8 @@ impl Engine {
                         "request expects schema revision {} ({}) but the database is at revision {} ({})",
                         expected.revision,
                         expected.hash,
-                        self.db.schema_info().revision,
-                        self.db.schema_info().hash
+                        self.committed.db.schema_info().revision,
+                        self.committed.db.schema_info().hash
                     ),
                 ));
             }
@@ -493,7 +502,7 @@ impl Engine {
         } else {
             IdempotencyDurability::ProcessLocal
         };
-        if let Some(receipt) = self.receipts.get(key) {
+        if let Some(receipt) = self.committed.receipts.get(key) {
             if receipt.digest != digest {
                 return Err(Error::new(
                     "E_IDEMPOTENCY_CONFLICT",
@@ -526,6 +535,7 @@ impl Engine {
             None,
         )?;
         let receipt = self
+            .committed
             .receipts
             .get(key)
             .expect("successful idempotent execution publishes its receipt");
@@ -539,8 +549,9 @@ impl Engine {
     }
 
     pub fn idempotency_status(&self) -> Result<IdempotencyStatus> {
-        let encoded_bytes = validate_receipts(&self.receipts, self.db.sequence)?;
-        let mut ordered = self.receipts.iter().collect::<Vec<_>>();
+        let encoded_bytes =
+            validate_receipts(&self.committed.receipts, self.committed.db.sequence)?;
+        let mut ordered = self.committed.receipts.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|(key, receipt)| {
             (
                 receipt.committed_sequence,
@@ -549,7 +560,7 @@ impl Engine {
             )
         });
         Ok(IdempotencyStatus {
-            count: self.receipts.len(),
+            count: self.committed.receipts.len(),
             encoded_bytes,
             max_count: MAX_IDEMPOTENCY_RECEIPTS,
             max_encoded_bytes: MAX_IDEMPOTENCY_TOTAL_BYTES,
@@ -566,21 +577,21 @@ impl Engine {
         let selected = self.idempotency_prune_selection(&options)?;
         let selected_encoded_bytes = selected.iter().try_fold(0usize, |total, key| {
             total
-                .checked_add(receipt_encoded_len(&self.receipts[*key])?)
+                .checked_add(receipt_encoded_len(&self.committed.receipts[*key])?)
                 .ok_or_else(|| Error::new("E_IDEMPOTENCY_CAPACITY", "receipt size overflow"))
         })?;
         Ok(IdempotencyPruneResult {
             options,
             selected_count: selected.len(),
             selected_encoded_bytes,
-            remaining_count: self.receipts.len().saturating_sub(selected.len()),
+            remaining_count: self.committed.receipts.len().saturating_sub(selected.len()),
             applied: false,
             first_selected: selected
                 .first()
-                .map(|key| boundary(key, &self.receipts[*key])),
+                .map(|key| boundary(key, &self.committed.receipts[*key])),
             last_selected: selected
                 .last()
-                .map(|key| boundary(key, &self.receipts[*key])),
+                .map(|key| boundary(key, &self.committed.receipts[*key])),
         })
     }
 
@@ -616,12 +627,13 @@ impl Engine {
             result.applied = true;
             return Ok(result);
         }
-        let mut receipts = self.receipts.as_ref().clone();
+        let mut receipts = self.committed.receipts.as_ref().clone();
         for key in keys {
             receipts.remove(&key);
         }
-        let mut candidate = self.db.as_ref().clone();
+        let mut candidate = self.committed.db.as_ref().clone();
         candidate.sequence = self
+            .committed
             .db
             .sequence
             .checked_add(1)
@@ -651,6 +663,7 @@ impl Engine {
             ));
         }
         let mut selected = self
+            .committed
             .receipts
             .iter()
             .filter(|(_, receipt)| {
@@ -700,6 +713,7 @@ impl Engine {
         for located in &mut statements {
             match &mut located.statement {
                 Statement::Explain(pipeline) | Statement::Pipeline(pipeline) => self
+                    .committed
                     .db
                     .prepare_pipeline(pipeline)
                     .map(|_| ())
@@ -711,7 +725,8 @@ impl Engine {
                     ..
                 } => {
                     *parameter_type = Some(
-                        self.db
+                        self.committed
+                            .db
                             .prepare_bulk_insert_parameter(table, returning.as_ref())
                             .map_err(|error| error.at(located.span))?,
                     );
@@ -724,7 +739,8 @@ impl Engine {
                     ..
                 } => {
                     *parameter_type = Some(
-                        self.db
+                        self.committed
+                            .db
                             .prepare_insert_parameter(table, returning.as_ref())
                             .map_err(|error| error.at(located.span))?,
                     );
@@ -737,7 +753,8 @@ impl Engine {
                     ..
                 } => {
                     *parameter_type = Some(
-                        self.db
+                        self.committed
+                            .db
                             .prepare_upsert_parameter(table, returning.as_ref())
                             .map_err(|error| error.at(located.span))?,
                     );
@@ -750,7 +767,8 @@ impl Engine {
                     ..
                 } => {
                     *parameter_type = Some(
-                        self.db
+                        self.committed
+                            .db
                             .prepare_bulk_upsert_parameter(table, returning.as_ref())
                             .map_err(|error| error.at(located.span))?,
                     );
@@ -761,13 +779,15 @@ impl Engine {
                     assignments,
                     returning,
                 } => {
-                    self.db
+                    self.committed
+                        .db
                         .prepare_update(target, assignments, returning.as_ref())
                         .map_err(|error| error.at(located.span))?;
                     mutating = true;
                 }
                 Statement::Delete { target, returning } => {
-                    self.db
+                    self.committed
+                        .db
                         .prepare_delete(target, returning.as_ref())
                         .map_err(|error| error.at(located.span))?;
                     mutating = true;
@@ -783,14 +803,14 @@ impl Engine {
         }
         let parameter_types = crate::params::types(&statements)?
             .into_iter()
-            .map(|(name, ty)| (name, self.db.catalog.describe(&ty)))
+            .map(|(name, ty)| (name, self.committed.db.catalog.describe(&ty)))
             .collect();
         Ok(PreparedQuery {
             source: source.into(),
             parameters: crate::params::names(&statements).into_iter().collect(),
             parameter_types,
             statements,
-            schema: self.db.schema_info(),
+            schema: self.committed.db.schema_info(),
             mutating,
         })
     }
@@ -815,7 +835,7 @@ impl Engine {
         let needs_schema_preview = statements[..last]
             .iter()
             .any(|located| located.statement.changes_schema());
-        let mut preview = self.db.as_ref().clone();
+        let mut preview = self.committed.db.as_ref().clone();
         if needs_schema_preview {
             for located in &statements[..last] {
                 preview
@@ -839,7 +859,7 @@ impl Engine {
     }
 
     pub(crate) fn preflight_protocol_v1_introspection(&self) -> Result<()> {
-        if self.db.has_production_scalars()? {
+        if self.committed.db.has_production_scalars()? {
             Err(Error::new(
                 "E_PROTOCOL_TYPE",
                 "schema introspection requires protocol version 2",
@@ -853,7 +873,7 @@ impl Engine {
     /// query. This preserves the established retry contract while still
     /// preventing a legacy protocol response from exposing a native scalar.
     pub(crate) fn preflight_protocol_v1_receipt(&self, key: &str, digest: &str) -> Result<bool> {
-        let Some(receipt) = self.receipts.get(key) else {
+        let Some(receipt) = self.committed.receipts.get(key) else {
             return Ok(false);
         };
         if receipt.digest != digest {
@@ -893,15 +913,15 @@ impl Engine {
         parameters: std::collections::BTreeMap<String, crate::Value>,
         deadline: Option<&ExecutionControl>,
     ) -> QueryResponse {
-        if prepared.schema != self.db.schema_info() {
+        if prepared.schema != self.committed.db.schema_info() {
             return self.with_schema(QueryResponse::failure(Error::new(
                 "E_SCHEMA_CHANGED",
                 format!(
                     "prepared query uses schema revision {} ({}) but the database is at revision {} ({})",
                     prepared.schema.revision,
                     prepared.schema.hash,
-                    self.db.schema_info().revision,
-                    self.db.schema_info().hash
+                    self.committed.db.schema_info().revision,
+                    self.committed.db.schema_info().hash
                 ),
             )));
         }
@@ -978,7 +998,7 @@ impl Engine {
         page: Option<PageSpec>,
     ) -> Result<QueryResponse> {
         if let Some(expected) = expected_schema
-            && expected != &self.db.schema_info()
+            && expected != &self.committed.db.schema_info()
         {
             return Err(Error::new(
                 "E_SCHEMA_CHANGED",
@@ -986,8 +1006,8 @@ impl Engine {
                     "request expects schema revision {} ({}) but the database is at revision {} ({})",
                     expected.revision,
                     expected.hash,
-                    self.db.schema_info().revision,
-                    self.db.schema_info().hash
+                    self.committed.db.schema_info().revision,
+                    self.committed.db.schema_info().hash
                 ),
             ));
         }
@@ -1066,7 +1086,7 @@ impl Engine {
                 "mutating scripts cannot execute against an immutable read snapshot",
             ));
         }
-        if schema_changing && !self.db.migration_history().is_empty() {
+        if schema_changing && !self.committed.db.migration_history().is_empty() {
             return Err(Error::new(
                 "E_MIGRATION",
                 "schema is managed by the migration ledger; use the versioned migration runner",
@@ -1079,7 +1099,7 @@ impl Engine {
             ));
         }
         let mut candidate = if mutating {
-            Some(self.db.as_ref().clone())
+            Some(self.committed.db.as_ref().clone())
         } else {
             None
         };
@@ -1088,7 +1108,7 @@ impl Engine {
             ensure_deadline(deadline)?;
             response = match candidate.as_mut() {
                 Some(target) => target.execute_with_deadline(located.statement, deadline),
-                None => self.db.execute_read(located.statement, deadline),
+                None => self.committed.db.execute_read(located.statement, deadline),
             }
             .map_err(|e| e.at(located.span))?;
         }
@@ -1098,6 +1118,7 @@ impl Engine {
                 candidate.advance_schema_revision()?;
             }
             candidate.sequence = self
+                .committed
                 .db
                 .sequence
                 .checked_add(1)
@@ -1110,8 +1131,8 @@ impl Engine {
                     completed_at_unix_ms: unix_time_ms()?,
                     response: response.clone(),
                 };
-                validate_new_receipt(&self.receipts, &receipt)?;
-                let mut receipts = self.receipts.as_ref().clone();
+                validate_new_receipt(&self.committed.receipts, &receipt)?;
+                let mut receipts = self.committed.receipts.as_ref().clone();
                 receipts.insert(idempotency.key.to_owned(), receipt);
                 Some(receipts)
             } else {
@@ -1123,10 +1144,11 @@ impl Engine {
     }
 
     pub fn migration_status(&self, files: &[MigrationFile]) -> Result<MigrationStatus> {
-        let applied_count = validate_files_against_history(files, self.db.migration_history())?;
+        let applied_count =
+            validate_files_against_history(files, self.committed.db.migration_history())?;
         Ok(MigrationStatus {
-            schema: self.db.schema_info(),
-            applied: self.db.migration_history().to_vec(),
+            schema: self.committed.db.schema_info(),
+            applied: self.committed.db.migration_history().to_vec(),
             pending: files[applied_count..]
                 .iter()
                 .map(|file| file.id.clone())
@@ -1135,9 +1157,10 @@ impl Engine {
     }
 
     pub fn plan_migrations(&self, files: &[MigrationFile]) -> Result<MigrationPlan> {
-        let applied_count = validate_files_against_history(files, self.db.migration_history())?;
-        let current_schema = self.db.schema_info();
-        let mut candidate = self.db.as_ref().clone();
+        let applied_count =
+            validate_files_against_history(files, self.committed.db.migration_history())?;
+        let current_schema = self.committed.db.schema_info();
+        let mut candidate = self.committed.db.as_ref().clone();
         let mut pending = Vec::new();
         for file in &files[applied_count..] {
             let before = candidate.schema_info();
@@ -1187,7 +1210,8 @@ impl Engine {
                 "versioned migrations require redb or an in-memory Engine",
             ));
         }
-        let applied_count = validate_files_against_history(files, self.db.migration_history())?;
+        let applied_count =
+            validate_files_against_history(files, self.committed.db.migration_history())?;
         if self.read_only && applied_count < files.len() {
             return Err(Error::new(
                 "E_READ_ONLY",
@@ -1219,7 +1243,7 @@ impl Engine {
         Ok(MigrationApply {
             applied,
             skipped,
-            schema: self.db.schema_info(),
+            schema: self.committed.db.schema_info(),
         })
     }
 
@@ -1230,7 +1254,7 @@ impl Engine {
                 "writes are disabled after a storage failure; reopen the database to resolve the commit state",
             ));
         }
-        let mut candidate = self.db.as_ref().clone();
+        let mut candidate = self.committed.db.as_ref().clone();
         candidate
             .execute(Statement::Migration {
                 name: file.id.clone(),
@@ -1240,6 +1264,7 @@ impl Engine {
             .map_err(|error| migration_file_error(file, error))?;
         candidate.advance_schema_revision()?;
         candidate.sequence = self
+            .committed
             .db
             .sequence
             .checked_add(1)
@@ -1273,8 +1298,8 @@ impl Engine {
         if let Some(durable) = &mut self.durable {
             let receipts = receipt_state
                 .as_ref()
-                .unwrap_or_else(|| self.receipts.as_ref());
-            match durable.commit(&self.db, &candidate, receipts) {
+                .unwrap_or_else(|| self.committed.receipts.as_ref());
+            match durable.commit(&self.committed.db, &candidate, receipts) {
                 Ok(()) => {}
                 Err(CommitFailure::Definite(error)) => {
                     return Err(Error::new(
@@ -1314,10 +1339,13 @@ impl Engine {
                 ));
             }
         }
-        self.db = Arc::new(candidate);
-        if let Some(receipts) = receipt_state {
-            self.receipts = Arc::new(receipts);
-        }
+        let receipts = receipt_state
+            .map(Arc::new)
+            .unwrap_or_else(|| self.committed.receipts.clone());
+        self.committed = Arc::new(CommittedState {
+            db: Arc::new(candidate),
+            receipts,
+        });
         self.writes_since_snapshot += 1;
         if self.snapshot_every > 0
             && self.writes_since_snapshot >= self.snapshot_every
@@ -1337,7 +1365,7 @@ impl Engine {
         }
         if let Some(snapshot) = &self.snapshot {
             snapshot
-                .save(&self.db)
+                .save(&self.committed.db)
                 .map_err(|e| Error::new("E_CHECKPOINT", e))?;
             if let Some(wal) = &self.wal {
                 wal.truncate().map_err(|e| Error::new("E_CHECKPOINT", e))?;
@@ -1362,12 +1390,14 @@ impl Engine {
         })?;
         let (backend_clean, database, receipts) = durable.check_integrity()?;
         let versions = durable.versions();
-        self.db = Arc::new(database);
-        self.receipts = Arc::new(receipts);
+        self.committed = Arc::new(CommittedState {
+            db: Arc::new(database),
+            receipts: Arc::new(receipts),
+        });
         Ok(StorageIntegrity {
             backend: "redb",
             backend_clean,
-            schema: self.db.schema_info(),
+            schema: self.committed.db.schema_info(),
             versions,
         })
     }
@@ -1388,7 +1418,7 @@ impl Engine {
                 "storage upgrade requires a database opened with Engine::open_redb",
             )
         })?;
-        match durable.upgrade(&self.db, &self.receipts, target) {
+        match durable.upgrade(&self.committed.db, &self.committed.receipts, target) {
             Ok(result) => Ok(result),
             Err(CommitFailure::Definite(error)) => Err(error),
             Err(CommitFailure::Uncertain(error)) => {
@@ -1406,19 +1436,19 @@ impl Engine {
     }
 
     pub fn schema(&self) -> String {
-        self.db.schema_text()
+        self.committed.db.schema_text()
     }
     pub fn tables(&self) -> Vec<String> {
-        self.db.table_names()
+        self.committed.db.table_names()
     }
 
     pub fn introspection(&self) -> Introspection {
         Introspection {
-            schema: self.db.schema_info(),
-            schema_source: self.db.schema_text(),
-            tables: self.db.table_names(),
-            types: self.db.type_names(),
-            fields: self.db.field_names(),
+            schema: self.committed.db.schema_info(),
+            schema_source: self.committed.db.schema_text(),
+            tables: self.committed.db.table_names(),
+            types: self.committed.db.type_names(),
+            fields: self.committed.db.field_names(),
             storage: self.storage_mode,
             storage_versions: self
                 .durable
@@ -1426,8 +1456,9 @@ impl Engine {
                 .map(|durable| durable.versions())
                 .or(self.snapshot_storage_versions),
             read_only: self.read_only,
-            migration_count: self.db.migration_history().len(),
+            migration_count: self.committed.db.migration_history().len(),
             migration_head: self
+                .committed
                 .db
                 .migration_history()
                 .last()
@@ -1436,15 +1467,15 @@ impl Engine {
     }
 
     pub fn schema_info(&self) -> crate::db::SchemaInfo {
-        self.db.schema_info()
+        self.committed.db.schema_info()
     }
 
     pub fn migration_history(&self) -> &[MigrationEntry] {
-        self.db.migration_history()
+        self.committed.db.migration_history()
     }
 
     pub(crate) fn database_snapshot(&self) -> Database {
-        self.db.as_ref().clone()
+        self.committed.db.as_ref().clone()
     }
 
     /// Capture one complete committed state for execution outside a service's
@@ -1452,8 +1483,7 @@ impl Engine {
     /// it can observe and evaluate the captured state but cannot publish writes.
     pub(crate) fn read_snapshot(&self) -> Self {
         Self {
-            db: self.db.clone(),
-            receipts: self.receipts.clone(),
+            committed: self.committed.clone(),
             write_failed: self.write_failed,
             read_only: self.read_only,
             snapshot_execution: true,
@@ -1468,7 +1498,10 @@ impl Engine {
     }
 
     pub(crate) fn logical_snapshot(&self) -> (Database, ReceiptMap) {
-        (self.db.as_ref().clone(), self.receipts.as_ref().clone())
+        (
+            self.committed.db.as_ref().clone(),
+            self.committed.receipts.as_ref().clone(),
+        )
     }
 
     pub(crate) fn restore_redb(
@@ -1518,11 +1551,11 @@ impl Engine {
         migration_id: &str,
         parent: Option<&str>,
     ) -> Result<crate::schema::SchemaDiff> {
-        crate::schema::diff(&self.db, target_source, migration_id, parent)
+        crate::schema::diff(&self.committed.db, target_source, migration_id, parent)
     }
 
     fn with_schema(&self, mut response: QueryResponse) -> QueryResponse {
-        response.schema = Some(self.db.schema_info());
+        response.schema = Some(self.committed.db.schema_info());
         response
     }
 }
@@ -1710,6 +1743,31 @@ mod tests {
         assert_eq!(rejected.error.unwrap().code, "E_STORAGE");
     }
 
+    #[test]
+    fn read_snapshot_captures_one_database_and_receipt_commit_root() {
+        let mut engine = Engine::memory();
+        assert!(engine.execute("create table entries (id int)").ok);
+        let mut snapshot = engine.read_snapshot();
+        let captured = snapshot.committed.clone();
+        assert!(Arc::ptr_eq(&captured, &engine.committed));
+
+        engine
+            .execute_idempotent_with_params(
+                "entry-1",
+                DIGEST_A,
+                "insert entries {id = 1}",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&captured, &engine.committed));
+        assert_eq!(snapshot.execute("from entries").rows.len(), 0);
+        assert_eq!(snapshot.idempotency_status().unwrap().count, 0);
+        assert_eq!(engine.execute("from entries").rows.len(), 1);
+        assert_eq!(engine.idempotency_status().unwrap().count, 1);
+    }
+
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
@@ -1838,7 +1896,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(failed.code, "E_STORAGE");
-        assert!(definite.receipts.is_empty());
+        assert!(definite.committed.receipts.is_empty());
         let retry = definite
             .execute_idempotent_with_params(
                 "retry",
@@ -1861,7 +1919,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(failed.code, "E_STORAGE");
-        assert!(uncertain.receipts.is_empty());
+        assert!(uncertain.committed.receipts.is_empty());
         assert!(uncertain.write_failed);
     }
 
@@ -2059,7 +2117,7 @@ mod tests {
         use crate::scalars::Uuid;
 
         let mut engine = Engine::memory();
-        Arc::make_mut(&mut engine.db)
+        Arc::make_mut(&mut Arc::make_mut(&mut engine.committed).db)
             .execute(Statement::DefineType {
                 name: "NativeRow".into(),
                 ty: ScalarType::Record(vec![
@@ -2078,14 +2136,14 @@ mod tests {
                 ]),
             })
             .unwrap();
-        Arc::make_mut(&mut engine.db)
+        Arc::make_mut(&mut Arc::make_mut(&mut engine.committed).db)
             .execute(Statement::TypedTable {
                 table: "native_rows".into(),
                 row_type: "NativeRow".into(),
                 key: None,
             })
             .unwrap();
-        Arc::make_mut(&mut engine.db)
+        Arc::make_mut(&mut Arc::make_mut(&mut engine.committed).db)
             .execute(Statement::Insert {
                 table: "native_rows".into(),
                 values: crate::Value::Record(BTreeMap::from([
