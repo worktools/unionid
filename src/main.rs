@@ -97,6 +97,15 @@ enum Command {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Explicitly upgrade all durable codecs in one transaction.
+    Upgrade {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        target: u32,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
     /// Create, inspect, and apply ordered schema migrations.
     Migration {
         #[command(subcommand)]
@@ -327,6 +336,9 @@ fn run() -> Result<(), String> {
             cli::format_source(&source, check)
         }
         Command::Check { db, format } => cli::check_redb(db, matches!(format, Format::Json)),
+        Command::Upgrade { db, target, format } => {
+            cli::upgrade_redb(db, target, matches!(format, Format::Json))
+        }
         Command::Migration { command } => match command {
             MigrationCommand::New { name, dir } => {
                 let path = cli::migration_new(dir, &name)?;

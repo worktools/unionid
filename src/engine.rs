@@ -12,7 +12,7 @@ use crate::idempotency::{
     MAX_IDEMPOTENCY_RECEIPTS, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap, boundary,
     receipt_encoded_len, validate_digest, validate_key, validate_new_receipt, validate_receipts,
 };
-use crate::introspection::{Introspection, StorageMode};
+use crate::introspection::{Introspection, StorageMode, StorageVersions};
 use crate::migration::{
     MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
     MigrationStatus, describe_step, validate_files_against_history,
@@ -56,6 +56,14 @@ pub struct StorageIntegrity {
     pub backend: &'static str,
     pub backend_clean: bool,
     pub schema: crate::db::SchemaInfo,
+    pub versions: StorageVersions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct StorageUpgrade {
+    pub previous_format: u32,
+    pub format: u32,
+    pub changed: bool,
 }
 
 /// A parsed query or supported parameterized operation bound to one schema
@@ -97,6 +105,14 @@ trait DurableBackend: Send {
         receipts: &ReceiptMap,
     ) -> std::result::Result<(), CommitFailure>;
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)>;
+    fn supports_production_scalars(&self) -> bool;
+    fn versions(&self) -> StorageVersions;
+    fn upgrade(
+        &mut self,
+        database: &Database,
+        receipts: &ReceiptMap,
+        target: u32,
+    ) -> std::result::Result<StorageUpgrade, CommitFailure>;
 }
 
 impl DurableBackend for RedbStore {
@@ -111,6 +127,28 @@ impl DurableBackend for RedbStore {
 
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
         RedbStore::check_integrity(self)
+    }
+
+    fn supports_production_scalars(&self) -> bool {
+        RedbStore::supports_production_scalars(self)
+    }
+
+    fn versions(&self) -> StorageVersions {
+        RedbStore::versions(self)
+    }
+
+    fn upgrade(
+        &mut self,
+        database: &Database,
+        receipts: &ReceiptMap,
+        target: u32,
+    ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+        let result = RedbStore::upgrade(self, database, receipts, target)?;
+        Ok(StorageUpgrade {
+            previous_format: result.previous_format,
+            format: result.format,
+            changed: result.changed,
+        })
     }
 }
 
@@ -701,6 +739,90 @@ impl Engine {
         })
     }
 
+    /// Validate the complete response type boundary used by protocol version 1.
+    /// Binding runs against a database clone when earlier schema statements must
+    /// affect the final statement; no live row or catalog mutation is published.
+    pub(crate) fn preflight_protocol_v1(
+        &self,
+        source: &str,
+        parameters: &std::collections::BTreeMap<String, crate::Value>,
+        page: Option<PageSpec>,
+    ) -> Result<()> {
+        let mut statements = syntax::parse(source)?;
+        if let Some(page) = page {
+            attach_structured_page(&mut statements, page)?;
+        }
+        crate::params::bind(&mut statements, parameters)?;
+        let Some(last) = statements.len().checked_sub(1) else {
+            return Ok(());
+        };
+        let needs_schema_preview = statements[..last]
+            .iter()
+            .any(|located| located.statement.changes_schema());
+        let mut preview = self.db.clone();
+        if needs_schema_preview {
+            for located in &statements[..last] {
+                preview
+                    .execute(located.statement.clone())
+                    .map_err(|error| error.at(located.span))?;
+            }
+        }
+        let types = preview
+            .prepare_response_types(&mut statements[last].statement)
+            .map_err(|error| error.at(statements[last].span))?;
+        for ty in types {
+            if preview.catalog.requires_protocol_v2(&ty)? {
+                return Err(Error::new(
+                    "E_PROTOCOL_TYPE",
+                    "response type requires protocol version 2",
+                )
+                .at(statements[last].span));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn preflight_protocol_v1_introspection(&self) -> Result<()> {
+        if self.db.has_production_scalars()? {
+            Err(Error::new(
+                "E_PROTOCOL_TYPE",
+                "schema introspection requires protocol version 2",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Return true when the idempotent request will replay without parsing its
+    /// query. This preserves the established retry contract while still
+    /// preventing a legacy protocol response from exposing a native scalar.
+    pub(crate) fn preflight_protocol_v1_receipt(&self, key: &str, digest: &str) -> Result<bool> {
+        let Some(receipt) = self.receipts.get(key) else {
+            return Ok(false);
+        };
+        if receipt.digest != digest {
+            return Err(Error::new(
+                "E_IDEMPOTENCY_CONFLICT",
+                format!(
+                    "idempotency key has digest {}; new request has digest {digest}",
+                    receipt.digest
+                ),
+            ));
+        }
+        if receipt
+            .response
+            .rows
+            .iter()
+            .any(|row| row.values().any(crate::Value::requires_protocol_v2))
+        {
+            return Err(Error::new(
+                "E_PROTOCOL_TYPE",
+                "stored response requires protocol version 2",
+            ));
+        }
+        Ok(true)
+    }
+
     pub fn query(
         &mut self,
         prepared: &PreparedQuery,
@@ -731,6 +853,19 @@ impl Engine {
             return self.with_schema(QueryResponse::failure(Error::new(
                 "E_CONFIG",
                 "parameterized writes require redb or memory mode; the transitional WAL stores source text",
+            )));
+        }
+        if prepared.mutating
+            && parameters.values().any(crate::Value::requires_protocol_v2)
+            && (self
+                .durable
+                .as_ref()
+                .is_some_and(|durable| !durable.supports_production_scalars())
+                || self.snapshot.is_some())
+        {
+            return self.with_schema(QueryResponse::failure(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "production scalar writes require storage format 4",
             )));
         }
         let mut statements = prepared.statements.clone();
@@ -802,6 +937,23 @@ impl Engine {
         let mut statements = syntax::parse(source)?;
         if let Some(page) = page {
             attach_structured_page(&mut statements, page)?;
+        }
+        let native_parameters = parameters.values().any(crate::Value::requires_protocol_v2);
+        if native_parameters
+            && (self
+                .durable
+                .as_ref()
+                .is_some_and(|durable| !durable.supports_production_scalars())
+                || self.wal.is_some()
+                || self.snapshot.is_some())
+            && statements
+                .iter()
+                .any(|located| located.statement.is_mutating())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "production scalar writes require storage format 4",
+            ));
         }
         crate::params::bind(&mut statements, &parameters)?;
         let contains_parameters = !parameters.is_empty();
@@ -1143,13 +1295,48 @@ impl Engine {
             )
         })?;
         let (backend_clean, database, receipts) = durable.check_integrity()?;
+        let versions = durable.versions();
         self.db = database;
         self.receipts = receipts;
         Ok(StorageIntegrity {
             backend: "redb",
             backend_clean,
             schema: self.db.schema_info(),
+            versions,
         })
+    }
+
+    pub fn upgrade_storage(&mut self, target: u32) -> Result<StorageUpgrade> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "storage upgrade requires reopening after an uncertain commit",
+            ));
+        }
+        if self.read_only {
+            return Err(Error::new("E_READ_ONLY", "storage upgrade is a mutation"));
+        }
+        let durable = self.durable.as_mut().ok_or_else(|| {
+            Error::new(
+                "E_CONFIG",
+                "storage upgrade requires a database opened with Engine::open_redb",
+            )
+        })?;
+        match durable.upgrade(&self.db, &self.receipts, target) {
+            Ok(result) => Ok(result),
+            Err(CommitFailure::Definite(error)) => Err(error),
+            Err(CommitFailure::Uncertain(error)) => {
+                self.durable = None;
+                self.write_failed = true;
+                Err(Error::new(
+                    "E_STORAGE",
+                    format!(
+                        "storage upgrade commit result is uncertain: {}; reopen the database and run check before retrying",
+                        error.message
+                    ),
+                ))
+            }
+        }
     }
 
     pub fn schema(&self) -> String {
@@ -1167,6 +1354,7 @@ impl Engine {
             types: self.db.type_names(),
             fields: self.db.field_names(),
             storage: self.storage_mode,
+            storage_versions: self.durable.as_ref().map(|durable| durable.versions()),
             read_only: self.read_only,
             migration_count: self.db.migration_history().len(),
             migration_head: self
@@ -1362,6 +1550,45 @@ mod tests {
         fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
             unreachable!()
         }
+
+        fn supports_production_scalars(&self) -> bool {
+            true
+        }
+
+        fn versions(&self) -> StorageVersions {
+            StorageVersions {
+                format: 4,
+                catalog_codec: 3,
+                value_codec: 2,
+                index_key_codec: 2,
+                migration_codec: 1,
+                receipt_codec: 2,
+                backup_codec: 3,
+            }
+        }
+
+        fn upgrade(
+            &mut self,
+            _: &Database,
+            _: &ReceiptMap,
+            _: u32,
+        ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+            match self.uncertain.take() {
+                Some(false) => Err(CommitFailure::Definite(Error::new(
+                    "E_STORAGE",
+                    "injected upgrade pre-commit failure",
+                ))),
+                Some(true) => Err(CommitFailure::Uncertain(Error::new(
+                    "E_STORAGE",
+                    "injected upgrade commit failure",
+                ))),
+                None => Ok(StorageUpgrade {
+                    previous_format: 3,
+                    format: 4,
+                    changed: true,
+                }),
+            }
+        }
     }
 
     fn engine_with_failure(uncertain: bool) -> Engine {
@@ -1371,6 +1598,16 @@ mod tests {
             })),
             ..Engine::default()
         }
+    }
+
+    #[test]
+    fn uncertain_storage_upgrade_disables_the_open_engine() {
+        let mut engine = engine_with_failure(true);
+        let error = engine.upgrade_storage(4).unwrap_err();
+        assert_eq!(error.code, "E_STORAGE");
+        assert!(error.message.contains("result is uncertain"));
+        assert!(engine.write_failed);
+        assert!(engine.durable.is_none());
     }
 
     const DIGEST_A: &str =
@@ -1713,5 +1950,134 @@ mod tests {
         let repeated = read_only.apply_migrations(&[file]).unwrap();
         assert!(repeated.applied.is_empty());
         assert_eq!(repeated.skipped, ["m0001_initial"]);
+    }
+
+    #[test]
+    fn protocol_v1_preflight_rejects_native_results_without_publishing_prior_mutations() {
+        use crate::model::{Column, ScalarType};
+        use crate::query::Statement;
+        use crate::scalars::Uuid;
+
+        let mut engine = Engine::memory();
+        engine
+            .db
+            .execute(Statement::DefineType {
+                name: "NativeRow".into(),
+                ty: ScalarType::Record(vec![
+                    Column {
+                        name: "id".into(),
+                        ty: ScalarType::Int,
+                        default: None,
+                        id: 0,
+                    },
+                    Column {
+                        name: "native".into(),
+                        ty: ScalarType::Uuid,
+                        default: None,
+                        id: 0,
+                    },
+                ]),
+            })
+            .unwrap();
+        engine
+            .db
+            .execute(Statement::TypedTable {
+                table: "native_rows".into(),
+                row_type: "NativeRow".into(),
+                key: None,
+            })
+            .unwrap();
+        engine
+            .db
+            .execute(Statement::Insert {
+                table: "native_rows".into(),
+                values: crate::Value::Record(BTreeMap::from([
+                    ("id".into(), crate::Value::Int(1)),
+                    (
+                        "native".into(),
+                        crate::Value::Uuid(Uuid::from_bytes([1; 16])),
+                    ),
+                ])),
+                returning: None,
+            })
+            .unwrap();
+        assert!(
+            engine
+                .execute("type Plain = { id int }\ntable plain Plain\ninsert plain { id = 1 }")
+                .ok
+        );
+
+        let error = engine
+            .preflight_protocol_v1(
+                "insert plain { id = 2 }\nfrom native_rows | select { native }",
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "E_PROTOCOL_TYPE");
+        assert_eq!(engine.execute("from plain").rows.len(), 1);
+        assert!(
+            engine
+                .preflight_protocol_v1("from native_rows | select { id }", &BTreeMap::new(), None,)
+                .is_ok()
+        );
+        for source in [
+            "delete native_rows | take 1 | returning { native }",
+            "explain from native_rows | select { native }",
+        ] {
+            assert_eq!(
+                engine
+                    .preflight_protocol_v1(source, &BTreeMap::new(), None)
+                    .unwrap_err()
+                    .code,
+                "E_PROTOCOL_TYPE",
+                "{source}"
+            );
+        }
+        assert_eq!(engine.execute("from native_rows").rows.len(), 1);
+        assert_eq!(
+            engine
+                .preflight_protocol_v1_introspection()
+                .unwrap_err()
+                .code,
+            "E_PROTOCOL_TYPE"
+        );
+    }
+
+    #[test]
+    fn protocol_v1_receipt_preflight_preserves_parse_free_replay() {
+        let mut engine = Engine::memory();
+        assert!(engine.execute("create table entries (id int)").ok);
+        engine
+            .execute_idempotent_with_params(
+                "replay",
+                DIGEST_A,
+                "insert entries { id = 1 }",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            engine
+                .preflight_protocol_v1_receipt("replay", DIGEST_A)
+                .unwrap()
+        );
+        assert_eq!(
+            engine
+                .preflight_protocol_v1_receipt("replay", DIGEST_B)
+                .unwrap_err()
+                .code,
+            "E_IDEMPOTENCY_CONFLICT"
+        );
+        let replay = engine
+            .execute_idempotent_with_params(
+                "replay",
+                DIGEST_A,
+                "this source is deliberately not parsed",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(replay.replayed);
     }
 }

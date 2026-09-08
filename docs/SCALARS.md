@@ -2,9 +2,9 @@
 
 ## 当前可用范围
 
-`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes` 的 Rust 值校验与 serde 表示。这是 [#137](https://github.com/worktools/unionid/issues/137) 的基础切片；当前查询语言、`ScalarType`、`Value`、网络协议和持久化尚未接入这些类型。`Value::from_serde` 遇到这些 wrapper（包括嵌套在应用 ADT 中）返回 `E_SERDE`，防止静默转换成 text 或 record。
+`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`。当前开发分支已将它们接入原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2 参数/返回值、完整 v1 typed-boundary 预检与独立 value codec 2。`Value::from_serde` 保留各标量身份，`Value::to_serde` 可解码回应用类型。这是 [#137](https://github.com/worktools/unionid/issues/137) 的进行中实现；新类型的源码声明与持久格式升级仍未交付。
 
-完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。数据库的显式 format-4 升级、protocol v2 和 codec 转换仍需完成后才能存储这些值。构造 Rust wrapper 不会触发数据库升级。
+完整目标见 [RFC 0004](rfc/0004-production-scalars.md)。新 redb 数据库使用 storage format 4 和 catalog/value/index-key/receipt codec 3/2/2/2；逻辑 backup 使用 codec 3。旧 format 1–3 和过渡 snapshot 仍拒绝新 schema/receipt，持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；显式执行 `unionid upgrade --db <path> --target 4` 会在一个同步事务中校验并重写 catalog、rows、indexes、receipts 和 meta。失败保留旧格式。
 
 ## Rust 值与规范表示
 
@@ -43,12 +43,24 @@ wrapper 调用 `serialize_newtype_struct`，marker 使用保留前缀 `unionid::
 
 现有普通应用 newtype 继续透明转换。保留前缀供 unionid 使用，应用不要把自己的 newtype 重命名到这个命名空间。
 
+## 二进制与协议接入
+
+`codec::encode_value` 继续写旧版 codec 1，`codec::encode_value_v2` 显式写 codec 2；`decode_value` 分派这两个版本并拒绝未知版本。旧类型的 payload 不变，新类型采用 RFC 的固定宽度字节或 length + bytes 编码。codec 1 对完整 type graph 预检，因此空的 `list uuid` 或 `None : option uuid` 也不能绕过版本限制。整个 encoded value 仍受既有 `MAX_VALUE_BYTES` 限制，包含 framing 开销。
+
+`Request` 保持默认 version 1；用 `.with_version(2)?` 显式选择 version 2。v1 在 mutation 前检查参数、最终 query／`returning`／`explain` 结果类型和 introspection schema，无法表达新标量时返回 `E_PROTOCOL_TYPE`。幂等命中仍保持“不解析源码直接重放”的既有语义，同时验证存量回执能否由 v1 表达。v2 使用 RFC 0004 的 canonical wire envelope，响应回显版本，幂等 digest 仍包含版本。
+
+cursor 根据实际 boundary 选择词汇版本：只含旧标量时继续输出 `u1`，任一排序键含新标量时输出 `u2`。两个版本共享 HMAC、database/schema/query/sequence 绑定和大小限制；prefix、payload codec 与 typed vocabulary 不一致时 fail closed。#137 继续跟踪进程中断、旧 binary 和完整恢复验收；源码声明与运算由 #138–#140 推进。
+
 ## English Description
 
-`unionid::scalars` provides validated Rust domains and canonical serde payloads for six production scalars. This is a foundation slice of #137. Query syntax, native `ScalarType` / `Value` variants, protocol v2, durable codecs, and the explicit format-4 upgrade remain pending. `Value::from_serde` rejects these wrappers with `E_SERDE`, including nested wrappers, so their identities cannot silently become ordinary text or records.
+`unionid::scalars` provides validated domains for six native `ScalarType` / `Value` variants. The current development branch preserves scalar identity through nested application ADTs, serde, protocol-v2 values, and the explicit `encode_value_v2` binary codec. The legacy encoder retains codec 1 and rejects new types even inside empty containers. Old-type binary payloads remain unchanged; the existing encoded-value budget includes framing overhead.
 
-UUID/date/timestamp payloads are canonical strings. Duration uses a signed decimal microsecond string. Decimal uses a string coefficient and numeric scale; declared schema precision is checked separately. Bytes use canonical unpadded base64url and retain a 16 MiB decoded bound. Source parsing may normalize equivalent spellings; serde decoding requires canonical forms and revalidates all domain limits. Decimal rescaling is exact and never rounds.
+Requests default to protocol 1; `.with_version(2)?` opts in. Version 1 rejects new scalar parameters before mutation, responses echo the requested version, and idempotency digests distinguish versions. Legacy durable formats reject native schemas/receipts and persistent mutations with native parameters. Read-only protocol-v2 use can pass and return native parameters without upgrading storage.
 
-Reserved `unionid::scalar::v1::<type>` newtype markers carry identity to typed serializers. Their version is independent of protocol and storage versions. JSON erases newtype markers; application structs, enums, options, tuples, and lists recover scalar identity through their declared Rust types. These payloads are not protocol-v2 envelopes. Existing application newtypes retain transparent conversion.
+Protocol-v1 preflight now covers parameters, final query/returning/explain result types, and introspection before publishing a mutation. Idempotent hits preserve parse-free replay while checking that the stored result is expressible. Cursors remain `u1` for legacy-only boundaries and use `u2` when any boundary key is a production scalar; prefix, payload codec, and typed vocabulary must agree.
 
-Validation lives in `tests/scalars.rs` and `tests/scalar_serde.rs`: logical vectors, calendar boundaries, precision/overflow, canonical rejection, binary limits, nested application ADTs, and the database conversion guard. End-to-end storage and wire validation remains tracked by #137–#140.
+New redb databases use storage format 4 with catalog/value/index-key/receipt codecs 3/2/2/2, and logical backups use codec 3. Formats 1–3 remain readable with legacy schemas and require `unionid upgrade --db <path> --target 4` before native scalar writes. The upgrader validates and rewrites catalog, rows, indexes, receipts, and meta in one synchronous transaction. #137 still tracks process-interruption, old-binary, and complete recovery acceptance; #138–#140 add source declarations and operations.
+
+Canonical serde uses text for UUID/date/timestamp, string microseconds for duration, string coefficient plus numeric scale for decimal, and unpadded base64url for bytes. Decoding validates both canonical forms and domain bounds. Reserved `unionid::scalar::v1::<type>` newtype markers carry identity to typed serializers; this payload version is independent of protocol/storage versions. JSON itself erases markers, so application Rust types restore identity.
+
+Tests in `tests/scalars.rs`, `tests/scalar_serde.rs`, and `tests/native_scalars.rs` cover logical/wire/binary vectors, calendar and precision boundaries, nested ADTs, canonical rejection, empty-container type checks, protocol versions, retries, and legacy redb write rejection/reopen.

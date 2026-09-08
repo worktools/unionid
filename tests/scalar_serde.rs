@@ -103,8 +103,9 @@ fn application_adts_round_trip_without_a_json_number_precision_boundary() {
         json["events"][1]["Completed"]["cost"]["coefficient"],
         "99999999999999999999999999999999999999"
     );
-    // Existing database serde must never erase any nested scalar's identity.
-    assert_eq!(Value::from_serde(&task).unwrap_err().code, "E_SERDE");
+    // Nested application ADTs preserve native identity in the database model.
+    let value = Value::from_serde(&task).unwrap();
+    assert_eq!(value.to_serde::<Task>().unwrap(), task);
 }
 
 fn rejected<T: DeserializeOwned>(values: &[Json]) {
@@ -192,32 +193,40 @@ fn bytes_base64_is_canonical_and_bounded() {
     assert!(Bytes::from_base64url(&encoded).is_err());
 }
 
-fn guarded(value: &impl Serialize, marker: &str) {
-    let error = Value::from_serde(value).unwrap_err();
-    assert_eq!(error.code, "E_SERDE");
-    assert!(error.message.contains(marker), "{error}");
+fn native_roundtrip<T: Serialize + DeserializeOwned + PartialEq + Debug>(value: &T, marker: &str) {
+    let native = Value::from_serde(value).unwrap();
+    assert!(native.requires_protocol_v2());
+    let kind = marker.rsplit("::").next().unwrap();
+    assert_eq!(
+        serde_json::to_value(&native).unwrap()["kind"]
+            .as_str()
+            .unwrap()
+            .to_lowercase(),
+        kind
+    );
+    assert_eq!(&native.to_serde::<T>().unwrap(), value);
 }
 
 #[test]
 fn scalar_markers_are_distinct_and_ordinary_newtypes_keep_working() {
-    guarded(&Uuid::from_bytes([0; 16]), "unionid::scalar::v1::uuid");
-    guarded(
+    native_roundtrip(&Uuid::from_bytes([0; 16]), "unionid::scalar::v1::uuid");
+    native_roundtrip(
         &Date::from_epoch_days(0).unwrap(),
         "unionid::scalar::v1::date",
     );
-    guarded(
+    native_roundtrip(
         &Timestamp::from_epoch_microseconds(0).unwrap(),
         "unionid::scalar::v1::timestamp",
     );
-    guarded(
+    native_roundtrip(
         &Duration::from_microseconds(0),
         "unionid::scalar::v1::duration",
     );
-    guarded(
+    native_roundtrip(
         &Decimal::new(0, 1, 0).unwrap(),
         "unionid::scalar::v1::decimal",
     );
-    guarded(&Bytes::new(vec![]).unwrap(), "unionid::scalar::v1::bytes");
+    native_roundtrip(&Bytes::new(vec![]).unwrap(), "unionid::scalar::v1::bytes");
 
     #[derive(Serialize, Deserialize, PartialEq, Debug)]
     struct Label(String);

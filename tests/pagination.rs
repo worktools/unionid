@@ -282,6 +282,16 @@ fn legacy_redb_meta_is_upgraded_with_cursor_identity() {
             let mut meta = transaction.open_table(META).unwrap();
             meta.insert("storage_format_version", 1_u32.to_be_bytes().as_slice())
                 .unwrap();
+            meta.insert("catalog_codec_version", 2_u16.to_be_bytes().as_slice())
+                .unwrap();
+            meta.insert("value_codec_version", 1_u16.to_be_bytes().as_slice())
+                .unwrap();
+            meta.insert("index_key_version", 1_u16.to_be_bytes().as_slice())
+                .unwrap();
+            meta.insert("migration_codec_version", 1_u16.to_be_bytes().as_slice())
+                .unwrap();
+            meta.insert("receipt_codec_version", 1_u16.to_be_bytes().as_slice())
+                .unwrap();
             meta.remove("cursor_instance_id").unwrap();
             meta.remove("cursor_secret").unwrap();
         }

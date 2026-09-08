@@ -49,6 +49,7 @@ struct PreparedPage {
 struct BoundReturning {
     fields: Vec<String>,
     columns: Vec<ResponseColumn>,
+    types: Vec<ScalarType>,
 }
 
 struct GroupAccumulator {
@@ -1422,18 +1423,23 @@ impl Database {
         } else {
             returning.fields.clone()
         };
+        let types = fields
+            .iter()
+            .map(|field| self.catalog.field_type(&table.schema, field).cloned())
+            .collect::<Result<Vec<_>>>()?;
         let columns = fields
             .iter()
-            .map(|field| {
-                self.catalog
-                    .field_type(&table.schema, field)
-                    .map(|ty| ResponseColumn {
-                        name: field.clone(),
-                        ty: self.catalog.describe(ty),
-                    })
+            .zip(&types)
+            .map(|(field, ty)| ResponseColumn {
+                name: field.clone(),
+                ty: self.catalog.describe(ty),
             })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Some(BoundReturning { fields, columns }))
+            .collect();
+        Ok(Some(BoundReturning {
+            fields,
+            columns,
+            types,
+        }))
     }
 
     fn returning_rows(
@@ -1786,6 +1792,69 @@ impl Database {
         }
         self.prepare_page(pipeline)?;
         Ok(schema)
+    }
+
+    /// Bind a statement far enough to know every type exposed by its response.
+    /// This does not inspect or mutate rows; callers may use a cloned database
+    /// to account for schema changes made by earlier statements in a script.
+    pub(crate) fn prepare_response_types(
+        &self,
+        statement: &mut Statement,
+    ) -> Result<Vec<ScalarType>> {
+        let columns = match statement {
+            Statement::Pipeline(pipeline) | Statement::Explain(pipeline) => {
+                return self
+                    .prepare_pipeline(pipeline)
+                    .map(|columns| columns.into_iter().map(|column| column.ty).collect());
+            }
+            Statement::Insert {
+                table, returning, ..
+            }
+            | Statement::InsertMany {
+                table, returning, ..
+            }
+            | Statement::Upsert {
+                table, returning, ..
+            }
+            | Statement::UpsertMany {
+                table, returning, ..
+            }
+            | Statement::InsertParameter {
+                table, returning, ..
+            }
+            | Statement::InsertManyParameter {
+                table, returning, ..
+            }
+            | Statement::UpsertParameter {
+                table, returning, ..
+            }
+            | Statement::UpsertManyParameter {
+                table, returning, ..
+            } => self.bind_returning(table, returning.as_ref())?,
+            Statement::Update {
+                target,
+                assignments,
+                returning,
+            } => {
+                let columns = self.bind_returning(&target.from, returning.as_ref())?;
+                self.bind_update_operation(target, assignments)?;
+                columns
+            }
+            Statement::Delete { target, returning } => {
+                let columns = self.bind_returning(&target.from, returning.as_ref())?;
+                self.bind_delete_operation(target)?;
+                columns
+            }
+            Statement::DefineType { .. }
+            | Statement::CreateTable { .. }
+            | Statement::TypedTable { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::Migration { .. } => None,
+        };
+        let Some(columns) = columns else {
+            return Ok(Vec::new());
+        };
+        Ok(columns.types)
     }
 
     fn bind_aggregate(&self, schema: &[Column], aggregate: &mut Aggregate) -> Result<Vec<Column>> {
@@ -2587,7 +2656,15 @@ impl Database {
     fn orderable(&self, ty: &ScalarType) -> Result<bool> {
         Ok(matches!(
             self.catalog.underlying(ty)?,
-            ScalarType::Int | ScalarType::Float | ScalarType::Text
+            ScalarType::Int
+                | ScalarType::Float
+                | ScalarType::Text
+                | ScalarType::Uuid
+                | ScalarType::Date
+                | ScalarType::Timestamp
+                | ScalarType::Duration
+                | ScalarType::Decimal { .. }
+                | ScalarType::Bytes
         ))
     }
     /// Indexes are derived data. Rebuild on load so older key encodings cannot
@@ -2815,6 +2892,12 @@ impl Database {
                 | ScalarType::Float
                 | ScalarType::Bool
                 | ScalarType::Text
+                | ScalarType::Uuid
+                | ScalarType::Date
+                | ScalarType::Timestamp
+                | ScalarType::Duration
+                | ScalarType::Decimal { .. }
+                | ScalarType::Bytes
                 | ScalarType::Named(_)
                 | ScalarType::Ref(_) => {}
             }
@@ -2885,6 +2968,29 @@ impl Database {
         impact
     }
 
+    pub(crate) fn has_production_scalars(&self) -> Result<bool> {
+        let mut native = false;
+        for definition in self.catalog.types.values() {
+            native |= self.catalog.requires_protocol_v2(&definition.ty)?;
+        }
+        for table in self.schema_tables() {
+            for column in &table.schema {
+                native |= self.catalog.requires_protocol_v2(&column.ty)?;
+            }
+        }
+        Ok(native)
+    }
+
+    pub(crate) fn ensure_legacy_scalars(&self) -> Result<()> {
+        if self.has_production_scalars()? {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "production scalar schemas require storage format 4",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn durable_meta(&self) -> DurableMeta {
         DurableMeta {
             sequence: self.sequence,
@@ -2932,6 +3038,13 @@ impl Database {
     }
 
     pub(crate) fn durable_rows(&self) -> Result<Vec<(u64, u64, Vec<u8>)>> {
+        self.durable_rows_with_codec(crate::codec::VALUE_CODEC_VERSION)
+    }
+
+    pub(crate) fn durable_rows_with_codec(
+        &self,
+        codec_version: u16,
+    ) -> Result<Vec<(u64, u64, Vec<u8>)>> {
         let mut encoded = Vec::new();
         for object in self.objects.values() {
             let DbObject::Table(table) = object;
@@ -2951,14 +3064,27 @@ impl Database {
                 encoded.push((
                     table.id,
                     row.id,
-                    crate::codec::encode_value(&self.catalog, &ty, &value)?,
+                    match codec_version {
+                        crate::codec::VALUE_CODEC_VERSION => {
+                            crate::codec::encode_value(&self.catalog, &ty, &value)?
+                        }
+                        crate::codec::PRODUCTION_VALUE_CODEC_VERSION => {
+                            crate::codec::encode_value_v2(&self.catalog, &ty, &value)?
+                        }
+                        _ => {
+                            return Err(Error::new(
+                                "E_STORAGE",
+                                format!("unsupported value codec version {codec_version}"),
+                            ));
+                        }
+                    },
                 ));
             }
         }
         Ok(encoded)
     }
 
-    pub(crate) fn durable_secondary_indexes(&self) -> Result<Vec<(u64, String, u64)>> {
+    pub(crate) fn durable_secondary_indexes(&self) -> Result<Vec<(u64, Value, u64)>> {
         let mut entries = Vec::new();
         for (table, definitions) in &self.index_definitions {
             for (column, definition) in definitions {
@@ -2972,14 +3098,38 @@ impl Database {
                             format!("missing in-memory index '{table}.{column}'"),
                         )
                     })?;
-                for (value_key, row_ids) in posting {
+                for row in &self.table(table)?.rows {
+                    let value = Value::Record(row.fields.clone())
+                        .field(column)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::new(
+                                "E_STORAGE",
+                                format!("indexed field '{table}.{column}' is missing"),
+                            )
+                        })?;
+                    let value_key = value.index_key();
+                    let row_ids = posting.get(&value_key).ok_or_else(|| {
+                        Error::new(
+                            "E_STORAGE",
+                            format!("missing in-memory index value for '{table}.{column}'"),
+                        )
+                    })?;
+                    if !row_ids.contains(&row.id) {
+                        return Err(Error::new(
+                            "E_STORAGE",
+                            format!("missing row {} in index '{table}.{column}'", row.id),
+                        ));
+                    }
                     for row_id in row_ids {
-                        entries.push((definition.id, value_key.clone(), *row_id));
+                        if *row_id == row.id {
+                            entries.push((definition.id, value.clone(), *row_id));
+                        }
                     }
                 }
             }
         }
-        entries.sort();
+        entries.sort_by_key(|(index_id, _, row_id)| (*index_id, *row_id));
         Ok(entries)
     }
 
@@ -3307,6 +3457,12 @@ fn type_reaches(catalog: &Catalog, ty: &ScalarType, target: u64, seen: &mut BTre
         | ScalarType::Float
         | ScalarType::Bool
         | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes
         | ScalarType::Named(_) => false,
     }
 }

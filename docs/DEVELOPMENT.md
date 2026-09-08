@@ -4,7 +4,7 @@
 
 ## 发布后进展
 
-- `unionid::scalars` 提供六种生产标量的 Rust 值域、规范 serde payload 与边界校验；当前数据库 serde 明确拒绝新 marker 以避免类型丢失，协议与存储接入仍由 #137 跟踪。已实现范围见 [SCALARS.md](SCALARS.md)。
+- `unionid::scalars` 提供六种生产标量的 Rust 值域、规范 serde payload 与边界校验；开发分支已接入原生 ScalarType/Value、无损 serde、protocol v2、完整 v1 typed-boundary 预检、按 boundary 选择的 `u1`/`u2` cursor、storage format 4、完整 durable codec 集和显式 upgrader。#137 继续跟踪中断与跨版本恢复验收，源码声明和运算由 #138–#140 推进。已实现范围见 [SCALARS.md](SCALARS.md)。
 - v0.1.0 crate、原生 target 包、校验清单和 GitHub Release 已由 tag workflow 发布。
 - Engine、本地 run/CLI 和 TCP 服务已提供统一只读执行边界；`introspection.read_only` 可验证实际状态，mutation 在创建候选状态或持久事务前返回 `E_READ_ONLY`。
 - 查询语言、Rust Engine 和 version 1 协议共享有界 keyset `page`：唯一排序以主键收尾，`u1` cursor 绑定 schema/query/params/sequence 并使用数据库 HMAC secret；redb 重开保留身份，逻辑 restore 轮换身份。

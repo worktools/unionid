@@ -28,11 +28,13 @@ impl SnapshotStore {
         let file = File::open(&self.path).map_err(|e| format!("open snapshot: {e}"))?;
         let mut db: Database = serde_json::from_reader(BufReader::new(file))
             .map_err(|e| format!("parse snapshot: {e}"))?;
+        db.ensure_legacy_scalars().map_err(|e| e.to_string())?;
         db.rebuild_indexes().map_err(|e| e.to_string())?;
         Ok(Some(db))
     }
 
     pub fn save(&self, db: &Database) -> Result<(), String> {
+        db.ensure_legacy_scalars().map_err(|e| e.to_string())?;
         let mut name = self.path.as_os_str().to_os_string();
         name.push(format!(
             ".{}.{}.tmp",

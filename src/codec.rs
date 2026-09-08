@@ -7,17 +7,36 @@ use crate::model::{Catalog, MAX_DEPTH, ScalarType, Value};
 
 const MAGIC: &[u8; 4] = b"UIDV";
 pub const VALUE_CODEC_VERSION: u16 = 1;
+pub const PRODUCTION_VALUE_CODEC_VERSION: u16 = 2;
 pub const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COLLECTION_ITEMS: usize = 1_000_000;
 
 pub fn encode_value(catalog: &Catalog, ty: &ScalarType, value: &Value) -> Result<Vec<u8>> {
+    encode_value_version(catalog, ty, value, VALUE_CODEC_VERSION)
+}
+
+/// Encode a production-scalar value for storage-format-4 integration.
+/// Existing storage callers continue to use the explicit legacy entry point.
+pub fn encode_value_v2(catalog: &Catalog, ty: &ScalarType, value: &Value) -> Result<Vec<u8>> {
+    encode_value_version(catalog, ty, value, PRODUCTION_VALUE_CODEC_VERSION)
+}
+
+fn encode_value_version(
+    catalog: &Catalog,
+    ty: &ScalarType,
+    value: &Value,
+    version: u16,
+) -> Result<Vec<u8>> {
+    if catalog.requires_protocol_v2(ty)? && version < PRODUCTION_VALUE_CODEC_VERSION {
+        return Err(codec_error("production scalars require value codec 2"));
+    }
     let value = catalog.coerce(value, ty, "value")?;
     let mut encoder = Encoder {
         catalog,
         bytes: Vec::new(),
     };
     encoder.bytes(MAGIC)?;
-    encoder.u16(VALUE_CODEC_VERSION)?;
+    encoder.u16(version)?;
     encoder.value(ty, &value, "value", 0)?;
     Ok(encoder.bytes)
 }
@@ -37,10 +56,13 @@ pub fn decode_value(catalog: &Catalog, ty: &ScalarType, bytes: &[u8]) -> Result<
         return Err(codec_error("invalid value codec magic"));
     }
     let version = decoder.u16()?;
-    if version != VALUE_CODEC_VERSION {
+    if version != VALUE_CODEC_VERSION && version != PRODUCTION_VALUE_CODEC_VERSION {
         return Err(codec_error(format!(
             "unsupported value codec version {version}"
         )));
+    }
+    if catalog.requires_protocol_v2(ty)? && version < PRODUCTION_VALUE_CODEC_VERSION {
+        return Err(codec_error("production scalars require value codec 2"));
     }
     let value = decoder.value(ty, "value", 0)?;
     if decoder.pos != bytes.len() {
@@ -79,6 +101,33 @@ impl Encoder<'_> {
             ScalarType::Bool => match value {
                 Value::Bool(false) => self.u8(0),
                 Value::Bool(true) => self.u8(1),
+                _ => Err(type_mismatch(path)),
+            },
+            ScalarType::Uuid => match value {
+                Value::Uuid(v) => self.bytes(v.as_bytes()),
+                _ => Err(type_mismatch(path)),
+            },
+            ScalarType::Date => match value {
+                Value::Date(v) => self.bytes(&v.epoch_days().to_be_bytes()),
+                _ => Err(type_mismatch(path)),
+            },
+            ScalarType::Timestamp => match value {
+                Value::Timestamp(v) => self.bytes(&v.epoch_microseconds().to_be_bytes()),
+                _ => Err(type_mismatch(path)),
+            },
+            ScalarType::Duration => match value {
+                Value::Duration(v) => self.bytes(&v.microseconds().to_be_bytes()),
+                _ => Err(type_mismatch(path)),
+            },
+            ScalarType::Decimal { .. } => match value {
+                Value::Decimal(v) => self.bytes(&v.coefficient().to_be_bytes()),
+                _ => Err(type_mismatch(path)),
+            },
+            ScalarType::Bytes => match value {
+                Value::Bytes(v) => {
+                    self.len(v.as_slice().len(), path)?;
+                    self.bytes(v.as_slice())
+                }
                 _ => Err(type_mismatch(path)),
             },
             ScalarType::Text => match value {
@@ -251,6 +300,35 @@ impl Decoder<'_> {
                 1 => Value::Bool(true),
                 tag => return Err(codec_error(format!("{path}: invalid bool tag {tag}"))),
             },
+            ScalarType::Uuid => Value::Uuid(crate::scalars::Uuid::from_bytes(self.array()?)),
+            ScalarType::Date => Value::Date(
+                crate::scalars::Date::from_epoch_days(i32::from_be_bytes(self.array()?))
+                    .map_err(|e| codec_error(e.to_string()))?,
+            ),
+            ScalarType::Timestamp => Value::Timestamp(
+                crate::scalars::Timestamp::from_epoch_microseconds(i64::from_be_bytes(
+                    self.array()?,
+                ))
+                .map_err(|e| codec_error(e.to_string()))?,
+            ),
+            ScalarType::Duration => Value::Duration(crate::scalars::Duration::from_microseconds(
+                i64::from_be_bytes(self.array()?),
+            )),
+            ScalarType::Decimal { precision, scale } => Value::Decimal(
+                crate::scalars::Decimal::new(
+                    i128::from_be_bytes(self.array()?),
+                    *precision,
+                    *scale,
+                )
+                .map_err(|e| codec_error(e.to_string()))?,
+            ),
+            ScalarType::Bytes => {
+                let len = self.length()?;
+                Value::Bytes(
+                    crate::scalars::Bytes::new(self.take(len)?.to_vec())
+                        .map_err(|e| codec_error(e.to_string()))?,
+                )
+            }
             ScalarType::Text => {
                 let len = self.length()?;
                 let text = std::str::from_utf8(self.take(len)?)

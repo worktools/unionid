@@ -9,11 +9,11 @@ unionid 0.1.0 把应用 schema migration 与数据库内部格式升级视为两
 | 层 | v0.1 值 |
 | --- | --- |
 | unionid / redb | 0.1.0 / 4.1.0 |
-| storage / catalog / ADT value | 1、2 或 3 / 2 / 1 |
+| storage / catalog / ADT value | 1–4 / 3 / 2 |
 | index key / migration ledger / receipt | 1 / 1 / 1 |
 | logical backup / JSON Lines protocol | 1 或 2 / 1 |
 
-当前二进制读取 storage format 1（无 receipt）、format 2（含 durable idempotency receipt）和 format 3（增加数据库 instance ID 与 cursor HMAC secret），写入当前格式 3。打开 format 1/2 时会生成 cursor 身份并通过同步事务升级到 format 3；此后不能降级到只认识旧格式的二进制。逻辑 backup 独立使用无 receipt 的 format 1 或含 receipt 的 format 2，并刻意不复制 cursor secret；restore 会生成新数据库身份，因此源库 cursor 不能在副本继续使用。未知 storage、catalog、value、index、migration 或 receipt codec 会在修改文件前失败；不会猜测或静默重写。命名类型、字段、变体、表和索引用稳定 ID 编码，应用侧重命名必须通过 migration，不能直接编辑数据库文件。
+当前二进制读取 storage format 1–4；新数据库直接创建为 format 4，使用 catalog/value/index-key/receipt codec 3/2/2/2。format 1/2 仍会补齐 cursor 身份并升级到 format 3，但 format 3 的普通写入保持 format 3，只有显式命令 `unionid upgrade --db app.redb --target 4` 才会在一个同步 two-phase redb transaction 中重写 catalog、rows、indexes、receipts 和 meta。预检或提交前失败保留 format 3；提交结果不确定时应重开并执行 `check --db`。逻辑 backup 3 保留生产标量和 receipt，但不复制 cursor secret；restore 会生成新数据库身份。未知 storage 或 codec version 在修改文件前失败。
 
 升级前后的 backup/restore 必须保留 receipt count。不要为了降级而删除 receipt：显式 prune 会恢复旧 key 的可执行性，应只在确认所有客户端、队列和人工重试都已越过 cutoff 后执行。旧 version 1 请求继续可用；只有需要 exactly-once effect 的 mutation 才增加 `idempotency_key`。
 
@@ -47,6 +47,6 @@ unionid migration status --db app.redb --dir migrations
 
 unionid 0.1.0 separates application schema migrations from internal database-format changes. Versioned migration files evolve fields, variants, types, constraints, indexes, and their data. A unionid binary opens only the internal codec versions it explicitly knows and fails before mutation when it encounters an unknown version.
 
-The current binary reads storage formats 1, 2, and 3 and writes format 3. Opening format 1 or 2 generates the database cursor identity and synchronously upgrades the file to format 3. Logical backup remains independently versioned at format 1 or 2 and excludes cursor secrets; restore rotates the database identity, so source cursors cannot resume against the copy.
+The current binary reads storage formats 1–4. New databases start at format 4 with catalog/value/index-key/receipt codecs 3/2/2/2. Opening format 1 or 2 still adds cursor identity and upgrades to format 3, while ordinary writes keep a format-3 database at format 3. Run `unionid upgrade --db app.redb --target 4` to validate and rewrite catalog, rows, indexes, receipts, and meta in one synchronous two-phase redb transaction. Preflight and pre-commit failures preserve format 3; after an uncertain commit, reopen and run `check --db`. Logical backup 3 preserves production scalars and receipts while rotating cursor identity on restore.
 
 Before changing binaries, run `check` with the old binary, create a verified logical backup, retain the old release archive and checksum, and test the new binary against a copy. Open the production file only when the target release notes declare support for its stored versions. Any future internal-format conversion must be explicit and write a separately verifiable path; v0.1 makes no promise of unannounced in-place upgrades.

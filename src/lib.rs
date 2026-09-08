@@ -34,14 +34,14 @@ pub use db::{
     PageAccessKind, PageInfo, PageOrder, PagePlan, QueryAccessKind, QueryAccessPlan, QueryPlan,
     QueryPlanStage, QueryResponse, QueryStageKind, SchemaInfo, TypedPage, UpsertAction,
 };
-pub use engine::{Engine, PreparedQuery, StorageIntegrity};
+pub use engine::{Engine, PreparedQuery, StorageIntegrity, StorageUpgrade};
 pub use error::{Error, Result, Span};
 pub use formatter::format_source;
 pub use idempotency::{
     IdempotencyBoundary, IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult,
     IdempotencyReceipt, IdempotencyStatus, IdempotentExecution,
 };
-pub use introspection::{Introspection, IntrospectionKind, StorageMode};
+pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};
 pub use protocol::{

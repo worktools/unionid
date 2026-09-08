@@ -223,12 +223,12 @@ fn malformed_versions_lengths_tags_and_trailing_bytes_fail_closed() {
     );
 
     let mut bad_version = good.clone();
-    bad_version[5] = 2;
+    bad_version[5] = 99;
     assert!(
         decode_value(&catalog, &ScalarType::Bool, &bad_version)
             .unwrap_err()
             .message
-            .contains("version 2")
+            .contains("version 99")
     );
     assert!(decode_value(&catalog, &ScalarType::Bool, &good[..good.len() - 1]).is_err());
 

@@ -94,15 +94,46 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
         );
     } else {
         println!(
-            "redb integrity verified ({})\nschema revision {}\nschema hash {}",
+            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt codecs {}/{}/{}/{}/{}",
             if report.backend_clean {
                 "backend was clean"
             } else {
                 "backend repair completed"
             },
             report.schema.revision,
-            report.schema.hash
+            report.schema.hash,
+            report.versions.format,
+            report.versions.catalog_codec,
+            report.versions.value_codec,
+            report.versions.index_key_codec,
+            report.versions.migration_codec,
+            report.versions.receipt_codec
         );
+    }
+    Ok(())
+}
+
+pub fn upgrade_redb(
+    path: impl Into<std::path::PathBuf>,
+    target: u32,
+    json: bool,
+) -> Result<(), String> {
+    let mut engine = Engine::open_redb(path).map_err(|error| error.to_string())?;
+    let result = engine
+        .upgrade_storage(target)
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&result).map_err(|error| error.to_string())?
+        );
+    } else if result.changed {
+        println!(
+            "storage upgraded from format {} to format {}",
+            result.previous_format, result.format
+        );
+    } else {
+        println!("storage already uses format {}", result.format);
     }
     Ok(())
 }
@@ -790,6 +821,15 @@ fn print_introspection(
             );
             println!("schema revision {}", introspection.schema.revision);
             println!("schema hash {}", introspection.schema.hash);
+            if let Some(versions) = introspection.storage_versions {
+                println!("storage format {}", versions.format);
+                println!("catalog codec {}", versions.catalog_codec);
+                println!("value codec {}", versions.value_codec);
+                println!("index key codec {}", versions.index_key_codec);
+                println!("migration codec {}", versions.migration_codec);
+                println!("receipt codec {}", versions.receipt_codec);
+                println!("backup codec {}", versions.backup_codec);
+            }
             println!("migrations {}", introspection.migration_count);
             if let Some(head) = &introspection.migration_head {
                 println!("migration head {head}");
