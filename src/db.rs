@@ -255,10 +255,22 @@ impl GroupAccumulator {
                     });
                 }
                 AggregateState::Min(current) => {
-                    update_extreme(current, &aggregate_input(catalog, row, assignment)?, true)?;
+                    update_extreme(
+                        catalog,
+                        assignment,
+                        current,
+                        &aggregate_input(catalog, row, assignment)?,
+                        true,
+                    )?;
                 }
                 AggregateState::Max(current) => {
-                    update_extreme(current, &aggregate_input(catalog, row, assignment)?, false)?;
+                    update_extreme(
+                        catalog,
+                        assignment,
+                        current,
+                        &aggregate_input(catalog, row, assignment)?,
+                        false,
+                    )?;
                 }
             }
         }
@@ -323,14 +335,22 @@ fn aggregate_input(
     crate::expression::evaluate_value(catalog, input, |path| row_field(row, path))
 }
 
-fn update_extreme(current: &mut Option<Value>, value: &Value, minimum: bool) -> Result<()> {
+fn update_extreme(
+    catalog: &Catalog,
+    assignment: &AggregateAssignment,
+    current: &mut Option<Value>,
+    value: &Value,
+    minimum: bool,
+) -> Result<()> {
     let replace = if let Some(existing) = current.as_ref() {
-        let order = value.cmp_ord(existing).ok_or_else(|| {
-            Error::new(
-                "E_TYPE",
-                "bound min/max received values without a shared ordering",
-            )
-        })?;
+        let output_type = assignment
+            .output_type
+            .as_ref()
+            .ok_or_else(|| Error::new("E_TYPE", "min/max output type is not bound"))?;
+        let ScalarType::Option(input_type) = output_type else {
+            return Err(Error::new("E_TYPE", "min/max output type is not optional"));
+        };
+        let order = catalog.cmp_typed(input_type, value, existing)?;
         if minimum {
             order == std::cmp::Ordering::Less
         } else {
@@ -401,6 +421,7 @@ fn page_plan_digest(pipeline: &Pipeline, direction: PageDirection) -> String {
 }
 
 fn compare_page_boundary(
+    catalog: &Catalog,
     row: &BTreeMap<String, Value>,
     order: &[BoundPageOrder],
     boundary: &[Value],
@@ -412,12 +433,9 @@ fn compare_page_boundary(
                 format!("page sort field '{}' is missing", key.key.column),
             )
         })?;
-        let comparison = value.cmp_ord(boundary).ok_or_else(|| {
-            Error::new(
-                "E_CURSOR_CODEC",
-                format!("cursor value for '{}' has no ordering", key.key.column),
-            )
-        })?;
+        let comparison = catalog
+            .cmp_typed(&key.ty, value, boundary)
+            .map_err(|error| Error::new("E_CURSOR_CODEC", error.message))?;
         let comparison = if key.key.descending {
             comparison.reverse()
         } else {
@@ -1847,13 +1865,14 @@ impl Database {
                 }
                 Stage::Sort(keys) => {
                     for key in keys {
-                        let ty = self.catalog.field_type(schema, &key.column)?;
-                        if !self.orderable(ty)? {
+                        let ty = self.catalog.field_type(schema, &key.column)?.clone();
+                        if !self.orderable(&ty)? {
                             return Err(Error::new(
                                 "E_TYPE",
                                 format!("field '{}' has no ordering", key.column),
                             ));
                         }
+                        key.ty = Some(ty);
                     }
                 }
                 Stage::Take { .. } => {}
@@ -1945,23 +1964,7 @@ impl Database {
                 }
                 Stage::Sort(keys) => {
                     check_deadline(control)?;
-                    rows.sort_by(|a, b| {
-                        for key in keys {
-                            let order = row_field(&a.fields, &key.column)
-                                .zip(row_field(&b.fields, &key.column))
-                                .and_then(|(a, b)| a.cmp_ord(b))
-                                .unwrap_or(std::cmp::Ordering::Equal);
-                            let order = if key.descending {
-                                order.reverse()
-                            } else {
-                                order
-                            };
-                            if order != std::cmp::Ordering::Equal {
-                                return order;
-                            }
-                        }
-                        std::cmp::Ordering::Equal
-                    });
+                    sort_by_typed(&mut rows, &self.catalog, keys, |row| &row.fields)?;
                     check_deadline(control)?;
                 }
                 Stage::Take { offset, limit } => {
@@ -2252,13 +2255,14 @@ impl Database {
                 }
                 Stage::Sort(keys) => {
                     for key in keys {
-                        let ty = self.catalog.field_type(&schema, &key.column)?;
-                        if !self.orderable(ty)? {
+                        let ty = self.catalog.field_type(&schema, &key.column)?.clone();
+                        if !self.orderable(&ty)? {
                             return Err(Error::new(
                                 "E_TYPE",
                                 format!("field '{}' has no ordering", key.column),
                             ));
                         }
+                        key.ty = Some(ty);
                     }
                 }
                 Stage::Take { .. } | Stage::Page(_) => {}
@@ -2394,7 +2398,7 @@ impl Database {
                         return Err(Error::new(
                             "E_TYPE",
                             format!(
-                                "{} expects an orderable int, float, or text value, got {}",
+                                "{} expects an orderable value, got {}",
                                 aggregate_function_name(assignment.function),
                                 self.catalog.describe(&ty)
                             ),
@@ -2720,7 +2724,7 @@ impl Database {
             let Some(boundary) = &page.boundary else {
                 return Ok(true);
             };
-            let order = compare_page_boundary(row, &page.order, boundary)?;
+            let order = compare_page_boundary(&self.catalog, row, &page.order, boundary)?;
             Ok(match page.spec.direction {
                 PageDirection::Forward => order == std::cmp::Ordering::Greater,
                 PageDirection::Backward => order == std::cmp::Ordering::Less,
@@ -3090,23 +3094,7 @@ impl Database {
                 }
                 Stage::Sort(keys) => {
                     check_deadline(control)?;
-                    rows.sort_by(|a, b| {
-                        for key in &keys {
-                            let order = row_field(a, &key.column)
-                                .zip(row_field(b, &key.column))
-                                .and_then(|(a, b)| a.cmp_ord(b))
-                                .unwrap_or(std::cmp::Ordering::Equal);
-                            let order = if key.descending {
-                                order.reverse()
-                            } else {
-                                order
-                            };
-                            if order != std::cmp::Ordering::Equal {
-                                return order;
-                            }
-                        }
-                        std::cmp::Ordering::Equal
-                    });
+                    sort_by_typed(&mut rows, &self.catalog, &keys, |row| row)?;
                     check_deadline(control)?;
                 }
                 Stage::Take { offset, limit } => {
@@ -3161,18 +3149,14 @@ impl Database {
     }
 
     fn orderable(&self, ty: &ScalarType) -> Result<bool> {
-        Ok(matches!(
-            self.catalog.underlying(ty)?,
-            ScalarType::Int
-                | ScalarType::Float
-                | ScalarType::Text
-                | ScalarType::Uuid
-                | ScalarType::Date
-                | ScalarType::Timestamp
-                | ScalarType::Duration
-                | ScalarType::Decimal { .. }
-                | ScalarType::Bytes
-        ))
+        match ty {
+            ScalarType::Ref(id) => {
+                self.catalog.definition(*id)?;
+                Ok(true)
+            }
+            ScalarType::Named(_) => Ok(false),
+            _ => Ok(true),
+        }
     }
     /// Indexes are derived data. Rebuild on load so older key encodings cannot
     /// change query semantics after a numeric comparison fix.
@@ -4042,6 +4026,54 @@ fn row_field<'a>(row: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a Val
     }
     let (head, tail) = path.split_once('.')?;
     row.get(head)?.field(tail)
+}
+
+fn sort_by_typed<T>(
+    rows: &mut [T],
+    catalog: &Catalog,
+    keys: &[SortKey],
+    fields: impl Fn(&T) -> &BTreeMap<String, Value>,
+) -> Result<()> {
+    let mut error = None;
+    rows.sort_by(|left, right| {
+        if error.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        for key in keys {
+            let result = (|| {
+                let ty = key.ty.as_ref().ok_or_else(|| {
+                    Error::new(
+                        "E_TYPE",
+                        format!("sort field '{}' was not bound", key.column),
+                    )
+                })?;
+                let left = row_field(fields(left), &key.column).ok_or_else(|| {
+                    Error::new("E_FIELD", format!("sort field '{}' is missing", key.column))
+                })?;
+                let right = row_field(fields(right), &key.column).ok_or_else(|| {
+                    Error::new("E_FIELD", format!("sort field '{}' is missing", key.column))
+                })?;
+                catalog.cmp_typed(ty, left, right)
+            })();
+            let ordering = match result {
+                Ok(ordering) => ordering,
+                Err(sort_error) => {
+                    error = Some(sort_error);
+                    return std::cmp::Ordering::Equal;
+                }
+            };
+            let ordering = if key.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    error.map_or(Ok(()), Err)
 }
 
 fn build_posting(rows: &imbl::Vector<Arc<Row>>, column: &str) -> IndexPosting {

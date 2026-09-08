@@ -612,6 +612,217 @@ impl Catalog {
         Ok(ids)
     }
 
+    /// Compare two values using the ordering of one already-bound static type.
+    /// This is the semantic order shared by scans, cursors, aggregates, and
+    /// ordered index codecs; callers must not infer an order from serialized
+    /// `Value` bytes or field names.
+    pub fn cmp_typed(&self, ty: &ScalarType, left: &Value, right: &Value) -> Result<Ordering> {
+        self.cmp_typed_inner(ty, left, right, 0)
+    }
+
+    fn cmp_typed_inner(
+        &self,
+        ty: &ScalarType,
+        left: &Value,
+        right: &Value,
+        depth: usize,
+    ) -> Result<Ordering> {
+        check_depth(depth)?;
+        let mismatch = || {
+            Error::new(
+                "E_TYPE",
+                format!(
+                    "values do not match bound comparison type '{}'",
+                    self.describe(ty)
+                ),
+            )
+        };
+        Ok(match ty {
+            ScalarType::Int => match (left, right) {
+                (Value::Int(left), Value::Int(right)) => left.cmp(right),
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Float => match (left, right) {
+                (Value::Float(left), Value::Float(right)) => {
+                    if !left.is_finite() || !right.is_finite() {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            "non-finite float has no typed ordering",
+                        ));
+                    }
+                    if *left == 0.0 && *right == 0.0 {
+                        Ordering::Equal
+                    } else {
+                        left.partial_cmp(right).ok_or_else(mismatch)?
+                    }
+                }
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Bool => match (left, right) {
+                (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Text => match (left, right) {
+                (Value::Text(left), Value::Text(right)) => left.as_bytes().cmp(right.as_bytes()),
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Uuid => match (left, right) {
+                (Value::Uuid(left), Value::Uuid(right)) => left.cmp(right),
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Date => match (left, right) {
+                (Value::Date(left), Value::Date(right)) => left.cmp(right),
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Timestamp => match (left, right) {
+                (Value::Timestamp(left), Value::Timestamp(right)) => left.cmp(right),
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Duration => match (left, right) {
+                (Value::Duration(left), Value::Duration(right)) => left.cmp(right),
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Decimal { scale, .. } => match (left, right) {
+                (Value::Decimal(left), Value::Decimal(right))
+                    if left.scale() == *scale && right.scale() == *scale =>
+                {
+                    left.coefficient().cmp(&right.coefficient())
+                }
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Bytes => match (left, right) {
+                (Value::Bytes(left), Value::Bytes(right)) => left.as_slice().cmp(right.as_slice()),
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Ref(id) => match (left, right) {
+                (
+                    Value::Named {
+                        type_id: left_id,
+                        value: left,
+                    },
+                    Value::Named {
+                        type_id: right_id,
+                        value: right,
+                    },
+                ) if left_id == id && right_id == id => {
+                    self.cmp_typed_inner(&self.definition(*id)?.ty, left, right, depth + 1)?
+                }
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Enum(sum) => match (left, right) {
+                (Value::Enum(left), Value::Enum(right)) => {
+                    let left_variant = sum
+                        .variants
+                        .iter()
+                        .find(|variant| variant.id == left.id && variant.id != 0)
+                        .ok_or_else(mismatch)?;
+                    let right_variant = sum
+                        .variants
+                        .iter()
+                        .find(|variant| variant.id == right.id && variant.id != 0)
+                        .ok_or_else(mismatch)?;
+                    if left.args.len() != left_variant.args.len()
+                        || right.args.len() != right_variant.args.len()
+                    {
+                        return Err(mismatch());
+                    }
+                    let tag = left.id.cmp(&right.id);
+                    if tag != Ordering::Equal {
+                        tag
+                    } else {
+                        self.cmp_typed_items(
+                            &left_variant.args,
+                            &left.args,
+                            &right.args,
+                            depth + 1,
+                        )?
+                    }
+                }
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Record(columns) => match (left, right) {
+                (Value::Record(left), Value::Record(right)) => {
+                    if left.len() != columns.len() || right.len() != columns.len() {
+                        return Err(mismatch());
+                    }
+                    let mut columns = columns.iter().collect::<Vec<_>>();
+                    columns.sort_by_key(|column| column.id);
+                    let mut ordering = Ordering::Equal;
+                    for column in columns {
+                        let left = left.get(&column.name).ok_or_else(mismatch)?;
+                        let right = right.get(&column.name).ok_or_else(mismatch)?;
+                        ordering = self.cmp_typed_inner(&column.ty, left, right, depth + 1)?;
+                        if ordering != Ordering::Equal {
+                            break;
+                        }
+                    }
+                    ordering
+                }
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Tuple(types) => match (left, right) {
+                (Value::Tuple(left), Value::Tuple(right)) => {
+                    self.cmp_typed_items(types, left, right, depth + 1)?
+                }
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Option(inner) => match (left, right) {
+                (Value::Option(None), Value::Option(None)) => Ordering::Equal,
+                (Value::Option(None), Value::Option(Some(_))) => Ordering::Less,
+                (Value::Option(Some(_)), Value::Option(None)) => Ordering::Greater,
+                (Value::Option(Some(left)), Value::Option(Some(right))) => {
+                    self.cmp_typed_inner(inner, left, right, depth + 1)?
+                }
+                _ => return Err(mismatch()),
+            },
+            ScalarType::List(inner) => match (left, right) {
+                (Value::List(left), Value::List(right)) => {
+                    let mut ordering = Ordering::Equal;
+                    for (left, right) in left.iter().zip(right) {
+                        ordering = self.cmp_typed_inner(inner, left, right, depth + 1)?;
+                        if ordering != Ordering::Equal {
+                            break;
+                        }
+                    }
+                    if ordering == Ordering::Equal {
+                        left.len().cmp(&right.len())
+                    } else {
+                        ordering
+                    }
+                }
+                _ => return Err(mismatch()),
+            },
+            ScalarType::Named(name) => {
+                return Err(Error::new(
+                    "E_SCHEMA",
+                    format!("unresolved type '{name}' cannot be compared"),
+                ));
+            }
+        })
+    }
+
+    fn cmp_typed_items(
+        &self,
+        types: &[ScalarType],
+        left: &[Value],
+        right: &[Value],
+        depth: usize,
+    ) -> Result<Ordering> {
+        if left.len() != types.len() || right.len() != types.len() {
+            return Err(Error::new(
+                "E_TYPE",
+                "tuple values do not match their bound comparison type",
+            ));
+        }
+        for ((ty, left), right) in types.iter().zip(left).zip(right) {
+            let ordering = self.cmp_typed_inner(ty, left, right, depth)?;
+            if ordering != Ordering::Equal {
+                return Ok(ordering);
+            }
+        }
+        Ok(Ordering::Equal)
+    }
+
     /// Check the complete type, including empty containers and recursive references.
     pub fn requires_protocol_v2(&self, ty: &ScalarType) -> Result<bool> {
         fn visit(

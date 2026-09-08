@@ -127,13 +127,13 @@ take 20
 | 局部定义 | `let retryable = attempt -> attempt < 3` | 定义常量或有类型、非递归纯函数，供后续 stage 展开复用 |
 | 汇总 | `aggregate {...}` / `group state (aggregate {...})` | count/sum/min/max；分组键保留完整 ADT 类型和值 |
 | 投影 | `select {id, owner.email}` | 保留列，响应按声明的列顺序展示 |
-| 排序 | `sort id` / `sort {-priority, created_at, id}` | 单列或多列词典序；支持 int、float、text |
+| 排序 | `sort id` / `sort {-priority, created_at, id}` | 单列或多列词典序；支持 primitive、命名类型及完整有限 ADT |
 | 截取 | `take 20` / `take 11..20` | 保留前 N 行或一基闭区间内的行 |
 | 稳定分页 | `page 100` / `page 100 after "u1..."` | 以主键收尾的唯一 sort tuple、opaque cursor 和 sequence-pinned 一致性 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 与多行 pipeline 同语义 |
 | 计划 | `explain from tasks \| filter id == 1` | 只绑定查询并返回 full scan／索引 lookup、候选数、stage 顺序和结果 schema |
 
-支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减，复杂算术可在括号内换行。运算数必须归一为同一个 int 或 float 类型；整数除法向零截断，溢出、除零或非有限 float 返回 `E_ARITH`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 提供有类型、可嵌套且有预算的元素字段谓词，`is_some`/`is_none` 显式检查 Option。函数使用空格传参。复杂条件放进跨行 `()`；match branches 放进 `{}`，分支结果也可使用括号跨行。混用 `and` 与 `or` 时规范写法加括号明确分组。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；`page` 要求最后一个排序键是源表主键，并返回可恢复的 opaque cursor。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。分页完整规则见[有界 keyset page](QUERY.md#有界-keyset-page)。
+支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减，复杂算术可在括号内换行。运算数必须归一为同一个 int 或 float 类型；整数除法向零截断，溢出、除零或非有限 float 返回 `E_ARITH`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 提供有类型、可嵌套且有预算的元素字段谓词，`is_some`/`is_none` 显式检查 Option。函数使用空格传参。复杂条件放进跨行 `()`；match branches 放进 `{}`，分支结果也可使用括号跨行。混用 `and` 与 `or` 时规范写法加括号明确分组。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；每个键使用绑定静态类型的 total order，sum 按稳定 variant ID、record 按稳定 field ID、option 按 `None < Some`、list 按短前缀优先的词典序比较。`page` 要求最后一个排序键是源表主键，并返回可恢复的 opaque cursor。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。分页完整规则见[有界 keyset page](QUERY.md#有界-keyset-page)。
 
 模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。match condition 与普通 filter 共用布尔、集合和数值表达式。`derive name = expression` 追加或替换 scalar 或 bool 列；结果保留命名类型，typed 参数在扫描前推导，后续 filter/derive/select/sort 可立即引用。`derive name = match source {...}` 的分支可返回 binding/literal/算术或完整 bool 表达式，也可用 binding 和算术结果构造 `Some (attempt + 1)`、`State.Done`、`Summary {label = message}`、tuple、record 和 list。复杂表达式使用括号换行，formatter 会在结构边界主动展开过长的布尔表达式。
 

@@ -558,11 +558,11 @@ fn errors_are_checked_before_scanning_empty_tables() {
         "from users | select name | filter id == 1",
         "from users | sort typo",
         "from users | filter id == \"1\"",
-        "from users | filter state > A",
-        "from users | sort state",
     ] {
         assert!(!e.execute(source).ok, "{source}");
     }
+    assert!(ok(&mut e, "from users | filter state > A").rows.is_empty());
+    assert!(ok(&mut e, "from users | sort state").rows.is_empty());
 }
 
 #[test]
@@ -631,7 +631,6 @@ fn sort_keys_and_take_ranges_are_validated_before_scanning() {
         "from rows | sort id, -id",
         "from rows | sort {id, id}",
         "from rows | sort {id, missing}",
-        "from rows | sort {id, state}",
         "from rows | take 0..1",
         "from rows | take 3..2",
         "from rows | take 1.5",
@@ -642,6 +641,120 @@ fn sort_keys_and_take_ranges_are_validated_before_scanning() {
         assert!(!result.ok, "accepted {source}");
         assert!(result.error.unwrap().span.is_some(), "{source}");
     }
+    assert!(ok(&mut e, "from rows | sort {id, state}").rows.is_empty());
+}
+
+#[test]
+fn typed_total_order_covers_products_sums_options_lists_and_recursive_values() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type State = Waiting | Running {attempt int} | Done
+type Meta =
+  z int
+  a int
+type Tree =
+  Leaf int
+  | Node {children list Tree}
+type Row =
+  id int
+  active bool
+  state State
+  meta Meta
+  pair (int, text)
+  maybe option int
+  nums list int
+  tree Tree
+table rows Row
+  key id
+insert rows {id = 1, active = true, state = Running {attempt = 2}, meta = {z = 0, a = 9}, pair = (1, "b"), maybe = Some 1, nums = [1, 2], tree = Node {children = [Leaf 1]}}
+insert rows {id = 2, active = false, state = Waiting, meta = {z = 1, a = 0}, pair = (1, "a"), maybe = None, nums = [1], tree = Leaf 2}
+insert rows {id = 3, active = true, state = Running {attempt = 1}, meta = {z = 0, a = 1}, pair = (0, "z"), maybe = Some 0, nums = [1, 1], tree = Leaf 1}"#,
+    );
+
+    fn ids(engine: &mut Engine, order: &str) -> Vec<i64> {
+        ok(
+            engine,
+            &format!("from rows\nsort {{{order}, id}}\nselect id"),
+        )
+        .rows
+        .iter()
+        .map(|row| match &row["id"] {
+            Value::Int(id) => *id,
+            value => panic!("unexpected ID {value:?}"),
+        })
+        .collect()
+    }
+
+    assert_eq!(ids(&mut engine, "active"), [2, 1, 3]);
+    assert_eq!(ids(&mut engine, "state"), [2, 3, 1]);
+    // Meta declares z before a. Stable field identity order must win over the
+    // alphabetical order of the runtime record map.
+    assert_eq!(ids(&mut engine, "meta"), [3, 1, 2]);
+    assert_eq!(ids(&mut engine, "pair"), [3, 2, 1]);
+    assert_eq!(ids(&mut engine, "maybe"), [2, 3, 1]);
+    assert_eq!(ids(&mut engine, "nums"), [2, 3, 1]);
+    assert_eq!(ids(&mut engine, "tree"), [3, 2, 1]);
+    assert_eq!(
+        ids(&mut engine, "-state"),
+        [1, 3, 2],
+        "descending reverses the complete sum ordering"
+    );
+
+    let filtered = ok(
+        &mut engine,
+        "from rows\nfilter state > Waiting\nsort {state, id}\nselect id",
+    );
+    assert_eq!(
+        filtered
+            .rows
+            .iter()
+            .map(|row| match row["id"] {
+                Value::Int(id) => id,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>(),
+        [3, 1]
+    );
+    let first_page = ok(&mut engine, "from rows\nsort {state, id}\npage 2");
+    assert_eq!(
+        first_page
+            .rows
+            .iter()
+            .map(|row| match row["id"] {
+                Value::Int(id) => id,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    let cursor = first_page.page.unwrap().next_cursor.unwrap();
+    let next_page = ok(
+        &mut engine,
+        &format!(
+            "from rows\nsort {{state, id}}\npage 2 after {}",
+            serde_json::to_string(&cursor).unwrap()
+        ),
+    );
+    assert_eq!(next_page.rows.len(), 1);
+    assert!(next_page.rows[0]["id"].cmp_eq(&Value::Int(1)));
+
+    let aggregate = ok(
+        &mut engine,
+        "from rows\naggregate\n  first_active = min active\n  first_state = min state\n  last_tree = max tree",
+    );
+    assert_eq!(
+        aggregate.rows[0]["first_active"].source_text(),
+        "Some (false)"
+    );
+    assert_eq!(
+        aggregate.rows[0]["first_state"].source_text(),
+        "Some (Waiting)"
+    );
+    assert_eq!(
+        aggregate.rows[0]["last_tree"].source_text(),
+        "Some (Node {children = [Leaf(1)]})"
+    );
 }
 
 #[test]
@@ -1263,7 +1376,6 @@ fn aggregates_reject_invalid_types_layout_and_runtime_overflow() {
     let setup = "type Row =\n  id int\n  label text\n  active bool\ntable rows Row";
     for (pipeline, code, message) in [
         ("aggregate\n  total = sum label", "E_TYPE", "sum expects"),
-        ("aggregate\n  first = min active", "E_TYPE", "orderable"),
         (
             "aggregate\n  total = sum missing",
             "E_FIELD",
@@ -2732,12 +2844,13 @@ returning id, state"#;
     assert!(remaining.rows[0]["id"].cmp_eq(&Value::Int(1)));
     assert!(remaining.rows[1]["id"].cmp_eq(&Value::Int(4)));
 
-    let before = serde_json::to_value(&remaining.rows).unwrap();
+    let ordered = ok(
+        &mut engine,
+        "update jobs\nsort state\ntake 1\nset priority = 0\nreturning id",
+    );
+    assert!(ordered.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    let before = serde_json::to_value(ok(&mut engine, "from jobs | sort id").rows).unwrap();
     for (source, code) in [
-        (
-            "update jobs\nsort state\ntake 1\nset priority = 0",
-            "E_TYPE",
-        ),
         (
             "update jobs\nsort missing\ntake 1\nset priority = 0",
             "E_FIELD",
