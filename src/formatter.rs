@@ -188,18 +188,32 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             for stage in &target.stages {
                 stage_text(output, stage, depth);
             }
+            let grouped = assignments.len() > 1;
+            if grouped {
+                line(output, depth, "set {");
+            }
             for assignment in assignments {
+                let assignment_depth = depth + usize::from(grouped);
+                let prefix = format!(
+                    "{}{} = ",
+                    if grouped { "" } else { "set " },
+                    assignment.path
+                );
                 match &assignment.value {
                     SetValue::Expression(value) => {
-                        expression(output, depth, &format!("set {} = ", assignment.path), value)
+                        expression(output, assignment_depth, &prefix, value)
                     }
-                    SetValue::Match(value) => match_value_arms(
-                        output,
-                        &format!("set {} = ", assignment.path),
-                        value,
-                        depth,
-                    ),
+                    SetValue::Match(value) => {
+                        match_value_arms(output, &prefix, value, assignment_depth)
+                    }
                 }
+                if grouped {
+                    output.pop();
+                    output.push_str(",\n");
+                }
+            }
+            if grouped {
+                line(output, depth, "}");
             }
             returning_text(output, returning.as_ref(), depth);
         }

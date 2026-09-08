@@ -1,6 +1,6 @@
 # 当前可运行的语言预览
 
-本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 field-set transforms 仍由 #143 跟踪。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)。
+本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select 与 computed select 仍由 #143 跟踪。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)。
 
 当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys (aggregate {...})`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`not/and/or`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
@@ -175,10 +175,12 @@ filter (
 )
 sort {-attempts, id}
 take 1
-set attempts = attempts + 1
-set state = match state {
-  Pending => Done {result = "ok"},
-  current => current,
+set {
+  attempts = attempts + 1,
+  state = match state {
+    Pending => Done {result = "ok"},
+    current => current,
+  },
 }
 returning {id, state}
 
@@ -194,6 +196,8 @@ delete tasks | filter id == 2 | returning
 - 每条候选 row 更新完成后重新检查完整 row 类型；全表重新检查主键与 unique indexes，再原子替换 rows 与派生 indexes。任一行除零、溢出、类型或约束失败时，该请求不修改任何行。
 - 成功 insert/upsert/update/delete 的 JSON 响应包含 `affected_rows`；批量 insert/upsert 返回输入行数，update/delete 未命中时返回 0。末尾的 `returning` 返回完整受影响行，`returning {id, state}` 按给定顺序投影字段：单行／批量 insert 与 upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像。空批次或空命中仍返回稳定 columns 和空 rows。
 - returning 字段在扫描前按表 schema 检查，行数和 8 MiB typed wire 预算也在提交前检查；失败不会发布 row 或索引。内部稳定 RowId 不出现在用户 record 中，删除后不会被后续插入复用。
+
+多字段更新规范写成 `set {left = right, right = left}`，每个右侧读取旧行，可安全交换字段。单项 `set left = right` 保持可用；旧的重复 `set` 也继续执行，formatter 将其合并为一个字段集。空字段集、缺少逗号和重复路径会提供源码诊断；重复检查跨越同一 update 的所有 set。多项 derive/select 与 computed select 仍由 #143 后续切片实现。
 
 单行形式可用必要的 pipeline 分隔符，例如 `update tasks | filter id == 1 | set attempts = attempts + 1`。多项修改推荐换行，避免长表达式掩盖目标范围。
 

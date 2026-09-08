@@ -1132,11 +1132,14 @@ insert jobs {id = 2, priority = 2, ready = false, state = Queued {attempt = 5}}"
 filter id >= $id
 sort {-priority, id}
 take 1
-set state =
-  match state
-    Queued {attempt} => Running {worker = $worker, attempt = attempt + 1}
-    current => current
-returning id, state"#
+set {
+  state = match state {
+    Queued {attempt} => Running {worker = $worker, attempt = attempt + 1},
+    current => current,
+  },
+  ready = true,
+}
+returning {id, state}"#
             .into(),
         introspect: None,
         params: BTreeMap::from([
@@ -1170,6 +1173,7 @@ returning id, state"#
         rows.rows[0]["state"].source_text(),
         "Running {attempt = 6, worker = \"tcp-worker\"}"
     );
+    assert!(rows.rows[0]["ready"].cmp_eq(&unionid::Value::Bool(true)));
     let untouched = cli::send_one(&server.addr, "from jobs | filter id == 1").unwrap();
     assert_eq!(
         untouched.rows[0]["state"].source_text(),
