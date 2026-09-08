@@ -1,6 +1,7 @@
 use super::*;
 use crate::model::{EnumValue, MAX_DEPTH};
 use crate::query::{MigrationTransform, SchemaMigration};
+use std::sync::Arc;
 
 impl Database {
     pub(super) fn migrate(
@@ -663,7 +664,7 @@ impl Database {
                             )
                         },
                     );
-                let value = Value::Record(row.fields);
+                let value = Value::Record(row.fields.clone());
                 let migrated = migrate_value(
                     old_catalog,
                     &self.catalog,
@@ -686,7 +687,7 @@ impl Database {
             let Some(DbObject::Table(table)) = self.objects.get_mut(&name) else {
                 unreachable!()
             };
-            table.rows = rows;
+            table.rows = rows.into_iter().map(Arc::new).collect();
         }
         self.refresh_index_paths()?;
         self.indexes.clear();

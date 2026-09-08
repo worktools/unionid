@@ -9,7 +9,7 @@ use redb::{
 };
 
 use crate::codec::{PRODUCTION_VALUE_CODEC_VERSION, VALUE_CODEC_VERSION};
-use crate::db::{Database, DurableCatalogEntry, DurableMeta};
+use crate::db::{Database, DurableCatalogEntry, DurableMeta, LogicalWriteSet};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyReceipt, MAX_IDEMPOTENCY_RECEIPT_BYTES, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap,
@@ -72,7 +72,30 @@ const RECEIPT_MAGIC: &[u8; 4] = b"UIDR";
 
 pub(crate) struct RedbStore {
     database: RedbDatabase,
-    committed: PreparedState,
+    committed: DurableHead,
+}
+
+#[derive(Debug, Clone)]
+struct DurableHead {
+    layout: StorageLayout,
+    meta: DurableMeta,
+    catalog_canonical: bool,
+}
+
+impl DurableHead {
+    fn from_prepared(state: &PreparedState) -> Self {
+        Self {
+            layout: state.layout,
+            meta: state.meta.clone(),
+            catalog_canonical: state.catalog.values().all(|value| {
+                value
+                    .get(4..6)
+                    .and_then(|version| version.try_into().ok())
+                    .map(u16::from_be_bytes)
+                    == Some(state.layout.catalog)
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,18 +175,21 @@ impl RedbStore {
         let fresh = std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0);
         let database = RedbDatabase::create(&path).map_err(open_error)?;
         let empty = Database::default();
+        let initial = PreparedState::new(&empty, &ReceiptMap::new(), StorageLayout::production())?;
         let mut store = Self {
             database,
-            committed: PreparedState::new(&empty, &ReceiptMap::new(), StorageLayout::production())?,
+            committed: DurableHead::from_prepared(&initial),
         };
         if fresh {
+            let mut bootstrap = PreparedDelta::between(&initial, &initial);
+            bootstrap.expected_meta = None;
             store
-                .commit(&empty, &empty, &ReceiptMap::new())
+                .commit_prepared(&bootstrap)
                 .map_err(CommitFailure::into_error)?;
         }
         let (loaded, receipts, committed) = store.load()?;
         let needs_cursor_upgrade = committed.layout.format < CURSOR_STORAGE_FORMAT_VERSION;
-        store.committed = committed;
+        store.committed = DurableHead::from_prepared(&committed);
         if needs_cursor_upgrade {
             store.committed.layout = StorageLayout::legacy(CURSOR_STORAGE_FORMAT_VERSION);
             store
@@ -236,9 +262,50 @@ impl RedbStore {
     ) -> std::result::Result<(), CommitFailure> {
         validate_receipts(receipts, database.sequence).map_err(CommitFailure::Definite)?;
         let layout = self.committed.layout;
+        let (_, _, previous) = self.load().map_err(CommitFailure::Definite)?;
         let next =
             PreparedState::new(database, receipts, layout).map_err(CommitFailure::Definite)?;
-        let prepared = PreparedDelta::between(&self.committed, &next);
+        let prepared = PreparedDelta::between(&previous, &next);
+        self.commit_prepared(&prepared)?;
+        self.committed = DurableHead::from_prepared(&next);
+        Ok(())
+    }
+
+    pub(crate) fn commit_incremental(
+        &mut self,
+        previous: &Database,
+        previous_receipts: &ReceiptMap,
+        database: &Database,
+        receipts: &ReceiptMap,
+        write_set: &LogicalWriteSet,
+    ) -> std::result::Result<(), CommitFailure> {
+        if !self.committed.catalog_canonical {
+            // Opening a legacy catalog can schedule an in-place codec
+            // normalization for the next successful write. That maintenance
+            // rewrite intentionally uses the full-state path once.
+            return self.commit(previous, database, receipts);
+        }
+        validate_receipts(receipts, database.sequence).map_err(CommitFailure::Definite)?;
+        let prepared = PreparedDelta::incremental(
+            previous,
+            previous_receipts,
+            database,
+            &self.committed,
+            receipts,
+            write_set,
+        )
+        .map_err(CommitFailure::Definite)?;
+        self.commit_prepared(&prepared)?;
+        self.committed.layout = prepared.layout;
+        self.committed.meta = prepared.meta.clone();
+        self.committed.catalog_canonical = true;
+        Ok(())
+    }
+
+    fn commit_prepared(
+        &mut self,
+        prepared: &PreparedDelta,
+    ) -> std::result::Result<(), CommitFailure> {
         let mut transaction = self
             .database
             .begin_write()
@@ -251,8 +318,13 @@ impl RedbStore {
             let mut table = transaction
                 .open_table(META)
                 .map_err(|error| CommitFailure::definite("open meta table", error))?;
-            write_meta(&mut table, &prepared.meta, prepared.layout)
-                .map_err(CommitFailure::Definite)?;
+            write_meta(
+                &mut table,
+                prepared.expected_meta.as_ref(),
+                &prepared.meta,
+                prepared.layout,
+            )
+            .map_err(CommitFailure::Definite)?;
         }
         {
             let mut table = transaction
@@ -294,7 +366,6 @@ impl RedbStore {
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit redb transaction", error))?;
-        self.committed = next;
         Ok(())
     }
 
@@ -304,7 +375,7 @@ impl RedbStore {
             .check_integrity()
             .map_err(|error| storage_error("check redb integrity", error))?;
         let (database, receipts, committed) = self.load()?;
-        self.committed = committed;
+        self.committed = DurableHead::from_prepared(&committed);
         Ok((backend_clean, database, receipts))
     }
 
@@ -560,8 +631,10 @@ impl PreparedState {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct PreparedDelta {
     layout: StorageLayout,
+    expected_meta: Option<(DurableMeta, StorageLayout)>,
     meta: DurableMeta,
     catalog: BytesDelta,
     rows: BytesDelta,
@@ -578,9 +651,185 @@ impl PreparedDelta {
         Ok(Self::between(&previous, &next))
     }
 
+    fn incremental(
+        previous: &Database,
+        previous_receipts: &ReceiptMap,
+        database: &Database,
+        committed: &DurableHead,
+        receipts: &ReceiptMap,
+        write_set: &LogicalWriteSet,
+    ) -> Result<Self> {
+        let layout = committed.layout;
+        if !layout.supports_production_scalars() {
+            database.ensure_legacy_scalars()?;
+            ensure_legacy_receipts(receipts)?;
+        }
+        if committed.meta != previous.durable_meta() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "cached durable head does not match the incremental base state",
+            ));
+        }
+
+        let mut catalog = BytesDelta::default();
+        for (table, (expected_before, expected_after)) in &write_set.table_watermarks {
+            let before = previous.durable_table_catalog_entry(table)?;
+            let after = database.durable_table_catalog_entry(table)?;
+            let (DurableCatalogEntry::Table(before_table), DurableCatalogEntry::Table(after_table)) =
+                (&before, &after)
+            else {
+                unreachable!("table catalog lookup returns a table entry")
+            };
+            if before_table.id != after_table.id
+                || before_table.next_row_id != *expected_before
+                || after_table.next_row_id != *expected_after
+            {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!("table '{table}' watermark does not match its incremental write set"),
+                ));
+            }
+            let key = encode_catalog_key(after.kind_tag(), after.stable_id());
+            let expected = encode_catalog_entry(&before, layout.catalog)?;
+            let value = encode_catalog_entry(&after, layout.catalog)?;
+            if expected != value {
+                catalog.writes.push(BytesWrite {
+                    key,
+                    expected: Some(expected),
+                    value,
+                });
+            }
+        }
+
+        let mut rows = BytesDelta::default();
+        for ((table, row_id), change) in &write_set.rows {
+            let before = change
+                .before
+                .as_ref()
+                .map(|row| {
+                    previous
+                        .durable_row_with_codec(table, row, layout.value)
+                        .map(|(table_id, bytes)| (table_id, row.id, bytes))
+                })
+                .transpose()?;
+            let after = change
+                .after
+                .as_ref()
+                .map(|row| {
+                    database
+                        .durable_row_with_codec(table, row, layout.value)
+                        .map(|(table_id, bytes)| (table_id, row.id, bytes))
+                })
+                .transpose()?;
+            let table_id = before
+                .as_ref()
+                .map(|entry| entry.0)
+                .or_else(|| after.as_ref().map(|entry| entry.0))
+                .expect("coalesced row changes retain one image");
+            if before
+                .as_ref()
+                .is_some_and(|entry| entry.0 != table_id || entry.1 != *row_id)
+                || after
+                    .as_ref()
+                    .is_some_and(|entry| entry.0 != table_id || entry.1 != *row_id)
+            {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!("row '{table}.{row_id}' does not match its incremental key"),
+                ));
+            }
+            let key = encode_row_key(table_id, *row_id);
+            match (before.as_ref(), after.as_ref()) {
+                (Some(before), Some(after)) if before.2 == after.2 => {}
+                (Some(before), Some(after)) => rows.writes.push(BytesWrite {
+                    key,
+                    expected: Some(before.2.clone()),
+                    value: after.2.clone(),
+                }),
+                (None, Some(after)) => rows.writes.push(BytesWrite {
+                    key,
+                    expected: None,
+                    value: after.2.clone(),
+                }),
+                (Some(before), None) => rows.deletes.push(BytesDelete {
+                    key,
+                    expected: before.2.clone(),
+                }),
+                (None, None) => unreachable!("empty row changes are removed during coalescing"),
+            }
+        }
+
+        let mut secondary_deletes = Vec::new();
+        let mut secondary_inserts = Vec::new();
+        for ((index_id, _, row_id), change) in &write_set.index_entries {
+            if change.index_id != *index_id || change.row_id != *row_id {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "index entry does not match its incremental write-set key",
+                ));
+            }
+            let key = encode_index_key(*index_id, &change.value, *row_id, layout.index)?;
+            match (change.before, change.after) {
+                (true, false) => secondary_deletes.push(key),
+                (false, true) => secondary_inserts.push(key),
+                _ => {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "unchanged index entry remained in incremental write set",
+                    ));
+                }
+            }
+        }
+
+        let mut receipt_delta = BytesDelta::default();
+        for key in &write_set.receipt_keys {
+            let before = previous_receipts
+                .get(key)
+                .map(|receipt| encode_receipt(receipt, layout.receipt))
+                .transpose()?;
+            let after = receipts
+                .get(key)
+                .map(|receipt| encode_receipt(receipt, layout.receipt))
+                .transpose()?;
+            match (before, after) {
+                (Some(expected), Some(value)) if expected == value => {}
+                (Some(expected), Some(value)) => receipt_delta.writes.push(BytesWrite {
+                    key: key.as_bytes().to_vec(),
+                    expected: Some(expected),
+                    value,
+                }),
+                (None, Some(value)) => receipt_delta.writes.push(BytesWrite {
+                    key: key.as_bytes().to_vec(),
+                    expected: None,
+                    value,
+                }),
+                (Some(expected), None) => receipt_delta.deletes.push(BytesDelete {
+                    key: key.as_bytes().to_vec(),
+                    expected,
+                }),
+                (None, None) => {}
+            }
+        }
+
+        Ok(Self {
+            layout,
+            expected_meta: Some((committed.meta.clone(), committed.layout)),
+            meta: database.durable_meta(),
+            catalog,
+            rows,
+            secondary_indexes: SetDelta {
+                deletes: secondary_deletes,
+                inserts: secondary_inserts,
+            },
+            migrations: LedgerDelta::default(),
+            receipts: receipt_delta,
+        })
+    }
+
     fn between(previous: &PreparedState, next: &PreparedState) -> Self {
         Self {
             layout: next.layout,
+            expected_meta: None,
             meta: next.meta.clone(),
             catalog: BytesDelta::between(&previous.catalog, &next.catalog),
             rows: BytesDelta::between(&previous.rows, &next.rows),
@@ -594,6 +843,7 @@ impl PreparedDelta {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
 struct LedgerDelta {
     deletes: Vec<(u64, Vec<u8>)>,
     writes: Vec<(u64, Option<Vec<u8>>, Vec<u8>)>,
@@ -617,16 +867,19 @@ impl LedgerDelta {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
 struct BytesDelta {
     deletes: Vec<BytesDelete>,
     writes: Vec<BytesWrite>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct BytesDelete {
     key: Vec<u8>,
     expected: Vec<u8>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct BytesWrite {
     key: Vec<u8>,
     expected: Option<Vec<u8>>,
@@ -658,6 +911,7 @@ impl BytesDelta {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct SetDelta {
     deletes: Vec<Vec<u8>>,
     inserts: Vec<Vec<u8>>,
@@ -756,10 +1010,33 @@ fn apply_set_delta(table: &mut redb::Table<'_, &[u8], u8>, delta: &SetDelta) -> 
 
 fn write_meta(
     table: &mut redb::Table<'_, &str, &[u8]>,
+    expected: Option<&(DurableMeta, StorageLayout)>,
     meta: &DurableMeta,
     layout: StorageLayout,
 ) -> Result<()> {
-    for (key, value) in [
+    if let Some((expected_meta, expected_layout)) = expected {
+        for (key, expected_value) in meta_entries(expected_meta, *expected_layout) {
+            let actual = table
+                .get(key)
+                .map_err(|error| storage_error("read expected meta entry", error))?;
+            if actual.as_ref().map(|value| value.value()) != Some(expected_value.as_slice()) {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!("stored meta entry '{key}' changed before incremental commit"),
+                ));
+            }
+        }
+    }
+    for (key, value) in meta_entries(meta, layout) {
+        table
+            .insert(key, value.as_slice())
+            .map_err(|error| storage_error("write meta entry", error))?;
+    }
+    Ok(())
+}
+
+fn meta_entries(meta: &DurableMeta, layout: StorageLayout) -> [(&'static str, Vec<u8>); 12] {
+    [
         (FORMAT_KEY, layout.format.to_be_bytes().to_vec()),
         (CATALOG_CODEC_KEY, layout.catalog.to_be_bytes().to_vec()),
         (VALUE_CODEC_KEY, layout.value.to_be_bytes().to_vec()),
@@ -781,12 +1058,7 @@ fn write_meta(
             meta.cursor_instance_id.as_slice().to_vec(),
         ),
         (CURSOR_SECRET_KEY, meta.cursor_secret.as_slice().to_vec()),
-    ] {
-        table
-            .insert(key, value.as_slice())
-            .map_err(|error| storage_error("write meta entry", error))?;
-    }
-    Ok(())
+    ]
 }
 
 fn read_meta(
@@ -1330,6 +1602,39 @@ mod tests {
         assert_eq!(delta.rows.writes.len(), 2);
         assert_eq!(delta.secondary_indexes.deletes.len(), 3);
         assert_eq!(delta.secondary_indexes.inserts.len(), 3);
+    }
+
+    #[test]
+    fn incremental_plan_matches_full_state_diff_for_row_only_batch() {
+        let mut previous = Database::default();
+        execute(
+            &mut previous,
+            "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ncreate index entries (label)\ninsert entries {id = 1, label = \"one\"}\ninsert entries {id = 2, label = \"two\"}",
+        );
+        let _ = previous.take_write_set();
+        let receipts = ReceiptMap::new();
+        let committed_state =
+            PreparedState::new(&previous, &receipts, StorageLayout::production()).unwrap();
+        let committed = DurableHead::from_prepared(&committed_state);
+
+        let mut next = previous.clone();
+        execute(
+            &mut next,
+            "update entries | filter id == 1 | set label = \"changed\"\ndelete entries | filter id == 2\ninsert entries {id = 3, label = \"three\"}",
+        );
+        let writes = next.take_write_set();
+        let incremental =
+            PreparedDelta::incremental(&previous, &receipts, &next, &committed, &receipts, &writes)
+                .unwrap();
+        let complete = PreparedState::new(&next, &receipts, StorageLayout::production()).unwrap();
+        let mut full = PreparedDelta::between(&committed_state, &complete);
+        assert_eq!(
+            incremental.expected_meta.as_ref().unwrap().0,
+            committed.meta
+        );
+        full.expected_meta = incremental.expected_meta.clone();
+
+        assert_eq!(incremental, full);
     }
 
     #[test]

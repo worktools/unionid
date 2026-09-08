@@ -26,6 +26,8 @@ const MIGRATION: &str = r#"migration benchmark_task_v2
 struct RawSamples {
     name: String,
     samples_micros: Vec<u64>,
+    candidate_samples_micros: Option<Vec<u64>>,
+    durable_commit_samples_micros: Option<Vec<u64>>,
     peak_rss_bytes: u64,
     access_kind: Option<QueryAccessKind>,
     index: Option<String>,
@@ -38,6 +40,18 @@ struct CaseReport {
     samples_micros: Vec<u64>,
     p50_micros: u64,
     p95_micros: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_samples_micros: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_p50_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_p95_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durable_commit_samples_micros: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durable_commit_p50_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durable_commit_p95_micros: Option<u64>,
     peak_rss_bytes: u64,
     access_kind: Option<QueryAccessKind>,
     index: Option<String>,
@@ -299,6 +313,8 @@ fn measure_query(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
     print_raw(RawSamples {
         name: case.into(),
         samples_micros: timings,
+        candidate_samples_micros: None,
+        durable_commit_samples_micros: None,
         peak_rss_bytes: peak_rss_bytes()?,
         access_kind: Some(expected_access),
         index: expected_index.map(Into::into),
@@ -329,19 +345,27 @@ fn measure_write(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
     };
     for source in &sources[..WARMUPS] {
         require_write(engine.execute(source), case)?;
+        require_write_profile(&engine, case)?;
     }
     let mut timings = Vec::with_capacity(samples);
+    let mut candidate_timings = Vec::with_capacity(samples);
+    let mut durable_commit_timings = Vec::with_capacity(samples);
     for source in &sources[WARMUPS..] {
         let started = Instant::now();
         let response = engine.execute(source);
         timings.push(elapsed_micros(started));
         require_write(response, case)?;
+        let profile = require_write_profile(&engine, case)?;
+        candidate_timings.push(profile.candidate_micros);
+        durable_commit_timings.push(profile.durable_commit_micros);
     }
     let peak_rss_bytes = peak_rss_bytes()?;
     validate_write_result(&mut engine, case, rows, target, total)?;
     print_raw(RawSamples {
         name: case.into(),
         samples_micros: timings,
+        candidate_samples_micros: Some(candidate_timings),
+        durable_commit_samples_micros: Some(durable_commit_timings),
         peak_rss_bytes,
         access_kind,
         index: index.map(Into::into),
@@ -355,6 +379,12 @@ fn measure_migration(path: &Path, rows: usize) -> AnyResult<()> {
     let response = engine.execute(MIGRATION);
     let timing = elapsed_micros(started);
     require_ok(response)?;
+    let profile = engine
+        .last_mutation_profile()
+        .ok_or("migration returned no mutation profile")?;
+    if !profile.full_rebuild {
+        return Err("migration unexpectedly used the incremental row-only path".into());
+    }
     let peak_rss_bytes = peak_rss_bytes()?;
     let migrated = require_one(engine.execute("from tasks | filter priority == 0 | take 1"))?;
     if migrated.rows[0]["priority"].cmp_eq(&Value::Int(0)) {
@@ -370,6 +400,8 @@ fn measure_migration(path: &Path, rows: usize) -> AnyResult<()> {
     print_raw(RawSamples {
         name: "deep_migration".into(),
         samples_micros: vec![timing],
+        candidate_samples_micros: Some(vec![profile.candidate_micros]),
+        durable_commit_samples_micros: Some(vec![profile.durable_commit_micros]),
         peak_rss_bytes,
         access_kind: Some(QueryAccessKind::SecondaryIndexLookup),
         index: Some("tasks.priority".into()),
@@ -463,6 +495,29 @@ fn require_write(response: QueryResponse, case: &str) -> AnyResult<()> {
     Ok(())
 }
 
+fn require_write_profile(engine: &Engine, case: &str) -> AnyResult<unionid::MutationProfile> {
+    let profile = engine
+        .last_mutation_profile()
+        .ok_or("write returned no mutation profile")?;
+    if profile.full_rebuild {
+        return Err(format!("{case} unexpectedly used the full-rebuild path").into());
+    }
+    let expected_inserts = usize::from(case == "atomic_batch") * BATCH_WRITE_ROWS;
+    let expected_updates = usize::from(case != "atomic_batch");
+    let expected_index_inserts = usize::from(case == "atomic_batch") * BATCH_WRITE_ROWS * 3;
+    if profile.touched_tables != 1
+        || profile.row_inserts != expected_inserts
+        || profile.row_updates != expected_updates
+        || profile.row_deletes != 0
+        || profile.index_inserts != expected_index_inserts
+        || profile.index_deletes != 0
+        || profile.receipt_changes != 0
+    {
+        return Err(format!("{case} returned unexpected mutation profile {profile:?}").into());
+    }
+    Ok(profile)
+}
+
 fn require_plan(
     engine: &mut Engine,
     source: &str,
@@ -519,6 +574,8 @@ fn combine_migration_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
     let mut combined = RawSamples {
         name: "deep_migration".into(),
         samples_micros: Vec::with_capacity(runs.len()),
+        candidate_samples_micros: Some(Vec::with_capacity(runs.len())),
+        durable_commit_samples_micros: Some(Vec::with_capacity(runs.len())),
         peak_rss_bytes: 0,
         access_kind: Some(QueryAccessKind::SecondaryIndexLookup),
         index: Some("tasks.priority".into()),
@@ -532,6 +589,28 @@ fn combine_migration_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
             return Err("migration child returned inconsistent metadata".into());
         }
         combined.samples_micros.push(run.samples_micros[0]);
+        combined
+            .candidate_samples_micros
+            .as_mut()
+            .ok_or("migration child omitted candidate samples")?
+            .push(
+                run.candidate_samples_micros
+                    .as_ref()
+                    .and_then(|samples| samples.first())
+                    .copied()
+                    .ok_or("migration child returned no candidate sample")?,
+            );
+        combined
+            .durable_commit_samples_micros
+            .as_mut()
+            .ok_or("migration child omitted durable commit samples")?
+            .push(
+                run.durable_commit_samples_micros
+                    .as_ref()
+                    .and_then(|samples| samples.first())
+                    .copied()
+                    .ok_or("migration child returned no durable commit sample")?,
+            );
         combined.peak_rss_bytes = combined.peak_rss_bytes.max(run.peak_rss_bytes);
     }
     Ok(combined)
@@ -545,16 +624,41 @@ fn summarize(mut raw: RawSamples) -> AnyResult<CaseReport> {
     sorted.sort_unstable();
     let p50_micros = percentile(&sorted, 50);
     let p95_micros = percentile(&sorted, 95);
+    let (candidate_p50_micros, candidate_p95_micros) =
+        summarize_phase(&raw.candidate_samples_micros, raw.samples_micros.len())?;
+    let (durable_commit_p50_micros, durable_commit_p95_micros) =
+        summarize_phase(&raw.durable_commit_samples_micros, raw.samples_micros.len())?;
     Ok(CaseReport {
         name: raw.name,
         iterations: raw.samples_micros.len(),
         samples_micros: std::mem::take(&mut raw.samples_micros),
         p50_micros,
         p95_micros,
+        candidate_samples_micros: raw.candidate_samples_micros.take(),
+        candidate_p50_micros,
+        candidate_p95_micros,
+        durable_commit_samples_micros: raw.durable_commit_samples_micros.take(),
+        durable_commit_p50_micros,
+        durable_commit_p95_micros,
         peak_rss_bytes: raw.peak_rss_bytes,
         access_kind: raw.access_kind,
         index: raw.index,
     })
+}
+
+fn summarize_phase(
+    samples: &Option<Vec<u64>>,
+    expected: usize,
+) -> AnyResult<(Option<u64>, Option<u64>)> {
+    let Some(samples) = samples else {
+        return Ok((None, None));
+    };
+    if samples.len() != expected {
+        return Err("phase sample count does not match total sample count".into());
+    }
+    let mut sorted = samples.clone();
+    sorted.sort_unstable();
+    Ok((Some(percentile(&sorted, 50)), Some(percentile(&sorted, 95))))
 }
 
 fn percentile(sorted: &[u64], percent: usize) -> u64 {

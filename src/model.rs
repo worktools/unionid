@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -255,7 +256,7 @@ pub struct Table {
     pub id: u64,
     pub name: String,
     pub schema: Vec<Column>,
-    pub rows: Vec<Row>,
+    pub rows: imbl::Vector<Arc<Row>>,
     /// The next stable row identity. This is persisted even when the row with
     /// the greatest allocated ID has been deleted.
     #[serde(default)]
