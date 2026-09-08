@@ -1755,7 +1755,11 @@ impl Parser {
             if !seen.insert(column.clone()) {
                 return Err(self.error(format!("duplicate sort field '{column}'")));
             }
-            keys.push(SortKey { column, descending });
+            keys.push(SortKey {
+                column,
+                descending,
+                ty: None,
+            });
             if !braced {
                 break;
             }
@@ -2622,6 +2626,7 @@ impl Parser {
                 left,
                 op,
                 right: self.scalar_expression(depth, false)?,
+                operand_type: None,
             })
         } else {
             Ok(BoolExpression::Value(left))

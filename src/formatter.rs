@@ -859,7 +859,9 @@ fn boolean(value: &BoolExpression, parent: u8, right: bool) -> String {
     };
     let text = match value {
         BoolExpression::Value(value) => scalar(value, 0, false),
-        BoolExpression::Compare { left, op, right } => format!(
+        BoolExpression::Compare {
+            left, op, right, ..
+        } => format!(
             "{} {} {}",
             scalar(left, 0, false),
             match op {

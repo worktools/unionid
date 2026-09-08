@@ -335,6 +335,7 @@ pub struct DeriveExpression {
 pub struct SortKey {
     pub column: String,
     pub descending: bool,
+    pub ty: Option<ScalarType>,
 }
 
 #[derive(Debug, Clone)]
@@ -433,6 +434,7 @@ pub enum BoolExpression {
         left: ScalarExpression,
         op: CmpOp,
         right: ScalarExpression,
+        operand_type: Option<ScalarType>,
     },
     Contains {
         collection: ScalarExpression,

@@ -74,6 +74,37 @@ fn memory_pages_traverse_duplicate_prefixes_in_both_directions() {
 }
 
 #[test]
+fn adt_cursor_boundaries_resume_after_redb_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("adt-page.redb");
+    let query = "from jobs\nsort {state, id}";
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let setup = engine.execute(
+        r#"type State = Waiting | Running {attempt int} | Done
+type Job =
+  id int
+  state State
+table jobs Job
+  key id
+insert jobs {id = 1, state = Running {attempt = 2}}
+insert jobs {id = 2, state = Waiting}
+insert jobs {id = 3, state = Running {attempt = 1}}"#,
+    );
+    assert!(setup.ok, "{}", setup.message);
+
+    let first = engine.execute_page(query, PageSpec::forward(2));
+    assert!(first.ok, "{}", first.message);
+    assert_eq!(ids(&first), [2, 3]);
+    let cursor = first.page.unwrap().next_cursor.unwrap();
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let second = reopened.execute_page(query, PageSpec::after(2, cursor));
+    assert!(second.ok, "{}", second.message);
+    assert_eq!(ids(&second), [1]);
+}
+
+#[test]
 fn projection_can_hide_cursor_order_fields() {
     let mut engine = Engine::memory();
     setup(&mut engine);

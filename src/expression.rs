@@ -109,7 +109,12 @@ fn bind_in_scope(
             let ty = bind_scalar(catalog, scope, value, None, reference_kind)?;
             require_bool(catalog, &ty, condition_kind)
         }
-        BoolExpression::Compare { left, op, right } => {
+        BoolExpression::Compare {
+            left,
+            op,
+            right,
+            operand_type,
+        } => {
             let inferred_left = infer_scalar(catalog, scope, left, reference_kind)?;
             let inferred_right = infer_scalar(catalog, scope, right, reference_kind)?;
             let expected = if is_constant(left) {
@@ -141,6 +146,7 @@ fn bind_in_scope(
                     format!("type '{}' has no ordering", catalog.describe(&left_ty)),
                 ));
             }
+            *operand_type = Some(left_ty);
             Ok(())
         }
         BoolExpression::Contains { collection, item } => {
@@ -797,18 +803,14 @@ fn require_bool(catalog: &Catalog, ty: &ScalarType, context: &str) -> Result<()>
 }
 
 fn orderable(catalog: &Catalog, ty: &ScalarType) -> Result<bool> {
-    Ok(matches!(
-        catalog.underlying(ty)?,
-        ScalarType::Int
-            | ScalarType::Float
-            | ScalarType::Text
-            | ScalarType::Uuid
-            | ScalarType::Date
-            | ScalarType::Timestamp
-            | ScalarType::Duration
-            | ScalarType::Decimal { .. }
-            | ScalarType::Bytes
-    ))
+    match ty {
+        ScalarType::Ref(id) => {
+            catalog.definition(*id)?;
+            Ok(true)
+        }
+        ScalarType::Named(_) => Ok(false),
+        _ => Ok(true),
+    }
 }
 
 pub(crate) fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
@@ -946,14 +948,25 @@ fn evaluate_resolved(
             };
             Ok(matches!(value.as_value().unwrapped(), Value::Bool(true)))
         }
-        BoolExpression::Compare { left, op, right } => {
+        BoolExpression::Compare {
+            left,
+            op,
+            right,
+            operand_type,
+        } => {
             let Some(left) = evaluate_scalar(catalog, left, values)? else {
                 return Ok(false);
             };
             let Some(right) = evaluate_scalar(catalog, right, values)? else {
                 return Ok(false);
             };
-            Ok(compare(left.as_value(), *op, right.as_value()))
+            compare(
+                catalog,
+                left.as_value(),
+                *op,
+                right.as_value(),
+                operand_type.as_ref(),
+            )
         }
         BoolExpression::Contains { collection, item } => {
             let Some(collection) = evaluate_scalar(catalog, collection, values)? else {
@@ -1302,21 +1315,35 @@ impl Evaluated<'_, '_> {
     }
 }
 
-fn compare(left: &Value, op: CmpOp, right: &Value) -> bool {
-    match op {
-        CmpOp::Eq => left.cmp_eq(right),
-        CmpOp::Ne => !left.cmp_eq(right),
-        CmpOp::Gt => left.cmp_ord(right) == Some(std::cmp::Ordering::Greater),
-        CmpOp::Lt => left.cmp_ord(right) == Some(std::cmp::Ordering::Less),
-        CmpOp::Gte => matches!(
-            left.cmp_ord(right),
-            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-        ),
-        CmpOp::Lte => matches!(
-            left.cmp_ord(right),
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        ),
+fn compare(
+    catalog: &Catalog,
+    left: &Value,
+    op: CmpOp,
+    right: &Value,
+    operand_type: Option<&ScalarType>,
+) -> Result<bool> {
+    if matches!(op, CmpOp::Eq | CmpOp::Ne) {
+        let equal = left.cmp_eq(right);
+        return Ok(if matches!(op, CmpOp::Eq) {
+            equal
+        } else {
+            !equal
+        });
     }
+    let ty = operand_type.ok_or_else(|| {
+        Error::new(
+            "E_TYPE",
+            "ordered comparison was executed before its operand type was bound",
+        )
+    })?;
+    let ordering = catalog.cmp_typed(ty, left, right)?;
+    Ok(match op {
+        CmpOp::Gt => ordering == std::cmp::Ordering::Greater,
+        CmpOp::Lt => ordering == std::cmp::Ordering::Less,
+        CmpOp::Gte => ordering != std::cmp::Ordering::Less,
+        CmpOp::Lte => ordering != std::cmp::Ordering::Greater,
+        CmpOp::Eq | CmpOp::Ne => unreachable!(),
+    })
 }
 
 pub(crate) fn simple_index_equality(expression: &BoolExpression) -> Option<(&str, &Value)> {
@@ -1324,6 +1351,7 @@ pub(crate) fn simple_index_equality(expression: &BoolExpression) -> Option<(&str
         left,
         op: CmpOp::Eq,
         right,
+        ..
     } = expression
     else {
         return None;
@@ -1355,6 +1383,7 @@ mod tests {
                 left: ScalarExpression::Reference("item".into()),
                 op: CmpOp::Gt,
                 right: ScalarExpression::Literal(Value::Int(10)),
+                operand_type: Some(ScalarType::Int),
             }),
         }
     }
