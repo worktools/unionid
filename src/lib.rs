@@ -27,6 +27,7 @@ pub mod schema;
 mod serde_value;
 pub mod server;
 pub mod snapshot;
+pub mod stream;
 pub mod syntax;
 pub mod wal;
 

@@ -9,6 +9,7 @@ pub(crate) struct ExecutionControl {
     deadline: Option<Instant>,
     cancelled: Option<Arc<AtomicBool>>,
     shutdown: Option<Arc<AtomicBool>>,
+    materialized_bytes_limit: Option<usize>,
 }
 
 impl ExecutionControl {
@@ -17,6 +18,7 @@ impl ExecutionControl {
             deadline: Some(deadline),
             cancelled: None,
             shutdown: None,
+            materialized_bytes_limit: None,
         }
     }
 
@@ -29,6 +31,7 @@ impl ExecutionControl {
             deadline: Some(deadline),
             cancelled: Some(cancelled),
             shutdown,
+            materialized_bytes_limit: Some(256 * 1024 * 1024),
         }
     }
 
@@ -62,5 +65,9 @@ impl ExecutionControl {
     pub(crate) fn remaining(&self) -> Option<std::time::Duration> {
         self.deadline
             .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+    }
+
+    pub(crate) fn materialized_bytes_limit(&self) -> Option<usize> {
+        self.materialized_bytes_limit
     }
 }

@@ -354,6 +354,37 @@ fn check_deadline_periodically(control: Option<&ExecutionControl>, position: usi
     }
 }
 
+fn check_materialized_rows(
+    rows: &[BTreeMap<String, Value>],
+    control: Option<&ExecutionControl>,
+) -> Result<()> {
+    let Some(limit) = control.and_then(ExecutionControl::materialized_bytes_limit) else {
+        return Ok(());
+    };
+    let mut encoded = 0_usize;
+    for (position, row) in rows.iter().enumerate() {
+        check_deadline_periodically(control, position)?;
+        encoded = encoded.saturating_add(materialized_row_size(row)?);
+        if encoded > limit {
+            return Err(Error::new(
+                "E_STREAM_LIMIT",
+                format!("stream materialized rows exceed {limit} encoded bytes"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn materialized_row_size(row: &BTreeMap<String, Value>) -> Result<usize> {
+    let wire = row
+        .iter()
+        .map(|(name, value)| (name, crate::protocol::WireValue::from(value)))
+        .collect::<BTreeMap<_, _>>();
+    serde_json::to_vec(&wire)
+        .map(|encoded| encoded.len())
+        .map_err(|error| Error::new("E_PROTOCOL", format!("estimate stream row size: {error}")))
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IndexKind {
@@ -438,7 +469,7 @@ pub struct SchemaInfo {
     pub hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseColumn {
     pub name: String,
     pub ty: String,
@@ -2548,12 +2579,27 @@ impl Database {
                 ),
             ));
         }
+        let materialized_limit = control.and_then(ExecutionControl::materialized_bytes_limit);
+        let mut materialized_bytes = 0_usize;
         let mut rows = match candidates {
             Some(ids) => {
                 let mut rows = Vec::with_capacity(ids.len());
                 for (position, id) in ids.into_iter().enumerate() {
                     check_deadline_periodically(control, position)?;
                     if let Ok(position) = table.rows.binary_search_by_key(&id, |row| row.id) {
+                        if let Some(limit) = materialized_limit {
+                            materialized_bytes = materialized_bytes.saturating_add(
+                                materialized_row_size(&table.rows[position].fields)?,
+                            );
+                            if materialized_bytes > limit {
+                                return Err(Error::new(
+                                    "E_STREAM_LIMIT",
+                                    format!(
+                                        "stream materialized rows exceed {limit} encoded bytes"
+                                    ),
+                                ));
+                            }
+                        }
                         rows.push(table.rows[position].fields.clone());
                     }
                 }
@@ -2563,6 +2609,16 @@ impl Database {
                 let mut rows = Vec::with_capacity(table.rows.len());
                 for (position, row) in table.rows.iter().enumerate() {
                     check_deadline_periodically(control, position)?;
+                    if let Some(limit) = materialized_limit {
+                        materialized_bytes =
+                            materialized_bytes.saturating_add(materialized_row_size(&row.fields)?);
+                        if materialized_bytes > limit {
+                            return Err(Error::new(
+                                "E_STREAM_LIMIT",
+                                format!("stream materialized rows exceed {limit} encoded bytes"),
+                            ));
+                        }
+                    }
                     rows.push(row.fields.clone());
                 }
                 rows
@@ -2686,9 +2742,11 @@ impl Database {
                     };
                 }
             }
+            check_materialized_rows(&rows, control)?;
         }
         for columns in deferred_selects {
             rows = project_rows(rows, &columns);
+            check_materialized_rows(&rows, control)?;
         }
         check_deadline(control)?;
         if rows.len() > MAX_RESULT_ROWS {

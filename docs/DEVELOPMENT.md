@@ -9,6 +9,7 @@
 - Engine、本地 run/CLI 和 TCP 服务已提供统一只读执行边界；`introspection.read_only` 可验证实际状态，mutation 在创建候选状态或持久事务前返回 `E_READ_ONLY`。
 - 查询语言、Rust Engine 和 version 1 协议共享有界 keyset `page`：唯一排序以主键收尾，`u1` cursor 绑定 schema/query/params/sequence 并使用数据库 HMAC secret；redb 重开保留身份，逻辑 restore 轮换身份。
 - Rust/TCP/HTTP 可用 `TypedPage<T>`、`PageInfo::next_page/previous_page` 和结构化 `PageSpec` 遍历相同 typed rows；HTTP adapter 通过 `ConcurrentEngine::execute_protocol_request_until` 设置绝对 deadline，并在一致 committed snapshot 上并发读取。真实接口场景覆盖重开续页、cursor 拒绝、migration 失效和客户端断开。
+- stream protocol version 1 以 server-issued capability、共享有界 NDJSON producer 和独立 cancel control 扩展长只读查询；TCP 内置服务与真实 Axum todolist adapter 消费同一 typed frame receiver，慢 consumer 不延长 snapshot 生命周期。
 - 后续工作按生产正确性、用户体验和语言探索拆分，不再把宽泛目标或已完成发布步骤保留为“当前任务”。
 
 ## 已实现

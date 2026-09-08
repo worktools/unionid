@@ -1,6 +1,6 @@
 # RFC 0007：可取消、有背压的流式读取
 
-状态：accepted design；implementation tracked by #156 and #157
+状态：accepted；#156 core 与 #157 TCP/HTTP adapters 已实现
 
 ## 1. 问题与边界
 

@@ -73,7 +73,8 @@
 - 生产标量兼容分支已接入 protocol v2 与完整 v1 typed-boundary 预检；新 redb 数据库使用 storage format 4 和 catalog/value/index-key/receipt codec 3/2/2/2，逻辑 backup 使用 codec 3。旧 format 1–3 保持可读且普通写入不隐式升到 4；`upgrade --db <path> --target 4` 在一个同步 two-phase transaction 中重写并验证全部 durable state。`.storage` 与 `check --db` 展示 codec versions；#137 继续跟踪中断和跨 binary 恢复验收。
 - `version --format json` 与 `doctor [--db <path>] --format json` 提供 version 1 机器可读的软件、target、protocol、storage/codec 和可选 schema/ledger 摘要；doctor 只检查私有临时副本，不创建、修复或升级请求的数据库。非查询 JSON 命令共用脱敏错误 envelope 和 2–6 分类退出码，query JSON 保持 `QueryResponse` 兼容。
 - #135 已拆为 #155 RFC → #156 核心 operation registry/cancellable read → #157 共享 TCP/HTTP NDJSON adapter。RFC 0007 选择 server-issued 128-bit bearer capability、进程内有界 registry、accepted/schema/row/complete/error frame、唯一 terminal 竞态线性化点，以及 frame/channel/bytes/deadline/idle-write 资源上限；stream 不开放 mutation、page 或隐式断线续传。
-- `ConcurrentEngine::register_read` / `ReadOperation::start` / `cancel` 已实现 transport-neutral 可取消读取核心：active registry 64、terminal tombstone 256/60 秒，统一 `ExecutionControl` 在 admission、bind 与 query 循环按 cancel/shutdown/deadline 检查。operation capability 不持久化、不记录查询数据；wire stream 仍等待 #157。
+- `ConcurrentEngine::register_read` / `ReadOperation::start` / `cancel` 已实现 transport-neutral 可取消读取核心：active registry 64、terminal tombstone 256/60 秒，统一 `ExecutionControl` 在 admission、bind 与 query 循环按 cancel/shutdown/deadline 检查。operation capability 不持久化、不记录查询数据。
+- stream protocol version 1 使用独立 query/cancel envelope 和 accepted/schema/row/complete/error NDJSON frame；TCP 与 HTTP todolist 共用最多 8 帧/16 MiB 的 producer、typed `WireValue` 和 operation registry。完整结果在进入 emitting 前释放 snapshot，partial stream 不提供隐式续传。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）

@@ -46,6 +46,8 @@ let request = ProtocolRequest::query(
 
 HTTP response 直接序列化 `unionid::ProtocolResponse`。Rust 客户端可用 `response.typed_rows::<Todo>()?` 读取 query 或 DML `returning`，同时 wire JSON 保留 i64 精度、Option/null 区别、tuple/list 形态和稳定 named/variant ID。
 
+长只读结果可使用示例的 `POST /v1/stream`，body 为 `stream::Request::Query`，响应为 `application/x-ndjson`；`x-unionid-operation-id` 与首个 `accepted` frame 携带同一个 bearer capability。`POST /v1/stream/cancel` 接受 `stream::Request::Cancel`。adapter 必须在 accepted 已交给 body 后才启动读取，并直接消费 `AcceptedStream::start` 的有界 receiver，不自行重编码 row。
+
 分页同样不拼接查询文本。第一页使用 `PageSpec::forward`，`typed_page` 解码应用类型并保留续页信息：
 
 ```rust
@@ -77,6 +79,7 @@ cargo run --example todolist -- /path/to/empty-work-directory
 - typed 参数错误；
 - 提交成功后注入 response loss，再用相同 key 和新 request ID 重试，验证 `replayed = true` 且只写入一次；
 - 通过 blocking worker 与共享 `ConcurrentEngine` 执行请求，多页 typed todo 遍历、真实客户端断开，以及断开后的健康请求；
+- 通过 lazy HTTP body 和共享 NDJSON producer 遍历 typed rows，并用独立 cancel route 查询 terminal outcome；
 - 服务端关闭/重开 redb 后继续旧 cursor，并拒绝被修改的 cursor；
 - 深层 ADT migration、旧 cursor 的 `E_CURSOR_SCHEMA`、schema mismatch 和索引 explain；
 - 完整性检查、逻辑备份、还原及 typed rows 比较。
@@ -90,5 +93,5 @@ cargo run --example todolist -- /path/to/empty-work-directory
 - receipt 不会自动过期。生产运维应先调用 version 1 receipt status/prune preview，再显式确认有界清理；清理后的 key 可能再次产生 effect。
 - query source 仍受解析、执行、结果大小和 deadline 限制；HTTP adapter 应设置更严格的 body/header/connection 限额。deadline 返回 `E_TIMEOUT`，不返回半页或 cursor。
 - 只读 HTTP 服务应使用 `Engine::open_redb_read_only(path)`，或在已打开的 Engine 上调用 `with_read_only(true)`，再包装为 `ConcurrentEngine`；adapter 不要只在路由层按字符串猜测写语句。`introspection.read_only` 可作为启动检查。
-- 当前 response 是有界完整 JSON；最多 1000 行的 keyset page 适合可恢复列表遍历。客户端断开不会成为可靠的取消信号，读取最多继续到 adapter deadline，并继续受工作行、排序内存和响应大小限制。一致性读快照已由 #116 完成；显式取消与有背压的 NDJSON/streaming 由 [#135](https://github.com/worktools/unionid/issues/135) 跟踪。
+- 完整 JSON 与最多 1000 行的 keyset page 适合短查询和可恢复遍历。stream 受 8 frame/16 MiB channel、16 MiB 单帧、100,000 rows、256 MiB 和总 deadline 约束；完整 materialize 后即释放 snapshot，慢 HTTP body 不延长 snapshot。断开可触发资源清理但不是取消确认；只有 cancel response 或 terminal frame 可确认 outcome。`complete` 前收到的内容必须视为 partial，不能从半帧隐式续传。
 - HTTP 层不得把普通 JSON number/null/object 当作无损 wire value；application-shaped serde 数据应由 Rust helper 或 schema-aware decoder 转为 `WireValue`。

@@ -18,6 +18,8 @@ unionid server --db ./data/app.redb --read-only
 | 并发读快照 | 8 | 后续读取排队并受请求 deadline／shutdown 控制；统计暴露 active/queued reads |
 | 已注册可取消读取 | 64 | 接纳前返回 `E_OPERATION_CAPACITY`；未启动 handle drop 后立即释放 entry |
 | operation terminal tombstone | 256 / 60 秒 | FIFO/TTL 淘汰；淘汰后的合法 capability 返回 `unknown` |
+| stream channel / frame | 8 帧、16 MiB queued / 16 MiB 单帧 | producer 背压并每 100 ms 检查控制信号；超限 `E_STREAM_LIMIT` |
+| stream 总结果 | 100,000 rows / 256 MiB | terminal `E_LIMIT` / `E_STREAM_LIMIT`；不产生 partial complete |
 | 请求 frame | 6 × 1 MiB + 256 bytes | 返回 <code>E_LIMIT</code> 并关闭该连接；该空间容纳 1 MiB 源码最坏 JSON 转义 |
 | 查询源码 | 1 MiB / 100,000 tokens / 64 层 | 返回 <code>E_LIMIT</code> 或带位置的语法错误 |
 | ADT value | 16 MiB encoded / 64 层 / 1,000,000 collection items | codec、恢复或写入拒绝超限值 |
@@ -52,7 +54,7 @@ TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON by
 
 客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；带 `idempotency_key` 的 version 1 mutation 通过“数据效果与回执同事务”提供 exactly-once effect，但网络仍只是 best-effort delivery。未收到响应时，重开连接并原样重发 query、wire params、schema precondition 和 key；不要改变内容或猜测结果。规范 digest 和 commit uncertain 恢复见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)。
 
-分页读取没有 effect。客户端断开后，已进入 snapshot 的读取可能继续到内置 25 秒 deadline；working rows、排序内存、page 大小和响应编码仍然有界，连接 worker 随执行或 socket write 结束而释放。HTTP adapter 可调用 `ConcurrentEngine::execute_protocol_request_until` 使用更短的绝对 deadline；超时返回 `E_TIMEOUT`，不发布半页或 cursor。关闭连接不是显式取消协议。长期读取的 operation capability、状态机、NDJSON frame 和背压边界已由 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md) 冻结；[#156](https://github.com/worktools/unionid/issues/156) 已提供 transport-neutral registry/cancellation 核心，[#157](https://github.com/worktools/unionid/issues/157) 继续实现 TCP/HTTP adapter。在 adapter 完成前，当前 wire 服务仍只提供完整 response/page。
+分页读取没有 effect。客户端断开后，完整 response/page 读取可能继续到内置 25 秒 deadline；HTTP adapter 可设置更短绝对 deadline。stream 使用显式 capability 与有界 producer，TCP socket write 最多阻塞 5 秒，断开会触发同一清理信号，但只有 cancel response 或 terminal frame 是确认。完整 typed result 建立后立即释放 snapshot，再进入 emitting，因此慢客户端不会占住数据库快照。状态机和恢复边界见 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md)。
 
 receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明确 cutoff、最多 1000 条的单次边界和 confirm 原子清理。清理意味着旧 key 可以再次执行，保留窗口必须覆盖所有自动与人工重试。receipt 运维端点与数据库写入权限等价，HTTP adapter 必须鉴权并审计。
 
