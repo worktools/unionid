@@ -245,3 +245,5 @@ table payments Payment
 6. 核心版本不以 join、window、递归查询函数和高阶泛型换取表面覆盖率。有限自递归 ADT 只表示整行拥有的有限树；若一个场景主要依赖大规模关联、任意图遍历、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
 
 实现顺序按用户可完成的工作流安排：#34–#36 与 #59–#61 已补齐列表读取、ADT 表达式、普通派生、基础汇总和查询局部纯函数；#11 已收口查询核心，#16 已补齐共享索引访问计划与 explain。#74 用任务队列、嵌套配置和 session/cache 走通持久重启、migration 与 backup/restore，#75、#70 和 #76 已收敛工作负载、日常体验与安装发布；#81 从 #25 中切出有限自递归 ADT，先补树形核心模型，再依据真实反馈决定互递归与泛型。
+
+查询结果整理可使用 `derive {score = priority + bonus, urgent = score >= 10}` 顺序计算，或用 `select {id, label = match state {...}}` 同时派生与投影。事件、任务队列和递归树示例使用此形式；计算式 select 必须放在分页最终 sort 之前，覆盖主键后不能继续 page。

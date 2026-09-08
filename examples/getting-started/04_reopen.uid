@@ -5,9 +5,14 @@ filter (
     _ => false,
   }
 )
-derive worker = match state {
-  Running {worker, ..} => worker,
-  _ => "",
+select {
+  id,
+  title,
+  owner.email,
+  state,
+  worker = match state {
+    Running {worker, ..} => worker,
+    _ => "",
+  },
 }
-select {id, title, owner.email, state, worker}
 sort id

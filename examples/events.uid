@@ -26,9 +26,12 @@ insert many events [
 
 from events
 filter event == Purchase {amount_cents = 1990, item = 42}
-derive event_kind = match event {
-  Login {..} => "login",
-  Purchase {..} => "purchase",
-  Failure {..} => "failure",
+select {
+  id,
+  event_kind = match event {
+    Login {..} => "login",
+    Purchase {..} => "purchase",
+    Failure {..} => "failure",
+  },
+  event,
 }
-select {id, event_kind, event}
