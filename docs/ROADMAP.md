@@ -6,7 +6,7 @@
 
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[结构化查询语法 RFC](rfc/0005-structured-prql-query-syntax.md)收敛 PRQL 风格的 delimiter、field set、match expression 与 group inner pipeline；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
-v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。[M5 总览 #111](https://github.com/worktools/unionid/issues/111) 的核心范围也已完成：生产边界、大结果集读取、标量类型、CLI 诊断和结构化查询语法均有可执行实现与验收证据。#118 与 #120 保留为由真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
+v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。[M5 总览 #111](https://github.com/worktools/unionid/issues/111) 的核心范围也已完成：生产边界、大结果集读取、标量类型、CLI 诊断和结构化查询语法均有可执行实现与验收证据。当前进入 [M6 总览 #167](https://github.com/worktools/unionid/issues/167)，优先消除普通 mutation 的完整数据库复制，再实现 typed ordered composite index、range access 和 page seek。#118 与 #120 保留为由真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，不使用没有意义的语句末尾分号；花括号、圆括号、方括号和逗号在能明确结构、层级或 precedence 时正常使用。本轮草案采用 `field type`、`option text`／`list text`、结构化声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不沿用 TypeScript 风格的密集字段注解或逐行 `|>`。
 
@@ -20,6 +20,7 @@ v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0�
 | [M3 · Schema migration 与数据生命周期](https://github.com/worktools/unionid/milestone/4) | Schema/数据转换、runner、diff、备份还原、旧格式导入 | 真实旧库可升级，失败迁移不留下半个新 schema |
 | [M4 · v0.1 日常可用版本](https://github.com/worktools/unionid/milestone/5) | CLI/REPL、Rust API、协议、服务限额、基准与发布 | 日常操作、恢复和升级均通过端到端验收 |
 | [M5 · 生产边界与应用体验](https://github.com/worktools/unionid/milestone/6) | 只读边界、幂等写入、游标分页、生产标量、并发读快照与 CLI 诊断 | 核心风险有显式协议和故障测试，应用无需依赖隐式约定 |
+| [M6 · 增量执行与有序访问](https://github.com/worktools/unionid/milestone/7) | 增量 mutation 候选状态、typed ordered composite index、range/page seek 与容量复验 | 小写集工作量不随完整数据库复制增长，常见有序读取有可验证的有界访问路径 |
 
 P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力；P2 为后续语言探索。里程碑不填写未经验证的工期承诺。
 
@@ -115,15 +116,35 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#156](https://github.com/worktools/unionid/issues/156) | [并发] 有界 operation registry 与只读取消 | 已完成 | PR #159 |
 | [#157](https://github.com/worktools/unionid/issues/157) | [接口] TCP/HTTP NDJSON 背压流 | 已完成 | [#156](https://github.com/worktools/unionid/issues/156)；PR #160 |
 | [#122](https://github.com/worktools/unionid/issues/122) | [文档] 中英双语 README 与 ADT/query 产品入口 | P1 | 使用已发布 v0.1.0 和 [#112](https://github.com/worktools/unionid/issues/112) 的真实入口 |
-| [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | P2 | 以真实 schema 复用需求单独验证 |
 | [#119](https://github.com/worktools/unionid/issues/119) | [语言] PRQL 风格结构化查询语法 RFC | P1 | 当前 typed IR 与持久源码兼容契约 |
 | [#142](https://github.com/worktools/unionid/issues/142) | [语言] 结构化 delimiter 与 canonical formatter | P1 | [#119](https://github.com/worktools/unionid/issues/119) RFC；[#143](https://github.com/worktools/unionid/issues/143) 和 [#139](https://github.com/worktools/unionid/issues/139) 的语法前置 |
 | [#143](https://github.com/worktools/unionid/issues/143) | [查询] field-set transforms 与 computed select | P1 | [#142](https://github.com/worktools/unionid/issues/142) |
-| [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | P2 | 先定义 schema identity 与参数契约 |
+
+### M6 · 增量执行与有序访问
+
+| Issue | 任务 | 优先级 | 前置依赖 |
+| --- | --- | --- | --- |
+| [#167](https://github.com/worktools/unionid/issues/167) | [路线图] M6 总览与验收顺序 | P0 | M5 核心完成 |
+| [#162](https://github.com/worktools/unionid/issues/162) | [设计] 增量候选状态与原子发布 RFC | P0 | 当前 candidate clone、redb delta 与并发 snapshot 契约 |
+| [#163](https://github.com/worktools/unionid/issues/163) | [核心] 增量 row-only DML 候选状态 | P0 | [#162](https://github.com/worktools/unionid/issues/162) |
+| [#164](https://github.com/worktools/unionid/issues/164) | [设计] 有序复合索引与范围访问 RFC | P0 | 当前 typed equality/order 与 cursor 契约；可与 #162 并行设计 |
+| [#165](https://github.com/worktools/unionid/issues/165) | [查询] 有序复合索引、range/ordered scan 与 page seek | P1 | [#163](https://github.com/worktools/unionid/issues/163)、[#164](https://github.com/worktools/unionid/issues/164) |
+| [#166](https://github.com/worktools/unionid/issues/166) | [质量] 复验 10k/100k 写入与有序访问成本 | P0 | [#163](https://github.com/worktools/unionid/issues/163)、[#165](https://github.com/worktools/unionid/issues/165) |
+
+### 独立 P2 探索
+
+| Issue | 任务 | 推进条件 |
+| --- | --- | --- |
+| [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | 出现真实 schema 复用需求并能定义有限性、身份和 codec 预算 |
+| [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | 至少两个真实调用方需要共享同一参数化 typed pipeline |
 
 ## M5 收口状态
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量、#116 的一致并发读快照、#117 的机器可读 CLI 诊断，以及 #135/#155–#157 的显式取消和有背压 NDJSON stream 均已完成。#118 与 #120 继续作为独立 P2 探索，仅在出现足够真实调用方和 schema 复用需求后推进，不阻塞 M5 收口。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量、#116 的一致并发读快照、#117 的机器可读 CLI 诊断，以及 #135/#155–#157 的显式取消和有背压 NDJSON stream 均已完成。#118 与 #120 已移出 M5，继续作为独立 P2 探索，不阻塞收口。
+
+## 当前执行顺序
+
+先完成 #162，冻结普通 DML 的增量候选状态、约束验证、redb commit 和 immutable snapshot 发布边界，再由 #163 修改核心写路径。#164 可同时完成索引语义设计；#165 等 #163 的内存所有权稳定后再实现，避免连续重写同一套 row/index 结构。最后由 #166 用保存原始样本的 10k/100k workload 复验能力边界。
 
 ## 维护约定
 
