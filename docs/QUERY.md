@@ -544,7 +544,7 @@ take 20
 | `min expression` | `int` / `float` / `text`，包括相应命名类型 | `option T` | `None` |
 | `max expression` | `int` / `float` / `text`，包括相应命名类型 | `option T` | `None` |
 
-`sum` 的 int 使用 checked addition，溢出返回 `E_ARITH`；float 每一步都必须保持有限，正负零最终归一为正零。min/max 用 Option 明确表达空输入，不引入 null 或三值逻辑。分组空输入没有 group，因此返回零行。
+`sum` 的 int 使用 checked addition，溢出返回 `E_ARITH`；float 每一步都必须保持有限，正负零最终归一为正零。min/max 接受所有具有静态类型的有限 ADT，并与 filter、sort 和 cursor boundary 共用 total order；它们用 Option 明确表达空输入，不引入 null 或三值逻辑。分组空输入没有 group，因此返回零行。
 
 aggregate 输入是 scalar expression，可以引用字段路径、前一 stage 的普通或 ADT 派生列，以及查询局部纯函数。group key 使用完整 typed equality，可包含 record、tuple、sum、option 或 list；输出中保留原静态类型。未显式 sort 时不承诺 group 行顺序。group inner pipeline 当前必须包含一个 aggregate，aggregate 后的 filter/select/sort/take 针对汇总后的 schema 执行。
 
@@ -559,7 +559,7 @@ from tasks
 select {title, id, owner.email}
 ```
 
-`sort field` 升序排列，`sort -field` 降序排列。多个排序键写成 `sort {key, -descending_key, final_key}`，按书写顺序做词典序比较。键可以是嵌套 record 路径，当前只接受 int、float 和 text；重复键在解析时拒绝，未知或不可排序键即使在空表上也会报错。
+`sort field` 升序排列，`sort -field` 降序排列。多个排序键写成 `sort {key, -descending_key, final_key}`，按书写顺序做词典序比较。键可以是嵌套 record 路径；primitive、命名类型、sum、record、tuple、option、list 与有限递归 ADT 使用同一类型化 total order。sum 先比较稳定 variant ID 再比较 payload，record 按稳定 field ID，`None < Some`，list 使用短前缀优先的词典序。重复键在解析时拒绝，未知键即使在空表上也会报错。
 
 全部排序键相同时，引擎不承诺原行顺序。分页或队列查询需要可复现顺序时，应把 int/text 主键作为最后一个键：
 
@@ -622,7 +622,7 @@ take 20
 | 错误 | 例子 |
 | --- | --- |
 | `E_FIELD` | 未知字段，或 `select` 后访问已经移除的字段 |
-| `E_TYPE` | 对 sum 排序、比较或算术类型不匹配、match 非 sum 字段、局部函数参数无法推断 |
+| `E_TYPE` | 比较或算术类型不匹配、typed value 与绑定类型不符、match 非 sum 字段、局部函数参数无法推断 |
 | `E_QUERY` | 局部函数前向引用／递归／参数数量错误，或 pipeline stage 的作用域冲突 |
 | `E_MATCH` | 未知/重复构造器、非穷尽 match、错误负载字段或分支绑定 |
 | `E_ARITH` | 整数溢出、除零或产生非有限 float |

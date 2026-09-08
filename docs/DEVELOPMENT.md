@@ -4,6 +4,7 @@
 
 ## 发布后进展
 
+- filter comparison、sort、min/max 与 cursor boundary 现在保存绑定静态类型，并共用 catalog-aware ADT total order。primitive、命名 scalar、sum、record、tuple、option、list 和有限递归值均可排序；sum/record 使用稳定 variant/field ID，避免运行时名称或 map 次序改变语义。memory 与 redb 重开 page、mutation sort 和 aggregate 有统一回归覆盖；有序复合 index codec 与 planner 由 #165 的后续切片接入。
 - 普通 row-only DML 使用按路径复制的 persistent row/index/receipt roots 和请求级合并 write set；Engine 通过一个 committed root 同时发布 database 与 receipt。redb 直接编码并核对变化的 catalog/row/index/receipt stable keys，常驻 durable head 只保留 layout、meta 与兼容状态；DDL、migration、upgrade、restore 和 receipt prune 明确走临时 full-rebuild 路径。`MutationProfile` 与 `tools/workload-eval` 分别记录 candidate build、durable commit、增量模式及不含业务值的 write-set 计数。
 - `unionid::scalars` 提供六种生产标量的 Rust 值域、规范 serde payload 与边界校验；原生 ScalarType/Value、无损 serde、protocol v2、完整 v1 typed-boundary 预检、按 boundary 选择的 `u1`/`u2` cursor、storage format 4、完整 durable codec 集、显式 upgrader、源码声明与精确运算均已接通。#137–#140 的验收由 PR #147–#151 完成，已实现范围见 [SCALARS.md](SCALARS.md)。
 - v0.1.0 crate、原生 target 包、校验清单和 GitHub Release 已由 tag workflow 发布。
