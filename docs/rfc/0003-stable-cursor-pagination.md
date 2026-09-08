@@ -14,7 +14,7 @@ unionid 首个生产分页能力使用有界 keyset page，不使用 offset，�
 - 第一页固定当前 schema identity、数据库 instance ID 和 commit sequence。后续页若 sequence 改变，直接返回 `E_CURSOR_STALE`，不扫描、不返回部分结果。
 - cursor 是有版本、有大小上限、以数据库持久 secret 做 HMAC-SHA-256 的 opaque token。它保证来源与完整性，不保证内容保密。
 - query language 的 `page` stage、Rust API 和 version 1 `page` object 映射到同一个 `PageSpec`，避免语言与结构化协议形成两套语义。
-- 首版只返回完整 JSON page。NDJSON/streaming、背压和跨请求显式取消需要并发读取基础，延后到独立任务；deadline 与断开连接仍有明确资源边界。
+- #131/#132 的首版只返回完整 JSON page。后续 #135/#155–#157 已在一致并发读快照上增加独立的 NDJSON streaming、背压和跨请求显式取消；page 的 cursor 与完整响应语义保持不变。
 
 这是一种保守的一致性模型：并发写不会被阻塞，但会使旧 cursor 明确失效。调用方可以重启遍历，永远不会在数据库已变化时收到伪装成同一 snapshot 的下一页。
 
@@ -173,11 +173,11 @@ plan digest 基于绑定后的规范 IR，而不是原始空白或 request ID。
 ### 8. Deadline、断开与后续取消
 
 - 现有 request deadline 在 parse、bind、scan/sort 和编码阶段继续检查；超时返回 `E_TIMEOUT`，不产生 cursor。
-- TCP/HTTP 客户端断开后，首版执行可继续到 deadline，但读取无副作用，且 CPU、rows、sort memory 与响应编码仍受现有限额约束。
-- 跨请求显式 cancel 需要 request registry、并发 Engine/read snapshot 和认证后的 operation ID；当前串行 Engine 无法可靠取消正在持锁的请求。
-- NDJSON/streaming 需要背压、半写响应错误、snapshot 生命周期和 server shutdown 规则。
+- 完整 response/page 的 TCP/HTTP 客户端断开后，执行可继续到 deadline，但读取无副作用，且 CPU、rows、sort memory 与响应编码仍受现有限额约束。
+- 显式 cancel 使用后续独立 stream protocol 的 request registry、并发 read snapshot 和认证 operation ID；它不改变 page 请求或 cursor。
+- NDJSON/streaming 的背压、半写响应错误、snapshot 生命周期和 server shutdown 规则由 [RFC 0007](0007-cancellable-backpressured-streams.md) 定义。
 
-因此 #131/#132 只实现 bounded page 与 deadline/disconnect 验证。#132 必须为显式 cancel + NDJSON/backpressure 建立 deferred issue，并关联 #116，不能用“关闭 socket 即取消”的非契约行为替代。
+因此 #131/#132 只实现 bounded page 与 deadline/disconnect 验证。后续 #135 在 #116 的一致读快照上完成了显式 cancel 与 NDJSON/backpressure；关闭 socket 仍只是本地清理信号，不能替代可确认的 cancel response 或 terminal frame。
 
 ### 9. 验收向量
 
@@ -208,8 +208,8 @@ Language `page`, the Rust API, and the version-1 `page` object normalize to one 
 
 The response preserves declared sort order in both directions and exposes bounded page metadata. Cursor decoding, database/MAC/schema/query/sequence checks, and typed-boundary binding all finish before row scanning. Explain reports the page limit, direction, unique order, boundary presence, sequence, and whether execution uses an index seek or bounded sorted scan, but never emits secrets or cursor contents.
 
-The `u1` consistency contract is deliberately conservative: unchanged sequence means forward and backward traversal has no silent duplicates or gaps; changed sequence means explicit restart. A future MVCC snapshot from #116 requires a new cursor version rather than changing this behavior.
+The `u1` consistency contract is deliberately conservative: unchanged sequence means forward and backward traversal has no silent duplicates or gaps; changed sequence means explicit restart. The concurrent snapshots later implemented by #116 are request-scoped and therefore do not change this cross-request cursor behavior; a future long-lived MVCC cursor would require a new version.
 
-The first implementation keeps complete JSON page responses. Existing deadlines bound parse, bind, execution, and encoding. A disconnected client may leave a read running only until those limits expire. Explicit cross-request cancellation and NDJSON/backpressure require request registries and concurrent read snapshots, so #132 must split them into a deferred issue associated with #116.
+The first implementation keeps complete JSON page responses. Existing deadlines bound parse, bind, execution, and encoding. The later #135/#155–#157 work added a separate cancellable, backpressured NDJSON stream on top of #116 request-scoped snapshots without changing page responses or adding partial-stream resume semantics.
 
 The normative limits, validation order, stable error codes, and acceptance vectors are defined in the Chinese sections above and apply equally to both language and structured protocol forms.
