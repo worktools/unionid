@@ -31,15 +31,6 @@ pub(crate) fn bind_derive(
     schema: &[Column],
     derive: &mut DeriveMatch,
 ) -> Result<Column> {
-    if schema.iter().any(|column| column.name == derive.name) {
-        return Err(Error::new(
-            "E_FIELD",
-            format!(
-                "derive field '{}' already exists; choose a new field name",
-                derive.name
-            ),
-        ));
-    }
     let source_ty = catalog.field_type(schema, &derive.source)?;
     let arm_count = derive.arms.len();
     let bindings = bind_patterns(

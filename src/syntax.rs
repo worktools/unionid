@@ -1507,25 +1507,26 @@ impl Parser {
                 self.filter_stage()?
             } else if self.word("derive") {
                 self.bump();
-                let name = self.identifier()?;
-                self.expect(Kind::Op("=".into()))?;
-                let nested = *self.kind() == Kind::Newline;
-                if nested {
-                    self.block()?;
+                let braced = self.eat(Kind::Open('{'));
+                if braced {
+                    self.newlines();
                 }
-                let stage = if self.word("match") {
-                    Stage::DeriveMatch(self.match_value_expression(name)?)
-                } else {
-                    Stage::Derive(DeriveExpression {
-                        name,
-                        expression: self.bool_expression(0, nested)?,
-                        output_type: None,
-                    })
-                };
-                if nested {
-                    self.expect(Kind::Dedent)?;
+                let mut seen = BTreeSet::new();
+                loop {
+                    let name = self.identifier()?;
+                    if !seen.insert(name.clone()) {
+                        return Err(Error::new(
+                            "E_QUERY",
+                            format!("duplicate derive field '{name}'"),
+                        )
+                        .at(self.token().span));
+                    }
+                    stages.push(self.derived_field(name, braced)?);
+                    if !braced || self.field_set_end("derive")? {
+                        break;
+                    }
                 }
-                stage
+                continue;
             } else if self.word("aggregate") {
                 Stage::Aggregate(self.aggregate(Vec::new())?)
             } else if self.word("group") {
@@ -1557,24 +1558,28 @@ impl Parser {
                 loop {
                     let name = self.path()?;
                     if !seen.insert(name.clone()) {
-                        return Err(self.error(format!("duplicate selected field '{name}'")));
+                        return Err(Error::new(
+                            "E_QUERY",
+                            format!("duplicate selected field '{name}'"),
+                        )
+                        .at(self.token().span));
+                    }
+                    if matches!(self.kind(), Kind::Op(op) if op == "=") {
+                        if name.contains('.') {
+                            return Err(
+                                self.error("computed select aliases must be simple field names")
+                            );
+                        }
+                        stages.push(self.derived_field(name.clone(), braced)?);
                     }
                     fields.push(name);
                     if braced {
-                        self.newlines();
-                    }
-                    if !self.eat(Kind::Comma) {
-                        break;
-                    }
-                    if braced {
-                        self.newlines();
-                        if *self.kind() == Kind::Close('}') {
+                        if self.field_set_end("select")? {
                             break;
                         }
+                    } else if !self.eat(Kind::Comma) {
+                        break;
                     }
-                }
-                if braced {
-                    self.expect(Kind::Close('}'))?;
                 }
                 Stage::Select(fields)
             } else if self.word("sort") {
@@ -1594,6 +1599,42 @@ impl Parser {
             stages.push(stage);
         }
         Ok(Statement::Pipeline(Pipeline { from, stages }))
+    }
+
+    // Surface field sets lower directly to the existing sequential derive IR.
+    fn derived_field(&mut self, name: String, braced: bool) -> Result<Stage> {
+        self.expect(Kind::Op("=".into()))?;
+        let nested = !braced && *self.kind() == Kind::Newline;
+        if nested {
+            self.block()?;
+        } else if braced {
+            self.newlines();
+        }
+        let stage = if self.word("match") {
+            Stage::DeriveMatch(self.match_value_expression(name)?)
+        } else {
+            Stage::Derive(DeriveExpression {
+                name,
+                expression: self.bool_expression(0, nested || braced)?,
+                output_type: None,
+            })
+        };
+        if nested {
+            self.expect(Kind::Dedent)?;
+        }
+        Ok(stage)
+    }
+
+    fn field_set_end(&mut self, context: &str) -> Result<bool> {
+        self.newlines();
+        if self.eat(Kind::Close('}')) {
+            return Ok(true);
+        }
+        if !self.eat(Kind::Comma) {
+            return Err(self.error(format!("expected ',' between {context} fields")));
+        }
+        self.newlines();
+        Ok(self.eat(Kind::Close('}')))
     }
 
     fn is_pipeline_stage(&self) -> bool {

@@ -1725,15 +1725,6 @@ impl Database {
                     crate::matching::bind(&self.catalog, &schema, pred)?
                 }
                 Stage::Derive(derive) => {
-                    if schema.iter().any(|column| column.name == derive.name) {
-                        return Err(Error::new(
-                            "E_FIELD",
-                            format!(
-                                "derive field '{}' already exists; choose a new field name",
-                                derive.name
-                            ),
-                        ));
-                    }
                     locals.expand_bool(&self.catalog, &schema, &mut derive.expression)?;
                     let ty = crate::expression::bind_derive(
                         &self.catalog,
@@ -1741,22 +1732,22 @@ impl Database {
                         &mut derive.expression,
                     )?;
                     derive.output_type = Some(ty.clone());
-                    schema.push(Column {
-                        name: derive.name.clone(),
-                        ty,
-                        default: None,
-                        id: 0,
-                    });
+                    replace_or_append_column(
+                        &mut schema,
+                        Column {
+                            name: derive.name.clone(),
+                            ty,
+                            default: None,
+                            id: 0,
+                        },
+                    );
                 }
                 Stage::DeriveMatch(derive) => {
                     for arm in &mut derive.arms {
                         locals.expand_match_value(&self.catalog, &schema, &mut arm.result)?;
                     }
-                    schema.push(crate::matching::bind_derive(
-                        &self.catalog,
-                        &schema,
-                        derive,
-                    )?);
+                    let column = crate::matching::bind_derive(&self.catalog, &schema, derive)?;
+                    replace_or_append_column(&mut schema, column);
                 }
                 Stage::Aggregate(aggregate) => {
                     for assignment in &mut aggregate.assignments {
@@ -2031,30 +2022,51 @@ impl Database {
             ));
         }
 
+        // A derived primary key need not remain unique, even if its name/type is unchanged.
+        if pipeline.stages[..sort_position]
+            .iter()
+            .any(|stage| match stage {
+                Stage::Derive(derive) => derive.name == primary_key,
+                Stage::DeriveMatch(derive) => derive.name == primary_key,
+                _ => false,
+            })
+        {
+            return Err(Error::new(
+                "E_PAGE_ORDER",
+                "page cannot use a replaced primary key",
+            ));
+        }
+
         let mut schema = table.schema.clone();
         let mut order = None;
         for (position, stage) in pipeline.stages.iter().enumerate() {
             match stage {
-                Stage::Derive(derive) => schema.push(Column {
-                    name: derive.name.clone(),
-                    ty: derive
-                        .output_type
-                        .clone()
-                        .ok_or_else(|| Error::new("E_TYPE", "derive output is not bound"))?,
-                    default: None,
-                    id: 0,
-                }),
+                Stage::Derive(derive) => replace_or_append_column(
+                    &mut schema,
+                    Column {
+                        name: derive.name.clone(),
+                        ty: derive
+                            .output_type
+                            .clone()
+                            .ok_or_else(|| Error::new("E_TYPE", "derive output is not bound"))?,
+                        default: None,
+                        id: 0,
+                    },
+                ),
                 Stage::DeriveMatch(derive) => {
                     let ty = derive
                         .output_type
                         .clone()
                         .ok_or_else(|| Error::new("E_TYPE", "derive output is not bound"))?;
-                    schema.push(Column {
-                        name: derive.name.clone(),
-                        ty,
-                        default: None,
-                        id: 0,
-                    });
+                    replace_or_append_column(
+                        &mut schema,
+                        Column {
+                            name: derive.name.clone(),
+                            ty,
+                            default: None,
+                            id: 0,
+                        },
+                    );
                 }
                 Stage::Select(columns) => {
                     schema = columns
@@ -2421,7 +2433,11 @@ impl Database {
         let mut evaluation_budget = crate::expression::EvaluationBudget::new();
         let mut deferred_selects = Vec::new();
         let mut page_info = None;
-        for stage in pipeline.stages {
+        let final_sort = pipeline
+            .stages
+            .iter()
+            .rposition(|stage| matches!(stage, Stage::Sort(_)));
+        for (stage_position, stage) in pipeline.stages.into_iter().enumerate() {
             match stage {
                 Stage::Let(_) => {}
                 Stage::Filter(expression) => {
@@ -2490,7 +2506,9 @@ impl Database {
                     rows = self.aggregate_rows(rows, &aggregate, deadline)?;
                 }
                 Stage::Select(columns) => {
-                    if prepared_page.is_some() {
+                    if prepared_page.is_some()
+                        && final_sort.is_some_and(|sort| stage_position > sort)
+                    {
                         deferred_selects.push(columns);
                     } else {
                         rows = project_rows(rows, &columns);
@@ -3364,6 +3382,17 @@ fn set_nested_field(
             "E_FIELD",
             format!("field path '{full_path}' does not pass through a record"),
         )),
+    }
+}
+
+fn replace_or_append_column(schema: &mut Vec<Column>, column: Column) {
+    if let Some(existing) = schema
+        .iter_mut()
+        .find(|existing| existing.name == column.name)
+    {
+        *existing = column;
+    } else {
+        schema.push(column);
     }
 }
 

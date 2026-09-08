@@ -1,6 +1,6 @@
 # 查询语言参考
 
-本页只描述当前可执行语义。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的 braced match、group inner pipeline 与 canonical formatter 已实现；多项 derive/select 与 computed select 由 #143 跟踪，`@` temporal 与 duration unit literal 由 #139 跟踪。
+本页只描述当前可执行语义。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的 braced match、group inner pipeline 与 canonical formatter 已实现；多项 derive/select、computed select 与 set 字段集已实现；`@` temporal 与 duration unit literal 由 #139 跟踪。
 
 本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。第一次使用可先运行[五分钟教程](GETTING_STARTED.md)中的持久查询、更新和重开链路。类型、表和 insert/upsert 见 [LANGUAGE.md](LANGUAGE.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)；尚未实现的表达式与 runner 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
 
@@ -97,7 +97,8 @@ match-filter      = "filter" "(" match-predicate ")"
 match-predicate   = "match" field-path "{" match-arm ("," match-arm)* ","? "}"
 match-arm         = arm-pattern "=>" bool-expression
 derive-match      = "derive" identifier "=" nested-match-expression
-derive-expression = "derive" identifier "=" nested-bool-expression
+derive-expression = "derive" (derived-field | "{" derived-field ("," derived-field)* ","? "}")
+derived-field     = identifier "=" (nested-bool-expression | match-expression)
 aggregate         = "aggregate" "{" aggregate-field ("," aggregate-field)* ","? "}"
 group-aggregate   = "group" group-fields "(" aggregate ")"
 group-fields      = field-path | "{" field-path ("," field-path)* ","? "}"
@@ -113,7 +114,8 @@ record-value      = "{" value-field ("," value-field)* ","? "}"
 value-field       = identifier "=" match-value
 tuple-value       = "(" match-value "," (match-value ("," match-value)*)? ")"
 list-value        = "[" (match-value ("," match-value)* ","?)? "]"
-select            = "select" field-path | "select" "{" field-path ("," field-path)* ","? "}"
+select            = "select" select-field | "select" "{" select-field ("," select-field)* ","? "}"
+select-field      = field-path | derived-field
 sort              = "sort" sort-key | "sort" "{" sort-key ("," sort-key)* ","? "}"
 sort-key          = "-"? field-path
 take              = "take" nonnegative-integer | "take" positive-integer ".." positive-integer
@@ -253,7 +255,7 @@ delete jobs | filter archived == true | returning
 
 不写 filter 时从整表开始选择。mutation target 接受普通 filter、braced match filter、sort 和 take，并严格按源码顺序执行；sort 并列保持稳定 RowId 输入顺序，生产语句仍应以唯一键结束排序。`take n` 与一基闭区间 `take start..end` 和读取 pipeline 一致。update 的全部 target stage 必须位于第一个 set 之前；derive/select/group/aggregate 不属于 mutation target。单行形式使用 `|`，例如 `update jobs | filter id == 1 | take 1 | set attempts = attempts + 1`。复杂选择和多项 set 推荐逐行写。
 
-多字段更新规范写成 `set {left = right, right = left}`，每个右侧读取旧行，可安全交换字段。单项 `set left = right` 保持可用；旧的重复 `set` 也继续执行，formatter 将其合并为一个字段集。空字段集、缺少逗号和重复路径会提供源码诊断；重复检查跨越同一 update 的所有 set。多项 derive/select 与 computed select 仍由 #143 后续切片实现。
+多字段更新规范写成 `set {left = right, right = left}`，每个右侧读取旧行，可安全交换字段。单项 `set left = right` 保持可用；旧的重复 `set` 也继续执行，formatter 将其合并为一个字段集。空字段集、缺少逗号和重复路径会提供源码诊断；重复检查跨越同一 update 的所有 set。
 
 set 的字段路径按表的完整 row schema 绑定。右侧可使用字段引用、literal、ADT constructor、`length`、int/float 算术和完整 bool 表达式，也可写 `match source {...}`，复用 ADT derive 的 pattern、coverage、bool 结果和 option/sum/product/list 值构造。assignment 目标给出结果类型，bool 表达式只能写入 bool 字段；每个分支在扫描前检查，因此空表仍会拒绝未知路径、非穷尽／不可达 pattern、错误 constructor 和类型不匹配。
 
@@ -279,7 +281,7 @@ from tasks | take 1 | filter id > 1
 from tasks | filter id > 1 | take 1
 ```
 
-引擎在读取任何行之前，按 stage 顺序检查整条 pipeline。空表上的未知字段、类型错误、非穷尽 match 和分支结果类型冲突仍然报错。`derive` 将新字段加入后续 schema；`select` 会改变后续 schema，因此投影掉的字段不能再用于 filter、match、derive 或 sort。
+引擎在读取任何行之前，按 stage 顺序检查整条 pipeline。空表上的未知字段、类型错误、非穷尽 match 和分支结果类型冲突仍然报错。`derive` 将新增或替换字段加入后续 schema；`select` 会改变后续 schema，因此投影掉的字段不能再用于 filter、match、derive 或 sort。
 
 | Stage | 输出 schema | 行与顺序语义 | 空输入 |
 | --- | --- | --- | --- |
@@ -287,8 +289,8 @@ from tasks | filter id > 1 | take 1
 | `let` | 不变 | 注册供后续 stage 展开的局部表达式或纯函数，不读取或改变行 | 仍检查可确定的引用、类型、递归和预算 |
 | `filter` | 不变 | 只保留条件为真的行 | 仍执行字段与类型检查 |
 | `filter (match ... {...})` | 不变 | 每行按其 sum/option constructor 执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
-| `derive` | 追加一个有静态类型的字段 | 每行求值一次 scalar 或 bool expression，行数与顺序不变 | 仍推导结果类型并检查完整表达式 |
-| `derive name = match source {...}` | 追加一个有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
+| `derive` | 追加或替换有静态类型的字段 | 每行求值一次 scalar 或 bool expression，行数与顺序不变 | 仍推导结果类型并检查完整表达式 |
+| `derive name = match source {...}` | 追加或替换有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
 | `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/sum 为类型化零；min/max 为 None |
 | `group ... (aggregate {...})` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
@@ -448,7 +450,33 @@ select {id, score, needs_retry}
 
 只有单个 scalar expression 时，结果保留它的类型；例如复制 `history` 仍得到 `list Attempt`，命名的 `Score + 1` 仍得到 `Score`。比较、`not/and/or`、`contains`、`any/all` 与 `is_some/is_none` 产生 bool。`$name` 参数从字段或运算数推导类型；孤立的 `$value`、`None`、空 list 或空 record 没有足够类型信息，会在扫描前返回 `E_TYPE`。
 
-新列追加到当前 schema，后续 filter、derive、select 和 sort 可以直接引用。派生名称不能与已有字段或更早的派生列冲突；`select` 已移除的字段也不能再引用。每行只读取求值开始时的当前行，表达式没有写入或其他副作用。布尔短路、算术错误和 `any/all` 共享预算都沿用 filter 语义。
+新列追加到当前 schema，后续 filter、derive、select 和 sort 可以直接引用。同名派生会替换已有列并保留其列位置，可改变查询结果类型；数据库 schema 与原始行不受影响。一个字段集内不允许重复输出名；`select` 已移除的字段也不能再引用。每行只读取求值开始时的当前行，表达式没有写入或其他副作用。布尔短路、算术错误和 `any/all` 共享预算都沿用 filter 语义。
+
+## 字段集与计算式 select
+
+`derive { ... }` 按从上到下的顺序求值；后项可读取前项的新值。同名字段替换当前查询列，列位置不变，新列追加到末尾。每个字段集内的重复输出名返回 `E_QUERY`；不同 derive stage 可以逐次替换同名列。
+
+```text
+from jobs
+derive {
+  score = priority + bonus,
+  urgent = score >= 10,
+}
+select {
+  id,
+  display_score = score * 2,
+  label = match state {
+    Queued {..} => "waiting",
+    current => "active",
+  },
+}
+```
+
+计算式 `select` 的赋值项按顺序展开为 derive，最后按所列路径投影，响应列顺序保持书写顺序。别名是简单标识符，普通投影可用嵌套路径。想保留覆盖前的值，先写 `original = score`，再写 `score = score + 1`；普通路径投影读取全部赋值完成后的行。此语义与 `set {}` 所有右侧读取旧行不同。单项 `select display = title` 也可用。类型推断、ADT 名义身份、prepared 参数、短路与算术错误均复用原有表达式规则。
+
+formatter 将名字不重复的相邻 derive 合并成字段集；若紧接的 select 包含这些派生名且顺序一致，则输出计算式 select。其他顺序保留 derive 加投影，避免改变求值顺序或丢弃可能报错的表达式。`explain` 显示展开后的 derive/projection stages。
+
+使用 `page` 时，计算式 select 必须放在最终 sort 之前；sort 与 page 之间仍只允许纯字段投影。覆盖过源表主键的查询返回 `E_PAGE_ORDER`，因为覆盖后的同名列不再保证唯一。此检查也适用于单项 derive 和 ADT match 派生。
 
 ## ADT 派生列
 

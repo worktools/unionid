@@ -963,7 +963,6 @@ fn regular_derives_are_checked_before_scanning_and_follow_stage_scope() {
     for (pipeline, code, message) in [
         ("derive value = missing", "E_FIELD", "unknown field"),
         ("derive value = None", "E_TYPE", "cannot infer"),
-        ("derive id = 1", "E_FIELD", "already exists"),
         ("derive invalid = 1 and true", "E_TYPE", "must be bool"),
         (
             "select {id}\nderive copy = state",
@@ -1933,10 +1932,6 @@ fn derive_match_supports_positional_bindings_and_inline_layout() {
 fn derive_match_is_fully_checked_on_empty_tables() {
     let setup = "type State = A {value int} | B\ntype R =\n  id int\n  optional option int\n  state State\ntable rows R";
     for (query, expected) in [
-        (
-            "derive id =\n  match state\n    A {value} => value\n    B => 0",
-            "already exists",
-        ),
         (
             "derive value =\n  match state\n    A {value} => value\n    B => \"wrong\"",
             "expected int",

@@ -349,8 +349,80 @@ fn type_definition(output: &mut String, prefix: &str, name: &str, ty: &ScalarTyp
 
 fn pipeline_text(output: &mut String, pipeline: &Pipeline, depth: usize) {
     line(output, depth, &format!("from {}", pipeline.from));
-    for stage in &pipeline.stages {
-        stage_text(output, stage, depth);
+    let mut position = 0;
+    while position < pipeline.stages.len() {
+        let mut end = position;
+        let mut names = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(name) = pipeline.stages.get(end).and_then(derived_name) {
+            if !seen.insert(name) {
+                break;
+            }
+            names.push(name);
+            end += 1;
+        }
+        if !names.is_empty() {
+            if let Some(Stage::Select(fields)) = pipeline.stages.get(end) {
+                let selected_names = fields
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|name| seen.contains(name))
+                    .collect::<Vec<_>>();
+                if selected_names == names {
+                    line(output, depth, "select {");
+                    let mut derived = position;
+                    for field in fields {
+                        if seen.contains(field.as_str()) {
+                            derived_assignment(output, &pipeline.stages[derived], depth + 1);
+                            derived += 1;
+                        } else {
+                            line(output, depth + 1, field);
+                        }
+                        output.pop();
+                        output.push_str(",\n");
+                    }
+                    line(output, depth, "}");
+                    position = end + 1;
+                    continue;
+                }
+            }
+            if names.len() > 1 {
+                line(output, depth, "derive {");
+                for stage in &pipeline.stages[position..end] {
+                    derived_assignment(output, stage, depth + 1);
+                    output.pop();
+                    output.push_str(",\n");
+                }
+                line(output, depth, "}");
+                position = end;
+                continue;
+            }
+        }
+        stage_text(output, &pipeline.stages[position], depth);
+        position += 1;
+    }
+}
+
+fn derived_name(stage: &Stage) -> Option<&str> {
+    match stage {
+        Stage::Derive(derive) => Some(&derive.name),
+        Stage::DeriveMatch(derive) => Some(&derive.name),
+        _ => None,
+    }
+}
+
+fn derived_assignment(output: &mut String, stage: &Stage, depth: usize) {
+    match stage {
+        Stage::Derive(derive) => expression(
+            output,
+            depth,
+            &format!("{} = ", derive.name),
+            &derive.expression,
+        ),
+        Stage::DeriveMatch(derive) => {
+            match_value_arms(output, &format!("{} = ", derive.name), derive, depth)
+        }
+        _ => unreachable!("only derives form assignment fields"),
     }
 }
 

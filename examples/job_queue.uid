@@ -105,15 +105,17 @@ insert jobs {
 }
 
 from jobs
-derive has_retryable_history = (
-  any history (
-    attempt ->
-      attempt.outcome == AttemptOutcome.Rejected {code = 503}
-      and any attempt.checkpoints (checkpoint -> checkpoint >= 3)
-      and is_some attempt.note
-  )
-)
-derive weighted_priority = priority + length history
+derive {
+  has_retryable_history = (
+    any history (
+      attempt ->
+        attempt.outcome == AttemptOutcome.Rejected {code = 503}
+        and any attempt.checkpoints (checkpoint -> checkpoint >= 3)
+        and is_some attempt.note
+    )
+  ),
+  weighted_priority = priority + length history,
+}
 filter has_retryable_history
 select {id, weighted_priority}
 
@@ -124,11 +126,14 @@ filter (
     _ => false,
   }
 )
-derive retry_at = match state {
-  Failed {retry_at = Some at, ..} => Some at,
-  _ => None,
+select {
+  id,
+  state,
+  retry_at = match state {
+    Failed {retry_at = Some at, ..} => Some at,
+    _ => None,
+  },
 }
-select {id, state, retry_at}
 
 from jobs
 derive state_label = match state {
@@ -156,15 +161,17 @@ filter (
     _ => false,
   }
 )
-derive state_label = match state {
-  Queued {..} => "queued",
-  Running {..} => "running",
-  Succeeded {..} => "succeeded",
-  Failed {..} => "failed",
-}
-derive next_attempt = match state {
-  Queued {attempt, ..} => Some (attempt + 1),
-  _ => None,
+derive {
+  state_label = match state {
+    Queued {..} => "queued",
+    Running {..} => "running",
+    Succeeded {..} => "succeeded",
+    Failed {..} => "failed",
+  },
+  next_attempt = match state {
+    Queued {attempt, ..} => Some (attempt + 1),
+    _ => None,
+  },
 }
 sort {-priority, created_at, id}
 take 2

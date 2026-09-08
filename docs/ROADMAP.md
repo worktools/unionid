@@ -120,7 +120,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect 以及 #130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程已完成。当前一起接受 [RFC 0005](rfc/0005-structured-prql-query-syntax.md) 与 [RFC 0004](rfc/0004-production-scalars.md)：先完成 #142 的结构 parser/formatter，再推进 #143 field-set transforms 与 #137–#140 生产标量；#139 的 temporal literal 复用 #142 的 token/delimiter 基础。随后继续 #116 和 #117。显式取消与 streaming 已拆到 #135，等待 #116 的一致性读快照。#118 与 #120 仍是独立 P2 探索。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect 以及 #130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程已完成。当前一起接受 [RFC 0005](rfc/0005-structured-prql-query-syntax.md) 与 [RFC 0004](rfc/0004-production-scalars.md)： #142 的结构 parser/formatter 与 #143 的 set 字段集已合并；当前完成 #143 剩余的 derive/select 字段集与 computed select，再推进 #137–#140 生产标量；#139 的 temporal literal 复用 #142 的 token/delimiter 基础。随后继续 #116 和 #117。显式取消与 streaming 已拆到 #135，等待 #116 的一致性读快照。#118 与 #120 仍是独立 P2 探索。
 
 ## 维护约定
 
