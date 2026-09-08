@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -24,19 +25,22 @@ use crate::syntax;
 use crate::wal::Wal;
 
 /// The shared execution boundary. A source request is one atomic batch.
-/// The preview stages writes by cloning its small in-memory database.
+/// Writes stage a private candidate while read snapshots share the last
+/// complete committed state through immutable `Arc` references.
 #[derive(Default)]
 pub struct Engine {
-    db: Database,
-    receipts: ReceiptMap,
+    db: Arc<Database>,
+    receipts: Arc<ReceiptMap>,
     wal: Option<Wal>,
     snapshot: Option<SnapshotStore>,
     snapshot_every: usize,
     writes_since_snapshot: usize,
     write_failed: bool,
     read_only: bool,
+    snapshot_execution: bool,
     durable: Option<Box<dyn DurableBackend>>,
     storage_mode: StorageMode,
+    snapshot_storage_versions: Option<StorageVersions>,
     _locks: Vec<DatabaseLock>,
 }
 
@@ -236,16 +240,18 @@ impl Engine {
             (None, _) => StorageMode::Memory,
         };
         Ok(Self {
-            db,
-            receipts: ReceiptMap::new(),
+            db: Arc::new(db),
+            receipts: Arc::new(ReceiptMap::new()),
             wal,
             snapshot,
             snapshot_every,
             writes_since_snapshot: 0,
             write_failed: false,
             read_only: false,
+            snapshot_execution: false,
             durable: None,
             storage_mode,
+            snapshot_storage_versions: None,
             _locks: locks,
         })
     }
@@ -255,8 +261,8 @@ impl Engine {
     pub fn open_redb(path: impl Into<PathBuf>) -> Result<Self> {
         let (redb, db, receipts) = RedbStore::open(path)?;
         Ok(Self {
-            db,
-            receipts,
+            db: Arc::new(db),
+            receipts: Arc::new(receipts),
             durable: Some(Box::new(redb)),
             storage_mode: StorageMode::Redb,
             ..Self::default()
@@ -560,11 +566,11 @@ impl Engine {
             result.applied = true;
             return Ok(result);
         }
-        let mut receipts = self.receipts.clone();
+        let mut receipts = self.receipts.as_ref().clone();
         for key in keys {
             receipts.remove(&key);
         }
-        let mut candidate = self.db.clone();
+        let mut candidate = self.db.as_ref().clone();
         candidate.sequence = self
             .db
             .sequence
@@ -759,7 +765,7 @@ impl Engine {
         let needs_schema_preview = statements[..last]
             .iter()
             .any(|located| located.statement.changes_schema());
-        let mut preview = self.db.clone();
+        let mut preview = self.db.as_ref().clone();
         if needs_schema_preview {
             for located in &statements[..last] {
                 preview
@@ -1003,6 +1009,12 @@ impl Engine {
                 "mutating scripts are disabled by the read-only execution boundary",
             ));
         }
+        if mutating && self.snapshot_execution {
+            return Err(Error::new(
+                "E_READ_SNAPSHOT",
+                "mutating scripts cannot execute against an immutable read snapshot",
+            ));
+        }
         if schema_changing && !self.db.migration_history().is_empty() {
             return Err(Error::new(
                 "E_MIGRATION",
@@ -1016,17 +1028,18 @@ impl Engine {
             ));
         }
         let mut candidate = if mutating {
-            Some(self.db.clone())
+            Some(self.db.as_ref().clone())
         } else {
             None
         };
-        let target = candidate.as_mut().unwrap_or(&mut self.db);
         let mut response = QueryResponse::ok_message("ok");
         for located in statements {
             ensure_deadline(deadline)?;
-            response = target
-                .execute_with_deadline(located.statement, deadline)
-                .map_err(|e| e.at(located.span))?;
+            response = match candidate.as_mut() {
+                Some(target) => target.execute_with_deadline(located.statement, deadline),
+                None => self.db.execute_read(located.statement, deadline),
+            }
+            .map_err(|e| e.at(located.span))?;
         }
         ensure_deadline(deadline)?;
         if let Some(mut candidate) = candidate {
@@ -1047,7 +1060,7 @@ impl Engine {
                     response: response.clone(),
                 };
                 validate_new_receipt(&self.receipts, &receipt)?;
-                let mut receipts = self.receipts.clone();
+                let mut receipts = self.receipts.as_ref().clone();
                 receipts.insert(idempotency.key.to_owned(), receipt);
                 Some(receipts)
             } else {
@@ -1073,7 +1086,7 @@ impl Engine {
     pub fn plan_migrations(&self, files: &[MigrationFile]) -> Result<MigrationPlan> {
         let applied_count = validate_files_against_history(files, self.db.migration_history())?;
         let current_schema = self.db.schema_info();
-        let mut candidate = self.db.clone();
+        let mut candidate = self.db.as_ref().clone();
         let mut pending = Vec::new();
         for file in &files[applied_count..] {
             let before = candidate.schema_info();
@@ -1166,7 +1179,7 @@ impl Engine {
                 "writes are disabled after a storage failure; reopen the database to resolve the commit state",
             ));
         }
-        let mut candidate = self.db.clone();
+        let mut candidate = self.db.as_ref().clone();
         candidate
             .execute(Statement::Migration {
                 name: file.id.clone(),
@@ -1207,7 +1220,9 @@ impl Engine {
         receipt_state: Option<ReceiptMap>,
     ) -> Result<()> {
         if let Some(durable) = &mut self.durable {
-            let receipts = receipt_state.as_ref().unwrap_or(&self.receipts);
+            let receipts = receipt_state
+                .as_ref()
+                .unwrap_or_else(|| self.receipts.as_ref());
             match durable.commit(&self.db, &candidate, receipts) {
                 Ok(()) => {}
                 Err(CommitFailure::Definite(error)) => {
@@ -1248,9 +1263,9 @@ impl Engine {
                 ));
             }
         }
-        self.db = candidate;
+        self.db = Arc::new(candidate);
         if let Some(receipts) = receipt_state {
-            self.receipts = receipts;
+            self.receipts = Arc::new(receipts);
         }
         self.writes_since_snapshot += 1;
         if self.snapshot_every > 0
@@ -1296,8 +1311,8 @@ impl Engine {
         })?;
         let (backend_clean, database, receipts) = durable.check_integrity()?;
         let versions = durable.versions();
-        self.db = database;
-        self.receipts = receipts;
+        self.db = Arc::new(database);
+        self.receipts = Arc::new(receipts);
         Ok(StorageIntegrity {
             backend: "redb",
             backend_clean,
@@ -1354,7 +1369,11 @@ impl Engine {
             types: self.db.type_names(),
             fields: self.db.field_names(),
             storage: self.storage_mode,
-            storage_versions: self.durable.as_ref().map(|durable| durable.versions()),
+            storage_versions: self
+                .durable
+                .as_ref()
+                .map(|durable| durable.versions())
+                .or(self.snapshot_storage_versions),
             read_only: self.read_only,
             migration_count: self.db.migration_history().len(),
             migration_head: self
@@ -1374,11 +1393,31 @@ impl Engine {
     }
 
     pub(crate) fn database_snapshot(&self) -> Database {
-        self.db.clone()
+        self.db.as_ref().clone()
+    }
+
+    /// Capture one complete committed state for execution outside a service's
+    /// writer lock. The clone intentionally has no durable handle or file lock:
+    /// it can observe and evaluate the captured state but cannot publish writes.
+    pub(crate) fn read_snapshot(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            receipts: self.receipts.clone(),
+            write_failed: self.write_failed,
+            read_only: self.read_only,
+            snapshot_execution: true,
+            storage_mode: self.storage_mode,
+            snapshot_storage_versions: self
+                .durable
+                .as_ref()
+                .map(|durable| durable.versions())
+                .or(self.snapshot_storage_versions),
+            ..Self::default()
+        }
     }
 
     pub(crate) fn logical_snapshot(&self) -> (Database, ReceiptMap) {
-        (self.db.clone(), self.receipts.clone())
+        (self.db.as_ref().clone(), self.receipts.as_ref().clone())
     }
 
     pub(crate) fn restore_redb(
@@ -1608,6 +1647,23 @@ mod tests {
         assert!(error.message.contains("result is uncertain"));
         assert!(engine.write_failed);
         assert!(engine.durable.is_none());
+    }
+
+    #[test]
+    fn uncertain_commit_does_not_publish_state_to_read_snapshots() {
+        let mut engine = engine_with_failure(true);
+        let failed = engine.execute("create table uncertain (id int)");
+        assert!(!failed.ok);
+        assert_eq!(failed.error.unwrap().code, "E_STORAGE");
+        assert!(engine.write_failed);
+
+        let mut snapshot = engine.read_snapshot();
+        let read = snapshot.execute("from uncertain");
+        assert!(!read.ok);
+        assert_eq!(read.error.unwrap().code, "E_TABLE");
+        let rejected = engine.execute("create table later (id int)");
+        assert!(!rejected.ok);
+        assert_eq!(rejected.error.unwrap().code, "E_STORAGE");
     }
 
     const DIGEST_A: &str =
@@ -1959,8 +2015,7 @@ mod tests {
         use crate::scalars::Uuid;
 
         let mut engine = Engine::memory();
-        engine
-            .db
+        Arc::make_mut(&mut engine.db)
             .execute(Statement::DefineType {
                 name: "NativeRow".into(),
                 ty: ScalarType::Record(vec![
@@ -1979,16 +2034,14 @@ mod tests {
                 ]),
             })
             .unwrap();
-        engine
-            .db
+        Arc::make_mut(&mut engine.db)
             .execute(Statement::TypedTable {
                 table: "native_rows".into(),
                 row_type: "NativeRow".into(),
                 key: None,
             })
             .unwrap();
-        engine
-            .db
+        Arc::make_mut(&mut engine.db)
             .execute(Statement::Insert {
                 table: "native_rows".into(),
                 values: crate::Value::Record(BTreeMap::from([

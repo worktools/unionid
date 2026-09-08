@@ -15,6 +15,7 @@ unionid server --db ./data/app.redb --read-only
 | 资源 | 当前边界 | 超限行为 |
 | --- | --- | --- |
 | 活动 TCP 连接 | 64 | 新连接收到 <code>E_BUSY</code> 后关闭；拒绝处理不创建 worker |
+| 并发读快照 | 8 | 后续读取排队并受请求 deadline／shutdown 控制；统计暴露 active/queued reads |
 | 请求 frame | 6 × 1 MiB + 256 bytes | 返回 <code>E_LIMIT</code> 并关闭该连接；该空间容纳 1 MiB 源码最坏 JSON 转义 |
 | 查询源码 | 1 MiB / 100,000 tokens / 64 层 | 返回 <code>E_LIMIT</code> 或带位置的语法错误 |
 | ADT value | 16 MiB encoded / 64 层 / 1,000,000 collection items | codec、恢复或写入拒绝超限值 |
@@ -31,7 +32,7 @@ unionid server --db ./data/app.redb --read-only
 | 空闲连接 / socket write | 30 秒 | 关闭空闲或不读取响应的客户端 |
 | match coverage | 100,000 analysis steps | 返回 <code>E_LIMIT</code>，要求简化嵌套 pattern |
 
-查询、写批次与 migration 使用同一个 Engine mutex，最多只有一个请求进入 Engine；其他已接纳连接形成至多 64 个等待者，因此不会产生无界线程或请求队列。读写只观察完整的 Engine 提交。查询扫描和 aggregate 输出定期检查 deadline；其他批次至少在每条语句前后检查，若计算期间越过 deadline，候选状态会被丢弃而不发布。排序受 working-row 上限约束；group/aggregate 另有限制 group 数、accumulator cell 和估算状态内存，查询局部函数限制定义数、调用深度和展开步骤，具体数值见 [QUERY.md](QUERY.md)。`explain` 只绑定查询并读取表／索引元数据和目标 posting，不扫描或复制数据行。
+写批次与 migration 使用唯一 Engine writer mutex。读取在锁内捕获完整 committed `Arc<Database>` 后于锁外执行，最多同时运行 8 个；慢 scan/sort/aggregate 不再持有 writer lock，每次读取只观察同一 schema revision、commit sequence、rows 与 indexes。各查询仍独立分配 working rows、sort/group state 和 response，内存会随 active reads 增长。方案、故障边界和 10k 对照基准见 [RFC 0006](rfc/0006-consistent-read-snapshots.md)。查询扫描和 aggregate 输出定期检查 deadline；其他批次至少在每条语句前后检查，若计算期间越过 deadline，候选状态会被丢弃而不发布。排序受 working-row 上限约束；group/aggregate 另有限制 group 数、accumulator cell 和估算状态内存，查询局部函数限制定义数、调用深度和展开步骤，具体数值见 [QUERY.md](QUERY.md)。`explain` 只绑定查询并读取表／索引元数据和目标 posting，不扫描或复制数据行。
 
 TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON byte buffer。带 returning 的写入先在 Engine 候选状态内验证 typed wire rows 预算，version 1 request ID 也在执行前限长，避免已知 DML 结果在提交后才因响应超限被改写为失败。版本化响应超限时仍回显 request ID 与 schema；旧协议得到旧格式的 <code>E_LIMIT</code>。
 
@@ -49,7 +50,7 @@ TCP response 使用限长 writer 直接编码，不先创建一个无界 JSON by
 
 客户端断开不会回滚一个已经提交或正在提交的请求。request ID 只关联请求与响应，不是幂等键；带 `idempotency_key` 的 version 1 mutation 通过“数据效果与回执同事务”提供 exactly-once effect，但网络仍只是 best-effort delivery。未收到响应时，重开连接并原样重发 query、wire params、schema precondition 和 key；不要改变内容或猜测结果。规范 digest 和 commit uncertain 恢复见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)。
 
-分页读取没有 effect。客户端断开后，已进入串行 Engine 的读取可能继续到内置 25 秒 deadline；working rows、排序内存、page 大小和响应编码仍然有界，连接 worker 随执行或 socket write 结束而释放。HTTP adapter 可调用 `execute_protocol_request_until` 使用更短的绝对 deadline；超时返回 `E_TIMEOUT`，不发布半页或 cursor。关闭连接不是显式取消协议。需要 request registry、operation ID、读 snapshot 生命周期和 NDJSON 背压的长期读取由 [#135](https://github.com/worktools/unionid/issues/135) 跟踪，并依赖 [#116](https://github.com/worktools/unionid/issues/116)。
+分页读取没有 effect。客户端断开后，已进入 snapshot 的读取可能继续到内置 25 秒 deadline；working rows、排序内存、page 大小和响应编码仍然有界，连接 worker 随执行或 socket write 结束而释放。HTTP adapter 可调用 `ConcurrentEngine::execute_protocol_request_until` 使用更短的绝对 deadline；超时返回 `E_TIMEOUT`，不发布半页或 cursor。关闭连接不是显式取消协议。需要 request registry、operation ID 和 NDJSON 背压的长期读取由 [#135](https://github.com/worktools/unionid/issues/135) 跟踪。
 
 receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明确 cutoff、最多 1000 条的单次边界和 confirm 原子清理。清理意味着旧 key 可以再次执行，保留窗口必须覆盖所有自动与人工重试。receipt 运维端点与数据库写入权限等价，HTTP adapter 必须鉴权并审计。
 
@@ -57,6 +58,6 @@ receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明�
 
 ## 嵌入式控制
 
-应用可以调用 <code>server::serve_until(listener, engine, shutdown)</code>，通过共享 <code>AtomicBool</code> 发起同样的关闭流程，并在返回时获得 <code>ServerStats</code>。命令行 <code>server</code> 已把 SIGINT/SIGTERM 连接到这个入口。
+应用可以调用 <code>server::serve_until(listener, engine, shutdown)</code>，通过共享 <code>AtomicBool</code> 发起同样的关闭流程，并在返回时获得 <code>ServerStats</code>。需要读取运行中并发统计或让 TCP/HTTP 共用执行边界时，构造可克隆的 <code>ConcurrentEngine</code>，调用 <code>stats()</code> 并传给 <code>serve_until_concurrent</code>；HTTP handler 应像 todolist 示例一样通过 blocking worker 调用同步数据库入口。命令行 <code>server</code> 已把 SIGINT/SIGTERM 连接到这个入口。
 
 服务限制是 v0.1 的明确支持边界，而非容量承诺。1 万/10 万行实际负载、恢复和 migration 数据由 #24 的发布基准记录。

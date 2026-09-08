@@ -1,0 +1,9 @@
+{
+  "rows": 10000,
+  "readers": 8,
+  "queries_per_reader": 5,
+  "serialized": {"mode":"serialized","rows":10000,"readers":8,"queries_per_reader":5,"elapsed_micros":814928,"queries_per_second":49.08404822081688,"peak_rss_bytes":42074112,"peak_active_reads":1},
+  "snapshots": {"mode":"snapshots","rows":10000,"readers":8,"queries_per_reader":5,"elapsed_micros":439621,"queries_per_second":90.98742115280298,"peak_rss_bytes":111312896,"peak_active_reads":8},
+  "throughput_ratio": 1.8537065391076402,
+  "peak_rss_ratio": 2.6456386292834893
+}

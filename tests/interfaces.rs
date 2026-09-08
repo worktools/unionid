@@ -752,7 +752,7 @@ fn local_run_and_server_share_the_redb_database() {
 }
 
 #[test]
-fn concurrent_requests_are_serialized_and_invalid_json_is_reported() {
+fn concurrent_mutations_are_serialized_and_invalid_json_is_reported() {
     let server = Server::start(&[]);
     assert!(
         cli::send_one(&server.addr, "type R =\n  id int\ntable t R\n  key id")

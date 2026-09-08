@@ -109,7 +109,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#138](https://github.com/worktools/unionid/issues/138) | [类型] UUID 与 bytes 端到端能力 | 已完成 | [#149](https://github.com/worktools/unionid/pull/149) |
 | [#139](https://github.com/worktools/unionid/issues/139) | [类型] date、timestamp 与 duration | 已完成 | [#150](https://github.com/worktools/unionid/pull/150) |
 | [#140](https://github.com/worktools/unionid/issues/140) | [类型] 固定精度 decimal | 已完成 | [#151](https://github.com/worktools/unionid/pull/151) |
-| [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | P1 | [#112](https://github.com/worktools/unionid/issues/112)、[#114](https://github.com/worktools/unionid/issues/114) |
+| [#116](https://github.com/worktools/unionid/issues/116) | [并发] 一致并发读快照 | 已完成 | [RFC 0006](rfc/0006-consistent-read-snapshots.md) |
 | [#117](https://github.com/worktools/unionid/issues/117) | [体验] CLI 版本诊断与结构化错误 | P1 | 核心错误协议稳定 |
 | [#122](https://github.com/worktools/unionid/issues/122) | [文档] 中英双语 README 与 ADT/query 产品入口 | P1 | 使用已发布 v0.1.0 和 [#112](https://github.com/worktools/unionid/issues/112) 的真实入口 |
 | [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | P2 | 以真实 schema 复用需求单独验证 |
@@ -120,7 +120,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集，以及 #115/#137–#140 的全部生产标量均已完成。当前继续 #116 的一致并发读快照与 #117 的 CLI 版本诊断。显式取消与 streaming 已拆到 #135，等待 #116 的快照边界。#118 与 #120 仍是独立 P2 探索。
+#112 的显式只读边界、#113/#124–#126 的 exactly-once effect、#130–#132 的有界分页与完整 Rust/TCP/HTTP 旅程、#142–#143 的结构化语法与字段集、#115/#137–#140 的全部生产标量，以及 #116 的一致并发读快照均已完成。当前继续 #117 的 CLI 版本诊断；#116 已解除 #135 显式取消与 streaming 的前置依赖。#118 与 #120 仍是独立 P2 探索。
 
 ## 维护约定
 
