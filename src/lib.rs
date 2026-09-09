@@ -24,6 +24,7 @@ pub mod protocol;
 pub mod query;
 mod redb_storage;
 mod repl;
+mod row_source;
 pub mod scalars;
 pub mod schema;
 mod serde_value;
@@ -49,7 +50,9 @@ pub use idempotency::{
 pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};
-pub use profile::{DurableCommitMode, DurableCommitProfile, StorageOpenProfile};
+pub use profile::{
+    DurableCommitMode, DurableCommitProfile, ExecutionObservation, StorageOpenProfile,
+};
 pub use protocol::{
     IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,
     Response as ProtocolResponse, WireValue,

@@ -31,7 +31,7 @@ use crate::wal::Wal;
 /// complete committed state through immutable `Arc` references.
 #[derive(Default)]
 pub struct Engine {
-    committed: Arc<CommittedState>,
+    committed: Arc<CommittedView>,
     wal: Option<Wal>,
     snapshot: Option<SnapshotStore>,
     snapshot_every: usize,
@@ -48,7 +48,7 @@ pub struct Engine {
 }
 
 #[derive(Clone, Default)]
-struct CommittedState {
+struct CommittedView {
     db: Arc<Database>,
     receipts: Arc<ReceiptMap>,
 }
@@ -306,7 +306,7 @@ impl Engine {
             (None, _) => StorageMode::Memory,
         };
         Ok(Self {
-            committed: Arc::new(CommittedState {
+            committed: Arc::new(CommittedView {
                 db: Arc::new(db),
                 receipts: Arc::new(ReceiptMap::new()),
             }),
@@ -331,7 +331,7 @@ impl Engine {
     pub fn open_redb(path: impl Into<PathBuf>) -> Result<Self> {
         let (redb, db, receipts, open_profile) = RedbStore::open(path)?;
         Ok(Self {
-            committed: Arc::new(CommittedState {
+            committed: Arc::new(CommittedView {
                 db: Arc::new(db),
                 receipts: Arc::new(receipts),
             }),
@@ -1457,7 +1457,7 @@ impl Engine {
         let receipts = receipt_state
             .map(Arc::new)
             .unwrap_or_else(|| self.committed.receipts.clone());
-        self.committed = Arc::new(CommittedState {
+        self.committed = Arc::new(CommittedView {
             db: Arc::new(candidate),
             receipts,
         });
@@ -1505,7 +1505,7 @@ impl Engine {
         })?;
         let (backend_clean, database, receipts) = durable.check_integrity()?;
         let versions = durable.versions();
-        self.committed = Arc::new(CommittedState {
+        self.committed = Arc::new(CommittedView {
             db: Arc::new(database),
             receipts: Arc::new(receipts),
         });
