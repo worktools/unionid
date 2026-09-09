@@ -1025,6 +1025,10 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                 QueryAccessKind::FullScan => "full_scan",
                 QueryAccessKind::PrimaryKeyLookup => "primary_key_lookup",
                 QueryAccessKind::SecondaryIndexLookup => "secondary_index_lookup",
+                QueryAccessKind::CompositeLookup => "composite_lookup",
+                QueryAccessKind::RangeScan => "range_scan",
+                QueryAccessKind::OrderedScan => "ordered_scan",
+                QueryAccessKind::PageSeek => "page_seek",
             };
             let index = plan
                 .access
@@ -1060,8 +1064,12 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                     .join(", ")
             );
             if let Some(page) = &plan.page {
+                let page_access = match page.access {
+                    crate::db::PageAccessKind::SortedScan => "sorted_scan",
+                    crate::db::PageAccessKind::IndexSeek => "index_seek",
+                };
                 println!(
-                    "page | {} {} via sorted_scan (read at most {}, cursor at most {} bytes)",
+                    "page | {} {} via {page_access} (read at most {}, cursor at most {} bytes)",
                     page.limit,
                     page_direction_name(page.direction),
                     page.read_limit,

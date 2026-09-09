@@ -87,7 +87,7 @@ fn indexed_and_scanned_decimal_queries_agree() {
             .unwrap()
             .access
             .kind,
-        QueryAccessKind::FullScan
+        QueryAccessKind::OrderedScan
     );
 
     let mut indexed = Engine::memory();

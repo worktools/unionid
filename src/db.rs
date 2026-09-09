@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -11,8 +12,8 @@ use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
 };
 use crate::query::{
-    Aggregate, AggregateAssignment, AggregateFunction, IndexComponent, PageDirection, PageSpec,
-    Pipeline, Returning, SetAssignment, SetValue, SortKey, Stage, Statement,
+    Aggregate, AggregateAssignment, AggregateFunction, CmpOp, IndexComponent, PageDirection,
+    PageSpec, Pipeline, Returning, SetAssignment, SetValue, SortKey, Stage, Statement,
 };
 
 mod migration;
@@ -21,6 +22,7 @@ type PostingRows = imbl::Vector<RowId>;
 type IndexPosting = imbl::OrdMap<Vec<u8>, PostingRows>;
 type TableIndexes = imbl::OrdMap<String, IndexPosting>;
 type Indexes = imbl::OrdMap<String, TableIndexes>;
+type IndexBounds = (Bound<Vec<u8>>, Bound<Vec<u8>>);
 
 pub const MAX_QUERY_WORKING_ROWS: usize = 250_000;
 pub const MAX_RESULT_ROWS: usize = 100_000;
@@ -33,7 +35,37 @@ pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
 
 struct PlannedAccess {
     plan: QueryAccessPlan,
-    candidates: Option<Vec<RowId>>,
+    index_scan: Option<PlannedIndexScan>,
+    ordered_sort: Option<usize>,
+}
+
+struct PlannedIndexScan {
+    shape: String,
+    bounds: Option<IndexBounds>,
+    reverse: bool,
+}
+
+#[derive(Clone)]
+struct IndexConstraint {
+    column: String,
+    op: CmpOp,
+    value: Value,
+}
+
+#[derive(Clone)]
+struct RangeLimit {
+    value: Value,
+    inclusive: bool,
+}
+
+struct IndexAccessCandidate {
+    plan: QueryAccessPlan,
+    index_scan: PlannedIndexScan,
+    equality_components: usize,
+    has_range: bool,
+    component_count: usize,
+    index_id: u64,
+    ordered_sort: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -644,6 +676,26 @@ pub enum QueryAccessKind {
     FullScan,
     PrimaryKeyLookup,
     SecondaryIndexLookup,
+    CompositeLookup,
+    RangeScan,
+    OrderedScan,
+    PageSeek,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexTraversal {
+    Forward,
+    Reverse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexRangePlan {
+    pub column: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lower_inclusive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_inclusive: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -653,6 +705,16 @@ pub struct QueryAccessPlan {
     pub index: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equality_prefix: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<IndexRangePlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traversal: Option<IndexTraversal>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sort_satisfied: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub page_seek: bool,
     pub estimated_rows: usize,
     pub table_rows: usize,
 }
@@ -699,6 +761,7 @@ pub struct PageOrder {
 #[serde(rename_all = "snake_case")]
 pub enum PageAccessKind {
     SortedScan,
+    IndexSeek,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2046,7 +2109,8 @@ impl Database {
     ) -> Result<Vec<RowId>> {
         check_deadline(control)?;
         let table = self.table(&target.from)?;
-        let candidates = self.plan_access(target)?.candidates;
+        let access = self.plan_access(target, None, false)?;
+        let candidates = self.materialize_access_candidates(target, None, &access, control)?;
         let working_rows = candidates
             .as_ref()
             .map_or(table.rows.len(), std::vec::Vec::len);
@@ -2072,7 +2136,7 @@ impl Database {
             None => table.rows.iter().collect(),
         };
         let mut evaluation_budget = crate::expression::EvaluationBudget::new();
-        for stage in &target.stages {
+        for (stage_position, stage) in target.stages.iter().enumerate() {
             match stage {
                 Stage::Filter(expression) => {
                     let mut filtered = Vec::with_capacity(rows.len());
@@ -2105,9 +2169,11 @@ impl Database {
                     rows = filtered;
                 }
                 Stage::Sort(keys) => {
-                    check_deadline(control)?;
-                    sort_by_typed(&mut rows, &self.catalog, keys, |row| &row.fields)?;
-                    check_deadline(control)?;
+                    if access.ordered_sort != Some(stage_position) {
+                        check_deadline(control)?;
+                        sort_by_typed(&mut rows, &self.catalog, keys, |row| &row.fields)?;
+                        check_deadline(control)?;
+                    }
                 }
                 Stage::Take { offset, limit } => {
                     rows = rows.into_iter().skip(*offset).take(*limit).collect();
@@ -2660,7 +2726,7 @@ impl Database {
             .ok_or_else(|| {
                 Error::new(
                     "E_PAGE_ORDER",
-                    "page requires an explicit sort ending in the table primary key",
+                    "page requires an explicit statically unique sort",
                 )
             })?;
         if pipeline.stages[sort_position + 1..page_position]
@@ -2685,31 +2751,21 @@ impl Database {
             ));
         }
         let table = self.table(&pipeline.from)?;
-        let primary_key = table.primary_key.as_deref().ok_or_else(|| {
-            Error::new(
-                "E_PAGE_ORDER",
-                format!("table '{}' has no primary key", pipeline.from),
-            )
-        })?;
-        if keys.last().map(|key| key.column.as_str()) != Some(primary_key) {
+        let primary_proof = table.primary_key.as_deref().is_some_and(|primary_key| {
+            keys.last().map(|key| key.column.as_str()) == Some(primary_key)
+                && !pipeline.stages[..sort_position]
+                    .iter()
+                    .any(|stage| match stage {
+                        Stage::Derive(derive) => derive.name == primary_key,
+                        Stage::DeriveMatch(derive) => derive.name == primary_key,
+                        _ => false,
+                    })
+        });
+        let unique_index_proof = self.page_unique_index(pipeline, sort_position, keys);
+        if !primary_proof && !unique_index_proof {
             return Err(Error::new(
                 "E_PAGE_ORDER",
-                format!("page sort must end with primary key '{primary_key}'"),
-            ));
-        }
-
-        // A derived primary key need not remain unique, even if its name/type is unchanged.
-        if pipeline.stages[..sort_position]
-            .iter()
-            .any(|stage| match stage {
-                Stage::Derive(derive) => derive.name == primary_key,
-                Stage::DeriveMatch(derive) => derive.name == primary_key,
-                _ => false,
-            })
-        {
-            return Err(Error::new(
-                "E_PAGE_ORDER",
-                "page cannot use a replaced primary key",
+                "page sort must end in an unchanged primary key or cover a complete unique-index suffix after equality-fixed fields",
             ));
         }
 
@@ -2840,6 +2896,42 @@ impl Database {
         }))
     }
 
+    fn page_unique_index(
+        &self,
+        pipeline: &Pipeline,
+        sort_position: usize,
+        keys: &[SortKey],
+    ) -> bool {
+        let constraints = leading_index_constraints(pipeline);
+        self.index_definitions
+            .get(&pipeline.from)
+            .into_iter()
+            .flat_map(|definitions| definitions.values())
+            .filter(|definition| definition.kind.is_unique())
+            .any(|definition| {
+                let components = definition.effective_components();
+                let equality_components = components
+                    .iter()
+                    .take_while(|component| {
+                        constraints.iter().any(|constraint| {
+                            constraint.column == component.column && constraint.op == CmpOp::Eq
+                        })
+                    })
+                    .count();
+                let fixed = components[..equality_components]
+                    .iter()
+                    .map(|component| component.column.as_str())
+                    .collect::<BTreeSet<_>>();
+                let visible = keys
+                    .iter()
+                    .filter(|key| !fixed.contains(key.column.as_str()))
+                    .collect::<Vec<_>>();
+                visible.len() == components.len().saturating_sub(equality_components)
+                    && index_sort_match(pipeline, &components, equality_components)
+                        .is_some_and(|(position, _)| position == sort_position)
+            })
+    }
+
     fn apply_page(
         &self,
         rows: Vec<BTreeMap<String, Value>>,
@@ -2962,7 +3054,9 @@ impl Database {
     fn explain(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
         let schema = self.prepare_pipeline(&mut pipeline)?;
         let prepared_page = self.prepare_page(&pipeline)?;
-        let access = self.plan_access(&pipeline)?.plan;
+        let access = self
+            .plan_access(&pipeline, prepared_page.as_ref(), true)?
+            .plan;
         let result_schema = schema
             .iter()
             .map(|column| ResponseColumn {
@@ -3005,7 +3099,11 @@ impl Database {
                 .collect(),
             resume_boundary: page.boundary.is_some(),
             snapshot_sequence: self.sequence.to_string(),
-            access: PageAccessKind::SortedScan,
+            access: if access.sort_satisfied && access.index.is_some() {
+                PageAccessKind::IndexSeek
+            } else {
+                PageAccessKind::SortedScan
+            },
             candidate_rows: access.estimated_rows,
             read_limit: page.spec.limit.saturating_add(1),
             max_cursor_bytes: crate::pagination::MAX_CURSOR_BYTES,
@@ -3020,54 +3118,437 @@ impl Database {
         Ok(response)
     }
 
-    fn plan_access(&self, pipeline: &Pipeline) -> Result<PlannedAccess> {
+    fn plan_access(
+        &self,
+        pipeline: &Pipeline,
+        page: Option<&PreparedPage>,
+        estimate_rows: bool,
+    ) -> Result<PlannedAccess> {
         let table = self.table(&pipeline.from)?;
-        let indexed_filter = pipeline
-            .stages
-            .iter()
-            .find(|stage| !matches!(stage, Stage::Let(_)))
-            .and_then(|stage| match stage {
-                Stage::Filter(expression) => crate::expression::simple_index_equality(expression),
-                _ => None,
-            });
-        if let Some((column, value)) = indexed_filter {
-            let key = self.single_index_key(&pipeline.from, column, value)?;
-            if let Some(posting) = self
-                .indexes
-                .get(&pipeline.from)
-                .and_then(|columns| columns.get(column))
-            {
-                let candidates: Vec<RowId> = posting
-                    .get(&key)
-                    .map(|rows| rows.iter().copied().collect())
-                    .unwrap_or_default();
-                let kind = if table.primary_key.as_deref() == Some(column) {
-                    QueryAccessKind::PrimaryKeyLookup
-                } else {
-                    QueryAccessKind::SecondaryIndexLookup
+        let constraints = leading_index_constraints(pipeline);
+        let mut best = None;
+        if let (Some(definitions), Some(indexes)) = (
+            self.index_definitions.get(&pipeline.from),
+            self.indexes.get(&pipeline.from),
+        ) {
+            for definition in definitions.values() {
+                let shape = definition.shape_key();
+                let Some(posting) = indexes.get(&shape) else {
+                    continue;
                 };
-                return Ok(PlannedAccess {
-                    plan: QueryAccessPlan {
-                        kind,
-                        index: Some(format!("{}.{}", pipeline.from, column)),
-                        condition: Some(format!("{} == {}", column, value.source_text())),
-                        estimated_rows: candidates.len(),
-                        table_rows: table.rows.len(),
-                    },
-                    candidates: Some(candidates),
+                let Some(candidate) = self.index_access_candidate(
+                    pipeline,
+                    page,
+                    definition,
+                    posting,
+                    &constraints,
+                    estimate_rows,
+                )?
+                else {
+                    continue;
+                };
+                let replace = best.as_ref().is_none_or(|current: &IndexAccessCandidate| {
+                    candidate.equality_components > current.equality_components
+                        || candidate.equality_components == current.equality_components
+                            && (candidate.has_range && !current.has_range
+                                || candidate.has_range == current.has_range
+                                    && (candidate.ordered_sort.is_some()
+                                        && current.ordered_sort.is_none()
+                                        || candidate.ordered_sort.is_some()
+                                            == current.ordered_sort.is_some()
+                                            && (candidate.component_count
+                                                < current.component_count
+                                                || candidate.component_count
+                                                    == current.component_count
+                                                    && candidate.index_id < current.index_id)))
                 });
+                if replace {
+                    best = Some(candidate);
+                }
             }
+        }
+        if let Some(best) = best {
+            return Ok(PlannedAccess {
+                plan: best.plan,
+                index_scan: Some(best.index_scan),
+                ordered_sort: best.ordered_sort,
+            });
         }
         Ok(PlannedAccess {
             plan: QueryAccessPlan {
                 kind: QueryAccessKind::FullScan,
                 index: None,
                 condition: None,
+                equality_prefix: Vec::new(),
+                range: None,
+                traversal: None,
+                sort_satisfied: false,
+                page_seek: false,
                 estimated_rows: table.rows.len(),
                 table_rows: table.rows.len(),
             },
-            candidates: None,
+            index_scan: None,
+            ordered_sort: None,
         })
+    }
+
+    fn index_access_candidate(
+        &self,
+        pipeline: &Pipeline,
+        page: Option<&PreparedPage>,
+        definition: &IndexDefinition,
+        posting: &IndexPosting,
+        constraints: &[IndexConstraint],
+        estimate_rows: bool,
+    ) -> Result<Option<IndexAccessCandidate>> {
+        let table_name = pipeline.from.as_str();
+        let table_rows = self.table(table_name)?.rows.len();
+        let components = definition.effective_components();
+        let mut equality = Vec::new();
+        let mut range = None;
+        let mut impossible = false;
+        for component in &components {
+            let field_constraints = constraints
+                .iter()
+                .filter(|constraint| constraint.column == component.column)
+                .collect::<Vec<_>>();
+            if field_constraints.is_empty() {
+                break;
+            }
+            let ty = self
+                .catalog
+                .field_type(&self.table(table_name)?.schema, &component.column)?;
+            let equal = field_constraints
+                .iter()
+                .filter(|constraint| constraint.op == CmpOp::Eq)
+                .map(|constraint| &constraint.value)
+                .next();
+            if let Some(equal) = equal {
+                for constraint in &field_constraints {
+                    if !constraint_matches(
+                        &self.catalog,
+                        ty,
+                        equal,
+                        constraint.op,
+                        &constraint.value,
+                    )? {
+                        impossible = true;
+                        break;
+                    }
+                }
+                equality.push((component, equal));
+                if impossible {
+                    break;
+                }
+                continue;
+            }
+            let (lower, upper) = merge_range_bounds(&self.catalog, ty, &field_constraints)?;
+            if lower.is_none() && upper.is_none() {
+                break;
+            }
+            impossible = range_is_empty(&self.catalog, ty, lower.as_ref(), upper.as_ref())?;
+            range = Some((lower, upper));
+            break;
+        }
+        let equality_components = equality.len();
+        let ordered_sort = index_sort_match(pipeline, &components, equality_components);
+        if equality.is_empty() && range.is_none() && ordered_sort.is_none() {
+            return Ok(None);
+        }
+        let condition = access_condition(&components, equality_components, range.is_some());
+        let page_seek = page.is_some_and(|page| page.boundary.is_some()) && ordered_sort.is_some();
+        let kind = if page_seek {
+            QueryAccessKind::PageSeek
+        } else if range.is_some() {
+            QueryAccessKind::RangeScan
+        } else if ordered_sort.is_some() {
+            QueryAccessKind::OrderedScan
+        } else if equality_components == 1 && components.len() == 1 {
+            if definition.is_primary_index(self.table(table_name)?.primary_key.as_deref()) {
+                QueryAccessKind::PrimaryKeyLookup
+            } else {
+                QueryAccessKind::SecondaryIndexLookup
+            }
+        } else {
+            QueryAccessKind::CompositeLookup
+        };
+        let equality_prefix = components[..equality_components]
+            .iter()
+            .map(|component| component.column.clone())
+            .collect::<Vec<_>>();
+        let range_plan = range.as_ref().map(|(lower, upper)| IndexRangePlan {
+            column: components[equality_components].column.clone(),
+            lower_inclusive: lower.as_ref().map(|bound| bound.inclusive),
+            upper_inclusive: upper.as_ref().map(|bound| bound.inclusive),
+        });
+        let traversal = ordered_sort.map(|(_, reverse)| {
+            if reverse {
+                IndexTraversal::Reverse
+            } else {
+                IndexTraversal::Forward
+            }
+        });
+        let bounds = if impossible {
+            None
+        } else {
+            let equality_key = if equality.is_empty() {
+                Vec::new()
+            } else {
+                let bound = equality
+                    .iter()
+                    .map(|(component, value)| {
+                        Ok(crate::ordered_key::Component {
+                            ty: self
+                                .catalog
+                                .field_type(&self.table(table_name)?.schema, &component.column)?,
+                            value,
+                            descending: component.descending,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                crate::ordered_key::encode_tuple(&self.catalog, &bound)?
+            };
+            let page_boundary = if let (Some(page), Some((_, reverse)), Some(values)) = (
+                page,
+                ordered_sort,
+                page.and_then(|page| page.boundary.as_ref()),
+            ) {
+                let mut bound = Vec::new();
+                for component in &components {
+                    let value = equality
+                        .iter()
+                        .find(|(fixed, _)| fixed.column == component.column)
+                        .map(|(_, value)| *value)
+                        .or_else(|| {
+                            page.order
+                                .iter()
+                                .position(|order| order.key.column == component.column)
+                                .and_then(|position| values.get(position))
+                        });
+                    let Some(value) = value else {
+                        break;
+                    };
+                    bound.push(crate::ordered_key::Component {
+                        ty: self
+                            .catalog
+                            .field_type(&self.table(table_name)?.schema, &component.column)?,
+                        value,
+                        descending: component.descending,
+                    });
+                }
+                let required = equality_components
+                    + page
+                        .order
+                        .iter()
+                        .filter(|order| {
+                            !equality
+                                .iter()
+                                .any(|(fixed, _)| fixed.column == order.key.column)
+                        })
+                        .count();
+                if bound.len() < required {
+                    None
+                } else {
+                    Some((
+                        crate::ordered_key::encode_tuple(&self.catalog, &bound)?,
+                        match page.spec.direction {
+                            PageDirection::Forward => !reverse,
+                            PageDirection::Backward => reverse,
+                        },
+                    ))
+                }
+            } else {
+                None
+            };
+            if range.is_none() && equality_components == components.len() {
+                Some((
+                    Bound::Included(equality_key.clone()),
+                    Bound::Included(equality_key),
+                ))
+            } else {
+                let bounds = if let Some((lower, upper)) = &range {
+                    let component = &components[equality_components];
+                    let ty = self
+                        .catalog
+                        .field_type(&self.table(table_name)?.schema, &component.column)?;
+                    index_range_bounds(
+                        &self.catalog,
+                        &equality_key,
+                        component.descending,
+                        ty,
+                        lower.as_ref(),
+                        upper.as_ref(),
+                    )?
+                } else {
+                    Some(prefix_bounds(&equality_key))
+                };
+                if let Some((boundary, greater)) = page_boundary {
+                    bounds.and_then(|(start, end)| page_seek_bounds(start, end, &boundary, greater))
+                } else {
+                    bounds
+                }
+            }
+        };
+        let estimated_rows = if estimate_rows {
+            bounds
+                .as_ref()
+                .map(|(start, end)| {
+                    posting
+                        .range((start.clone(), end.clone()))
+                        .map(|(_, rows)| rows.len())
+                        .sum()
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let display = if components.len() == 1 && !components[0].descending {
+            format!("{table_name}.{}", components[0].column)
+        } else {
+            format!("{table_name} ({})", definition.display_shape())
+        };
+        Ok(Some(IndexAccessCandidate {
+            plan: QueryAccessPlan {
+                kind,
+                index: Some(display),
+                condition: (!condition.is_empty()).then_some(condition),
+                equality_prefix,
+                range: range_plan,
+                traversal,
+                sort_satisfied: ordered_sort.is_some(),
+                page_seek,
+                estimated_rows,
+                table_rows,
+            },
+            index_scan: PlannedIndexScan {
+                shape: definition.shape_key(),
+                bounds,
+                reverse: ordered_sort.is_some_and(|(_, reverse)| reverse),
+            },
+            equality_components,
+            has_range: range.is_some(),
+            component_count: components.len(),
+            index_id: definition.id,
+            ordered_sort: ordered_sort.map(|(position, _)| position),
+        }))
+    }
+
+    fn materialize_access_candidates(
+        &self,
+        pipeline: &Pipeline,
+        page: Option<&PreparedPage>,
+        access: &PlannedAccess,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Option<Vec<RowId>>> {
+        let Some(scan) = access.index_scan.as_ref() else {
+            return Ok(None);
+        };
+        let Some((start, end)) = scan.bounds.as_ref() else {
+            return Ok(Some(Vec::new()));
+        };
+        let posting = self
+            .indexes
+            .get(&pipeline.from)
+            .and_then(|indexes| indexes.get(&scan.shape))
+            .ok_or_else(|| Error::new("E_STORAGE", "planned index disappeared"))?;
+
+        let mut needed = None;
+        if let Some(sort_position) = access.ordered_sort {
+            let mut can_bound = true;
+            for stage in &pipeline.stages[sort_position + 1..] {
+                match stage {
+                    Stage::Take { offset, limit } => {
+                        needed = Some(offset.saturating_add(*limit));
+                        break;
+                    }
+                    Stage::Page(spec) => {
+                        needed = Some(spec.limit.saturating_add(1));
+                        break;
+                    }
+                    Stage::Let(_) | Stage::Derive(_) | Stage::DeriveMatch(_) | Stage::Select(_) => {
+                    }
+                    Stage::Filter(_)
+                    | Stage::FilterMatch(_)
+                    | Stage::Aggregate(_)
+                    | Stage::Sort(_) => {
+                        can_bound = false;
+                        break;
+                    }
+                }
+            }
+            if !can_bound {
+                needed = None;
+            }
+        }
+        if needed == Some(0) {
+            return Ok(Some(Vec::new()));
+        }
+
+        let table = self.table(&pipeline.from)?;
+        let mut budget = crate::expression::EvaluationBudget::new();
+        let eligible =
+            |id: RowId, budget: &mut crate::expression::EvaluationBudget| -> Result<bool> {
+                let Ok(position) = table.rows.binary_search_by_key(&id, |row| row.id) else {
+                    return Ok(false);
+                };
+                let row = &table.rows[position].fields;
+                let Some(sort_position) = access.ordered_sort else {
+                    return Ok(true);
+                };
+                for stage in &pipeline.stages[..sort_position] {
+                    if let Stage::Filter(expression) = stage
+                        && !crate::expression::evaluate(
+                            &self.catalog,
+                            expression,
+                            |path| row_field(row, path),
+                            budget,
+                        )?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            };
+        let backward = page.is_some_and(|page| page.spec.direction == PageDirection::Backward);
+        let reverse = scan.reverse ^ backward;
+        let capacity = needed.unwrap_or(0);
+        let mut selected = Vec::with_capacity(capacity);
+        let mut visited = 0_usize;
+        let mut push = |id: RowId| -> Result<bool> {
+            check_deadline_periodically(control, visited)?;
+            visited = visited.saturating_add(1);
+            if needed.is_none() || eligible(id, &mut budget)? {
+                selected.push(id);
+            }
+            Ok(needed.is_some_and(|limit| selected.len() == limit))
+        };
+        if reverse {
+            'entries: for (_, rows) in posting.range((start.clone(), end.clone())).rev() {
+                // Posting RowIds stay in source order within an equal typed
+                // tuple. Only the tuple-key traversal is globally reversed.
+                for id in rows.iter().copied() {
+                    if push(id)? {
+                        break 'entries;
+                    }
+                }
+            }
+        } else {
+            'entries: for (_, rows) in posting.range((start.clone(), end.clone())) {
+                for id in rows.iter().copied() {
+                    if push(id)? {
+                        break 'entries;
+                    }
+                }
+            }
+        }
+        if backward {
+            selected.reverse();
+        }
+        if access.ordered_sort.is_none() {
+            selected.sort_unstable();
+            selected.dedup();
+        }
+        Ok(Some(selected))
     }
 
     fn query(
@@ -3079,7 +3560,13 @@ impl Database {
         let schema = self.prepare_pipeline(&mut pipeline)?;
         let prepared_page = self.prepare_page(&pipeline)?;
         let table = self.table(&pipeline.from)?;
-        let candidates = self.plan_access(&pipeline)?.candidates;
+        let access = self.plan_access(&pipeline, prepared_page.as_ref(), false)?;
+        let candidates = self.materialize_access_candidates(
+            &pipeline,
+            prepared_page.as_ref(),
+            &access,
+            control,
+        )?;
         let working_rows = candidates
             .as_ref()
             .map_or(table.rows.len(), std::vec::Vec::len);
@@ -3221,9 +3708,11 @@ impl Database {
                     }
                 }
                 Stage::Sort(keys) => {
-                    check_deadline(control)?;
-                    sort_by_typed(&mut rows, &self.catalog, &keys, |row| row)?;
-                    check_deadline(control)?;
+                    if access.ordered_sort != Some(stage_position) {
+                        check_deadline(control)?;
+                        sort_by_typed(&mut rows, &self.catalog, &keys, |row| row)?;
+                        check_deadline(control)?;
+                    }
                 }
                 Stage::Take { offset, limit } => {
                     rows = rows.into_iter().skip(offset).take(limit).collect()
@@ -4318,6 +4807,333 @@ fn sort_by_typed<T>(
         std::cmp::Ordering::Equal
     });
     error.map_or(Ok(()), Err)
+}
+
+fn leading_index_constraints(pipeline: &Pipeline) -> Vec<IndexConstraint> {
+    let mut constraints = Vec::new();
+    for stage in &pipeline.stages {
+        match stage {
+            Stage::Let(_) if constraints.is_empty() => {}
+            Stage::Filter(expression) => {
+                let Some((column, op, value)) =
+                    crate::expression::simple_index_comparison(expression)
+                else {
+                    break;
+                };
+                constraints.push(IndexConstraint {
+                    column: column.to_owned(),
+                    op,
+                    value: value.clone(),
+                });
+            }
+            _ => break,
+        }
+    }
+    constraints
+}
+
+fn constraint_matches(
+    catalog: &Catalog,
+    ty: &ScalarType,
+    field: &Value,
+    op: CmpOp,
+    bound: &Value,
+) -> Result<bool> {
+    let order = catalog.cmp_typed(ty, field, bound)?;
+    Ok(match op {
+        CmpOp::Eq => order == std::cmp::Ordering::Equal,
+        CmpOp::Ne => order != std::cmp::Ordering::Equal,
+        CmpOp::Gt => order == std::cmp::Ordering::Greater,
+        CmpOp::Gte => order != std::cmp::Ordering::Less,
+        CmpOp::Lt => order == std::cmp::Ordering::Less,
+        CmpOp::Lte => order != std::cmp::Ordering::Greater,
+    })
+}
+
+fn merge_range_bounds(
+    catalog: &Catalog,
+    ty: &ScalarType,
+    constraints: &[&IndexConstraint],
+) -> Result<(Option<RangeLimit>, Option<RangeLimit>)> {
+    let mut lower: Option<RangeLimit> = None;
+    let mut upper: Option<RangeLimit> = None;
+    for constraint in constraints {
+        let (slot, inclusive, prefer_greater) = match constraint.op {
+            CmpOp::Gt => (&mut lower, false, true),
+            CmpOp::Gte => (&mut lower, true, true),
+            CmpOp::Lt => (&mut upper, false, false),
+            CmpOp::Lte => (&mut upper, true, false),
+            CmpOp::Eq | CmpOp::Ne => continue,
+        };
+        let replace = match slot.as_ref() {
+            None => true,
+            Some(current) => {
+                let order = catalog.cmp_typed(ty, &constraint.value, &current.value)?;
+                (prefer_greater && order == std::cmp::Ordering::Greater)
+                    || (!prefer_greater && order == std::cmp::Ordering::Less)
+                    || order == std::cmp::Ordering::Equal && !inclusive && current.inclusive
+            }
+        };
+        if replace {
+            *slot = Some(RangeLimit {
+                value: constraint.value.clone(),
+                inclusive,
+            });
+        }
+    }
+    Ok((lower, upper))
+}
+
+fn range_is_empty(
+    catalog: &Catalog,
+    ty: &ScalarType,
+    lower: Option<&RangeLimit>,
+    upper: Option<&RangeLimit>,
+) -> Result<bool> {
+    let (Some(lower), Some(upper)) = (lower, upper) else {
+        return Ok(false);
+    };
+    let order = catalog.cmp_typed(ty, &lower.value, &upper.value)?;
+    Ok(order == std::cmp::Ordering::Greater
+        || order == std::cmp::Ordering::Equal && (!lower.inclusive || !upper.inclusive))
+}
+
+fn index_sort_match(
+    pipeline: &Pipeline,
+    components: &[IndexComponentDefinition],
+    equality_components: usize,
+) -> Option<(usize, bool)> {
+    let mut position = 0;
+    while matches!(pipeline.stages.get(position), Some(Stage::Let(_))) {
+        position += 1;
+    }
+    while let Some(Stage::Filter(expression)) = pipeline.stages.get(position) {
+        crate::expression::simple_index_comparison(expression)?;
+        position += 1;
+    }
+    let Some(Stage::Sort(keys)) = pipeline.stages.get(position) else {
+        return None;
+    };
+    let fixed = components[..equality_components]
+        .iter()
+        .map(|component| component.column.as_str())
+        .collect::<BTreeSet<_>>();
+    let keys = keys
+        .iter()
+        .filter(|key| !fixed.contains(key.column.as_str()))
+        .collect::<Vec<_>>();
+    if keys.is_empty() || keys.len() > components.len().saturating_sub(equality_components) {
+        return None;
+    }
+    let remaining = &components[equality_components..equality_components + keys.len()];
+    if !keys
+        .iter()
+        .zip(remaining)
+        .all(|(key, component)| key.column == component.column)
+    {
+        return None;
+    }
+    let exact = keys
+        .iter()
+        .zip(remaining)
+        .all(|(key, component)| key.descending == component.descending);
+    let reverse = keys
+        .iter()
+        .zip(remaining)
+        .all(|(key, component)| key.descending != component.descending);
+    (exact || reverse).then_some((position, reverse))
+}
+
+fn access_condition(
+    components: &[IndexComponentDefinition],
+    equality_components: usize,
+    has_range: bool,
+) -> String {
+    let mut conditions = components[..equality_components]
+        .iter()
+        .map(|component| format!("{} == <bound>", component.column))
+        .collect::<Vec<_>>();
+    if has_range {
+        conditions.push(format!(
+            "{} in <range>",
+            components[equality_components].column
+        ));
+    }
+    conditions.join(", ")
+}
+
+fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut next = prefix.to_vec();
+    while next.last() == Some(&u8::MAX) {
+        next.pop();
+    }
+    let last = next.last_mut()?;
+    *last += 1;
+    Some(next)
+}
+
+fn prefix_bounds(prefix: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    if prefix.is_empty() {
+        return (Bound::Unbounded, Bound::Unbounded);
+    }
+    let start = Bound::Included(prefix.to_vec());
+    let end = prefix_successor(prefix).map_or(Bound::Unbounded, Bound::Excluded);
+    (start, end)
+}
+
+fn page_seek_bounds(
+    start: Bound<Vec<u8>>,
+    end: Bound<Vec<u8>>,
+    boundary: &[u8],
+    greater: bool,
+) -> Option<IndexBounds> {
+    let (start, end) = if greater {
+        let next = prefix_successor(boundary)?;
+        (stricter_lower(start, Bound::Included(next)), end)
+    } else {
+        (
+            start,
+            stricter_upper(end, Bound::Excluded(boundary.to_vec())),
+        )
+    };
+    bounds_have_values(&start, &end).then_some((start, end))
+}
+
+fn stricter_lower(current: Bound<Vec<u8>>, candidate: Bound<Vec<u8>>) -> Bound<Vec<u8>> {
+    match (&current, &candidate) {
+        (Bound::Unbounded, _) => candidate,
+        (_, Bound::Unbounded) => current,
+        (
+            Bound::Included(left) | Bound::Excluded(left),
+            Bound::Included(right) | Bound::Excluded(right),
+        ) => match left.cmp(right) {
+            std::cmp::Ordering::Less => candidate,
+            std::cmp::Ordering::Greater => current,
+            std::cmp::Ordering::Equal => {
+                if matches!(current, Bound::Excluded(_)) {
+                    current
+                } else {
+                    candidate
+                }
+            }
+        },
+    }
+}
+
+fn stricter_upper(current: Bound<Vec<u8>>, candidate: Bound<Vec<u8>>) -> Bound<Vec<u8>> {
+    match (&current, &candidate) {
+        (Bound::Unbounded, _) => candidate,
+        (_, Bound::Unbounded) => current,
+        (
+            Bound::Included(left) | Bound::Excluded(left),
+            Bound::Included(right) | Bound::Excluded(right),
+        ) => match left.cmp(right) {
+            std::cmp::Ordering::Less => current,
+            std::cmp::Ordering::Greater => candidate,
+            std::cmp::Ordering::Equal => {
+                if matches!(current, Bound::Excluded(_)) {
+                    current
+                } else {
+                    candidate
+                }
+            }
+        },
+    }
+}
+
+fn bounds_have_values(start: &Bound<Vec<u8>>, end: &Bound<Vec<u8>>) -> bool {
+    let start_key = match start {
+        Bound::Included(key) | Bound::Excluded(key) => Some(key),
+        Bound::Unbounded => None,
+    };
+    let end_key = match end {
+        Bound::Included(key) | Bound::Excluded(key) => Some(key),
+        Bound::Unbounded => None,
+    };
+    match (start_key, end_key) {
+        (Some(start_key), Some(end_key)) => match start_key.cmp(end_key) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => {
+                matches!(start, Bound::Included(_)) && matches!(end, Bound::Included(_))
+            }
+        },
+        _ => true,
+    }
+}
+
+fn encoded_component(
+    catalog: &Catalog,
+    ty: &ScalarType,
+    value: &Value,
+    descending: bool,
+    equality_prefix: &[u8],
+) -> Result<Vec<u8>> {
+    let encoded = crate::ordered_key::encode_tuple(
+        catalog,
+        &[crate::ordered_key::Component {
+            ty,
+            value,
+            descending,
+        }],
+    )?;
+    let mut key = Vec::with_capacity(equality_prefix.len() + encoded.len());
+    key.extend_from_slice(equality_prefix);
+    key.extend_from_slice(&encoded);
+    Ok(key)
+}
+
+fn index_range_bounds(
+    catalog: &Catalog,
+    equality_prefix: &[u8],
+    descending: bool,
+    ty: &ScalarType,
+    lower: Option<&RangeLimit>,
+    upper: Option<&RangeLimit>,
+) -> Result<Option<IndexBounds>> {
+    let equality_bounds = prefix_bounds(equality_prefix);
+    let lower_key = lower
+        .map(|bound| encoded_component(catalog, ty, &bound.value, descending, equality_prefix))
+        .transpose()?;
+    let upper_key = upper
+        .map(|bound| encoded_component(catalog, ty, &bound.value, descending, equality_prefix))
+        .transpose()?;
+    let logical_lower = |key: Vec<u8>, inclusive: bool| {
+        if inclusive {
+            Some(Bound::Included(key))
+        } else {
+            prefix_successor(&key).map(Bound::Included)
+        }
+    };
+    let logical_upper = |key: Vec<u8>, inclusive: bool| {
+        if inclusive {
+            Some(prefix_successor(&key).map_or(Bound::Unbounded, Bound::Excluded))
+        } else {
+            Some(Bound::Excluded(key))
+        }
+    };
+    let (start, end) = if descending {
+        let start = match (upper, upper_key) {
+            (Some(bound), Some(key)) => logical_lower(key, bound.inclusive),
+            _ => Some(equality_bounds.0),
+        };
+        let end = match (lower, lower_key) {
+            (Some(bound), Some(key)) => logical_upper(key, bound.inclusive),
+            _ => Some(equality_bounds.1),
+        };
+        (start, end)
+    } else {
+        let start = match (lower, lower_key) {
+            (Some(bound), Some(key)) => logical_lower(key, bound.inclusive),
+            _ => Some(equality_bounds.0),
+        };
+        let end = match (upper, upper_key) {
+            (Some(bound), Some(key)) => logical_upper(key, bound.inclusive),
+            _ => Some(equality_bounds.1),
+        };
+        (start, end)
+    };
+    Ok(start.zip(end))
 }
 
 fn index_shape_key(components: &[IndexComponentDefinition]) -> String {

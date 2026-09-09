@@ -61,7 +61,9 @@ create unique index sessions (tenant, token)
 
 索引由 1–16 个有序字段路径组成，路径可以指向嵌套 record 字段。没有标记表示升序，`-` 表示降序；方向和 component 次序都属于索引身份。内联成员用逗号分隔，较长声明可在括号内每行写一个成员而省略逗号。完全相同的 field tuple 不能重复声明，即使 ordinary/unique kind 不同；`(state, priority)` 与 `(state, -priority)` 是不同 shape。
 
-unique index 支持 primitive、命名 sum/record、tuple、option 和 list；复合 unique 对完整 tuple 强制唯一。`None` 也是普通 typed value。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert/upsert、单行 upsert、update/delete、migration、restore 和 redb 完整性检查都维护同一 tuple 约束。当前 planner 仍只使用单字段完整 equality lookup；复合范围、索引顺序和 page seek 由后续查询切片接入。
+unique index 支持 primitive、命名 sum/record、tuple、option 和 list；复合 unique 对完整 tuple 强制唯一。`None` 也是普通 typed value。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert/upsert、单行 upsert、update/delete、migration、restore 和 redb 完整性检查都维护同一 tuple 约束。
+
+planner 可以把连续的简单比较绑定为复合索引的 equality prefix，以及紧邻下一个 component 的一组上下 range boundary。匹配索引剩余连续前缀的 sort 可以直接使用声明方向或全局反向遍历；安全的 `take` 和 `page` 只读取足够的通过行。range 后、key gap 后或 stage 语义边界后的条件继续按源码顺序作为 residual filter 执行。分页顺序仍必须由主键收尾，或由 equality-fixed prefix 加完整 unique-index suffix 证明唯一。
 
 被任意普通、unique 或主键索引覆盖的 bytes leaf 最大为 8192 octets，完整持久索引 key 最大为 64 KiB；创建索引、写入、migration 或 restore 超限时返回 `E_INDEX_KEY_LIMIT` 并原子回滚。未索引 bytes 仍受 16 MiB value 上限。
 

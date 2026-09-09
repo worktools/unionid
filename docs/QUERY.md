@@ -320,15 +320,17 @@ explain
   select {id, state}
 ```
 
-成功响应的 `plan` 是结构化值，包含源表、访问方式、索引名、用于 lookup 的等值条件、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表，以及最终结果 schema。访问方式为 `full_scan`、`primary_key_lookup` 或 `secondary_index_lookup`。CLI 会把这些字段打印成可读的四行计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。
+成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表，以及最终结果 schema。访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
 
-当前只有第一个改变或观察行的 stage 是单纯 `field == literal` 或 `literal == field` 时才选择等值索引；前置 `let` 不改变行，可以跳过。planner 不会把 filter 越过 derive、aggregate、select、sort 或 take，也不会从复合布尔表达式中抽取条件，因为提前缩小候选集可能隐藏前序表达式错误或改变短路行为。索引 lookup 未命中时直接产生 0 个候选行。
+planner 跳过开头的 row-independent `let`，然后只从连续的简单 `field op bound` filter 提取边界；`op` 可以是 `==`、`>`、`>=`、`<` 或 `<=`。复合索引使用从首 component 开始的连续 equality prefix，并在紧邻的下一个 component 上合并至多一组 lower/upper range；range 后或 key gap 后的条件仍作为 residual filter。遇到 compound bool、`filter match`、derive、select、aggregate/group、sort、take 或其他语义边界后停止抽取，也不从 `and`／`or` 内部拆条件。
 
-当前可执行版本已经支持 `create index tasks (status, -priority, id)` 的 inline/multiline 语法、方向化 schema identity、复合 unique 约束、memory/redb typed tuple key、migration/diff、storage format 5 与 backup 4。查询 planner 目前仍只使用单 field path 的完整 equality lookup；equality-prefix range、index-order scan 与 page seek 由 #173 接入。在 planner 报告新访问方式之前，复合索引主要提供持久 schema/约束语义，不应被解释为已经加速范围或排序。
+去掉 equality-fixed sort 字段后，剩余 sort 只有与索引 suffix 的连续前缀方向完全相同或全部相反时才消费 index order。多个候选依次按 equality component 数、是否有 range、是否满足 sort/page、key component 数和 stable index ID 选择。原 filter 始终按源码顺序再次执行；如果后续 stage 会改变行集或顺序，执行器不会提前按 `take` 截断。
+
+当前可执行版本支持 `create index tasks (status, -priority, id)` 的 inline/multiline 语法、方向化 schema identity、复合 unique 约束、memory/redb typed tuple key、migration/diff、storage format 5 与 backup 4。符合前缀规则的 equality、range 和 sort 会直接读取有界 tuple span；`take` 在所有前置 residual filter 通过后计数。稳定分页可以用主键收尾，或用 equality-fixed fields 加完整 unique-index visible suffix 证明唯一，并把 typed cursor boundary 下推为严格的 forward/backward seek。
 
 所有可存储的静态类型都使用与 `cmp_eq` 相同的稳定结构键，包括命名类型、record、tuple、sum、option 和 list。Option 的 `None` 与 sum 的不同 constructor 有不同键，不会按 null 或缺失值混合。索引从 row 派生，insert/update/delete、redb 恢复和 migration 后都会维护或重建；是否存在索引不能改变查询结果。
 
-`estimated_rows` 是当前快照中将进入 pipeline 的确切候选数量：full scan 等于表行数，lookup 等于 posting 长度。它用于验证访问路径和工作集上限，不是基于统计信息的长期基数预测，也不承诺固定性能倍数。测量时应在同一数据集上分别执行无索引与有索引查询，同时用 explain 确认访问路径；记录行数、候选数、构建模式和硬件环境。
+`estimated_rows` 是当前快照中 B-tree span 的 entry 数：full scan 等于表行数，lookup 等于 posting 长度，range/page seek 等于应用 typed boundary 后的 span。它不扣除 residual filter，也不是基于统计信息的长期基数预测。执行器对可安全下推的 `take/page` 按索引方向逐项读取，只保留足够的通过行；explain 自身不读取或执行数据行。
 
 ## 查询局部 let 与纯函数
 
@@ -629,11 +631,11 @@ take 20
 | `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |
-| `E_PAGE_SHAPE` / `E_PAGE_ORDER` | page 位置、limit、组合不合法，或排序没有以主键形成可证明的唯一顺序 |
+| `E_PAGE_SHAPE` / `E_PAGE_ORDER` | page 位置、limit、组合不合法，或排序既没有以主键收尾，也没有覆盖 equality-fixed prefix 后的完整 unique-index suffix |
 | `E_CURSOR_LIMIT` / `E_CURSOR_CODEC` / `E_CURSOR_INTEGRITY` | cursor 超限、编码无效或 HMAC 验证失败 |
 | `E_CURSOR_DATABASE` / `E_CURSOR_SCHEMA` / `E_CURSOR_QUERY` / `E_CURSOR_STALE` | cursor 的数据库、schema、绑定查询/参数/方向/limit 或 commit sequence 不匹配 |
 
-查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。分页查询另带 `page` 元数据；`explain` 的 `plan.page` 显示 limit、方向、唯一排序 tuple、resume boundary、snapshot sequence、候选行、`limit + 1` 读取预算、cursor 上限和当前 `sorted_scan` 路径。insert/upsert/update/delete 成功响应包含 `affected_rows`；单行 upsert 还包含 `upsert_action`，批量 upsert 包含 `upsert_actions`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。当前 indexed query、full scan、写入和 migration 的 10k/100k 实测边界见[工作负载成本记录](benchmarks/workload-2026-09-07.md)。
+查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。分页查询另带 `page` 元数据；`explain` 的 `plan.page` 显示 limit、方向、唯一排序 tuple、resume boundary、snapshot sequence、候选行、`limit + 1` 读取预算、cursor 上限，以及 `sorted_scan` 或 `index_seek`。insert/upsert/update/delete 成功响应包含 `affected_rows`；单行 upsert 还包含 `upsert_action`，批量 upsert 包含 `upsert_actions`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。当前 indexed query、full scan、写入和 migration 的 10k/100k 实测边界见[工作负载成本记录](benchmarks/workload-2026-09-07.md)。
 
 以下片段是故意失败的反例：
 

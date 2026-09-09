@@ -1,6 +1,6 @@
 use unionid::{
-    Engine, InputStatus, QueryAccessKind, QueryResponse, QueryStageKind, UpsertAction, Value,
-    input_status,
+    Engine, IndexTraversal, InputStatus, QueryAccessKind, QueryResponse, QueryStageKind,
+    UpsertAction, Value, input_status,
 };
 
 fn ok(engine: &mut Engine, source: &str) -> QueryResponse {
@@ -716,6 +716,32 @@ insert rows {id = 3, active = true, state = Running {attempt = 1}, meta = {z = 0
             .collect::<Vec<_>>(),
         [3, 1]
     );
+    let range_queries = [
+        "from rows | filter active > false",
+        "from rows | filter state > Waiting",
+        "from rows | filter meta >= {z = 0, a = 9}",
+        "from rows | filter pair > (1, \"a\")",
+        "from rows | filter maybe >= Some 0",
+        "from rows | filter nums > [1]",
+        "from rows | filter tree >= Leaf 2",
+    ];
+    let scan_results = range_queries
+        .iter()
+        .map(|query| rows(&mut engine, query))
+        .collect::<Vec<_>>();
+    ok(
+        &mut engine,
+        "create index rows (active)\ncreate index rows (state)\ncreate index rows (meta)\ncreate index rows (pair)\ncreate index rows (maybe)\ncreate index rows (nums)\ncreate index rows (tree)",
+    );
+    for (query, expected) in range_queries.iter().zip(scan_results) {
+        assert_eq!(
+            rows(&mut engine, query),
+            expected,
+            "indexed parity for {query}"
+        );
+        let plan = ok(&mut engine, &format!("explain {query}")).plan.unwrap();
+        assert_eq!(plan.access.kind, QueryAccessKind::RangeScan, "{query}");
+    }
     let first_page = ok(&mut engine, "from rows\nsort {state, id}\npage 2");
     assert_eq!(
         first_page
@@ -1643,7 +1669,7 @@ fn explain_reports_typed_access_without_reordering_pipeline_stages() {
     let plan = primary.plan.unwrap();
     assert_eq!(plan.access.kind, QueryAccessKind::PrimaryKeyLookup);
     assert_eq!(plan.access.index.as_deref(), Some("tasks.id"));
-    assert_eq!(plan.access.condition.as_deref(), Some("id == 2"));
+    assert_eq!(plan.access.condition.as_deref(), Some("id == <bound>"));
     assert_eq!(plan.access.estimated_rows, 1);
     assert_eq!(plan.access.table_rows, 2);
     assert_eq!(
@@ -1717,6 +1743,283 @@ fn explain_reports_typed_access_without_reordering_pipeline_stages() {
             .len(),
         1
     );
+}
+
+#[test]
+fn composite_index_planner_bounds_equality_prefix_and_one_range_field() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type Task = {id int, tenant text, priority int, active bool}
+table tasks Task
+  key id
+create index tasks (tenant, -priority, id)
+create index tasks (tenant, -priority)
+create index tasks (tenant, priority, id)
+insert many tasks [
+  {id = 1, tenant = "acme", priority = 1, active = true},
+  {id = 2, tenant = "acme", priority = 2, active = false},
+  {id = 3, tenant = "acme", priority = 3, active = true},
+  {id = 4, tenant = "acme", priority = 4, active = true},
+  {id = 5, tenant = "acme", priority = 5, active = true},
+  {id = 6, tenant = "other", priority = 3, active = true},
+]"#,
+    );
+
+    let prefix = ok(
+        &mut engine,
+        r#"explain from tasks | filter tenant == "acme""#,
+    )
+    .plan
+    .unwrap();
+    assert_eq!(prefix.access.kind, QueryAccessKind::CompositeLookup);
+    assert_eq!(prefix.access.estimated_rows, 5);
+    assert_eq!(
+        prefix.access.condition.as_deref(),
+        Some("tenant == <bound>")
+    );
+
+    let ordered = ok(
+        &mut engine,
+        r#"explain
+  from tasks
+  filter tenant == "acme"
+  sort {-priority, id}
+  take 2"#,
+    )
+    .plan
+    .unwrap();
+    assert_eq!(ordered.access.kind, QueryAccessKind::OrderedScan);
+    assert_eq!(ordered.access.estimated_rows, 5);
+    assert_eq!(ordered.access.equality_prefix, ["tenant"]);
+    assert_eq!(ordered.access.traversal, Some(IndexTraversal::Forward));
+    assert!(ordered.access.sort_satisfied);
+    let ordered_rows = ok(
+        &mut engine,
+        r#"from tasks
+filter tenant == "acme"
+sort {-priority, id}
+take 2"#,
+    );
+    assert!(ordered_rows.rows[0]["id"].cmp_eq(&Value::Int(5)));
+    assert!(ordered_rows.rows[1]["id"].cmp_eq(&Value::Int(4)));
+    let residual_rows = ok(
+        &mut engine,
+        r#"from tasks
+filter tenant == "acme"
+filter id < 5
+sort {-priority, id}
+take 2"#,
+    );
+    assert_eq!(residual_rows.rows.len(), 2);
+    assert!(residual_rows.rows[0]["id"].cmp_eq(&Value::Int(4)));
+    assert!(residual_rows.rows[1]["id"].cmp_eq(&Value::Int(3)));
+    let reversed_rows = ok(
+        &mut engine,
+        r#"from tasks
+filter tenant == "acme"
+sort {priority, -id}
+take 2"#,
+    );
+    assert!(reversed_rows.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(reversed_rows.rows[1]["id"].cmp_eq(&Value::Int(2)));
+    let post_sort_filter = ok(
+        &mut engine,
+        r#"from tasks
+filter tenant == "acme"
+sort {-priority, id}
+filter id < 5
+take 2"#,
+    );
+    assert_eq!(post_sort_filter.rows.len(), 2);
+    assert!(post_sort_filter.rows[0]["id"].cmp_eq(&Value::Int(4)));
+    assert!(post_sort_filter.rows[1]["id"].cmp_eq(&Value::Int(3)));
+    let post_sort_mutation = ok(
+        &mut engine,
+        r#"update tasks
+filter tenant == "acme"
+sort {-priority, id}
+filter id < 5
+take 2
+set active = false
+returning {id}"#,
+    );
+    assert_eq!(post_sort_mutation.affected_rows, Some(2));
+    assert!(post_sort_mutation.rows[0]["id"].cmp_eq(&Value::Int(4)));
+    assert!(post_sort_mutation.rows[1]["id"].cmp_eq(&Value::Int(3)));
+    let whole_index_order = ok(
+        &mut engine,
+        "explain from tasks | sort {tenant, -priority, id} | take 2",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(whole_index_order.access.kind, QueryAccessKind::OrderedScan);
+    assert_eq!(whole_index_order.access.estimated_rows, 6);
+
+    let range = ok(
+        &mut engine,
+        r#"explain
+  from tasks
+  filter tenant == "acme"
+  filter 2 <= priority
+  filter priority < 5
+  filter id > 2"#,
+    )
+    .plan
+    .unwrap();
+    assert_eq!(range.access.kind, QueryAccessKind::RangeScan);
+    assert_eq!(range.access.estimated_rows, 3);
+    assert_eq!(
+        range.access.index.as_deref(),
+        Some("tasks (tenant, -priority)")
+    );
+    assert_eq!(range.access.equality_prefix, ["tenant"]);
+    let range_shape = range.access.range.as_ref().unwrap();
+    assert_eq!(range_shape.column, "priority");
+    assert_eq!(range_shape.lower_inclusive, Some(true));
+    assert_eq!(range_shape.upper_inclusive, Some(false));
+    assert_eq!(
+        range.access.condition.as_deref(),
+        Some("tenant == <bound>, priority in <range>")
+    );
+    assert!(!range.access.condition.as_deref().unwrap().contains("acme"));
+
+    let indexed = ok(
+        &mut engine,
+        r#"from tasks
+filter tenant == "acme"
+filter 2 <= priority
+filter priority < 5
+filter id > 2
+sort id"#,
+    );
+    assert_eq!(indexed.rows.len(), 2);
+    assert!(indexed.rows[0]["id"].cmp_eq(&Value::Int(3)));
+    assert!(indexed.rows[1]["id"].cmp_eq(&Value::Int(4)));
+    let ascending = ok(
+        &mut engine,
+        r#"from tasks
+filter tenant == "acme"
+filter priority > 1
+filter priority <= 4
+sort {priority, id}"#,
+    );
+    assert_eq!(ascending.rows.len(), 3);
+    assert!(ascending.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(ascending.rows[1]["id"].cmp_eq(&Value::Int(3)));
+    assert!(ascending.rows[2]["id"].cmp_eq(&Value::Int(4)));
+
+    let exact = ok(
+        &mut engine,
+        r#"explain
+  from tasks
+  filter tenant == "acme"
+  filter priority == 3
+  filter id == 3"#,
+    )
+    .plan
+    .unwrap();
+    assert_eq!(exact.access.kind, QueryAccessKind::CompositeLookup);
+    assert_eq!(exact.access.estimated_rows, 1);
+
+    let gap = ok(&mut engine, "explain from tasks | filter priority >= 3")
+        .plan
+        .unwrap();
+    assert_eq!(gap.access.kind, QueryAccessKind::FullScan);
+    let barrier = ok(
+        &mut engine,
+        r#"explain from tasks | filter tenant == "acme" and priority == 3"#,
+    )
+    .plan
+    .unwrap();
+    assert_eq!(barrier.access.kind, QueryAccessKind::FullScan);
+
+    let empty = ok(
+        &mut engine,
+        r#"explain
+  from tasks
+  filter tenant == "acme"
+  filter priority >= 5
+  filter priority < 5"#,
+    )
+    .plan
+    .unwrap();
+    assert_eq!(empty.access.kind, QueryAccessKind::RangeScan);
+    assert_eq!(empty.access.estimated_rows, 0);
+
+    let updated = ok(
+        &mut engine,
+        r#"update tasks
+filter tenant == "acme"
+filter priority >= 2
+take 1
+set active = true
+returning {id}"#,
+    );
+    assert_eq!(updated.affected_rows, Some(1));
+    assert!(updated.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    let ordered_update = ok(
+        &mut engine,
+        r#"update tasks
+filter tenant == "acme"
+sort {-priority, id}
+take 1
+set active = false
+returning {id}"#,
+    );
+    assert!(ordered_update.rows[0]["id"].cmp_eq(&Value::Int(5)));
+}
+
+#[test]
+fn ordered_composite_index_matches_scans_across_duplicate_prefixes() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type Job = {id int, tenant text, priority int}
+table jobs Job
+  key id
+create index jobs (tenant, -priority, id)
+insert many jobs [
+  {id = 1, tenant = "acme", priority = 2},
+  {id = 2, tenant = "acme", priority = 2},
+  {id = 3, tenant = "acme", priority = 1},
+  {id = 4, tenant = "other", priority = 9},
+]"#,
+    );
+    for (indexed_sort, scanned_sort) in [
+        (
+            r#"from jobs
+filter tenant == "acme"
+sort {-priority, id}"#,
+            r#"from jobs
+filter tenant == "acme" and true
+sort {-priority, id}"#,
+        ),
+        (
+            r#"from jobs
+filter tenant == "acme"
+sort {priority, -id}"#,
+            r#"from jobs
+filter tenant == "acme" and true
+sort {priority, -id}"#,
+        ),
+    ] {
+        assert_eq!(
+            rows(&mut engine, indexed_sort),
+            rows(&mut engine, scanned_sort)
+        );
+        assert_eq!(
+            ok(
+                &mut engine,
+                &format!("explain\n  {}", indexed_sort.replace('\n', "\n  "))
+            )
+            .plan
+            .unwrap()
+            .access
+            .kind,
+            QueryAccessKind::OrderedScan
+        );
+    }
 }
 
 #[test]

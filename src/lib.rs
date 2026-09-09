@@ -34,8 +34,9 @@ pub mod wal;
 
 pub use backup::BackupInfo;
 pub use db::{
-    PageAccessKind, PageInfo, PageOrder, PagePlan, QueryAccessKind, QueryAccessPlan, QueryPlan,
-    QueryPlanStage, QueryResponse, QueryStageKind, SchemaInfo, TypedPage, UpsertAction,
+    IndexRangePlan, IndexTraversal, PageAccessKind, PageInfo, PageOrder, PagePlan, QueryAccessKind,
+    QueryAccessPlan, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind, SchemaInfo,
+    TypedPage, UpsertAction,
 };
 pub use engine::{Engine, MutationProfile, PreparedQuery, StorageIntegrity, StorageUpgrade};
 pub use error::{Error, Result, Span};
