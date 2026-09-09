@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,8 +7,9 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use unionid::{
-    Engine, IndexTraversal, PageAccessKind, PagePlan, QueryAccessKind, QueryAccessPlan, QueryPlan,
-    QueryResponse, UpsertAction, Value,
+    DurableCommitMode, DurableCommitProfile, Engine, IndexTraversal, PageAccessKind, PagePlan,
+    QueryAccessKind, QueryAccessPlan, QueryPlan, QueryResponse, StorageOpenProfile, UpsertAction,
+    Value,
 };
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
@@ -38,6 +40,14 @@ struct RawSamples {
     index: Option<String>,
     access_plan: Option<QueryAccessPlan>,
     page_plan: Option<PagePlan>,
+    open_profiles: Option<Vec<StorageOpenProfile>>,
+    durable_profiles: Option<Vec<DurableCommitProfile>>,
+}
+
+#[derive(Debug, Serialize)]
+struct PhasePercentiles {
+    p50_micros: BTreeMap<String, u64>,
+    p95_micros: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +76,12 @@ struct CaseReport {
     access_plan: Option<QueryAccessPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     page_plan: Option<PagePlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_profiles: Option<Vec<StorageOpenProfile>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durable_profiles: Option<Vec<DurableCommitProfile>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage_phase_percentiles: Option<PhasePercentiles>,
 }
 
 #[derive(Debug, Serialize)]
@@ -422,6 +438,8 @@ fn measure_query(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
         index: expected_index.map(Into::into),
         access_plan: Some(plan.access),
         page_plan: plan.page,
+        open_profiles: None,
+        durable_profiles: None,
     })
 }
 
@@ -528,14 +546,27 @@ fn measure_write(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
     let mut timings = Vec::with_capacity(samples);
     let mut candidate_timings = Vec::with_capacity(samples);
     let mut durable_commit_timings = Vec::with_capacity(samples);
+    let mut durable_profiles = Vec::with_capacity(samples);
     for source in &sources[WARMUPS..] {
         let started = Instant::now();
         let response = engine.execute(source);
-        timings.push(elapsed_micros(started));
+        let timing = elapsed_micros(started);
+        timings.push(timing);
         require_write(response, case)?;
         let profile = require_write_profile(&engine, case)?;
+        validate_durable_profile(
+            profile
+                .durable
+                .ok_or("durable write omitted its commit phase profile")?,
+            timing,
+        )?;
         candidate_timings.push(profile.candidate_micros);
         durable_commit_timings.push(profile.durable_commit_micros);
+        durable_profiles.push(
+            profile
+                .durable
+                .ok_or("durable write omitted its commit phase profile")?,
+        );
     }
     let peak_rss_bytes = peak_rss_bytes()?;
     validate_write_result(&mut engine, case, rows, target, total)?;
@@ -550,6 +581,8 @@ fn measure_write(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
         index: index.map(Into::into),
         access_plan: None,
         page_plan: None,
+        open_profiles: None,
+        durable_profiles: Some(durable_profiles),
     })
 }
 
@@ -565,6 +598,21 @@ fn measure_migration(path: &Path, rows: usize) -> AnyResult<()> {
         .ok_or("migration returned no mutation profile")?;
     if !profile.full_rebuild {
         return Err("migration unexpectedly used the incremental row-only path".into());
+    }
+    let durable_profile = profile
+        .durable
+        .ok_or("durable migration omitted its commit phase profile")?;
+    if durable_profile.mode != DurableCommitMode::FullRebuild
+        || durable_profile.total_micros != profile.durable_commit_micros
+    {
+        return Err("migration returned inconsistent full-rebuild phase metadata".into());
+    }
+    validate_durable_profile(durable_profile, timing)?;
+    if durable_profile.row_changes != rows
+        || durable_profile.index_changes == 0
+        || durable_profile.encoded_change_bytes == 0
+    {
+        return Err("migration returned incomplete full-rebuild change counts".into());
     }
     let peak_rss_bytes = peak_rss_bytes()?;
     let migrated = require_one(engine.execute("from tasks | filter migrated_rank == 0 | take 1"))?;
@@ -589,6 +637,8 @@ fn measure_migration(path: &Path, rows: usize) -> AnyResult<()> {
         index: Some("tasks.migrated_rank".into()),
         access_plan: None,
         page_plan: None,
+        open_profiles: None,
+        durable_profiles: Some(vec![durable_profile]),
     })
 }
 
@@ -597,6 +647,10 @@ fn measure_open(path: &Path, rows: usize) -> AnyResult<()> {
     let started = Instant::now();
     let mut engine = Engine::open_redb(path.to_path_buf())?;
     let timing = elapsed_micros(started);
+    let open_profile = engine
+        .open_profile()
+        .ok_or("durable open omitted its phase profile")?;
+    validate_open_profile(open_profile, timing, rows)?;
     let peak_rss_bytes = peak_rss_bytes()?;
     require_count(&mut engine, rows)?;
     require_integrity(&mut engine)?;
@@ -610,6 +664,8 @@ fn measure_open(path: &Path, rows: usize) -> AnyResult<()> {
         index: None,
         access_plan: None,
         page_plan: None,
+        open_profiles: Some(vec![open_profile]),
+        durable_profiles: None,
     })
 }
 
@@ -709,9 +765,23 @@ fn require_write_profile(engine: &Engine, case: &str) -> AnyResult<unionid::Muta
     if profile.full_rebuild {
         return Err(format!("{case} unexpectedly used the full-rebuild path").into());
     }
+    let durable = profile
+        .durable
+        .ok_or_else(|| format!("{case} omitted its durable phase profile"))?;
+    if durable.mode != DurableCommitMode::Incremental
+        || durable.total_micros != profile.durable_commit_micros
+        || durable.reload_previous_micros != 0
+        || durable.encode_next_micros != 0
+        || durable.diff_micros != 0
+    {
+        return Err(format!("{case} returned inconsistent incremental phase metadata").into());
+    }
     let expected_inserts = usize::from(case == "atomic_batch") * BATCH_WRITE_ROWS;
     let expected_updates = usize::from(case != "atomic_batch");
     let expected_index_inserts = usize::from(case == "atomic_batch") * BATCH_WRITE_ROWS * 4;
+    let expected_durable_rows = expected_inserts + expected_updates;
+    let expected_durable_indexes = expected_index_inserts;
+    let expected_catalog_changes = usize::from(case == "atomic_batch");
     if profile.touched_tables != 1
         || profile.row_inserts != expected_inserts
         || profile.row_updates != expected_updates
@@ -719,10 +789,68 @@ fn require_write_profile(engine: &Engine, case: &str) -> AnyResult<unionid::Muta
         || profile.index_inserts != expected_index_inserts
         || profile.index_deletes != 0
         || profile.receipt_changes != 0
+        || durable.catalog_changes != expected_catalog_changes
+        || durable.row_changes != expected_durable_rows
+        || durable.index_changes != expected_durable_indexes
+        || durable.migration_changes != 0
+        || durable.receipt_changes != 0
+        || durable.encoded_change_bytes == 0
     {
         return Err(format!("{case} returned unexpected mutation profile {profile:?}").into());
     }
     Ok(profile)
+}
+
+fn validate_open_profile(
+    profile: StorageOpenProfile,
+    outer_micros: u64,
+    expected_rows: usize,
+) -> AnyResult<()> {
+    let exclusive_sum = profile
+        .redb_open_micros
+        .saturating_add(profile.bootstrap_micros)
+        .saturating_add(profile.meta_micros)
+        .saturating_add(profile.catalog_micros)
+        .saturating_add(profile.rows_micros)
+        .saturating_add(profile.indexes_micros)
+        .saturating_add(profile.migrations_micros)
+        .saturating_add(profile.receipts_micros)
+        .saturating_add(profile.database_construct_micros)
+        .saturating_add(profile.validation_micros);
+    if profile.fresh
+        || profile.read_only
+        || profile.cursor_upgrade
+        || profile.total_micros > outer_micros
+        || exclusive_sum > profile.total_micros
+        || profile.row_entries != expected_rows
+        || profile.index_entries != expected_rows.saturating_mul(4)
+        || profile.catalog_entries == 0
+        || profile.row_bytes == 0
+        || profile.index_key_bytes == 0
+    {
+        return Err(format!("open returned inconsistent phase metadata {profile:?}").into());
+    }
+    Ok(())
+}
+
+fn validate_durable_profile(profile: DurableCommitProfile, outer_micros: u64) -> AnyResult<()> {
+    let top_level_sum = profile
+        .prepare_micros
+        .saturating_add(profile.transaction_apply_micros)
+        .saturating_add(profile.sync_micros);
+    let prepare_subphase_sum = profile
+        .reload_previous_micros
+        .saturating_add(profile.encode_next_micros)
+        .saturating_add(profile.diff_micros);
+    if profile.total_micros > outer_micros
+        || top_level_sum > profile.total_micros
+        || prepare_subphase_sum > profile.prepare_micros
+    {
+        return Err(
+            format!("durable commit returned inconsistent phase timings {profile:?}").into(),
+        );
+    }
+    Ok(())
 }
 
 fn require_plan(
@@ -804,12 +932,18 @@ fn combine_migration_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
         index: Some("tasks.migrated_rank".into()),
         access_plan: None,
         page_plan: None,
+        open_profiles: None,
+        durable_profiles: Some(Vec::with_capacity(runs.len())),
     };
     for run in runs {
         if run.name != combined.name
             || run.samples_micros.len() != 1
             || run.access_kind != combined.access_kind
             || run.index != combined.index
+            || run.open_profiles.is_some()
+            || run.durable_profiles.as_ref().is_none_or(|profiles| {
+                profiles.len() != 1 || profiles[0].mode != DurableCommitMode::FullRebuild
+            })
         {
             return Err("migration child returned inconsistent metadata".into());
         }
@@ -837,6 +971,11 @@ fn combine_migration_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
                     .ok_or("migration child returned no durable commit sample")?,
             );
         combined.peak_rss_bytes = combined.peak_rss_bytes.max(run.peak_rss_bytes);
+        combined
+            .durable_profiles
+            .as_mut()
+            .expect("combined migration profiles are initialized")
+            .push(run.durable_profiles.expect("validated migration profile")[0]);
     }
     Ok(combined)
 }
@@ -852,6 +991,8 @@ fn combine_open_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
         index: None,
         access_plan: None,
         page_plan: None,
+        open_profiles: Some(Vec::with_capacity(runs.len())),
+        durable_profiles: None,
     };
     for run in runs {
         if run.name != combined.name
@@ -860,11 +1001,21 @@ fn combine_open_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
             || run.durable_commit_samples_micros.is_some()
             || run.access_kind.is_some()
             || run.index.is_some()
+            || run.durable_profiles.is_some()
+            || run
+                .open_profiles
+                .as_ref()
+                .is_none_or(|profiles| profiles.len() != 1)
         {
             return Err("open child returned inconsistent metadata".into());
         }
         combined.samples_micros.push(run.samples_micros[0]);
         combined.peak_rss_bytes = combined.peak_rss_bytes.max(run.peak_rss_bytes);
+        combined
+            .open_profiles
+            .as_mut()
+            .expect("combined open profiles are initialized")
+            .push(run.open_profiles.expect("validated open profile")[0]);
     }
     Ok(combined)
 }
@@ -881,6 +1032,11 @@ fn summarize(mut raw: RawSamples) -> AnyResult<CaseReport> {
         summarize_phase(&raw.candidate_samples_micros, raw.samples_micros.len())?;
     let (durable_commit_p50_micros, durable_commit_p95_micros) =
         summarize_phase(&raw.durable_commit_samples_micros, raw.samples_micros.len())?;
+    let storage_phase_percentiles = summarize_storage_phases(
+        &raw.open_profiles,
+        &raw.durable_profiles,
+        raw.samples_micros.len(),
+    )?;
     Ok(CaseReport {
         name: raw.name,
         iterations: raw.samples_micros.len(),
@@ -898,7 +1054,84 @@ fn summarize(mut raw: RawSamples) -> AnyResult<CaseReport> {
         index: raw.index,
         access_plan: raw.access_plan,
         page_plan: raw.page_plan,
+        open_profiles: raw.open_profiles.take(),
+        durable_profiles: raw.durable_profiles.take(),
+        storage_phase_percentiles,
     })
+}
+
+fn summarize_storage_phases(
+    open_profiles: &Option<Vec<StorageOpenProfile>>,
+    durable_profiles: &Option<Vec<DurableCommitProfile>>,
+    expected: usize,
+) -> AnyResult<Option<PhasePercentiles>> {
+    if open_profiles.is_some() && durable_profiles.is_some() {
+        return Err("case mixed open and durable storage profiles".into());
+    }
+    let mut phases = BTreeMap::<String, Vec<u64>>::new();
+    if let Some(profiles) = open_profiles {
+        if profiles.len() != expected {
+            return Err("open profile count does not match total sample count".into());
+        }
+        for profile in profiles {
+            for (name, value) in open_phase_values(*profile) {
+                phases.entry(name.into()).or_default().push(value);
+            }
+        }
+    } else if let Some(profiles) = durable_profiles {
+        if profiles.len() != expected {
+            return Err("durable profile count does not match total sample count".into());
+        }
+        for profile in profiles {
+            for (name, value) in durable_phase_values(*profile) {
+                phases.entry(name.into()).or_default().push(value);
+            }
+        }
+    } else {
+        return Ok(None);
+    }
+    let mut p50_micros = BTreeMap::new();
+    let mut p95_micros = BTreeMap::new();
+    for (name, mut samples) in phases {
+        if samples.len() != expected {
+            return Err("storage phase schema changed between samples".into());
+        }
+        samples.sort_unstable();
+        p50_micros.insert(name.clone(), percentile(&samples, 50));
+        p95_micros.insert(name, percentile(&samples, 95));
+    }
+    Ok(Some(PhasePercentiles {
+        p50_micros,
+        p95_micros,
+    }))
+}
+
+fn open_phase_values(profile: StorageOpenProfile) -> [(&'static str, u64); 11] {
+    [
+        ("total", profile.total_micros),
+        ("redb_open", profile.redb_open_micros),
+        ("bootstrap", profile.bootstrap_micros),
+        ("meta", profile.meta_micros),
+        ("catalog", profile.catalog_micros),
+        ("rows", profile.rows_micros),
+        ("indexes", profile.indexes_micros),
+        ("migrations", profile.migrations_micros),
+        ("receipts", profile.receipts_micros),
+        ("database_construct", profile.database_construct_micros),
+        ("validation", profile.validation_micros),
+    ]
+}
+
+fn durable_phase_values(profile: DurableCommitProfile) -> [(&'static str, u64); 7] {
+    [
+        ("total", profile.total_micros),
+        ("prepare", profile.prepare_micros),
+        ("reload_previous", profile.reload_previous_micros),
+        ("encode_next", profile.encode_next_micros),
+        ("diff", profile.diff_micros),
+        ("transaction_apply", profile.transaction_apply_micros),
+        ("sync", profile.sync_micros),
+    ]
 }
 
 fn environment_report() -> AnyResult<EnvironmentReport> {

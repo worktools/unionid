@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use redb::{
     Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
@@ -18,6 +19,7 @@ use crate::idempotency::{
 use crate::introspection::StorageVersions;
 use crate::migration::MigrationEntry;
 use crate::model::Value;
+use crate::profile::{DurableCommitMode, DurableCommitProfile, StorageOpenProfile};
 
 const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
 const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
@@ -165,6 +167,22 @@ pub(crate) enum CommitFailure {
     Uncertain(Error),
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct TransactionProfile {
+    apply_micros: u64,
+    sync_micros: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DeltaCounts {
+    catalog_changes: usize,
+    row_changes: usize,
+    index_changes: usize,
+    migration_changes: usize,
+    receipt_changes: usize,
+    encoded_change_bytes: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct UpgradeResult {
     pub(crate) previous_format: u32,
@@ -189,7 +207,10 @@ impl CommitFailure {
 }
 
 impl RedbStore {
-    pub(crate) fn open(path: impl Into<PathBuf>) -> Result<(Self, Database, ReceiptMap)> {
+    pub(crate) fn open(
+        path: impl Into<PathBuf>,
+    ) -> Result<(Self, Database, ReceiptMap, StorageOpenProfile)> {
+        let total_started = Instant::now();
         let path = resolve_path(path.into())?;
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|error| {
@@ -197,13 +218,16 @@ impl RedbStore {
             })?;
         }
         let fresh = std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0);
+        let redb_started = Instant::now();
         let database = RedbDatabase::create(&path).map_err(open_error)?;
+        let redb_open_micros = elapsed_micros(redb_started);
         let empty = Database::default();
         let initial = PreparedState::new(&empty, &ReceiptMap::new(), StorageLayout::production())?;
         let mut store = Self {
             database,
             committed: DurableHead::from_prepared(&initial),
         };
+        let bootstrap_started = Instant::now();
         if fresh {
             let mut bootstrap = PreparedDelta::between(&initial, &initial);
             bootstrap.expected_meta = None;
@@ -211,7 +235,12 @@ impl RedbStore {
                 .commit_prepared(&bootstrap)
                 .map_err(CommitFailure::into_error)?;
         }
-        let (loaded, receipts, committed) = store.load()?;
+        let bootstrap_micros = if fresh {
+            elapsed_micros(bootstrap_started)
+        } else {
+            0
+        };
+        let (loaded, receipts, committed, mut profile) = store.load()?;
         let needs_cursor_upgrade = committed.layout.format < CURSOR_STORAGE_FORMAT_VERSION;
         store.committed = DurableHead::from_prepared(&committed);
         if needs_cursor_upgrade {
@@ -220,7 +249,12 @@ impl RedbStore {
                 .commit(&loaded, &loaded, &receipts)
                 .map_err(CommitFailure::into_error)?;
         }
-        Ok((store, loaded, receipts))
+        profile.total_micros = elapsed_micros(total_started);
+        profile.redb_open_micros = redb_open_micros;
+        profile.bootstrap_micros = bootstrap_micros;
+        profile.fresh = fresh;
+        profile.cursor_upgrade = needs_cursor_upgrade;
+        Ok((store, loaded, receipts, profile))
     }
 
     pub(crate) fn supports_production_scalars(&self) -> bool {
@@ -286,16 +320,41 @@ impl RedbStore {
         _previous: &Database,
         database: &Database,
         receipts: &ReceiptMap,
-    ) -> std::result::Result<(), CommitFailure> {
+    ) -> std::result::Result<DurableCommitProfile, CommitFailure> {
+        let total_started = Instant::now();
+        let prepare_started = Instant::now();
         validate_receipts(receipts, database.sequence).map_err(CommitFailure::Definite)?;
         let layout = self.committed.layout;
-        let (_, _, previous) = self.load().map_err(CommitFailure::Definite)?;
+        let reload_started = Instant::now();
+        let (_, _, previous, _) = self.load().map_err(CommitFailure::Definite)?;
+        let reload_previous_micros = elapsed_micros(reload_started);
+        let encode_started = Instant::now();
         let next =
             PreparedState::new(database, receipts, layout).map_err(CommitFailure::Definite)?;
+        let encode_next_micros = elapsed_micros(encode_started);
+        let diff_started = Instant::now();
         let prepared = PreparedDelta::between(&previous, &next);
-        self.commit_prepared(&prepared)?;
+        let diff_micros = elapsed_micros(diff_started);
+        let counts = prepared.counts();
+        let prepare_micros = elapsed_micros(prepare_started);
+        let transaction = self.commit_prepared(&prepared)?;
         self.committed = DurableHead::from_prepared(&next);
-        Ok(())
+        Ok(DurableCommitProfile {
+            mode: DurableCommitMode::FullRebuild,
+            total_micros: elapsed_micros(total_started),
+            prepare_micros,
+            reload_previous_micros,
+            encode_next_micros,
+            diff_micros,
+            transaction_apply_micros: transaction.apply_micros,
+            sync_micros: transaction.sync_micros,
+            catalog_changes: counts.catalog_changes,
+            row_changes: counts.row_changes,
+            index_changes: counts.index_changes,
+            migration_changes: counts.migration_changes,
+            receipt_changes: counts.receipt_changes,
+            encoded_change_bytes: counts.encoded_change_bytes,
+        })
     }
 
     pub(crate) fn commit_incremental(
@@ -305,13 +364,15 @@ impl RedbStore {
         database: &Database,
         receipts: &ReceiptMap,
         write_set: &LogicalWriteSet,
-    ) -> std::result::Result<(), CommitFailure> {
+    ) -> std::result::Result<DurableCommitProfile, CommitFailure> {
         if !self.committed.catalog_canonical {
             // Opening a legacy catalog can schedule an in-place codec
             // normalization for the next successful write. That maintenance
             // rewrite intentionally uses the full-state path once.
             return self.commit(previous, database, receipts);
         }
+        let total_started = Instant::now();
+        let prepare_started = Instant::now();
         validate_receipts(receipts, database.sequence).map_err(CommitFailure::Definite)?;
         let prepared = PreparedDelta::incremental(
             previous,
@@ -322,17 +383,33 @@ impl RedbStore {
             write_set,
         )
         .map_err(CommitFailure::Definite)?;
-        self.commit_prepared(&prepared)?;
+        let counts = prepared.counts();
+        let prepare_micros = elapsed_micros(prepare_started);
+        let transaction = self.commit_prepared(&prepared)?;
         self.committed.layout = prepared.layout;
         self.committed.meta = prepared.meta.clone();
         self.committed.catalog_canonical = true;
-        Ok(())
+        Ok(DurableCommitProfile {
+            mode: DurableCommitMode::Incremental,
+            total_micros: elapsed_micros(total_started),
+            prepare_micros,
+            transaction_apply_micros: transaction.apply_micros,
+            sync_micros: transaction.sync_micros,
+            catalog_changes: counts.catalog_changes,
+            row_changes: counts.row_changes,
+            index_changes: counts.index_changes,
+            migration_changes: counts.migration_changes,
+            receipt_changes: counts.receipt_changes,
+            encoded_change_bytes: counts.encoded_change_bytes,
+            ..DurableCommitProfile::default()
+        })
     }
 
     fn commit_prepared(
         &mut self,
         prepared: &PreparedDelta,
-    ) -> std::result::Result<(), CommitFailure> {
+    ) -> std::result::Result<TransactionProfile, CommitFailure> {
+        let apply_started = Instant::now();
         let mut transaction = self
             .database
             .begin_write()
@@ -390,10 +467,15 @@ impl RedbStore {
             apply_bytes_delta(&mut table, &prepared.receipts, "idempotency receipt")
                 .map_err(CommitFailure::Definite)?;
         }
+        let apply_micros = elapsed_micros(apply_started);
+        let sync_started = Instant::now();
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit redb transaction", error))?;
-        Ok(())
+        Ok(TransactionProfile {
+            apply_micros,
+            sync_micros: elapsed_micros(sync_started),
+        })
     }
 
     pub(crate) fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
@@ -401,12 +483,15 @@ impl RedbStore {
             .database
             .check_integrity()
             .map_err(|error| storage_error("check redb integrity", error))?;
-        let (database, receipts, committed) = self.load()?;
+        let (database, receipts, committed, _) = self.load()?;
         self.committed = DurableHead::from_prepared(&committed);
         Ok((backend_clean, database, receipts))
     }
 
-    fn load(&self) -> Result<(Database, ReceiptMap, PreparedState)> {
+    fn load(&self) -> Result<(Database, ReceiptMap, PreparedState, StorageOpenProfile)> {
+        let total_started = Instant::now();
+        let mut profile = StorageOpenProfile::default();
+        let meta_started = Instant::now();
         let transaction = self
             .database
             .begin_read()
@@ -417,6 +502,8 @@ impl RedbStore {
                 .map_err(|error| storage_error("open meta table", error))?;
             read_meta(&table)?
         };
+        profile.meta_micros = elapsed_micros(meta_started);
+        let catalog_started = Instant::now();
         let (entries, stored_catalog) = {
             let table = transaction
                 .open_table(CATALOG)
@@ -436,6 +523,9 @@ impl RedbStore {
             }
             (entries, stored)
         };
+        profile.catalog_micros = elapsed_micros(catalog_started);
+        profile.catalog_entries = stored_catalog.len();
+        let rows_started = Instant::now();
         let (rows, stored_rows) = {
             let table = transaction
                 .open_table(ROWS)
@@ -455,6 +545,10 @@ impl RedbStore {
             }
             (rows, stored)
         };
+        profile.rows_micros = elapsed_micros(rows_started);
+        profile.row_entries = stored_rows.len();
+        profile.row_bytes = map_bytes(&stored_rows);
+        let indexes_started = Instant::now();
         let stored_indexes = {
             let table = transaction
                 .open_table(SECONDARY_INDEX)
@@ -471,6 +565,10 @@ impl RedbStore {
             }
             keys
         };
+        profile.indexes_micros = elapsed_micros(indexes_started);
+        profile.index_entries = stored_indexes.len();
+        profile.index_key_bytes = set_bytes(&stored_indexes);
+        let migrations_started = Instant::now();
         let (migrations, stored_migrations) = {
             let table = transaction
                 .open_table(MIGRATION_LEDGER)
@@ -497,6 +595,9 @@ impl RedbStore {
             }
             (migrations, stored)
         };
+        profile.migrations_micros = elapsed_micros(migrations_started);
+        profile.migration_entries = stored_migrations.len();
+        let receipts_started = Instant::now();
         let (receipts, stored_receipts) = if transaction
             .list_tables()
             .map_err(|error| storage_error("list redb tables", error))?
@@ -547,7 +648,13 @@ impl RedbStore {
         } else {
             (ReceiptMap::new(), BTreeMap::new())
         };
+        profile.receipts_micros = elapsed_micros(receipts_started);
+        profile.receipt_entries = stored_receipts.len();
+        profile.receipt_bytes = map_bytes(&stored_receipts);
+        let construct_started = Instant::now();
         let database = Database::from_durable(meta.clone(), entries, rows, migrations)?;
+        profile.database_construct_micros = elapsed_micros(construct_started);
+        let validation_started = Instant::now();
         if !layout.supports_production_scalars() {
             database.ensure_legacy_scalars()?;
             ensure_legacy_receipts(&receipts)?;
@@ -572,6 +679,7 @@ impl RedbStore {
                 "durable secondary indexes do not match the stored rows and catalog",
             ));
         }
+        profile.validation_micros = elapsed_micros(validation_started);
         let committed_layout = StorageLayout {
             catalog: layout.catalog.max(CATALOG_CODEC_VERSION),
             ..layout
@@ -585,7 +693,8 @@ impl RedbStore {
             migrations: stored_migrations,
             receipts: stored_receipts,
         };
-        Ok((database, receipts, committed))
+        profile.total_micros = elapsed_micros(total_started);
+        Ok((database, receipts, committed, profile))
     }
 }
 
@@ -868,6 +977,23 @@ impl PreparedDelta {
             receipts: BytesDelta::between(&previous.receipts, &next.receipts),
         }
     }
+
+    fn counts(&self) -> DeltaCounts {
+        DeltaCounts {
+            catalog_changes: self.catalog.change_count(),
+            row_changes: self.rows.change_count(),
+            index_changes: self.secondary_indexes.change_count(),
+            migration_changes: self.migrations.change_count(),
+            receipt_changes: self.receipts.change_count(),
+            encoded_change_bytes: self
+                .catalog
+                .encoded_bytes()
+                .saturating_add(self.rows.encoded_bytes())
+                .saturating_add(self.secondary_indexes.encoded_bytes())
+                .saturating_add(self.migrations.encoded_bytes())
+                .saturating_add(self.receipts.encoded_bytes()),
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -892,6 +1018,24 @@ impl LedgerDelta {
             .collect();
         Self { deletes, writes }
     }
+
+    fn change_count(&self) -> usize {
+        self.deletes.len().saturating_add(self.writes.len())
+    }
+
+    fn encoded_bytes(&self) -> u64 {
+        self.deletes
+            .iter()
+            .map(|(_, value)| usize_u64(value.len()).saturating_add(8))
+            .chain(self.writes.iter().map(|(_, expected, value)| {
+                expected
+                    .as_ref()
+                    .map_or(0, |bytes| usize_u64(bytes.len()))
+                    .saturating_add(usize_u64(value.len()))
+                    .saturating_add(8)
+            }))
+            .fold(0, u64::saturating_add)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -911,6 +1055,29 @@ struct BytesWrite {
     key: Vec<u8>,
     expected: Option<Vec<u8>>,
     value: Vec<u8>,
+}
+
+impl BytesDelta {
+    fn change_count(&self) -> usize {
+        self.deletes.len().saturating_add(self.writes.len())
+    }
+
+    fn encoded_bytes(&self) -> u64 {
+        self.deletes
+            .iter()
+            .map(|entry| usize_u64(entry.key.len()).saturating_add(usize_u64(entry.expected.len())))
+            .chain(self.writes.iter().map(|entry| {
+                usize_u64(entry.key.len())
+                    .saturating_add(
+                        entry
+                            .expected
+                            .as_ref()
+                            .map_or(0, |bytes| usize_u64(bytes.len())),
+                    )
+                    .saturating_add(usize_u64(entry.value.len()))
+            }))
+            .fold(0, u64::saturating_add)
+    }
 }
 
 impl BytesDelta {
@@ -950,6 +1117,18 @@ impl SetDelta {
             deletes: previous.difference(next).cloned().collect(),
             inserts: next.difference(previous).cloned().collect(),
         }
+    }
+
+    fn change_count(&self) -> usize {
+        self.deletes.len().saturating_add(self.inserts.len())
+    }
+
+    fn encoded_bytes(&self) -> u64 {
+        self.deletes
+            .iter()
+            .chain(&self.inserts)
+            .map(|key| usize_u64(key.len()))
+            .fold(0, u64::saturating_add)
     }
 }
 
@@ -1602,6 +1781,28 @@ fn encode_escaped(bytes: &[u8], output: &mut Vec<u8>) {
         }
     }
     output.extend_from_slice(&[0, 0]);
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn usize_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn map_bytes(values: &BTreeMap<Vec<u8>, Vec<u8>>) -> u64 {
+    values
+        .iter()
+        .map(|(key, value)| usize_u64(key.len()).saturating_add(usize_u64(value.len())))
+        .fold(0, u64::saturating_add)
+}
+
+fn set_bytes(values: &BTreeSet<Vec<u8>>) -> u64 {
+    values
+        .iter()
+        .map(|value| usize_u64(value.len()))
+        .fold(0, u64::saturating_add)
 }
 
 fn resolve_path(path: PathBuf) -> Result<PathBuf> {

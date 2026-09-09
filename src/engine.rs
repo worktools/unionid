@@ -19,6 +19,7 @@ use crate::migration::{
     MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
     MigrationStatus, describe_step, validate_files_against_history,
 };
+use crate::profile::{DurableCommitProfile, StorageOpenProfile};
 use crate::query::{LocatedStatement, PageSpec, Stage, Statement};
 use crate::redb_storage::{CommitFailure, RedbStore};
 use crate::snapshot::SnapshotStore;
@@ -42,6 +43,7 @@ pub struct Engine {
     storage_mode: StorageMode,
     snapshot_storage_versions: Option<StorageVersions>,
     last_mutation_profile: Option<MutationProfile>,
+    open_profile: Option<StorageOpenProfile>,
     _locks: Vec<DatabaseLock>,
 }
 
@@ -93,6 +95,8 @@ pub struct MutationProfile {
     pub index_inserts: usize,
     pub index_deletes: usize,
     pub receipt_changes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durable: Option<DurableCommitProfile>,
 }
 
 impl MutationProfile {
@@ -109,6 +113,7 @@ impl MutationProfile {
             index_inserts: summary.index_inserts,
             index_deletes: summary.index_deletes,
             receipt_changes: summary.receipt_changes,
+            durable: None,
         }
     }
 }
@@ -152,7 +157,7 @@ trait DurableBackend: Send {
         database: &Database,
         receipts: &ReceiptMap,
         write_set: Option<&LogicalWriteSet>,
-    ) -> std::result::Result<(), CommitFailure>;
+    ) -> std::result::Result<DurableCommitProfile, CommitFailure>;
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)>;
     fn supports_production_scalars(&self) -> bool;
     fn versions(&self) -> StorageVersions;
@@ -172,7 +177,7 @@ impl DurableBackend for RedbStore {
         database: &Database,
         receipts: &ReceiptMap,
         write_set: Option<&LogicalWriteSet>,
-    ) -> std::result::Result<(), CommitFailure> {
+    ) -> std::result::Result<DurableCommitProfile, CommitFailure> {
         match write_set {
             Some(write_set) => RedbStore::commit_incremental(
                 self,
@@ -316,6 +321,7 @@ impl Engine {
             storage_mode,
             snapshot_storage_versions: None,
             last_mutation_profile: None,
+            open_profile: None,
             _locks: locks,
         })
     }
@@ -323,7 +329,7 @@ impl Engine {
     /// Open the durable redb backend. Every mutating source request is
     /// committed as one synchronous, two-phase redb transaction.
     pub fn open_redb(path: impl Into<PathBuf>) -> Result<Self> {
-        let (redb, db, receipts) = RedbStore::open(path)?;
+        let (redb, db, receipts, open_profile) = RedbStore::open(path)?;
         Ok(Self {
             committed: Arc::new(CommittedState {
                 db: Arc::new(db),
@@ -331,6 +337,7 @@ impl Engine {
             }),
             durable: Some(Box::new(redb)),
             storage_mode: StorageMode::Redb,
+            open_profile: Some(open_profile),
             ..Self::default()
         })
     }
@@ -358,6 +365,9 @@ impl Engine {
     /// and before candidate state or a durable transaction is created.
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        if let Some(profile) = &mut self.open_profile {
+            profile.read_only = read_only;
+        }
         self
     }
 
@@ -367,6 +377,13 @@ impl Engine {
 
     pub fn last_mutation_profile(&self) -> Option<MutationProfile> {
         self.last_mutation_profile
+    }
+
+    /// Return the value-free phase profile captured by the successful durable
+    /// open that created this Engine. Memory and legacy WAL engines return
+    /// `None`.
+    pub fn open_profile(&self) -> Option<StorageOpenProfile> {
+        self.open_profile
     }
 
     pub fn execute(&mut self, source: &str) -> QueryResponse {
@@ -1206,13 +1223,15 @@ impl Engine {
                 candidate_started.expect("mutating scripts start candidate timing"),
                 write_set.as_ref(),
             );
-            profile.durable_commit_micros = self.commit_candidate(
+            let (durable_commit_micros, durable_profile) = self.commit_candidate(
                 candidate,
                 wal_source,
                 &mut response,
                 receipt_state,
                 write_set,
             )?;
+            profile.durable_commit_micros = durable_commit_micros;
+            profile.durable = durable_profile;
             self.last_mutation_profile = Some(profile);
         }
         Ok(self.with_schema(response))
@@ -1371,17 +1390,17 @@ impl Engine {
         response: &mut QueryResponse,
         receipt_state: Option<ReceiptMap>,
         write_set: Option<LogicalWriteSet>,
-    ) -> Result<u64> {
+    ) -> Result<(u64, Option<DurableCommitProfile>)> {
         // A committed root never carries changes forward into the next
         // candidate. Row-only callers already extracted the supplied set;
         // full-rebuild callers intentionally discard any internal details.
         let _ = candidate.take_write_set();
         let mut durable_commit_micros = 0;
+        let mut durable_profile = None;
         if let Some(durable) = &mut self.durable {
             let receipts = receipt_state
                 .as_ref()
                 .unwrap_or_else(|| self.committed.receipts.as_ref());
-            let commit_started = std::time::Instant::now();
             let result = durable.commit(
                 &self.committed.db,
                 &self.committed.receipts,
@@ -1389,9 +1408,11 @@ impl Engine {
                 receipts,
                 write_set.as_ref(),
             );
-            durable_commit_micros = elapsed_micros(commit_started);
             match result {
-                Ok(()) => {}
+                Ok(profile) => {
+                    durable_commit_micros = profile.total_micros;
+                    durable_profile = Some(profile);
+                }
                 Err(CommitFailure::Definite(error)) => {
                     if error.code == "E_STORAGE_UPGRADE_REQUIRED" {
                         return Err(error);
@@ -1447,7 +1468,7 @@ impl Engine {
         {
             response.warnings.push(error.to_string());
         }
-        Ok(durable_commit_micros)
+        Ok((durable_commit_micros, durable_profile))
     }
 
     pub fn checkpoint(&mut self) -> Result<()> {
@@ -1749,7 +1770,7 @@ mod tests {
             _: &Database,
             _: &ReceiptMap,
             _: Option<&LogicalWriteSet>,
-        ) -> std::result::Result<(), CommitFailure> {
+        ) -> std::result::Result<DurableCommitProfile, CommitFailure> {
             match self.uncertain.take() {
                 Some(false) => Err(CommitFailure::Definite(Error::new(
                     "E_STORAGE",
@@ -1759,7 +1780,7 @@ mod tests {
                     "E_STORAGE",
                     "injected commit failure",
                 ))),
-                None => Ok(()),
+                None => Ok(DurableCommitProfile::default()),
             }
         }
 
@@ -1838,6 +1859,7 @@ mod tests {
                 index_inserts: 0,
                 index_deletes: 0,
                 receipt_changes: 0,
+                durable: None,
             })
         );
 
@@ -2134,6 +2156,7 @@ mod tests {
         assert!(!failed.ok);
         assert_eq!(failed.error.unwrap().code, "E_STORAGE");
         assert!(failed.message.contains("aborted before commit"));
+        assert_eq!(engine.last_mutation_profile(), None);
         assert_eq!(
             engine.execute("from entries").error.unwrap().code,
             "E_TABLE"
@@ -2149,6 +2172,7 @@ mod tests {
         assert!(!failed.ok);
         assert_eq!(failed.error.unwrap().code, "E_STORAGE");
         assert!(failed.message.contains("result is uncertain"));
+        assert_eq!(engine.last_mutation_profile(), None);
         assert_eq!(
             engine.execute("from entries").error.unwrap().code,
             "E_TABLE"

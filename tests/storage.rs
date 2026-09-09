@@ -5,7 +5,7 @@ use redb::{
     TableDefinition,
 };
 use std::process::Command;
-use unionid::{Engine, MigrationFile, QueryAccessKind, UpsertAction, Value};
+use unionid::{DurableCommitMode, Engine, MigrationFile, QueryAccessKind, UpsertAction, Value};
 
 const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
@@ -27,6 +27,92 @@ const TEST_IDEMPOTENCY_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TEST_IDEMPOTENCY_DIGEST_B: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[test]
+fn storage_profiles_separate_successful_open_incremental_and_full_rebuild_phases() {
+    let mut memory = Engine::memory();
+    assert_eq!(memory.open_profile(), None);
+    assert!(memory.execute("create table scratch (id int)").ok);
+    assert_eq!(memory.last_mutation_profile().unwrap().durable, None);
+
+    let dir = TempDir::new();
+    let path = dir.0.join("profiles.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let fresh = engine.open_profile().unwrap();
+    assert!(fresh.fresh);
+    assert!(!fresh.read_only);
+    assert_eq!(fresh.row_entries, 0);
+    assert_eq!(fresh.index_entries, 0);
+    assert!(fresh.total_micros >= fresh.redb_open_micros);
+    assert!(open_phase_sum(fresh) <= fresh.total_micros);
+
+    let schema = engine.execute(
+        "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ncreate index entries (label)",
+    );
+    assert!(schema.ok, "{}", schema.message);
+    let full = engine.last_mutation_profile().unwrap();
+    assert!(full.full_rebuild);
+    let durable = full.durable.unwrap();
+    assert_eq!(durable.mode, DurableCommitMode::FullRebuild);
+    assert!(durable.catalog_changes > 0);
+    assert!(durable.total_micros >= durable.sync_micros);
+    assert!(commit_phase_sum(durable) <= durable.total_micros);
+    assert!(commit_prepare_subphase_sum(durable) <= durable.prepare_micros);
+
+    let inserted = engine.execute("insert entries {id = 1, label = \"one\"}");
+    assert!(inserted.ok, "{}", inserted.message);
+    let incremental = engine.last_mutation_profile().unwrap();
+    assert!(!incremental.full_rebuild);
+    let durable = incremental.durable.unwrap();
+    assert_eq!(durable.mode, DurableCommitMode::Incremental);
+    assert_eq!(durable.row_changes, 1);
+    assert_eq!(durable.index_changes, 2);
+    assert_eq!(durable.reload_previous_micros, 0);
+    assert_eq!(durable.encode_next_micros, 0);
+    assert_eq!(durable.diff_micros, 0);
+    assert!(commit_phase_sum(durable) <= durable.total_micros);
+    drop(engine);
+
+    let reopened = Engine::open_redb(&path).unwrap();
+    let loaded = reopened.open_profile().unwrap();
+    assert!(!loaded.fresh);
+    assert_eq!(loaded.row_entries, 1);
+    assert_eq!(loaded.index_entries, 2);
+    assert!(loaded.row_bytes > 0);
+    assert!(loaded.index_key_bytes > 0);
+    drop(reopened);
+
+    let read_only = Engine::open_redb_read_only(&path).unwrap();
+    assert!(read_only.open_profile().unwrap().read_only);
+}
+
+fn open_phase_sum(profile: unionid::StorageOpenProfile) -> u64 {
+    profile
+        .redb_open_micros
+        .saturating_add(profile.bootstrap_micros)
+        .saturating_add(profile.meta_micros)
+        .saturating_add(profile.catalog_micros)
+        .saturating_add(profile.rows_micros)
+        .saturating_add(profile.indexes_micros)
+        .saturating_add(profile.migrations_micros)
+        .saturating_add(profile.receipts_micros)
+        .saturating_add(profile.database_construct_micros)
+        .saturating_add(profile.validation_micros)
+}
+
+fn commit_phase_sum(profile: unionid::DurableCommitProfile) -> u64 {
+    profile
+        .prepare_micros
+        .saturating_add(profile.transaction_apply_micros)
+        .saturating_add(profile.sync_micros)
+}
+
+fn commit_prepare_subphase_sum(profile: unionid::DurableCommitProfile) -> u64 {
+    profile
+        .reload_previous_micros
+        .saturating_add(profile.encode_next_micros)
+        .saturating_add(profile.diff_micros)
+}
 
 fn create_empty_format3(path: &std::path::Path) {
     drop(Engine::open_redb(path).unwrap());

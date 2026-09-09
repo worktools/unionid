@@ -6,7 +6,7 @@
 
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[结构化查询语法 RFC](rfc/0005-structured-prql-query-syntax.md)收敛 PRQL 风格的 delimiter、field set、match expression 与 group inner pipeline；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
-v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。[M5 总览 #111](https://github.com/worktools/unionid/issues/111) 的核心范围也已完成：生产边界、大结果集读取、标量类型、CLI 诊断和结构化查询语法均有可执行实现与验收证据。当前进入 [M6 总览 #167](https://github.com/worktools/unionid/issues/167)，优先消除普通 mutation 的完整数据库复制，再实现 typed ordered composite index、range access 和 page seek。#118 与 #120 保留为由真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
+v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。[M5 总览 #111](https://github.com/worktools/unionid/issues/111) 的核心范围也已完成。M6 的增量 mutation、typed ordered composite index、range/order/page seek 和 10k/100k 复验已进入 stacked PR 合并队列；最新容量证据把后续工作收敛为 [M7 总览 #177](https://github.com/worktools/unionid/issues/177) 的有界常驻状态与可恢复维护。#118 与 #120 保留为由真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，不使用没有意义的语句末尾分号；花括号、圆括号、方括号和逗号在能明确结构、层级或 precedence 时正常使用。本轮草案采用 `field type`、`option text`／`list text`、结构化声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不沿用 TypeScript 风格的密集字段注解或逐行 `|>`。
 
@@ -21,6 +21,7 @@ v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0�
 | [M4 · v0.1 日常可用版本](https://github.com/worktools/unionid/milestone/5) | CLI/REPL、Rust API、协议、服务限额、基准与发布 | 日常操作、恢复和升级均通过端到端验收 |
 | [M5 · 生产边界与应用体验](https://github.com/worktools/unionid/milestone/6) | 只读边界、幂等写入、游标分页、生产标量、并发读快照与 CLI 诊断 | 核心风险有显式协议和故障测试，应用无需依赖隐式约定 |
 | [M6 · 增量执行与有序访问](https://github.com/worktools/unionid/milestone/7) | 增量 mutation 候选状态、typed ordered composite index、range/page seek 与容量复验 | 小写集工作量不随完整数据库复制增长，常见有序读取有可验证的有界访问路径 |
+| [M7 · 有界常驻状态与可恢复维护](https://github.com/worktools/unionid/milestone/8) | storage phase 证据、按需 typed row access、generation migration 与容量复验 | bounded read 不加载全表，维护失败只暴露完整旧/新 generation |
 
 P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力；P2 为后续语言探索。里程碑不填写未经验证的工期承诺。
 
@@ -131,6 +132,14 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#165](https://github.com/worktools/unionid/issues/165) | [查询] 有序复合索引、range/ordered scan 与 page seek | 评审中 | [#174](https://github.com/worktools/unionid/pull/174)；[#175](https://github.com/worktools/unionid/pull/175) |
 | [#166](https://github.com/worktools/unionid/issues/166) | [质量] 复验 10k/100k 写入与有序访问成本 | 当前 | [#163](https://github.com/worktools/unionid/issues/163)、[#165](https://github.com/worktools/unionid/issues/165) |
 
+### M7 · 有界常驻状态与可恢复维护
+
+| Issue | 任务 | 优先级 | 前置依赖 |
+| --- | --- | --- | --- |
+| [#177](https://github.com/worktools/unionid/issues/177) | [路线图] M7 总览与阶段验收 | P0 | M6 容量证据 |
+| [#178](https://github.com/worktools/unionid/issues/178) | [质量] 分段观测 open 与 full-rebuild migration | 当前 | [#166](https://github.com/worktools/unionid/issues/166) |
+| [#179](https://github.com/worktools/unionid/issues/179) | [设计] 冻结 bounded resident state 与 maintenance generation | P0 | [#178](https://github.com/worktools/unionid/issues/178) |
+
 ### 独立 P2 探索
 
 | Issue | 任务 | 推进条件 |
@@ -144,7 +153,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek。当前由 #166 保存并核验 10k/100k 原始样本，更新能力边界并收口 M6；合并顺序为 #174 → #175 → #166 的评测与文档 PR。
+#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。当前 #178 对 open/full rebuild 做分阶段观测；证据完成后进入 #179 RFC，再按 RFC 拆分 bounded indexed/page read、full scan/check 与 migration generation 实现。
 
 ## 维护约定
 
