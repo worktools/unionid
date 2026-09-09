@@ -1958,13 +1958,15 @@ impl Engine {
             .maintenance_info()?
             .is_some()
         {
-            ensure_deadline(control)?;
             let result = self
                 .durable
                 .as_mut()
                 .expect("successful cutover keeps the durable backend")
                 .reclaim_maintenance_step();
             if self.finish_maintenance_result(result)? {
+                break;
+            }
+            if ensure_deadline(control).is_err() {
                 break;
             }
         }

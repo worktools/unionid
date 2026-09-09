@@ -1309,8 +1309,7 @@ impl RedbStore {
             logical_bytes = logical_bytes
                 .saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX))
                 .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
-            rolling_digest =
-                advance_rolling_digest(&rolling_digest, &BTreeMap::from([(key, value)]))?;
+            rolling_digest = advance_rolling_digest_entry(&rolling_digest, &key, &value)?;
             row_count = row_count.saturating_add(1);
         }
         let mut index_count = 0_u64;
@@ -2388,7 +2387,7 @@ impl RedbStore {
             let (database, receipts, committed, source, _) = self.load_bounded_view()?;
             drop(source);
             let mut profile =
-                self.validate_bounded_integrity_for(&database, self.committed.generation.active)?;
+                self.validate_bounded_integrity_for(&database, committed.generation.active)?;
             profile.backend_micros = backend_micros;
             profile.logical_micros = elapsed_micros(logical_started);
             profile.total_micros = elapsed_micros(total_started);
@@ -4158,23 +4157,27 @@ fn empty_rolling_digest() -> String {
 }
 
 fn advance_rolling_digest(current: &str, rows: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<String> {
+    let mut rolling = current.to_owned();
+    for (key, value) in rows {
+        rolling = advance_rolling_digest_entry(&rolling, key, value)?;
+    }
+    Ok(rolling)
+}
+
+fn advance_rolling_digest_entry(current: &str, key: &[u8], value: &[u8]) -> Result<String> {
     if !current.starts_with("sha256:") {
         return Err(Error::new(
             "E_STORAGE",
             "maintenance rolling digest is not canonical",
         ));
     }
-    let mut rolling = current.to_owned();
-    for (key, value) in rows {
-        let mut digest = Sha256::new();
-        digest.update(rolling.as_bytes());
-        digest.update(u64::try_from(key.len()).unwrap_or(u64::MAX).to_be_bytes());
-        digest.update(key);
-        digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
-        digest.update(value);
-        rolling = format!("sha256:{:x}", digest.finalize());
-    }
-    Ok(rolling)
+    let mut digest = Sha256::new();
+    digest.update(current.as_bytes());
+    digest.update(u64::try_from(key.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(key);
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(value);
+    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 fn delete_bytes_entries(
