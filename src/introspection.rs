@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::SchemaInfo;
+use crate::{MigrationMaintenance, SchemaInfo};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,4 +49,6 @@ pub struct Introspection {
     pub migration_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<MigrationMaintenance>,
 }

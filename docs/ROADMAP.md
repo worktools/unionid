@@ -142,7 +142,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#181](https://github.com/worktools/unionid/issues/181) | [核心] 统一 typed row source 与 committed view | 已合并 | [#179](https://github.com/worktools/unionid/issues/179) |
 | [#182](https://github.com/worktools/unionid/issues/182) | [存储] Legacy0 有界 redb read 与 row cache | 已合并 | [#181](https://github.com/worktools/unionid/issues/181) |
 | [#183](https://github.com/worktools/unionid/issues/183) | [执行] 有界 full pipeline、check 与 backup | 已合并 | [#182](https://github.com/worktools/unionid/issues/182) |
-| [#184](https://github.com/worktools/unionid/issues/184) | [存储] format-6 generation envelope 与升级 | P0 | [#179](https://github.com/worktools/unionid/issues/179) |
+| [#184](https://github.com/worktools/unionid/issues/184) | [存储] format-6 generation envelope 与升级 | 已合并 | [#195](https://github.com/worktools/unionid/pull/195) |
 | [#185](https://github.com/worktools/unionid/issues/185) | [迁移] 可恢复 shadow generation 与原子 cutover | P0 | [#183](https://github.com/worktools/unionid/issues/183)、[#184](https://github.com/worktools/unionid/issues/184) |
 | [#186](https://github.com/worktools/unionid/issues/186) | [质量] M7 接口旅程与容量复验 | P1 | [#182](https://github.com/worktools/unionid/issues/182)–[#185](https://github.com/worktools/unionid/issues/185) |
 

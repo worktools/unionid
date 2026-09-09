@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::control::ExecutionControl;
-use crate::db::{Database, LogicalWriteSet, QueryResponse, QueryRowSink};
+use crate::db::{Database, DurableCatalogEntry, LogicalWriteSet, QueryResponse, QueryRowSink};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyReceipt,
@@ -16,12 +16,13 @@ use crate::idempotency::{
 };
 use crate::introspection::{Introspection, StorageMode, StorageVersions};
 use crate::migration::{
-    MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
-    MigrationStatus, describe_step, validate_files_against_history,
+    MigrationAbort, MigrationApply, MigrationEntry, MigrationFile, MigrationMaintenance,
+    MigrationMaintenancePhase, MigrationPlan, MigrationPlanItem, MigrationStatus, describe_step,
+    validate_files_against_history,
 };
 use crate::profile::{DurableCommitProfile, StorageCheckProfile, StorageOpenProfile};
 use crate::query::{LocatedStatement, PageSpec, Stage, Statement};
-use crate::redb_storage::{CommitFailure, RedbStore};
+use crate::redb_storage::{CommitFailure, MaintenanceInfo, MaintenanceState, RedbStore};
 use crate::row_source::TypedRowSource;
 use crate::snapshot::SnapshotStore;
 use crate::syntax;
@@ -223,6 +224,60 @@ trait DurableBackend: Send {
         receipts: &ReceiptMap,
         target: u32,
     ) -> std::result::Result<StorageUpgrade, CommitFailure>;
+    fn maintenance_info(&self) -> Result<Option<MaintenanceInfo>> {
+        Ok(None)
+    }
+    fn start_maintenance(
+        &mut self,
+        _source: &Database,
+        _target: &Database,
+        _file: &MigrationFile,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "durable backend does not support recoverable migrations",
+        )))
+    }
+    fn append_maintenance_batch(
+        &mut self,
+        _file: &MigrationFile,
+        _target_batch: &Database,
+        _checkpoint: (u64, crate::RowId),
+        _source_rows: usize,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "durable backend does not support recoverable migrations",
+        )))
+    }
+    fn mark_maintenance_ready(
+        &mut self,
+        _file: &MigrationFile,
+        _target: &Database,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "durable backend does not support recoverable migrations",
+        )))
+    }
+    fn cutover_maintenance(
+        &mut self,
+        _file: &MigrationFile,
+        _target: &Database,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "durable backend does not support recoverable migrations",
+        )))
+    }
+    fn begin_maintenance_abort(
+        &mut self,
+    ) -> std::result::Result<Option<MaintenanceInfo>, CommitFailure> {
+        Ok(None)
+    }
+    fn reclaim_maintenance_step(&mut self) -> std::result::Result<bool, CommitFailure> {
+        Ok(true)
+    }
 }
 
 impl DurableBackend for RedbStore {
@@ -282,6 +337,55 @@ impl DurableBackend for RedbStore {
             format: result.format,
             changed: result.changed,
         })
+    }
+
+    fn maintenance_info(&self) -> Result<Option<MaintenanceInfo>> {
+        RedbStore::maintenance_info(self)
+    }
+
+    fn start_maintenance(
+        &mut self,
+        source: &Database,
+        target: &Database,
+        file: &MigrationFile,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        RedbStore::start_maintenance(self, source, target, file)
+    }
+
+    fn append_maintenance_batch(
+        &mut self,
+        file: &MigrationFile,
+        target_batch: &Database,
+        checkpoint: (u64, crate::RowId),
+        source_rows: usize,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        RedbStore::append_maintenance_batch(self, file, target_batch, checkpoint, source_rows)
+    }
+
+    fn mark_maintenance_ready(
+        &mut self,
+        file: &MigrationFile,
+        target: &Database,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        RedbStore::mark_maintenance_ready(self, file, target)
+    }
+
+    fn cutover_maintenance(
+        &mut self,
+        file: &MigrationFile,
+        target: &Database,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        RedbStore::cutover_maintenance(self, file, target)
+    }
+
+    fn begin_maintenance_abort(
+        &mut self,
+    ) -> std::result::Result<Option<MaintenanceInfo>, CommitFailure> {
+        RedbStore::begin_maintenance_abort(self)
+    }
+
+    fn reclaim_maintenance_step(&mut self) -> std::result::Result<bool, CommitFailure> {
+        RedbStore::reclaim_maintenance_step(self)
     }
 }
 
@@ -804,6 +908,12 @@ impl Engine {
                 "receipt pruning is disabled after a storage failure; reopen the database",
             ));
         }
+        if self.unfinished_maintenance()? {
+            return Err(Error::new(
+                "E_MAINTENANCE_REQUIRED",
+                "receipt pruning is blocked while a migration generation is unfinished",
+            ));
+        }
         let keys = self
             .idempotency_prune_selection(&options)?
             .into_iter()
@@ -1297,6 +1407,12 @@ impl Engine {
                 "writes are disabled after a storage failure; reopen the database to resolve the commit state",
             ));
         }
+        if mutating && self.unfinished_maintenance()? {
+            return Err(Error::new(
+                "E_MAINTENANCE_REQUIRED",
+                "ordinary writes are blocked while a migration generation is unfinished; resume or abort the migration",
+            ));
+        }
         let bounded_mutation_source = (self.storage_mode == StorageMode::Redb
             && self
                 .durable
@@ -1392,6 +1508,13 @@ impl Engine {
     pub fn migration_status(&self, files: &[MigrationFile]) -> Result<MigrationStatus> {
         let applied_count =
             validate_files_against_history(files, self.committed.db.migration_history())?;
+        let maintenance = self
+            .durable
+            .as_ref()
+            .map(|durable| durable.maintenance_info())
+            .transpose()?
+            .flatten()
+            .map(migration_maintenance);
         Ok(MigrationStatus {
             schema: self.committed.db.schema_info(),
             applied: self.committed.db.migration_history().to_vec(),
@@ -1399,6 +1522,76 @@ impl Engine {
                 .iter()
                 .map(|file| file.id.clone())
                 .collect(),
+            maintenance,
+        })
+    }
+
+    fn unfinished_maintenance(&self) -> Result<bool> {
+        Ok(self
+            .durable
+            .as_ref()
+            .map(|durable| durable.maintenance_info())
+            .transpose()?
+            .flatten()
+            .is_some_and(|info| {
+                matches!(
+                    info.state,
+                    MaintenanceState::Building
+                        | MaintenanceState::Ready
+                        | MaintenanceState::Aborting
+                )
+            }))
+    }
+
+    pub fn abort_migration(&mut self) -> Result<MigrationAbort> {
+        if self.read_only {
+            return Err(Error::new(
+                "E_READ_ONLY",
+                "migration abort is a maintenance mutation",
+            ));
+        }
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "migration abort requires reopening after an uncertain commit",
+            ));
+        }
+        let existing = self
+            .durable
+            .as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    "E_CONFIG",
+                    "recoverable migration abort requires a redb database",
+                )
+            })?
+            .maintenance_info()?;
+        let migration_id = existing.as_ref().map(|info| info.migration_id.clone());
+        if !existing
+            .as_ref()
+            .is_some_and(|info| info.state == MaintenanceState::Reclaimable)
+        {
+            let result = self
+                .durable
+                .as_mut()
+                .expect("durable backend was checked")
+                .begin_maintenance_abort();
+            self.finish_maintenance_result(result)?;
+        }
+        loop {
+            let result = self
+                .durable
+                .as_mut()
+                .expect("maintenance abort keeps the durable backend")
+                .reclaim_maintenance_step();
+            if self.finish_maintenance_result(result)? {
+                break;
+            }
+        }
+        Ok(MigrationAbort {
+            migration_id,
+            cleaned: true,
+            schema: self.committed.db.schema_info(),
         })
     }
 
@@ -1406,7 +1599,15 @@ impl Engine {
         let applied_count =
             validate_files_against_history(files, self.committed.db.migration_history())?;
         let current_schema = self.committed.db.schema_info();
-        let mut candidate = self.mutable_candidate(None)?;
+        let mut candidate = if self
+            .durable
+            .as_ref()
+            .is_some_and(|durable| durable.versions().format == 6)
+        {
+            self.committed.db.metadata_only()?
+        } else {
+            self.mutable_candidate(None)?
+        };
         let mut pending = Vec::new();
         for file in &files[applied_count..] {
             let before = candidate.schema_info();
@@ -1450,6 +1651,24 @@ impl Engine {
     }
 
     pub fn apply_migrations(&mut self, files: &[MigrationFile]) -> Result<MigrationApply> {
+        self.apply_migrations_controlled(files, None)
+    }
+
+    pub fn apply_migrations_until(
+        &mut self,
+        files: &[MigrationFile],
+        deadline: std::time::Instant,
+    ) -> Result<MigrationApply> {
+        let control = ExecutionControl::deadline(deadline);
+        self.apply_migrations_controlled(files, Some(&control))
+    }
+
+    pub(crate) fn apply_migrations_controlled(
+        &mut self,
+        files: &[MigrationFile],
+        control: Option<&ExecutionControl>,
+    ) -> Result<MigrationApply> {
+        ensure_deadline(control)?;
         if self.wal.is_some() {
             return Err(Error::new(
                 "E_CONFIG",
@@ -1470,7 +1689,8 @@ impl Engine {
             .collect();
         let mut applied = Vec::new();
         for file in &files[applied_count..] {
-            if let Err(error) = self.apply_migration_file(file) {
+            ensure_deadline(control)?;
+            if let Err(error) = self.apply_migration_file(file, control) {
                 if applied.is_empty() {
                     return Err(error);
                 }
@@ -1493,12 +1713,24 @@ impl Engine {
         })
     }
 
-    fn apply_migration_file(&mut self, file: &MigrationFile) -> Result<()> {
+    fn apply_migration_file(
+        &mut self,
+        file: &MigrationFile,
+        control: Option<&ExecutionControl>,
+    ) -> Result<()> {
+        ensure_deadline(control)?;
         if self.write_failed {
             return Err(Error::new(
                 "E_STORAGE",
                 "writes are disabled after a storage failure; reopen the database to resolve the commit state",
             ));
+        }
+        if self
+            .durable
+            .as_ref()
+            .is_some_and(|durable| durable.versions().format == 6)
+        {
+            return self.apply_migration_file_shadow(file, control);
         }
         let mut candidate = self.mutable_candidate(None)?;
         candidate
@@ -1509,6 +1741,7 @@ impl Engine {
             })
             .map_err(|error| migration_file_error(file, error))?;
         candidate.advance_schema_revision()?;
+        ensure_deadline(control)?;
         candidate.sequence = self
             .committed
             .db
@@ -1533,6 +1766,290 @@ impl Engine {
         let mut response = QueryResponse::ok_message(format!("migration '{}' applied", file.id));
         self.commit_candidate(candidate, None, &mut response, None, None)
             .map(|_| ())
+    }
+
+    fn apply_migration_file_shadow(
+        &mut self,
+        file: &MigrationFile,
+        control: Option<&ExecutionControl>,
+    ) -> Result<()> {
+        ensure_deadline(control)?;
+        let source_database = self.committed.db.clone();
+        let source = self.committed.source.clone();
+        let mut target = source_database
+            .migration_target(&file.id, &file.steps)
+            .map_err(|error| migration_file_error(file, error))?;
+        let schema = target.schema_info();
+        let applied_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| Error::new("E_TIME", error.to_string()))?
+            .as_millis()
+            .try_into()
+            .map_err(|_| Error::new("E_LIMIT", "migration timestamp exceeds u64"))?;
+        target.append_migration(MigrationEntry {
+            id: file.id.clone(),
+            parent: file.parent.clone(),
+            checksum: file.checksum.clone(),
+            schema_revision: schema.revision,
+            schema_hash: schema.hash,
+            applied_at_unix_ms,
+        })?;
+
+        loop {
+            ensure_deadline(control)?;
+            let info = self
+                .durable
+                .as_ref()
+                .expect("format-6 migration has a durable backend")
+                .maintenance_info()?;
+            if !info.is_some_and(|info| {
+                matches!(
+                    info.state,
+                    MaintenanceState::Aborting | MaintenanceState::Reclaimable
+                )
+            }) {
+                break;
+            }
+            let result = self
+                .durable
+                .as_mut()
+                .expect("format-6 migration has a durable backend")
+                .reclaim_maintenance_step();
+            if self.finish_maintenance_result(result)? {
+                break;
+            }
+        }
+
+        let mut info = self
+            .durable
+            .as_ref()
+            .expect("format-6 migration has a durable backend")
+            .maintenance_info()?;
+        if info.is_none() {
+            let result = self
+                .durable
+                .as_mut()
+                .expect("format-6 migration has a durable backend")
+                .start_maintenance(&source_database, &target, file);
+            info = Some(self.finish_maintenance_result(result)?);
+        }
+        let mut info = info.expect("maintenance was started or resumed");
+        if info.state == MaintenanceState::Building {
+            let mut tables = source_database
+                .durable_catalog_entries()
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    DurableCatalogEntry::Table(table) => Some((table.id, table.name)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            tables.sort_by_key(|(id, _)| *id);
+            for (table_id, table_name) in tables {
+                ensure_deadline(control)?;
+                if info
+                    .checkpoint
+                    .is_some_and(|(checkpoint_table, _)| table_id < checkpoint_table)
+                {
+                    continue;
+                }
+                let mut cursor = source.scan_rows(&table_name)?;
+                let mut observation = crate::ExecutionObservation::default();
+                while let Some(batch) = cursor.next_batch(control, &mut observation)? {
+                    let rows = batch
+                        .rows
+                        .into_iter()
+                        .filter(|row| {
+                            info.checkpoint
+                                .is_none_or(|(checkpoint_table, checkpoint_row)| {
+                                    table_id > checkpoint_table
+                                        || (table_id == checkpoint_table && row.id > checkpoint_row)
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    let checkpoint = (
+                        table_id,
+                        rows.last().expect("nonempty maintenance batch").id,
+                    );
+                    let target_batch = match source_database.migrate_table_batch(
+                        &file.id,
+                        &file.steps,
+                        &table_name,
+                        &rows,
+                    ) {
+                        Ok(batch) => batch,
+                        Err(error) => {
+                            let error = migration_file_error(file, error);
+                            self.abort_after_deterministic_maintenance_failure();
+                            return Err(error);
+                        }
+                    };
+                    ensure_deadline(control)?;
+                    let result = self
+                        .durable
+                        .as_mut()
+                        .expect("format-6 migration has a durable backend")
+                        .append_maintenance_batch(file, &target_batch, checkpoint, rows.len());
+                    match self.finish_maintenance_result(result) {
+                        Ok(next) => info = next,
+                        Err(error) => {
+                            self.abort_after_nonrecoverable_maintenance_failure(&error);
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            ensure_deadline(control)?;
+            let result = self
+                .durable
+                .as_mut()
+                .expect("format-6 migration has a durable backend")
+                .mark_maintenance_ready(file, &target);
+            info = match self.finish_maintenance_result(result) {
+                Ok(next) => next,
+                Err(error) => {
+                    self.abort_after_nonrecoverable_maintenance_failure(&error);
+                    return Err(error);
+                }
+            };
+        }
+        if info.state != MaintenanceState::Ready {
+            return Err(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "migration checkpoint is not ready for cutover",
+            ));
+        }
+        ensure_deadline(control)?;
+        let result = self
+            .durable
+            .as_mut()
+            .expect("format-6 migration has a durable backend")
+            .cutover_maintenance(file, &target);
+        self.finish_maintenance_result(result)?;
+        let view = self
+            .durable
+            .as_ref()
+            .expect("successful cutover keeps the durable backend")
+            .committed_view(&target)
+            .and_then(|(database, source)| {
+                CommittedView::new(database, source, self.committed.receipts.clone())
+            });
+        match view {
+            Ok(view) => self.committed = Arc::new(view),
+            Err(error) => {
+                self.durable = None;
+                self.write_failed = true;
+                self.read_reopen_required = true;
+                return Err(Error::new(
+                    "E_STORAGE_REOPEN_REQUIRED",
+                    format!(
+                        "migration cutover committed but its read view could not be created: {}; reopen the database before reading or retrying",
+                        error.message
+                    ),
+                ));
+            }
+        }
+        while self
+            .durable
+            .as_ref()
+            .expect("successful cutover keeps the durable backend")
+            .maintenance_info()?
+            .is_some()
+        {
+            let result = self
+                .durable
+                .as_mut()
+                .expect("successful cutover keeps the durable backend")
+                .reclaim_maintenance_step();
+            if self.finish_maintenance_result(result)? {
+                break;
+            }
+            if ensure_deadline(control).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_maintenance_result<T>(
+        &mut self,
+        result: std::result::Result<T, CommitFailure>,
+    ) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(CommitFailure::Definite(error)) => Err(error),
+            Err(CommitFailure::Uncertain(error)) => {
+                self.durable = None;
+                self.write_failed = true;
+                self.read_reopen_required = true;
+                Err(Error::new(
+                    "E_STORAGE",
+                    format!(
+                        "maintenance commit result is uncertain: {}; reopen the database and inspect migration status before retrying",
+                        error.message
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn abort_after_deterministic_maintenance_failure(&mut self) {
+        if self.write_failed {
+            return;
+        }
+        let Some(_) = self.durable.as_mut() else {
+            return;
+        };
+        let begin = self
+            .durable
+            .as_mut()
+            .expect("durable backend was checked")
+            .begin_maintenance_abort();
+        match begin {
+            Ok(_) => {}
+            Err(CommitFailure::Definite(_)) => return,
+            Err(CommitFailure::Uncertain(_)) => {
+                self.durable = None;
+                self.write_failed = true;
+                self.read_reopen_required = true;
+                return;
+            }
+        };
+        loop {
+            let result = self
+                .durable
+                .as_mut()
+                .expect("abort cleanup keeps the durable backend")
+                .reclaim_maintenance_step();
+            match result {
+                Ok(true) | Err(CommitFailure::Definite(_)) => break,
+                Ok(false) => {}
+                Err(CommitFailure::Uncertain(_)) => {
+                    self.durable = None;
+                    self.write_failed = true;
+                    self.read_reopen_required = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn abort_after_nonrecoverable_maintenance_failure(&mut self, error: &Error) {
+        if matches!(
+            error.code.as_str(),
+            "E_MAINTENANCE_CONFLICT"
+                | "E_STORAGE"
+                | "E_IO"
+                | "E_BUSY"
+                | "E_TIMEOUT"
+                | "E_CANCELLED"
+                | "E_SHUTDOWN"
+        ) {
+            return;
+        }
+        self.abort_after_deterministic_maintenance_failure();
     }
 
     fn commit_candidate(
@@ -1726,6 +2243,12 @@ impl Engine {
         if self.read_only {
             return Err(Error::new("E_READ_ONLY", "storage upgrade is a mutation"));
         }
+        if self.unfinished_maintenance()? {
+            return Err(Error::new(
+                "E_MAINTENANCE_REQUIRED",
+                "storage upgrade is blocked while a migration generation is unfinished",
+            ));
+        }
         let metadata_only_upgrade = target
             == crate::redb_storage::PRODUCTION_STORAGE_FORMAT_VERSION
             && self
@@ -1812,6 +2335,11 @@ impl Engine {
                 .migration_history()
                 .last()
                 .map(|entry| entry.id.clone()),
+            maintenance: self
+                .durable
+                .as_ref()
+                .and_then(|durable| durable.maintenance_info().ok().flatten())
+                .map(migration_maintenance),
         }
     }
 
@@ -1952,6 +2480,39 @@ fn migration_file_error(file: &MigrationFile, error: Error) -> Error {
             file.id, error.message
         ),
     )
+}
+
+fn migration_maintenance(info: MaintenanceInfo) -> MigrationMaintenance {
+    let (phase, actions) = match info.state {
+        MaintenanceState::Building => (
+            MigrationMaintenancePhase::Building,
+            vec!["resume".to_owned(), "abort".to_owned()],
+        ),
+        MaintenanceState::Ready => (
+            MigrationMaintenancePhase::Ready,
+            vec!["resume".to_owned(), "abort".to_owned()],
+        ),
+        MaintenanceState::Aborting => (
+            MigrationMaintenancePhase::Aborting,
+            vec!["abort".to_owned()],
+        ),
+        MaintenanceState::Reclaimable => (
+            MigrationMaintenancePhase::Reclaimable,
+            vec!["abort".to_owned()],
+        ),
+    };
+    MigrationMaintenance {
+        phase,
+        migration_id: info.migration_id,
+        source_generation: info.source_generation,
+        target_generation: info.target_generation,
+        source_rows_seen: info.source_rows_seen,
+        target_rows_written: info.target_rows_written,
+        index_entries_written: info.index_entries_written,
+        logical_bytes: info.logical_bytes,
+        updated_at_unix_ms: info.updated_at_unix_ms,
+        actions,
+    }
 }
 
 fn canonical_existing_path(path: PathBuf) -> Result<PathBuf> {
@@ -2181,6 +2742,23 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_maintenance_commit_requires_reopen_before_reads_or_writes() {
+        let mut engine = Engine::memory();
+        let error = engine
+            .finish_maintenance_result::<()>(Err(CommitFailure::Uncertain(Error::new(
+                "E_STORAGE",
+                "injected maintenance commit failure",
+            ))))
+            .unwrap_err();
+        assert_eq!(error.code, "E_STORAGE");
+        assert!(engine.write_failed);
+        assert!(engine.read_reopen_required);
+        assert!(engine.durable.is_none());
+        let read = engine.execute("from missing");
+        assert_eq!(read.error.unwrap().code, "E_STORAGE_REOPEN_REQUIRED");
+    }
+
+    #[test]
     fn uncertain_commit_does_not_publish_state_to_read_snapshots() {
         let mut engine = engine_with_failure(true);
         let failed = engine.execute("create table uncertain (id int)");
@@ -2290,6 +2868,45 @@ mod tests {
         assert_eq!(old_snapshot.idempotency_status().unwrap().count, 0);
         assert_eq!(engine.idempotency_status().unwrap().count, 1);
         assert!(engine.committed.source.snapshot_identity().sequence > old_sequence);
+
+        drop(old_snapshot);
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn redb_read_snapshot_keeps_old_generation_across_migration_cutover() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-redb-migration-snapshot-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(
+            "type Item =\n  id int\n  value int\ntable items Item\n  key id\ninsert items {id = 1, value = 2}",
+        );
+        assert!(setup.ok, "{}", setup.message);
+        let mut old_snapshot = engine.read_snapshot();
+        let old_identity = old_snapshot.committed.source.snapshot_identity();
+        let migration =
+            MigrationFile::parse("migration m0001_enabled\n  add field Item.enabled bool = true\n")
+                .unwrap();
+
+        engine
+            .apply_migrations(std::slice::from_ref(&migration))
+            .unwrap();
+
+        let old = old_snapshot.execute("from items | filter id == 1");
+        let new = engine.execute("from items | filter id == 1");
+        assert!(old.ok, "{}", old.message);
+        assert!(new.ok, "{}", new.message);
+        assert!(!old.rows[0].contains_key("enabled"));
+        assert!(new.rows[0]["enabled"].cmp_eq(&crate::Value::Bool(true)));
+        assert!(engine.committed.source.snapshot_identity().sequence > old_identity.sequence);
+        assert!(engine.introspection().maintenance.is_none());
 
         drop(old_snapshot);
         drop(engine);

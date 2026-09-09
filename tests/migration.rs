@@ -180,6 +180,118 @@ fn redb_persists_schema_and_migration_ledger_together() {
 }
 
 #[test]
+fn redb_shadow_generation_migrates_multiple_bounded_batches() {
+    let dir = TempDir::new();
+    let path = dir.0.join("shadow-batches.redb");
+    let initial = MigrationFile::parse(
+        "migration m0001_items\n  add type Item =\n    id int\n    value int\n  add table items Item key id\n",
+    )
+    .unwrap();
+    let changed = MigrationFile::parse(
+        "migration m0002_items\n  parent m0001_items\n  add field Item.enabled bool = true\n  add index items (enabled, id)\n",
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine
+        .apply_migrations(std::slice::from_ref(&initial))
+        .unwrap();
+    let mut source = String::from("insert many items [");
+    for id in 0..2_500 {
+        if id > 0 {
+            source.push_str(", ");
+        }
+        source.push_str(&format!("{{id = {id}, value = {id}}}"));
+    }
+    source.push(']');
+    ok(&mut engine, &source);
+    let digest = format!("sha256:{}", "ab".repeat(32));
+    let receipt = engine
+        .execute_idempotent_with_params(
+            "migration-receipt",
+            &digest,
+            "update items\nfilter id == 0\nset value = 42",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(!receipt.replayed);
+    let before = engine.schema_info();
+    engine
+        .apply_migrations(&[initial.clone(), changed.clone()])
+        .unwrap();
+    assert_eq!(engine.schema_info().revision, before.revision + 1);
+    let rows = ok(
+        &mut engine,
+        "from items | filter enabled == true | filter id == 2499",
+    );
+    assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(2_499)));
+    let replay = engine
+        .execute_idempotent_with_params(
+            "migration-receipt",
+            &digest,
+            "the stored receipt bypasses this invalid source",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert!(
+        engine
+            .migration_status(&[initial, changed])
+            .unwrap()
+            .maintenance
+            .is_none()
+    );
+    drop(engine);
+    let mut reopened = Engine::open_redb(path).unwrap();
+    assert_eq!(
+        reopened
+            .execute("from items | filter enabled == true")
+            .rows
+            .len(),
+        2_500
+    );
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn redb_shadow_generation_cleans_a_deterministic_constraint_failure() {
+    let dir = TempDir::new();
+    let path = dir.0.join("shadow-failure.redb");
+    let initial = MigrationFile::parse(
+        "migration m0001_items\n  add type Item =\n    id int\n    group int\n  add table items Item key id\n",
+    )
+    .unwrap();
+    let invalid = MigrationFile::parse(
+        "migration m0002_unique_group\n  parent m0001_items\n  add unique index items (group)\n",
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine
+        .apply_migrations(std::slice::from_ref(&initial))
+        .unwrap();
+    ok(
+        &mut engine,
+        "insert many items [{id = 1, group = 7}, {id = 2, group = 7}]",
+    );
+
+    let error = engine
+        .apply_migrations(&[initial.clone(), invalid.clone()])
+        .unwrap_err();
+    assert_eq!(error.code, "E_CONSTRAINT");
+    assert!(engine.introspection().maintenance.is_none());
+    assert_eq!(ok(&mut engine, "from items").rows.len(), 2);
+    ok(&mut engine, "insert items {id = 3, group = 8}");
+    assert_eq!(engine.migration_history().len(), 1);
+
+    drop(engine);
+    let mut reopened = Engine::open_redb(path).unwrap();
+    assert_eq!(reopened.execute("from items").rows.len(), 3);
+    assert!(reopened.introspection().maintenance.is_none());
+}
+
+#[test]
 fn migration_directory_order_and_parent_are_validated() {
     let dir = TempDir::new();
     std::fs::write(dir.0.join("0001_initial.uid"), initial_file().source).unwrap();

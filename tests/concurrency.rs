@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use unionid::protocol::{PRODUCTION_VERSION, Request};
@@ -7,6 +8,8 @@ use unionid::{Engine, IntrospectionKind};
 
 struct TempDatabase(PathBuf);
 
+static NEXT_TEMP_DATABASE: AtomicU64 = AtomicU64::new(0);
+
 impl TempDatabase {
     fn new() -> Self {
         let nonce = SystemTime::now()
@@ -14,8 +17,9 @@ impl TempDatabase {
             .unwrap()
             .as_nanos();
         Self(std::env::temp_dir().join(format!(
-            "unionid-concurrency-{}-{nonce}.redb",
-            std::process::id()
+            "unionid-concurrency-{}-{nonce}-{}.redb",
+            std::process::id(),
+            NEXT_TEMP_DATABASE.fetch_add(1, Ordering::Relaxed)
         )))
     }
 }

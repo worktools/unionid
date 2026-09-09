@@ -43,7 +43,15 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 format-5 Legacy0 和 format-6 active generation 上的单条 insert/upsert/update/delete 直接从 committed source 构造有界 change set，不先物化全表。update/delete 的 filter/match/index-order/take target 只保留 RowId，再按需读取目标 row；primary/unique constraint 通过 durable typed index 点查验证。change set 同时受 250,000 rows 与 64 MiB working-state 上限，returning 仍受独立 100,000 rows／8 MiB 上限。它生成合并的逻辑 write set，并只编码其中变化的 catalog、`(table_id, row_id)`、版本化 index key 和 receipt key。format 6 在物理 key 外增加 generation envelope，内部 catalog/value/index component codec 不变。redb transaction 只删除消失的键，只写入新增或编码内容变化的键；普通数据写入不触碰 `migration_ledger`。meta 的固定版本与水位值保持同步更新。删除或覆盖时会核对 redb 中的旧值是否与 Engine 基线一致，不一致则在 commit 前明确中止并回滚事务。多语句原子脚本、旧 storage format 和需要 catalog 规范化的兼容写入仍使用完整候选。
 
-DDL、schema/data migration、格式升级、restore 与 receipt prune 仍走 full-rebuild 路径：重新加载 durable 前态，编码完整候选状态，再按稳定键计算差异。该路径保留同一原子提交契约，但 CPU 和峰值内存仍随完整数据规模增长。
+DDL、格式升级、restore 与 receipt prune 仍走 full-rebuild 路径：重新加载 durable 前态，编码完整候选状态，再按稳定键计算差异。该路径保留同一原子提交契约，但 CPU 和峰值内存仍随完整数据规模增长。format-6 schema/data migration 改走下述 shadow-generation 路径。
+
+## 可恢复 migration generation
+
+format 6 的 migration runner 先持久化 Building manifest 和空 target catalog，active generation 保持不变。它从一个固定 source MVCC view 按 table stable ID、RowId 顺序读取最多 1,024 rows／16 MiB，逐批执行相同 typed migration，并在不超过 32 MiB 的同步事务中写 target rows、派生 indexes 和 durable checkpoint。manifest 同时绑定 database instance、source/target schema identity、migration ID/parent/checksum、executor version、row/index 计数、逻辑字节和 rolling digest。target generation 的 catalog、rows 与 indexes 合计最多 1 GiB。
+
+全部 source rows 写完后，runner 有界扫描 target generation，复核 catalog digest、row/index 数量、逻辑字节、rolling digest、typed values、RowId 水位和双向 index 一致性，再把 manifest 标为 Ready。cutover 用一个 `Durability::Immediate`、two-phase transaction 同时切换 active generation、schema revision/hash、sequence，追加 ledger entry，并把旧 source 标为 Reclaimable。此事务前失败保留旧 active；commit 返回错误时结果不确定，Engine 关闭句柄并阻止继续读写，重开后只会看到完整旧状态或完整新状态。
+
+Building、Ready 与 Aborting 阶段允许查询旧 active generation，并阻止普通 DDL/DML、receipt prune、storage upgrade 和不同 migration。完全相同的 migration 可核对 manifest 后从 checkpoint 继续；不匹配身份返回 `E_MAINTENANCE_CONFLICT`。`migration abort` 把未切换 target 标为 Aborting，并以每事务最多 1,024 entries 删除。cutover 后同样分批回收旧 source；活跃的旧 `Engine::read_snapshot` 继续持有原 redb MVCC root，直到该 snapshot 释放。generation ID 由 durable watermark 单调分配，失败或 abort 后不复用。
 
 `Engine::open_profile` 和成功 mutation 的 `MutationProfile::durable` 提供不含业务值的内部诊断。open 分离 redb open、bootstrap、各内部表读取、typed `Database` 构造和逻辑验证；format-5/6 普通 open 还以 `bounded_view = true` 明确表示它没有遍历 durable rows/indexes，此时相应 entry/byte 计数为零。commit 分离 prepare、transaction apply 与 sync，full rebuild 还记录前态 reload、完整后态 encode 和 diff。`prepare` 包含这三个 full-rebuild 子阶段，不能与它们重复相加。profile 只在成功 open/commit 后发布；memory Engine 没有 durable profile，read-only redb 会显式标记。类型不包含 schema/field 名、key/value、cursor secret、idempotency key 或 receipt payload，也不改变 storage/catalog/value/index/backup/protocol 格式。
 

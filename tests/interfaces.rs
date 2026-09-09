@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use unionid::{
-    Engine, IdempotencyPruneOptions, IntrospectionKind, MigrationApply, MigrationFile,
-    MigrationPlan, MigrationStatus, ProtocolRequest, QueryResponse, ReceiptOperationResult,
-    SchemaCheck, StorageMode, UpsertAction, Value, WireValue, backup, cli,
+    Engine, IdempotencyPruneOptions, IntrospectionKind, MigrationAbort, MigrationApply,
+    MigrationFile, MigrationPlan, MigrationStatus, ProtocolRequest, QueryResponse,
+    ReceiptOperationResult, SchemaCheck, StorageMode, UpsertAction, Value, WireValue, backup, cli,
 };
 
 #[test]
@@ -315,6 +315,27 @@ fn migration_cli_creates_plans_applies_and_reports_status() {
     let status: MigrationStatus = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status.applied.len(), 2);
     assert!(status.pending.is_empty());
+    assert!(status.maintenance.is_none());
+
+    let abort = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "abort",
+            "--db",
+            database.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        abort.status.success(),
+        "{}",
+        String::from_utf8_lossy(&abort.stderr)
+    );
+    let abort: MigrationAbort = serde_json::from_slice(&abort.stdout).unwrap();
+    assert!(abort.cleaned);
+    assert!(abort.migration_id.is_none());
 
     std::fs::write(
         first_path,
