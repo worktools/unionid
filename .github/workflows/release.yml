@@ -27,7 +27,10 @@ jobs:
           fi
           python3 scripts/package-release.py --output dist "${args[@]}"
       - name: Verify checksum, CLI and tutorial
-        run: python3 scripts/verify-release.py --dist dist
+        shell: bash
+        run: |
+          digest="$(python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(next(pathlib.Path(sys.argv[1]).glob("*.tar.gz")).read_bytes()).hexdigest())' dist)"
+          python3 scripts/verify-release.py --dist dist --expected-sha256 "${digest}"
       - uses: actions/upload-artifact@v7
         with:
           name: unionid-${{ runner.os }}-${{ runner.arch }}

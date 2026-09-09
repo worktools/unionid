@@ -2002,13 +2002,14 @@ impl Engine {
             .expect("successful cutover keeps the durable backend")
             .maintenance_info()?
             .is_none();
+        let reclaim_micros = elapsed_micros(reclaim_started);
         self.last_migration_profile = Some(MigrationProfile {
             total_micros: elapsed_micros(total_started),
             prepare_micros,
             build_micros,
             validate_micros,
             cutover_micros,
-            reclaim_micros: elapsed_micros(reclaim_started),
+            reclaim_micros,
             source_generation: ready_info.source_generation,
             target_generation: ready_info.target_generation,
             source_rows_seen: ready_info.source_rows_seen,

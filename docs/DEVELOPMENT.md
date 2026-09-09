@@ -58,7 +58,7 @@
 - SIGINT/SIGTERM 停止 accept，关闭空闲连接，等待已进入 Engine 的请求完成或原子放弃，再释放 redb 锁；关闭时输出 accepted/rejected/requests/failed 统计。真实子进程测试验证 idle client 存在时仍能退出并立即 reopen。
 - JSON Lines version 1 请求包含 request ID、完整多行源码、typed params 与可选 schema 前置条件；也支持独立且 1 MiB 有界的 introspection 动作。响应回显 ID，并通过独立 wire codec 无损表示 i64、命名 sum/record、tuple、option/list。未知版本、缺少/多余/错误参数分别使用稳定错误码；旧 `{query}` 与纯文本入口保留兼容。
 - 查询语言支持 `$name` AST 参数，insert/upsert 可用完整 row 参数，`insert many` 与 `upsert many` 可用 `list RowType` 参数。Rust `prepare/query` 在准备时检查表、字段、stage 与参数上下文类型，记录 schema revision/hash；prepared operation 覆盖 read/explain 和核心 insert/upsert/update/delete，在不扫描 row 的情况下绑定 mutation target、set/match、returning 与参数类型，并用 `execute_prepared_until` 传播 deadline。schema 改变后拒绝旧 plan，避免使用失效的字段或 constructor 位置；prepared 写入支持 memory/redb，过渡 WAL 拒绝无法按原源码重放的绑定值。
-- 五分钟教程用同一组 ADT 源码覆盖持久建库、穷尽匹配、嵌套字段、原子更新、关闭重开和完整检查；集成测试比较 Rust Engine、本地 redb CLI 与 TCP 返回的 typed rows、列和 schema identity。发布脚本构建带精确 target/codec 清单的原生压缩包和 SHA-256，包内验证器从空目录重跑教程；macOS/Linux CI 与 tag release workflow 均执行该自检。
+- 五分钟教程用同一组 ADT 源码覆盖持久建库、穷尽匹配、嵌套字段、原子更新、关闭重开和完整检查；集成测试比较 Rust Engine、本地 redb CLI 与 TCP 返回的 typed rows、列和 schema identity。发布脚本先让构建出的二进制与独立的 `release/contract.json` 能力契约一致，再生成带精确 target/codec 清单的原生压缩包和 SHA-256。验证器要求 CI 或发布环境另行传入可信 SHA-256，在解包和执行二进制前认证产物，并从空目录重跑教程；macOS/Linux CI 与 tag release workflow 均执行该自检。
 
 ## 现有持久化适配的修复
 
