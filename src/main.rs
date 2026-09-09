@@ -276,7 +276,7 @@ struct VersionReport {
     target: &'static str,
     protocol_versions: [u32; 2],
     stream_protocol_versions: [u32; 1],
-    readable_storage_formats: [u32; 4],
+    readable_storage_formats: [u32; 5],
     current_storage: unionid::StorageVersions,
 }
 
@@ -417,7 +417,7 @@ fn version_report() -> VersionReport {
             unionid::protocol::PRODUCTION_VERSION,
         ],
         stream_protocol_versions: [unionid::stream::VERSION],
-        readable_storage_formats: [1, 2, 3, 4],
+        readable_storage_formats: [1, 2, 3, 4, 5],
         current_storage: unionid::Engine::current_storage_versions(),
     }
 }
@@ -431,7 +431,7 @@ fn print_version(json: bool) -> Result<(), String> {
         );
     } else {
         println!(
-            "unionid {}\ntarget {}\nprotocols 1,2; streams 1\nstorage read 1,2,3,4; write {}\ncodecs catalog/value/index/migration/receipt/backup {}/{}/{}/{}/{}/{}",
+            "unionid {}\ntarget {}\nprotocols 1,2; streams 1\nstorage read 1,2,3,4,5; write {}\ncodecs catalog/value/index/migration/receipt/backup {}/{}/{}/{}/{}/{}",
             report.software_version,
             report.target,
             report.current_storage.format,

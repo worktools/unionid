@@ -16,6 +16,7 @@ mod local;
 mod matching;
 pub mod migration;
 pub mod model;
+mod ordered_key;
 mod pagination;
 mod params;
 pub mod protocol;

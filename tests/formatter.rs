@@ -53,6 +53,40 @@ fn formatter_is_idempotent_for_current_examples() {
 }
 
 #[test]
+fn composite_index_layouts_share_one_canonical_shape() {
+    let inline = "create index tasks (tenant, -priority, id)";
+    let multiline = "create index tasks (\n  tenant\n  -priority\n  id\n)";
+    let expected = "create index tasks (tenant, -priority, id)\n";
+
+    assert_eq!(unionid::format_source(inline).unwrap(), expected);
+    assert_eq!(unionid::format_source(multiline).unwrap(), expected);
+    assert_eq!(
+        unionid::format_source("create index tasks (tenant, -priority, id,)").unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn composite_index_parser_rejects_ambiguous_or_oversized_shapes() {
+    for source in [
+        "create index tasks ()",
+        "create index tasks (tenant, tenant)",
+        "create index tasks (+tenant)",
+        "create index tasks (tenant desc)",
+    ] {
+        assert!(unionid::format_source(source).is_err(), "{source}");
+    }
+    let fields = (0..16)
+        .map(|index| format!("field_{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(unionid::format_source(&format!("create index tasks ({fields})")).is_ok());
+    let error =
+        unionid::format_source(&format!("create index tasks ({fields}, overflow)")).unwrap_err();
+    assert!(error.message.contains("at most 16"));
+}
+
+#[test]
 fn formatter_preserves_comments_at_stable_statement_boundaries() {
     let source = "# schema\ntype Task = {id int} # row type\n# query\nfrom tasks | take 1\n  # trailing note\n";
     let formatted = format_source(source).unwrap();

@@ -9,11 +9,11 @@ unionid 0.1.0 把应用 schema migration 与数据库内部格式升级视为两
 | 层 | v0.1 值 |
 | --- | --- |
 | unionid / redb | 0.1.0 / 4.1.0 |
-| storage / catalog / ADT value | 1–4 / 3 / 2 |
-| index key / migration ledger / receipt | 1 / 1 / 1 |
-| logical backup / JSON Lines protocol | 1 或 2 / 1 |
+| storage / catalog / ADT value | 可读 1–5，当前 5 / 4 / 2 |
+| index key / migration ledger / receipt | 3 / 1 / 2 |
+| logical backup / JSON Lines protocol | 可读 1–4，当前 4 / 1–2 |
 
-当前二进制读取 storage format 1–4；新数据库直接创建为 format 4，使用 catalog/value/index-key/receipt codec 3/2/2/2。format 1/2 仍会补齐 cursor 身份并升级到 format 3，但 format 3 的普通写入保持 format 3，只有显式命令 `unionid upgrade --db app.redb --target 4` 才会在一个同步 two-phase redb transaction 中重写 catalog、rows、indexes、receipts 和 meta。预检或提交前失败保留 format 3；提交结果不确定时应重开并执行 `check --db`。逻辑 backup 3 保留生产标量和 receipt，但不复制 cursor secret；restore 会生成新数据库身份。未知 storage 或 codec version 在修改文件前失败。
+当前二进制读取 storage format 1–5；新数据库直接创建为 format 5，使用 catalog/value/index-key/receipt codec 4/2/3/2。format 1/2 仍会补齐 cursor 身份并升级到 format 3；format 3 可显式升级到 4 以使用生产标量，format 4 可继续读写已有单列升序索引。创建复合或降序索引前必须执行 `unionid upgrade --db app.redb --target 5`。升级在一个同步 two-phase redb transaction 中重写 catalog 与 secondary-index keys，并保留 rows、RowId、schema identity、ledger、receipts、数据库/cursor 身份和 sequence。预检或提交前失败保留完整旧格式；提交结果不确定时应重开并执行 `check --db`。逻辑 backup 4 保存复合索引 shape、生产标量和 receipt；backup 3 单列索引按一个升序 component 恢复。restore 会生成新数据库身份。未知 storage 或 codec version 在修改文件前失败。
 
 升级前后的 backup/restore 必须保留 receipt count。不要为了降级而删除 receipt：显式 prune 会恢复旧 key 的可执行性，应只在确认所有客户端、队列和人工重试都已越过 cutoff 后执行。旧 version 1 请求继续可用；只有需要 exactly-once effect 的 mutation 才增加 `idempotency_key`。
 
@@ -49,6 +49,6 @@ unionid migration status --db app.redb --dir migrations
 
 unionid 0.1.0 separates application schema migrations from internal database-format changes. Versioned migration files evolve fields, variants, types, constraints, indexes, and their data. A unionid binary opens only the internal codec versions it explicitly knows and fails before mutation when it encounters an unknown version.
 
-The current binary reads storage formats 1–4. New databases start at format 4 with catalog/value/index-key/receipt codecs 3/2/2/2. Opening format 1 or 2 still adds cursor identity and upgrades to format 3, while ordinary writes keep a format-3 database at format 3. Run `unionid upgrade --db app.redb --target 4` to validate and rewrite catalog, rows, indexes, receipts, and meta in one synchronous two-phase redb transaction. Preflight and pre-commit failures preserve format 3; after an uncertain commit, reopen and run `check --db`. Logical backup 3 preserves production scalars and receipts while rotating cursor identity on restore.
+The current binary reads storage formats 1–5. New databases start at format 5 with catalog/value/index-key/receipt codecs 4/2/3/2. Formats 1 and 2 still gain cursor identity and move to format 3; format 3 can be explicitly upgraded to 4 for production scalars. Format 4 remains readable and writable for existing ascending single-column indexes, but composite or descending declarations require `unionid upgrade --db app.redb --target 5`. The synchronous two-phase transaction rewrites the catalog and secondary-index keys while preserving rows, RowIds, schema identity, ledger, receipts, database/cursor identity, and sequence. Preflight or pre-commit failure leaves the complete old format; after an uncertain commit, reopen and run `check --db`. Logical backup 4 preserves composite shapes, production scalars, and receipts; backup 3 maps each legacy column to one ascending component. Restore rotates cursor identity.
 
 Before changing binaries, retain the old binary's `version --format json` and `doctor --db app.redb --format json` reports, run `check`, create a verified logical backup, and keep the old release archive and checksum. Compare the new binary's readable/current storage and protocol versions, then run doctor, check, migration planning, and application queries against a quiescent copy. Doctor diagnoses a private temporary copy and never creates, repairs, or upgrades the requested path; it is not a replacement for checking the actual copy. Automation should branch on the documented CLI exit classes rather than matching prose. Open the production file only when the target release notes declare support for its stored versions. Any future internal-format conversion must be explicit and write a separately verifiable path; v0.1 makes no promise of unannounced in-place upgrades.

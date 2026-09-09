@@ -82,10 +82,12 @@ impl Database {
             } => self.change_variant(&owner, &variant, args, transform),
             SchemaMigration::AddIndex {
                 table,
-                column,
+                components,
                 unique,
-            } => self.create_index(&table, &column, unique).map(|_| ()),
-            SchemaMigration::DropIndex { table, column } => self.drop_index(&table, &column),
+            } => self.create_index(&table, &components, unique).map(|_| ()),
+            SchemaMigration::DropIndex { table, components } => {
+                self.drop_index(&table, &components)
+            }
             SchemaMigration::SetKey { table, column } => self.set_key(&table, &column),
             SchemaMigration::DropKey { table } => self.drop_key(&table),
         }
@@ -197,20 +199,25 @@ impl Database {
         let old_catalog = self.catalog.clone();
         let owner_id = self.named_type_id(owner)?;
         let field_id = direct_record_field(&old_catalog, owner, field)?.id;
-        if let Some((table, column)) =
+        if let Some((table, shape)) =
             self.index_definitions
                 .iter()
                 .find_map(|(table, definitions)| {
                     definitions
                         .values()
-                        .find(|definition| definition.field_path.contains(&field_id))
-                        .map(|definition| (table, &definition.column))
+                        .find(|definition| {
+                            definition
+                                .effective_components()
+                                .iter()
+                                .any(|component| component.field_path.contains(&field_id))
+                        })
+                        .map(|definition| (table, definition.display_shape()))
                 })
         {
             return Err(Error::new(
                 "E_MIGRATION",
                 format!(
-                    "cannot drop field '{owner}.{field}' while index '{table}.{column}' references it; drop the key/index first"
+                    "cannot drop field '{owner}.{field}' while index '{table} ({shape})' references it; drop the key/index first"
                 ),
             ));
         }
@@ -510,28 +517,33 @@ impl Database {
         self.rewrite_after_catalog_change(&old_catalog, Some(owner_id), Some(&rewrite))
     }
 
-    fn drop_index(&mut self, table: &str, column: &str) -> Result<()> {
+    fn drop_index(&mut self, table: &str, components: &[IndexComponent]) -> Result<()> {
         let source = self.table(table)?;
-        if source.primary_key.as_deref() == Some(column) {
+        let shape = query_index_shape_key(components);
+        let display = crate::formatter::index_shape(components);
+        if components.len() == 1
+            && !components[0].descending
+            && source.primary_key.as_deref() == Some(components[0].column.as_str())
+        {
             return Err(Error::new(
                 "E_MIGRATION",
-                format!("index '{table}.{column}' enforces the primary key; drop the key first"),
+                format!("index '{table} ({display})' enforces the primary key; drop the key first"),
             ));
         }
         let definitions = self.index_definitions.get_mut(table).ok_or_else(|| {
             Error::new(
                 "E_INDEX",
-                format!("index '{table}.{column}' does not exist"),
+                format!("index '{table} ({display})' does not exist"),
             )
         })?;
-        if definitions.remove(column).is_none() {
+        if definitions.remove(&shape).is_none() {
             return Err(Error::new(
                 "E_INDEX",
-                format!("index '{table}.{column}' does not exist"),
+                format!("index '{table} ({display})' does not exist"),
             ));
         }
         if let Some(columns) = self.indexes.get_mut(table) {
-            columns.remove(column);
+            columns.remove(&shape);
         }
         Ok(())
     }
@@ -565,7 +577,14 @@ impl Database {
             .get(table)
             .is_some_and(|definitions| definitions.contains_key(column))
         {
-            self.create_index(table, column, false)?;
+            self.create_index(
+                table,
+                &[IndexComponent {
+                    column: column.to_owned(),
+                    descending: false,
+                }],
+                false,
+            )?;
         }
         let Some(DbObject::Table(source)) = self.objects.get_mut(table) else {
             unreachable!()
@@ -742,19 +761,38 @@ impl Database {
                 .unwrap_or_default();
             let mut refreshed = BTreeMap::new();
             for (_, mut definition) in definitions {
-                let Some(column) =
-                    field_path_name(&self.catalog, &table.schema, &definition.field_path)
-                else {
+                let mut components = Vec::new();
+                for component in definition.effective_components() {
+                    let Some(column) =
+                        field_path_name(&self.catalog, &table.schema, &component.field_path)
+                    else {
+                        components.clear();
+                        break;
+                    };
+                    components.push(IndexComponentDefinition {
+                        column,
+                        field_path: component.field_path,
+                        descending: component.descending,
+                    });
+                }
+                if components.is_empty() {
                     continue;
-                };
-                definition.column = column.clone();
-                refreshed.insert(column, definition);
+                }
+                definition.column.clear();
+                definition.field_path.clear();
+                definition.components = components;
+                refreshed.insert(definition.shape_key(), definition);
             }
             let primary_key = primary_id.and_then(|id| {
                 refreshed
                     .values()
                     .find(|definition| definition.id == id)
-                    .map(|definition| definition.column.clone())
+                    .and_then(|definition| {
+                        definition
+                            .effective_components()
+                            .first()
+                            .map(|component| component.column.clone())
+                    })
             });
             if let Some(key) = &primary_key {
                 let ty = self.catalog.field_type(&table.schema, key)?;

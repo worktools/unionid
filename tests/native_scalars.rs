@@ -323,7 +323,7 @@ fn format4_persists_native_receipts_and_replays_them_after_reopen() {
     let restored_path = path.with_extension("restored.redb");
     assert_eq!(
         backup::create(&path, &backup_path).unwrap().format_version,
-        3
+        4
     );
     backup::restore(&backup_path, &restored_path).unwrap();
     let restored = Engine::open_redb(&restored_path).unwrap();

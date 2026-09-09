@@ -83,7 +83,7 @@ fn idempotent_effect_and_receipt_commit_together_and_survive_reopen() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            4_u32.to_be_bytes()
+            5_u32.to_be_bytes()
         );
         let receipts = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
         assert_eq!(receipts.len().unwrap(), 1);
@@ -226,6 +226,70 @@ fn typed_unique_indexes_survive_redb_reopen_and_integrity_checks() {
         assert_eq!(failed.error.unwrap().code, "E_CONSTRAINT");
     }
     assert_eq!(engine.execute("from users").rows.len(), 2);
+    assert!(engine.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn composite_index_shapes_and_tuples_survive_redb_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("composite-index.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let created = engine.execute(
+            "type Task =\n  id int\n  tenant text\n  priority int\ntable tasks Task\n  key id\ncreate unique index tasks (tenant, -priority)\ninsert tasks {id = 1, tenant = \"acme\", priority = 3}\ninsert tasks {id = 2, tenant = \"acme\", priority = 4}",
+        );
+        assert!(created.ok, "{}", created.message);
+        let duplicate = engine.execute("insert tasks {id = 3, tenant = \"acme\", priority = 4}");
+        assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+        assert!(engine.check_integrity().unwrap().backend_clean);
+        assert_eq!(engine.introspection().storage_versions.unwrap().format, 5);
+    }
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert!(
+        reopened
+            .schema()
+            .contains("create unique index tasks (tenant, -priority)")
+    );
+    let rows = reopened.execute("from tasks | sort {-priority, id}");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 2);
+    assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn format4_requires_explicit_upgrade_for_new_index_shapes() {
+    let dir = TempDir::new();
+    let path = dir.0.join("format4-composite.redb");
+    create_empty_format3(&path);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(engine.upgrade_storage(4).unwrap().changed);
+    assert!(
+        engine
+            .execute(
+                "type Entry = {id int, tenant text, priority int}\ntable entries Entry\n  key id"
+            )
+            .ok
+    );
+    let before = engine.schema_info();
+    let rejected = engine.execute("create index entries (tenant, -priority)");
+    assert!(!rejected.ok);
+    assert_eq!(
+        rejected.error.as_ref().unwrap().code,
+        "E_STORAGE_UPGRADE_REQUIRED"
+    );
+    assert_eq!(engine.schema_info(), before);
+
+    let upgraded = engine.upgrade_storage(5).unwrap();
+    assert_eq!(upgraded.previous_format, 4);
+    assert_eq!(upgraded.format, 5);
+    assert_eq!(engine.schema_info(), before);
+    assert!(
+        engine
+            .execute("create index entries (tenant, -priority)")
+            .ok
+    );
     assert!(engine.check_integrity().unwrap().backend_clean);
 }
 
@@ -563,11 +627,11 @@ fn redb_upgrade_child() {
     let ready = std::env::var(UPGRADE_READY_ENV).unwrap();
     let mut engine = Engine::open_redb(path).unwrap();
     std::fs::write(ready, b"ready").unwrap();
-    engine.upgrade_storage(4).unwrap();
+    engine.upgrade_storage(5).unwrap();
 }
 
 #[test]
-fn interrupted_format4_upgrade_recovers_as_complete_old_or_new_state() {
+fn interrupted_format5_upgrade_recovers_as_complete_old_or_new_state() {
     let dir = TempDir::new();
     let path = dir.0.join("interrupted-upgrade.redb");
     let ready = dir.0.join("upgrade-ready");
@@ -586,6 +650,7 @@ fn interrupted_format4_upgrade_recovers_as_complete_old_or_new_state() {
         let mut engine = Engine::open_redb(&path).unwrap();
         let inserted = engine.execute(&source);
         assert!(inserted.ok, "{}", inserted.message);
+        assert!(engine.upgrade_storage(4).unwrap().changed);
     }
 
     let mut child = Command::new(std::env::current_exe().unwrap())
@@ -610,16 +675,16 @@ fn interrupted_format4_upgrade_recovers_as_complete_old_or_new_state() {
 
     let mut reopened = Engine::open_redb(&path).unwrap();
     let format = reopened.introspection().storage_versions.unwrap().format;
-    assert!(matches!(format, 3 | 4));
+    assert!(matches!(format, 4 | 5));
     assert!(reopened.check_integrity().unwrap().backend_clean);
     let rows = reopened.execute("from entries | filter label == \"value-4999\"");
     assert!(rows.ok, "{}", rows.message);
     assert_eq!(rows.rows.len(), 1);
     assert!(rows.rows[0]["id"].cmp_eq(&Value::Int(4_999)));
-    if format == 3 {
-        assert!(reopened.upgrade_storage(4).unwrap().changed);
+    if format == 4 {
+        assert!(reopened.upgrade_storage(5).unwrap().changed);
     }
-    assert_eq!(reopened.introspection().storage_versions.unwrap().format, 4);
+    assert_eq!(reopened.introspection().storage_versions.unwrap().format, 5);
 }
 
 #[test]
@@ -1036,7 +1101,7 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            4_u32.to_be_bytes()
+            5_u32.to_be_bytes()
         );
         transaction.open_table(REDB_CATALOG).unwrap();
         transaction.open_table(REDB_ROWS).unwrap();
@@ -1061,7 +1126,7 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
 }
 
 #[test]
-fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
+fn explicit_format5_upgrade_rewrites_every_durable_codec_and_reopens() {
     let dir = TempDir::new();
     let path = dir.0.join("upgrade.redb");
     let backup_path = dir.0.join("upgrade.backup.json");
@@ -1087,13 +1152,15 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
             )
             .unwrap();
         original_schema = engine.schema_info();
-        let rejected = engine.upgrade_storage(5).unwrap_err();
-        assert_eq!(rejected.code, "E_STORAGE_UPGRADE");
-        let upgraded = engine.upgrade_storage(4).unwrap();
-        assert_eq!(upgraded.previous_format, 3);
-        assert_eq!(upgraded.format, 4);
+        let scalar = engine.upgrade_storage(4).unwrap();
+        assert_eq!(scalar.previous_format, 3);
+        assert_eq!(scalar.format, 4);
+        assert!(scalar.changed);
+        let upgraded = engine.upgrade_storage(5).unwrap();
+        assert_eq!(upgraded.previous_format, 4);
+        assert_eq!(upgraded.format, 5);
         assert!(upgraded.changed);
-        assert!(!engine.upgrade_storage(4).unwrap().changed);
+        assert!(!engine.upgrade_storage(5).unwrap().changed);
         let versions = engine.introspection().storage_versions.unwrap();
         assert_eq!(
             (
@@ -1105,7 +1172,7 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
                 versions.receipt_codec,
                 versions.backup_codec,
             ),
-            (4, 3, 2, 2, 1, 2, 3)
+            (5, 4, 2, 3, 1, 2, 4)
         );
         assert!(engine.check_integrity().unwrap().backend_clean);
         assert_eq!(engine.schema_info(), original_schema);
@@ -1115,10 +1182,10 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
     let transaction = database.begin_read().unwrap();
     let meta = transaction.open_table(REDB_META).unwrap();
     for (key, expected) in [
-        ("storage_format_version", 4_u32.to_be_bytes().to_vec()),
-        ("catalog_codec_version", 3_u16.to_be_bytes().to_vec()),
+        ("storage_format_version", 5_u32.to_be_bytes().to_vec()),
+        ("catalog_codec_version", 4_u16.to_be_bytes().to_vec()),
         ("value_codec_version", 2_u16.to_be_bytes().to_vec()),
-        ("index_key_version", 2_u16.to_be_bytes().to_vec()),
+        ("index_key_version", 3_u16.to_be_bytes().to_vec()),
         ("migration_codec_version", 1_u16.to_be_bytes().to_vec()),
         ("receipt_codec_version", 2_u16.to_be_bytes().to_vec()),
     ] {
@@ -1129,7 +1196,7 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
         catalog
             .iter()
             .unwrap()
-            .all(|entry| { entry.unwrap().1.value()[4..6] == 3_u16.to_be_bytes() })
+            .all(|entry| { entry.unwrap().1.value()[4..6] == 4_u16.to_be_bytes() })
     );
     let rows = transaction.open_table(REDB_ROWS).unwrap();
     assert!(
@@ -1142,7 +1209,7 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
         indexes
             .iter()
             .unwrap()
-            .all(|entry| { entry.unwrap().0.value()[4..6] == 2_u16.to_be_bytes() })
+            .all(|entry| { entry.unwrap().0.value()[4..6] == 3_u16.to_be_bytes() })
     );
     let receipts = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
     assert!(
@@ -1169,7 +1236,7 @@ fn explicit_format4_upgrade_rewrites_every_durable_codec_and_reopens() {
         unionid::backup::create(&path, &backup_path)
             .unwrap()
             .format_version,
-        3
+        4
     );
     unionid::backup::restore(&backup_path, &restored_path).unwrap();
     let mut restored = Engine::open_redb(restored_path).unwrap();

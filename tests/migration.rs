@@ -586,3 +586,39 @@ insert items {id = 1, name = "first", status = Active}"#,
     assert!(!engine.schema().contains("note text"));
     assert!(!engine.execute("from items | filter note == \"new\"").ok);
 }
+
+#[test]
+fn migrations_add_rename_and_drop_composite_index_shapes() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Entry = {id int, tenant text, priority int}\ntable entries Entry\n  key id\ninsert entries {id = 1, tenant = \"a\", priority = 1}",
+    );
+    ok(
+        &mut engine,
+        "migration add_shape\n  add unique index entries (tenant, -priority)",
+    );
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index entries (tenant, -priority)")
+    );
+
+    ok(
+        &mut engine,
+        "migration rename_component\n  rename field Entry.priority to rank",
+    );
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index entries (tenant, -rank)")
+    );
+    let blocked = engine.execute("migration drop_live_field\n  drop field Entry.rank");
+    assert_eq!(blocked.error.as_ref().unwrap().code, "E_MIGRATION");
+
+    ok(
+        &mut engine,
+        "migration remove_shape\n  drop index entries (tenant, -rank)\n  drop field Entry.rank",
+    );
+    assert!(!engine.schema().contains("-rank"));
+}

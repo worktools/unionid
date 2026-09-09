@@ -4,9 +4,9 @@
 
 ## 发布后进展
 
-- filter comparison、sort、min/max 与 cursor boundary 现在保存绑定静态类型，并共用 catalog-aware ADT total order。primitive、命名 scalar、sum、record、tuple、option、list 和有限递归值均可排序；sum/record 使用稳定 variant/field ID，避免运行时名称或 map 次序改变语义。memory 与 redb 重开 page、mutation sort 和 aggregate 有统一回归覆盖；有序复合 index codec 与 planner 由 #165 的后续切片接入。
+- filter comparison、sort、min/max 与 cursor boundary 现在保存绑定静态类型，并共用 catalog-aware ADT total order。primitive、命名 scalar、sum、record、tuple、option、list 和有限递归值均可排序；sum/record 使用稳定 variant/field ID，避免运行时名称或 map 次序改变语义。复合 index schema、memory tuple key、redb index-key codec 3、storage format 5、backup 4 与显式 4→5 upgrade 已接入；range/index-order/page-seek planner 由 #173 继续实现。
 - 普通 row-only DML 使用按路径复制的 persistent row/index/receipt roots 和请求级合并 write set；Engine 通过一个 committed root 同时发布 database 与 receipt。redb 直接编码并核对变化的 catalog/row/index/receipt stable keys，常驻 durable head 只保留 layout、meta 与兼容状态；DDL、migration、upgrade、restore 和 receipt prune 明确走临时 full-rebuild 路径。`MutationProfile` 与 `tools/workload-eval` 分别记录 candidate build、durable commit、增量模式及不含业务值的 write-set 计数。
-- `unionid::scalars` 提供六种生产标量的 Rust 值域、规范 serde payload 与边界校验；原生 ScalarType/Value、无损 serde、protocol v2、完整 v1 typed-boundary 预检、按 boundary 选择的 `u1`/`u2` cursor、storage format 4、完整 durable codec 集、显式 upgrader、源码声明与精确运算均已接通。#137–#140 的验收由 PR #147–#151 完成，已实现范围见 [SCALARS.md](SCALARS.md)。
+- `unionid::scalars` 提供六种生产标量的 Rust 值域、规范 serde payload 与边界校验；原生 ScalarType/Value、无损 serde、protocol v2、完整 v1 typed-boundary 预检、按 boundary 选择的 `u1`/`u2` cursor、storage format 4 标量兼容层、当前 format 5 durable codec、显式 upgrader、源码声明与精确运算均已接通。#137–#140 的验收由 PR #147–#151 完成，已实现范围见 [SCALARS.md](SCALARS.md)。
 - v0.1.0 crate、原生 target 包、校验清单和 GitHub Release 已由 tag workflow 发布。
 - Engine、本地 run/CLI 和 TCP 服务已提供统一只读执行边界；`introspection.read_only` 可验证实际状态，mutation 在创建候选状态或持久事务前返回 `E_READ_ONLY`。
 - 查询语言、Rust Engine 和 version 1 协议共享有界 keyset `page`：唯一排序以主键收尾，`u1` cursor 绑定 schema/query/params/sequence 并使用数据库 HMAC secret；redb 重开保留身份，逻辑 restore 轮换身份。
