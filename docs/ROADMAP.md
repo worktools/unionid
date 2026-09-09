@@ -129,19 +129,19 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#162](https://github.com/worktools/unionid/issues/162) | [设计] 增量候选状态与原子发布 RFC | 已完成 | [RFC 0008](rfc/0008-incremental-candidate-state.md)；[#168](https://github.com/worktools/unionid/pull/168) |
 | [#163](https://github.com/worktools/unionid/issues/163) | [核心] 增量 row-only DML 候选状态 | 已完成 | [#162](https://github.com/worktools/unionid/issues/162)；[#169](https://github.com/worktools/unionid/pull/169) |
 | [#164](https://github.com/worktools/unionid/issues/164) | [设计] 有序复合索引与范围访问 RFC | 已完成 | [RFC 0009](rfc/0009-ordered-composite-indexes.md)；[#170](https://github.com/worktools/unionid/pull/170) |
-| [#165](https://github.com/worktools/unionid/issues/165) | [查询] 有序复合索引、range/ordered scan 与 page seek | 评审中 | [#174](https://github.com/worktools/unionid/pull/174)；[#175](https://github.com/worktools/unionid/pull/175) |
-| [#166](https://github.com/worktools/unionid/issues/166) | [质量] 复验 10k/100k 写入与有序访问成本 | 当前 | [#163](https://github.com/worktools/unionid/issues/163)、[#165](https://github.com/worktools/unionid/issues/165) |
+| [#165](https://github.com/worktools/unionid/issues/165) | [查询] 有序复合索引、range/ordered scan 与 page seek | 已合并 | [#174](https://github.com/worktools/unionid/pull/174)；[#175](https://github.com/worktools/unionid/pull/175) |
+| [#166](https://github.com/worktools/unionid/issues/166) | [质量] 复验 10k/100k 写入与有序访问成本 | 已合并 | [#163](https://github.com/worktools/unionid/issues/163)、[#165](https://github.com/worktools/unionid/issues/165) |
 
 ### M7 · 有界常驻状态与可恢复维护
 
 | Issue | 任务 | 优先级 | 前置依赖 |
 | --- | --- | --- | --- |
 | [#177](https://github.com/worktools/unionid/issues/177) | [路线图] M7 总览与阶段验收 | P0 | M6 容量证据 |
-| [#178](https://github.com/worktools/unionid/issues/178) | [质量] 分段观测 open 与 full-rebuild migration | 当前 | [#166](https://github.com/worktools/unionid/issues/166) |
-| [#179](https://github.com/worktools/unionid/issues/179) | [设计] 冻结 bounded resident state 与 maintenance generation | P0 | [RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md)、[#178](https://github.com/worktools/unionid/issues/178) |
-| [#181](https://github.com/worktools/unionid/issues/181) | [核心] 统一 typed row source 与 committed view | P0 | [#179](https://github.com/worktools/unionid/issues/179) |
-| [#182](https://github.com/worktools/unionid/issues/182) | [存储] Legacy0 有界 redb read 与 row cache | P0 | [#181](https://github.com/worktools/unionid/issues/181) |
-| [#183](https://github.com/worktools/unionid/issues/183) | [执行] 有界 full pipeline、check 与 backup | P1 | [#182](https://github.com/worktools/unionid/issues/182) |
+| [#178](https://github.com/worktools/unionid/issues/178) | [质量] 分段观测 open 与 full-rebuild migration | 已合并 | [#166](https://github.com/worktools/unionid/issues/166) |
+| [#179](https://github.com/worktools/unionid/issues/179) | [设计] 冻结 bounded resident state 与 maintenance generation | 已合并 | [RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md)、[#178](https://github.com/worktools/unionid/issues/178) |
+| [#181](https://github.com/worktools/unionid/issues/181) | [核心] 统一 typed row source 与 committed view | 已合并 | [#179](https://github.com/worktools/unionid/issues/179) |
+| [#182](https://github.com/worktools/unionid/issues/182) | [存储] Legacy0 有界 redb read 与 row cache | 已合并 | [#181](https://github.com/worktools/unionid/issues/181) |
+| [#183](https://github.com/worktools/unionid/issues/183) | [执行] 有界 full pipeline、check 与 backup | 已合并 | [#182](https://github.com/worktools/unionid/issues/182) |
 | [#184](https://github.com/worktools/unionid/issues/184) | [存储] format-6 generation envelope 与升级 | P0 | [#179](https://github.com/worktools/unionid/issues/179) |
 | [#185](https://github.com/worktools/unionid/issues/185) | [迁移] 可恢复 shadow generation 与原子 cutover | P0 | [#183](https://github.com/worktools/unionid/issues/183)、[#184](https://github.com/worktools/unionid/issues/184) |
 | [#186](https://github.com/worktools/unionid/issues/186) | [质量] M7 接口旅程与容量复验 | P1 | [#182](https://github.com/worktools/unionid/issues/182)–[#185](https://github.com/worktools/unionid/issues/185) |
@@ -159,7 +159,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。#181/#188 建立共享 source seam，#182/#189 实现 format-5 Legacy0 bounded open、durable cursor、MVCC committed view 与 32 MiB cache，#183/#190 已完成 bounded full pipeline/check/backup。接下来由 #184 实现 generation envelope，再由 #185 实现 resumable migration，最后由 #186 复验接口与容量。format 6 仍是后续实现目标，不能因 bounded format-5 reads 已完成而标记整个 M7 完成。
+任务 #162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。#181/#188 建立共享 source seam，#182/#189 实现 format-5 Legacy0 bounded open、durable cursor、MVCC committed view 与 32 MiB cache，#183/#190 已完成 bounded full pipeline/check/backup。接下来由 #184 实现 generation envelope，再由 #185 实现 resumable migration，最后由 #186 复验接口与容量。format 6 仍是后续实现目标，不能因 bounded format-5 reads 已完成而标记整个 M7 完成。
 
 ### 应用集成切片
 
