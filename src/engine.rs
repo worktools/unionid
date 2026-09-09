@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::control::ExecutionControl;
-use crate::db::{Database, LogicalWriteSet, QueryResponse};
+use crate::db::{Database, LogicalWriteSet, QueryResponse, QueryRowSink};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyReceipt,
@@ -19,7 +19,7 @@ use crate::migration::{
     MigrationApply, MigrationEntry, MigrationFile, MigrationPlan, MigrationPlanItem,
     MigrationStatus, describe_step, validate_files_against_history,
 };
-use crate::profile::{DurableCommitProfile, StorageOpenProfile};
+use crate::profile::{DurableCommitProfile, StorageCheckProfile, StorageOpenProfile};
 use crate::query::{LocatedStatement, PageSpec, Stage, Statement};
 use crate::redb_storage::{CommitFailure, RedbStore};
 use crate::row_source::TypedRowSource;
@@ -115,6 +115,7 @@ pub struct StorageIntegrity {
     pub backend_clean: bool,
     pub schema: crate::db::SchemaInfo,
     pub versions: StorageVersions,
+    pub profile: StorageCheckProfile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -203,8 +204,11 @@ trait DurableBackend: Send {
         receipts: &ReceiptMap,
         write_set: Option<&LogicalWriteSet>,
     ) -> std::result::Result<DurableCommitProfile, CommitFailure>;
-    fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)>;
+    fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)>;
     fn supports_production_scalars(&self) -> bool;
+    fn supports_bounded_row_mutation(&self) -> bool {
+        false
+    }
     fn versions(&self) -> StorageVersions;
     fn committed_view(
         &self,
@@ -244,12 +248,16 @@ impl DurableBackend for RedbStore {
         }
     }
 
-    fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
+    fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
         RedbStore::check_integrity(self)
     }
 
     fn supports_production_scalars(&self) -> bool {
         RedbStore::supports_production_scalars(self)
+    }
+
+    fn supports_bounded_row_mutation(&self) -> bool {
+        RedbStore::supports_bounded_row_mutation(self)
     }
 
     fn versions(&self) -> StorageVersions {
@@ -548,6 +556,56 @@ impl Engine {
             Ok(response) => response,
             Err(error) => self.with_schema(QueryResponse::failure(error)),
         }
+    }
+
+    pub(crate) fn execute_read_stream_controlled(
+        &mut self,
+        mut statements: Vec<LocatedStatement>,
+        parameters: std::collections::BTreeMap<String, crate::Value>,
+        expected_schema: Option<&crate::db::SchemaInfo>,
+        control: &ExecutionControl,
+        sink: &mut dyn QueryRowSink,
+    ) -> Result<QueryResponse> {
+        self.last_mutation_profile = None;
+        control.checkpoint()?;
+        if self.read_reopen_required {
+            return Err(Error::new(
+                "E_STORAGE_REOPEN_REQUIRED",
+                "the durable effect was committed but no matching read view is available; reopen the database before reading",
+            ));
+        }
+        if let Some(expected) = expected_schema
+            && expected != &self.committed.db.schema_info()
+        {
+            return Err(Error::new(
+                "E_SCHEMA_CHANGED",
+                format!(
+                    "request expects schema revision {} ({}) but the database is at revision {} ({})",
+                    expected.revision,
+                    expected.hash,
+                    self.committed.db.schema_info().revision,
+                    self.committed.db.schema_info().hash
+                ),
+            ));
+        }
+        crate::params::bind(&mut statements, &parameters)?;
+        control.checkpoint()?;
+        if statements.len() != 1 || statements[0].statement.is_mutating() {
+            return Err(Error::new(
+                "E_STREAM_SHAPE",
+                "streaming requires exactly one read query",
+            ));
+        }
+        let located = statements.remove(0);
+        self.committed
+            .db
+            .execute_read_stream_from(
+                self.committed.source.as_ref(),
+                located.statement,
+                Some(control),
+                sink,
+            )
+            .map_err(|error| error.at(located.span))
     }
 
     /// Execute a structured bounded-page request through the same pipeline
@@ -1240,9 +1298,30 @@ impl Engine {
                 "writes are disabled after a storage failure; reopen the database to resolve the commit state",
             ));
         }
+        let bounded_mutation_source = (self.storage_mode == StorageMode::Redb
+            && self
+                .durable
+                .as_ref()
+                .is_some_and(|durable| durable.supports_bounded_row_mutation())
+            && statements.len() == 1
+            && !schema_changing
+            && matches!(
+                statements[0].statement,
+                Statement::Insert { .. }
+                    | Statement::InsertMany { .. }
+                    | Statement::Upsert { .. }
+                    | Statement::UpsertMany { .. }
+                    | Statement::Update { .. }
+                    | Statement::Delete { .. }
+            ))
+        .then(|| self.committed.source.clone());
         let candidate_started = mutating.then(std::time::Instant::now);
         let mut candidate = if mutating {
-            Some(self.mutable_candidate(deadline)?)
+            Some(if bounded_mutation_source.is_some() {
+                self.committed.db.metadata_only()?
+            } else {
+                self.mutable_candidate(deadline)?
+            })
         } else {
             None
         };
@@ -1250,7 +1329,12 @@ impl Engine {
         for located in statements {
             ensure_deadline(deadline)?;
             response = match candidate.as_mut() {
-                Some(target) => target.execute_with_deadline(located.statement, deadline),
+                Some(target) => match bounded_mutation_source.as_deref() {
+                    Some(source) => {
+                        target.execute_bounded_mutation_from(source, located.statement, deadline)
+                    }
+                    None => target.execute_with_deadline(located.statement, deadline),
+                },
                 None => self.committed.db.execute_read_from(
                     self.committed.source.as_ref(),
                     located.statement,
@@ -1613,7 +1697,7 @@ impl Engine {
                 "integrity check requires a database opened with Engine::open_redb",
             )
         })?;
-        let (backend_clean, database, receipts) = match durable.check_integrity() {
+        let (backend_clean, database, receipts, profile) = match durable.check_integrity() {
             Ok(result) => result,
             Err(error) => {
                 let (database, source) = durable.committed_view(&metadata)?;
@@ -1629,6 +1713,7 @@ impl Engine {
             backend_clean,
             schema: self.committed.db.schema_info(),
             versions,
+            profile,
         })
     }
 
@@ -1765,11 +1850,12 @@ impl Engine {
         }
     }
 
-    pub(crate) fn logical_snapshot(&self) -> Result<(Database, ReceiptMap)> {
-        Ok((
-            self.database_snapshot()?,
-            self.committed.receipts.as_ref().clone(),
-        ))
+    pub(crate) fn logical_backup_view(&self) -> (&Database, &dyn TypedRowSource, &ReceiptMap) {
+        (
+            self.committed.db.as_ref(),
+            self.committed.source.as_ref(),
+            self.committed.receipts.as_ref(),
+        )
     }
 
     pub(crate) fn restore_redb(
@@ -1942,7 +2028,7 @@ mod tests {
             }
         }
 
-        fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
+        fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
             unreachable!()
         }
 
@@ -1999,7 +2085,7 @@ mod tests {
             Ok(DurableCommitProfile::default())
         }
 
-        fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
+        fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
             unreachable!()
         }
 

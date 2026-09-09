@@ -51,6 +51,12 @@ struct PlannedIndexScan {
     reverse: bool,
 }
 
+#[derive(Default)]
+struct StreamingTakeState {
+    seen: usize,
+    emitted: usize,
+}
+
 #[derive(Clone)]
 struct IndexConstraint {
     column: String,
@@ -562,12 +568,14 @@ fn project_rows(
     columns: &[String],
 ) -> Vec<BTreeMap<String, Value>> {
     rows.into_iter()
-        .map(|row| {
-            columns
-                .iter()
-                .filter_map(|name| row_field(&row, name).map(|value| (name.clone(), value.clone())))
-                .collect()
-        })
+        .map(|row| project_row(row, columns))
+        .collect()
+}
+
+fn project_row(row: BTreeMap<String, Value>, columns: &[String]) -> BTreeMap<String, Value> {
+    columns
+        .iter()
+        .filter_map(|name| row_field(&row, name).map(|value| (name.clone(), value.clone())))
         .collect()
 }
 
@@ -607,6 +615,77 @@ fn check_materialized_rows(
         }
     }
     Ok(encoded)
+}
+
+fn check_streaming_row_bytes(
+    row: &BTreeMap<String, Value>,
+    resident_bytes: usize,
+    control: Option<&ExecutionControl>,
+) -> Result<usize> {
+    let row_bytes = materialized_row_size(row)?;
+    let total = resident_bytes.saturating_add(row_bytes);
+    if total > GENERAL_WORKING_MAX_BYTES {
+        return Err(Error::new(
+            "E_LIMIT",
+            format!("query working state exceeds {GENERAL_WORKING_MAX_BYTES} encoded bytes"),
+        ));
+    }
+    if let Some(limit) = control.and_then(ExecutionControl::materialized_bytes_limit)
+        && total > limit
+    {
+        return Err(Error::new(
+            "E_STREAM_LIMIT",
+            format!("stream materialized rows exceed {limit} encoded bytes"),
+        ));
+    }
+    Ok(row_bytes)
+}
+
+fn append_working_row(
+    rows: &mut Vec<BTreeMap<String, Value>>,
+    row: BTreeMap<String, Value>,
+    resident_bytes: usize,
+    control: Option<&ExecutionControl>,
+    observation: &mut ExecutionObservation,
+) -> Result<usize> {
+    if rows.len() == MAX_QUERY_WORKING_ROWS {
+        return Err(Error::new(
+            "E_LIMIT",
+            format!(
+                "query working rows exceed {MAX_QUERY_WORKING_ROWS}; add a selective filter or take"
+            ),
+        ));
+    }
+    let row_bytes = check_streaming_row_bytes(&row, resident_bytes, control)?;
+    let next = resident_bytes.saturating_add(row_bytes);
+    rows.push(row);
+    observation.observe_working_bytes(next);
+    Ok(next)
+}
+
+fn append_mutation_change(
+    changes: &mut Vec<RowChange>,
+    change: RowChange,
+    resident_bytes: usize,
+) -> Result<usize> {
+    let mut change_bytes = std::mem::size_of::<RowChange>();
+    if let Some(before) = &change.before {
+        change_bytes = change_bytes.saturating_add(materialized_row_size(&before.fields)?);
+    }
+    if let Some(after) = &change.after {
+        change_bytes = change_bytes.saturating_add(materialized_row_size(&after.fields)?);
+    }
+    let next = resident_bytes.saturating_add(change_bytes);
+    if next > GENERAL_WORKING_MAX_BYTES {
+        return Err(Error::new(
+            "E_LIMIT",
+            format!(
+                "mutation working state exceeds {GENERAL_WORKING_MAX_BYTES} encoded bytes; add a selective filter or take"
+            ),
+        ));
+    }
+    changes.push(change);
+    Ok(next)
 }
 
 fn materialized_row_size(row: &BTreeMap<String, Value>) -> Result<usize> {
@@ -928,6 +1007,11 @@ pub struct QueryResponse {
     /// part of the JSON/TCP response format.
     #[serde(skip)]
     pub execution: Option<ExecutionObservation>,
+}
+
+pub(crate) trait QueryRowSink {
+    fn begin(&mut self, columns: &[ResponseColumn], schema: &SchemaInfo) -> Result<()>;
+    fn row(&mut self, row: BTreeMap<String, Value>) -> Result<()>;
 }
 
 impl QueryResponse {
@@ -1352,6 +1436,73 @@ impl Database {
         }
     }
 
+    pub(crate) fn execute_read_stream_from(
+        &self,
+        source: &dyn TypedRowSource,
+        stmt: Statement,
+        control: Option<&ExecutionControl>,
+        sink: &mut dyn QueryRowSink,
+    ) -> Result<QueryResponse> {
+        match stmt {
+            Statement::Pipeline(pipeline) => {
+                self.query_from_output(source, pipeline, control, Some(sink))
+            }
+            _ => Err(Error::new(
+                "E_STREAM_SHAPE",
+                "streaming requires exactly one read query",
+            )),
+        }
+    }
+
+    pub(crate) fn execute_bounded_mutation_from(
+        &mut self,
+        source: &dyn TypedRowSource,
+        stmt: Statement,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        match stmt {
+            Statement::Insert {
+                table,
+                values,
+                returning,
+            } => self.insert_from_source(source, &table, values, returning.as_ref(), control),
+            Statement::InsertMany {
+                table,
+                values,
+                returning,
+            } => self.insert_many_from_source(source, &table, values, returning.as_ref(), control),
+            Statement::Upsert {
+                table,
+                values,
+                returning,
+            } => self.upsert_from_source(source, &table, values, returning.as_ref(), control),
+            Statement::UpsertMany {
+                table,
+                values,
+                returning,
+            } => self.upsert_many_from_source(source, &table, values, returning.as_ref(), control),
+            Statement::Update {
+                mut target,
+                mut assignments,
+                returning,
+            } => self.update_from_source(
+                source,
+                &mut target,
+                &mut assignments,
+                returning.as_ref(),
+                control,
+            ),
+            Statement::Delete {
+                mut target,
+                returning,
+            } => self.delete_from_source(source, &mut target, returning.as_ref(), control),
+            _ => Err(Error::new(
+                "E_INTERNAL",
+                "statement is not a bounded durable row mutation",
+            )),
+        }
+    }
+
     fn table(&self, name: &str) -> Result<&Table> {
         let Some(DbObject::Table(table)) = self.objects.get(name) else {
             return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
@@ -1648,6 +1799,108 @@ impl Database {
         Ok(response)
     }
 
+    fn insert_from_source(
+        &mut self,
+        source: &dyn TypedRowSource,
+        name: &str,
+        value: Value,
+        returning: Option<&Returning>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        self.insert_values_from_source(source, name, vec![value], returning, control, false)
+    }
+
+    fn insert_many_from_source(
+        &mut self,
+        source: &dyn TypedRowSource,
+        name: &str,
+        values: Value,
+        returning: Option<&Returning>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        let Value::List(values) = values else {
+            return Err(Error::new(
+                "E_TYPE",
+                "insert many requires a list of complete records",
+            ));
+        };
+        self.insert_values_from_source(source, name, values, returning, control, true)
+    }
+
+    fn insert_values_from_source(
+        &mut self,
+        source: &dyn TypedRowSource,
+        name: &str,
+        values: Vec<Value>,
+        returning: Option<&Returning>,
+        control: Option<&ExecutionControl>,
+        bulk: bool,
+    ) -> Result<QueryResponse> {
+        check_deadline(control)?;
+        if values.len() > MAX_BULK_INSERT_ROWS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "bulk insert contains {} rows; limit is {MAX_BULK_INSERT_ROWS}",
+                    values.len()
+                ),
+            ));
+        }
+        let returning = self.bind_returning(name, returning)?;
+        let first_row_id = self.table(name)?.next_row_id;
+        let count = u64::try_from(values.len())
+            .map_err(|_| Error::new("E_LIMIT", "bulk insert row count exceeds u64"))?;
+        let next_row_id = first_row_id
+            .checked_add(count)
+            .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
+        let mut changes = Vec::with_capacity(values.len());
+        let mut change_bytes = 0_usize;
+        for (position, value) in values.iter().enumerate() {
+            check_deadline_periodically(control, position)?;
+            let offset = u64::try_from(position)
+                .map_err(|_| Error::new("E_LIMIT", "bulk insert row count exceeds u64"))?;
+            change_bytes = append_mutation_change(
+                &mut changes,
+                RowChange::inserted(Arc::new(Row {
+                    id: first_row_id + offset,
+                    fields: self.coerce_row(
+                        name,
+                        value,
+                        if bulk { "insert many" } else { "insert" },
+                    )?,
+                })),
+                change_bytes,
+            )?;
+        }
+        self.validate_source_unique_changes(source, name, &changes, control)?;
+        let returned_fields = changes
+            .iter()
+            .filter_map(|change| change.after.as_ref().map(|row| &row.fields))
+            .collect::<Vec<_>>();
+        let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
+        let definitions = self
+            .index_definitions
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        self.record_row_changes(name, &changes);
+        self.record_index_changes(name, &definitions, &changes)?;
+        let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
+            unreachable!("insert table was bound")
+        };
+        table.next_row_id = next_row_id;
+        self.record_table_watermark(name, first_row_id, next_row_id);
+        let affected = values.len();
+        let mut response = QueryResponse::ok_message(if bulk {
+            format!("inserted {affected} rows into '{name}'")
+        } else {
+            format!("inserted into '{name}'")
+        });
+        response.affected_rows = Some(affected);
+        apply_returning(&mut response, returning, returned);
+        Ok(response)
+    }
+
     fn upsert(
         &mut self,
         name: &str,
@@ -1826,6 +2079,205 @@ impl Database {
         ));
         response.affected_rows = Some(actions.len());
         response.upsert_actions = actions;
+        apply_returning(&mut response, returning, returned);
+        Ok(response)
+    }
+
+    fn upsert_from_source(
+        &mut self,
+        source: &dyn TypedRowSource,
+        name: &str,
+        value: Value,
+        returning: Option<&Returning>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        self.upsert_values_from_source(source, name, vec![value], returning, control, false)
+    }
+
+    fn upsert_many_from_source(
+        &mut self,
+        source: &dyn TypedRowSource,
+        name: &str,
+        values: Value,
+        returning: Option<&Returning>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        let Value::List(values) = values else {
+            return Err(Error::new(
+                "E_TYPE",
+                "upsert many requires a list of complete records",
+            ));
+        };
+        self.upsert_values_from_source(source, name, values, returning, control, true)
+    }
+
+    fn upsert_values_from_source(
+        &mut self,
+        source: &dyn TypedRowSource,
+        name: &str,
+        values: Vec<Value>,
+        returning: Option<&Returning>,
+        control: Option<&ExecutionControl>,
+        bulk: bool,
+    ) -> Result<QueryResponse> {
+        check_deadline(control)?;
+        if values.len() > MAX_BULK_INSERT_ROWS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "bulk upsert contains {} rows; limit is {MAX_BULK_INSERT_ROWS}",
+                    values.len()
+                ),
+            ));
+        }
+        let returning = self.bind_returning(name, returning)?;
+        let table = self.table(name)?;
+        let primary_key = table.primary_key.clone().ok_or_else(|| {
+            Error::new(
+                "E_CONSTRAINT",
+                format!(
+                    "{} requires a primary key on table '{name}'",
+                    if bulk { "upsert many" } else { "upsert" }
+                ),
+            )
+        })?;
+        let initial_next_row_id = table.next_row_id;
+        let mut next_row_id = initial_next_row_id;
+        let mut batch_keys = BTreeSet::new();
+        let mut changes = Vec::with_capacity(values.len());
+        let mut actions = Vec::with_capacity(values.len());
+        let mut observation = ExecutionObservation::default();
+        let mut change_bytes = 0_usize;
+        let mut batch_key_bytes = 0_usize;
+        for (position, value) in values.iter().enumerate() {
+            check_deadline_periodically(control, position)?;
+            let fields =
+                self.coerce_row(name, value, if bulk { "upsert many" } else { "upsert" })?;
+            let key_value = row_field(&fields, &primary_key)
+                .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{primary_key}'")))?;
+            let boundary = self.single_index_key(name, &primary_key, key_value)?;
+            batch_key_bytes = batch_key_bytes.saturating_add(boundary.len());
+            if batch_key_bytes.saturating_add(change_bytes) > GENERAL_WORKING_MAX_BYTES {
+                return Err(Error::new(
+                    "E_LIMIT",
+                    format!(
+                        "mutation working state exceeds {GENERAL_WORKING_MAX_BYTES} encoded bytes; reduce the batch size"
+                    ),
+                ));
+            }
+            if !batch_keys.insert(boundary.clone()) {
+                return Err(Error::new(
+                    "E_CONSTRAINT",
+                    format!("duplicate primary key in bulk upsert '{name}.{primary_key}'"),
+                ));
+            }
+            let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
+            let mut cursor = source.scan_index(name, &primary_key, &bounds, false, Some(2))?;
+            let mut existing = None;
+            while let Some(hits) = cursor.next_batch(control)? {
+                observation.batches = observation.batches.saturating_add(1);
+                for hit in hits {
+                    observation.index_entries_examined =
+                        observation.index_entries_examined.saturating_add(1);
+                    if existing.replace(hit.row_id).is_some() {
+                        return Err(Error::new(
+                            "E_STORAGE",
+                            format!(
+                                "primary-key index for '{name}.{primary_key}' contains duplicate values"
+                            ),
+                        ));
+                    }
+                }
+            }
+            if let Some(id) = existing {
+                let before = source
+                    .get_row(name, id, control, &mut observation)?
+                    .ok_or_else(|| {
+                        Error::new(
+                            "E_STORAGE",
+                            format!(
+                                "primary-key index for '{name}.{primary_key}' references a missing row"
+                            ),
+                        )
+                    })?;
+                change_bytes = append_mutation_change(
+                    &mut changes,
+                    RowChange::updated(before, Arc::new(Row { id, fields })),
+                    change_bytes,
+                )?;
+                if batch_key_bytes.saturating_add(change_bytes) > GENERAL_WORKING_MAX_BYTES {
+                    return Err(Error::new(
+                        "E_LIMIT",
+                        format!(
+                            "mutation working state exceeds {GENERAL_WORKING_MAX_BYTES} encoded bytes; reduce the batch size"
+                        ),
+                    ));
+                }
+                actions.push(UpsertAction::Updated);
+            } else {
+                let id = next_row_id;
+                next_row_id = next_row_id
+                    .checked_add(1)
+                    .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
+                change_bytes = append_mutation_change(
+                    &mut changes,
+                    RowChange::inserted(Arc::new(Row { id, fields })),
+                    change_bytes,
+                )?;
+                if batch_key_bytes.saturating_add(change_bytes) > GENERAL_WORKING_MAX_BYTES {
+                    return Err(Error::new(
+                        "E_LIMIT",
+                        format!(
+                            "mutation working state exceeds {GENERAL_WORKING_MAX_BYTES} encoded bytes; reduce the batch size"
+                        ),
+                    ));
+                }
+                actions.push(UpsertAction::Inserted);
+            }
+        }
+        observation.observe_working_bytes(change_bytes.saturating_add(batch_key_bytes));
+        self.validate_source_unique_changes(source, name, &changes, control)?;
+        let returned_fields = changes
+            .iter()
+            .filter_map(|change| change.after.as_ref().map(|row| &row.fields))
+            .collect::<Vec<_>>();
+        let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
+        let definitions = self
+            .index_definitions
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        self.record_row_changes(name, &changes);
+        self.record_index_changes(name, &definitions, &changes)?;
+        let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
+            unreachable!("upsert table was bound")
+        };
+        table.next_row_id = next_row_id;
+        self.record_table_watermark(name, initial_next_row_id, next_row_id);
+        let inserted = actions
+            .iter()
+            .filter(|action| **action == UpsertAction::Inserted)
+            .count();
+        let updated = actions.len().saturating_sub(inserted);
+        let mut response = if bulk {
+            QueryResponse::ok_message(format!(
+                "upserted {} rows in '{name}' ({inserted} inserted, {updated} updated)",
+                actions.len()
+            ))
+        } else {
+            QueryResponse::ok_message(match actions.first() {
+                Some(UpsertAction::Inserted) => format!("inserted one row into '{name}'"),
+                Some(UpsertAction::Updated) => format!("updated one row in '{name}'"),
+                None => unreachable!("single upsert contains one row"),
+            })
+        };
+        response.affected_rows = Some(actions.len());
+        response.execution = Some(observation);
+        if bulk {
+            response.upsert_actions = actions;
+        } else {
+            response.upsert_action = actions.first().copied();
+        }
         apply_returning(&mut response, returning, returned);
         Ok(response)
     }
@@ -2061,6 +2513,170 @@ impl Database {
         Ok(response)
     }
 
+    fn update_from_source(
+        &mut self,
+        source: &dyn TypedRowSource,
+        target: &mut Pipeline,
+        assignments: &mut [SetAssignment],
+        returning: Option<&Returning>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        let returning = self.bind_returning(&target.from, returning)?;
+        let (schema, row_type) = self.bind_update_operation(target, assignments)?;
+        let (target_order, mut execution) =
+            self.mutation_target_ids_from(source, target, control)?;
+        let mut changes = Vec::with_capacity(target_order.len());
+        let mut evaluation_budget = crate::expression::EvaluationBudget::new();
+        let mut change_bytes = target_order
+            .len()
+            .saturating_mul(std::mem::size_of::<RowId>());
+        for (position, id) in target_order.iter().copied().enumerate() {
+            check_deadline_periodically(control, position)?;
+            let before = source
+                .get_row(&target.from, id, control, &mut execution)?
+                .ok_or_else(|| {
+                    Error::new(
+                        "E_STORAGE",
+                        format!("mutation target references missing row ID {id}"),
+                    )
+                })?;
+            let original = before.fields.clone();
+            let mut values = Vec::with_capacity(assignments.len());
+            for assignment in assignments.iter() {
+                let expected = self.catalog.field_type(&schema, &assignment.path)?.clone();
+                let value = match &assignment.value {
+                    SetValue::Expression(value) => crate::expression::evaluate_derive(
+                        &self.catalog,
+                        value,
+                        |path| row_field(&original, path),
+                        &mut evaluation_budget,
+                    )?,
+                    SetValue::Match(value) => crate::matching::evaluate_assignment(
+                        &self.catalog,
+                        &original,
+                        value,
+                        &mut evaluation_budget,
+                    )?,
+                };
+                values.push((
+                    assignment.path.as_str(),
+                    self.catalog.coerce(&value, &expected, "update value")?,
+                ));
+            }
+            let mut fields = original;
+            for (path, value) in values {
+                set_row_field(&mut fields, path, value)?;
+            }
+            let checked = self
+                .catalog
+                .coerce(&Value::Record(fields), &row_type, "updated row")?;
+            let Value::Record(fields) = checked.unwrapped() else {
+                unreachable!()
+            };
+            change_bytes = append_mutation_change(
+                &mut changes,
+                RowChange::updated(
+                    before,
+                    Arc::new(Row {
+                        id,
+                        fields: fields.clone(),
+                    }),
+                ),
+                change_bytes,
+            )?;
+            execution.observe_working_bytes(change_bytes);
+        }
+        self.validate_source_unique_changes(source, &target.from, &changes, control)?;
+        let returned_fields = changes
+            .iter()
+            .filter_map(|change| change.after.as_ref().map(|row| &row.fields))
+            .collect::<Vec<_>>();
+        let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
+        let definitions = self
+            .index_definitions
+            .get(&target.from)
+            .cloned()
+            .unwrap_or_default();
+        self.record_row_changes(&target.from, &changes);
+        self.record_index_changes(&target.from, &definitions, &changes)?;
+        let affected = changes.len();
+        let mut response =
+            QueryResponse::ok_message(format!("updated {affected} row(s) in '{}'", target.from));
+        response.affected_rows = Some(affected);
+        response.execution = Some(execution);
+        apply_returning(&mut response, returning, returned);
+        Ok(response)
+    }
+
+    fn validate_source_unique_changes(
+        &self,
+        source: &dyn TypedRowSource,
+        table_name: &str,
+        changes: &[RowChange],
+        control: Option<&ExecutionControl>,
+    ) -> Result<()> {
+        let table = self.table(table_name)?;
+        let definitions = self
+            .index_definitions
+            .get(table_name)
+            .cloned()
+            .unwrap_or_default();
+        let targets = changes
+            .iter()
+            .map(RowChange::row_id)
+            .collect::<BTreeSet<_>>();
+        for definition in definitions.values().filter(|definition| {
+            definition.kind.is_unique() || definition.is_primary_index(table.primary_key.as_deref())
+        }) {
+            let components = definition.effective_components();
+            let mut changed_values = BTreeMap::<Vec<u8>, RowId>::new();
+            for change in changes {
+                let Some(after) = change.after.as_ref() else {
+                    continue;
+                };
+                let boundary = self.index_tuple_key(table_name, &components, &after.fields)?;
+                if changed_values.insert(boundary.clone(), after.id).is_some() {
+                    return Err(Error::new(
+                        "E_CONSTRAINT",
+                        if definition.is_primary_index(table.primary_key.as_deref()) {
+                            format!(
+                                "duplicate primary key '{table_name}.{}'",
+                                table.primary_key.as_deref().unwrap_or_default()
+                            )
+                        } else {
+                            format!(
+                                "duplicate value for unique index '{table_name} ({})'",
+                                definition.display_shape()
+                            )
+                        },
+                    ));
+                }
+                let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
+                let mut cursor =
+                    source.scan_index(table_name, &definition.shape_key(), &bounds, false, None)?;
+                while let Some(hits) = cursor.next_batch(control)? {
+                    if hits.iter().any(|hit| !targets.contains(&hit.row_id)) {
+                        return Err(Error::new(
+                            "E_CONSTRAINT",
+                            if definition.is_primary_index(table.primary_key.as_deref()) {
+                                format!(
+                                    "duplicate primary key '{table_name}.{}'",
+                                    table.primary_key.as_deref().unwrap_or_default()
+                                )
+                            } else {
+                                format!(
+                                    "duplicate value for unique index '{table_name} ({})'",
+                                    definition.display_shape()
+                                )
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn bind_update_operation(
         &self,
         target: &mut Pipeline,
@@ -2154,6 +2770,56 @@ impl Database {
             rows.remove(position);
         }
         self.replace_rows_and_indexes(&target.from, rows, &changes)?;
+        let affected = changes.len();
+        let mut response =
+            QueryResponse::ok_message(format!("deleted {affected} row(s) from '{}'", target.from));
+        response.affected_rows = Some(affected);
+        response.execution = Some(execution);
+        apply_returning(&mut response, returning, returned);
+        Ok(response)
+    }
+
+    fn delete_from_source(
+        &mut self,
+        source: &dyn TypedRowSource,
+        target: &mut Pipeline,
+        returning: Option<&Returning>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        let returning = self.bind_returning(&target.from, returning)?;
+        self.bind_delete_operation(target)?;
+        let (target_order, mut execution) =
+            self.mutation_target_ids_from(source, target, control)?;
+        let mut changes = Vec::with_capacity(target_order.len());
+        let mut change_bytes = target_order
+            .len()
+            .saturating_mul(std::mem::size_of::<RowId>());
+        for (position, id) in target_order.iter().copied().enumerate() {
+            check_deadline_periodically(control, position)?;
+            let before = source
+                .get_row(&target.from, id, control, &mut execution)?
+                .ok_or_else(|| {
+                    Error::new(
+                        "E_STORAGE",
+                        format!("mutation target references missing row ID {id}"),
+                    )
+                })?;
+            change_bytes =
+                append_mutation_change(&mut changes, RowChange::deleted(before), change_bytes)?;
+            execution.observe_working_bytes(change_bytes);
+        }
+        let returned_fields = changes
+            .iter()
+            .filter_map(|change| change.before.as_ref().map(|row| &row.fields))
+            .collect::<Vec<_>>();
+        let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
+        let definitions = self
+            .index_definitions
+            .get(&target.from)
+            .cloned()
+            .unwrap_or_default();
+        self.record_row_changes(&target.from, &changes);
+        self.record_index_changes(&target.from, &definitions, &changes)?;
         let affected = changes.len();
         let mut response =
             QueryResponse::ok_message(format!("deleted {affected} row(s) from '{}'", target.from));
@@ -2314,25 +2980,107 @@ impl Database {
         target: &Pipeline,
         control: Option<&ExecutionControl>,
     ) -> Result<(Vec<RowId>, ExecutionObservation)> {
-        check_deadline(control)?;
         let source = CandidateRowSource::new(self);
+        self.mutation_target_ids_from(&source, target, control)
+    }
+
+    fn mutation_target_ids_from(
+        &self,
+        source: &dyn TypedRowSource,
+        target: &Pipeline,
+        control: Option<&ExecutionControl>,
+    ) -> Result<(Vec<RowId>, ExecutionObservation)> {
+        check_deadline(control)?;
         let stats = source.table_stats(&target.from)?;
-        let access = self.plan_access(&source, target, None, false)?;
+        let access = self.plan_access(source, target, None, false)?;
         let mut observation = ExecutionObservation::default();
         let candidates = self.materialize_access_candidates(
-            &source,
+            source,
             target,
             None,
             &access,
             control,
             &mut observation,
         )?;
+        if candidates
+            .as_ref()
+            .is_some_and(|ids| ids.len() > MAX_QUERY_WORKING_ROWS)
+        {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "mutation index candidates exceed {MAX_QUERY_WORKING_ROWS} working rows; add a selective indexed filter"
+                ),
+            ));
+        }
+        let blocking_sort = target.stages.iter().enumerate().any(|(position, stage)| {
+            matches!(stage, Stage::Sort(_)) && access.ordered_sort != Some(position)
+        });
+        if !blocking_sort {
+            let mut selected = Vec::new();
+            let mut take_states = BTreeMap::<usize, StreamingTakeState>::new();
+            let mut evaluation_budget = crate::expression::EvaluationBudget::new();
+            let mut visit = |row: Arc<Row>,
+                             observation: &mut ExecutionObservation|
+             -> Result<bool> {
+                let id = row.id;
+                let (row, exhausted) = self.apply_streaming_prefix(
+                    row.fields.clone(),
+                    &target.stages,
+                    &mut take_states,
+                    &mut evaluation_budget,
+                    selected.len().saturating_mul(std::mem::size_of::<RowId>()),
+                    control,
+                )?;
+                if row.is_some() {
+                    if selected.len() == MAX_QUERY_WORKING_ROWS {
+                        return Err(Error::new(
+                            "E_LIMIT",
+                            format!(
+                                "mutation target exceeds {MAX_QUERY_WORKING_ROWS} working rows; add a selective filter or take"
+                            ),
+                        ));
+                    }
+                    selected.push(id);
+                    observation.observe_working_bytes(
+                        selected.len().saturating_mul(std::mem::size_of::<RowId>()),
+                    );
+                }
+                Ok(exhausted)
+            };
+            match candidates {
+                Some(ids) => {
+                    for id in ids {
+                        if let Some(row) =
+                            source.get_row(&target.from, id, control, &mut observation)?
+                            && visit(row, &mut observation)?
+                        {
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    let mut cursor = source.scan_rows(&target.from)?;
+                    'batches: while let Some(batch) =
+                        cursor.next_batch(control, &mut observation)?
+                    {
+                        observation.observe_working_bytes(batch.encoded_bytes);
+                        for row in batch.rows {
+                            if visit(row, &mut observation)? {
+                                break 'batches;
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok((selected, observation));
+        }
         let working_rows = candidates.as_ref().map_or(stats.rows, std::vec::Vec::len);
         if working_rows > MAX_QUERY_WORKING_ROWS {
             return Err(Error::new(
                 "E_LIMIT",
                 format!(
-                    "mutation needs {working_rows} working rows; limit is {MAX_QUERY_WORKING_ROWS}; add a selective indexed filter"
+                    "mutation sort needs {working_rows} working rows; limit is {MAX_QUERY_WORKING_ROWS}; add a selective indexed filter"
                 ),
             ));
         }
@@ -2870,46 +3618,77 @@ impl Database {
         aggregate: &Aggregate,
         control: Option<&ExecutionControl>,
     ) -> Result<Vec<BTreeMap<String, Value>>> {
-        let mut groups: BTreeMap<Vec<String>, GroupAccumulator> = BTreeMap::new();
+        let mut groups = Self::new_aggregate_groups(aggregate);
         let mut working_bytes = 0usize;
+        for (position, row) in rows.iter().enumerate() {
+            check_deadline_periodically(control, position)?;
+            self.aggregate_one_row(&mut groups, &mut working_bytes, row, aggregate)?;
+        }
+        self.finish_aggregate_groups(groups, aggregate, control)
+    }
+
+    fn new_aggregate_groups(aggregate: &Aggregate) -> BTreeMap<Vec<String>, GroupAccumulator> {
+        let mut groups = BTreeMap::new();
         if aggregate.group_by.is_empty() {
             groups.insert(
                 Vec::new(),
                 GroupAccumulator::new(Vec::new(), &aggregate.assignments),
             );
         }
-        for (position, row) in rows.iter().enumerate() {
-            check_deadline_periodically(control, position)?;
-            let mut key = Vec::with_capacity(aggregate.group_by.len());
-            let mut values = Vec::with_capacity(aggregate.group_by.len());
-            for path in &aggregate.group_by {
-                let value = row_field(row, path).ok_or_else(|| {
-                    Error::new(
-                        "E_FIELD",
-                        format!("missing group field '{path}' during execution"),
-                    )
-                })?;
-                key.push(value.index_key());
-                values.push((path.clone(), value.clone()));
-            }
-            let next_group_count = groups.len().saturating_add(1);
-            if !groups.contains_key(&key) {
-                let group_bytes = key
-                    .iter()
-                    .map(String::len)
-                    .sum::<usize>()
-                    .saturating_mul(2)
-                    .saturating_add(aggregate.assignments.len().saturating_mul(32));
-                working_bytes = working_bytes.saturating_add(group_bytes);
-                check_group_limits(next_group_count, aggregate.assignments.len(), working_bytes)?;
-                groups.insert(
-                    key.clone(),
-                    GroupAccumulator::new(values, &aggregate.assignments),
-                );
-            }
-            let group = groups.get_mut(&key).expect("group was initialized");
-            group.update(&self.catalog, row, &aggregate.assignments)?;
+        groups
+    }
+
+    fn aggregate_one_row(
+        &self,
+        groups: &mut BTreeMap<Vec<String>, GroupAccumulator>,
+        working_bytes: &mut usize,
+        row: &BTreeMap<String, Value>,
+        aggregate: &Aggregate,
+    ) -> Result<()> {
+        let mut key = Vec::with_capacity(aggregate.group_by.len());
+        let mut values = Vec::with_capacity(aggregate.group_by.len());
+        for path in &aggregate.group_by {
+            let value = row_field(row, path).ok_or_else(|| {
+                Error::new(
+                    "E_FIELD",
+                    format!("missing group field '{path}' during execution"),
+                )
+            })?;
+            key.push(value.index_key());
+            values.push((path.clone(), value.clone()));
         }
+        let next_group_count = groups.len().saturating_add(1);
+        if !groups.contains_key(&key) {
+            let group_bytes = key
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                .saturating_mul(2)
+                .saturating_add(aggregate.assignments.len().saturating_mul(32));
+            *working_bytes = working_bytes.saturating_add(group_bytes);
+            check_group_limits(
+                next_group_count,
+                aggregate.assignments.len(),
+                *working_bytes,
+            )?;
+            groups.insert(
+                key.clone(),
+                GroupAccumulator::new(values, &aggregate.assignments),
+            );
+        }
+        groups.get_mut(&key).expect("group was initialized").update(
+            &self.catalog,
+            row,
+            &aggregate.assignments,
+        )
+    }
+
+    fn finish_aggregate_groups(
+        &self,
+        groups: BTreeMap<Vec<String>, GroupAccumulator>,
+        aggregate: &Aggregate,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Vec<BTreeMap<String, Value>>> {
         let mut output = Vec::with_capacity(groups.len());
         for (position, (_, group)) in groups.into_iter().enumerate() {
             check_deadline_periodically(control, position)?;
@@ -3814,8 +4593,18 @@ impl Database {
     fn query_from(
         &self,
         source: &dyn TypedRowSource,
+        pipeline: Pipeline,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        self.query_from_output(source, pipeline, control, None)
+    }
+
+    fn query_from_output(
+        &self,
+        source: &dyn TypedRowSource,
         mut pipeline: Pipeline,
         control: Option<&ExecutionControl>,
+        mut sink: Option<&mut dyn QueryRowSink>,
     ) -> Result<QueryResponse> {
         check_deadline(control)?;
         let schema = self.prepare_pipeline(&mut pipeline)?;
@@ -3831,10 +4620,11 @@ impl Database {
             control,
             &mut observation,
         )?;
-        let working_rows = candidates
-            .as_ref()
-            .map(std::vec::Vec::len)
-            .or_else(|| stats.rows_exact.then_some(stats.rows));
+        // Index candidates are resident state today. A table scan is already
+        // a bounded source cursor, so its durable cardinality is not itself a
+        // working-row count: row-local stages can discard source rows before
+        // they enter blocking or result state.
+        let working_rows = candidates.as_ref().map(std::vec::Vec::len);
         if working_rows.is_some_and(|rows| rows > MAX_QUERY_WORKING_ROWS) {
             return Err(Error::new(
                 "E_LIMIT",
@@ -3844,77 +4634,173 @@ impl Database {
                 ),
             ));
         }
-        let materialized_limit = control.and_then(ExecutionControl::materialized_bytes_limit);
-        let mut materialized_bytes = 0_usize;
-        let mut rows = match candidates {
+        let final_sort = pipeline
+            .stages
+            .iter()
+            .rposition(|stage| matches!(stage, Stage::Sort(_)));
+        let streaming_end = pipeline
+            .stages
+            .iter()
+            .enumerate()
+            .position(|(position, stage)| match stage {
+                Stage::Aggregate(_) | Stage::Page(_) => true,
+                Stage::Sort(_) => access.ordered_sort != Some(position),
+                Stage::Select(_) => {
+                    prepared_page.is_some() && final_sort.is_some_and(|sort| position > sort)
+                }
+                Stage::Let(_)
+                | Stage::Filter(_)
+                | Stage::FilterMatch(_)
+                | Stage::Derive(_)
+                | Stage::DeriveMatch(_)
+                | Stage::Take { .. } => false,
+            })
+            .unwrap_or(pipeline.stages.len());
+        let response_columns = schema
+            .iter()
+            .map(|column| ResponseColumn {
+                name: column.name.clone(),
+                ty: self.catalog.describe(&column.ty),
+            })
+            .collect::<Vec<_>>();
+        if let Some(output) = sink.as_deref_mut() {
+            output.begin(&response_columns, &self.schema_info())?;
+        }
+        let direct_output = sink.is_some() && streaming_end == pipeline.stages.len();
+        let streaming_aggregate = match pipeline.stages.get(streaming_end) {
+            Some(Stage::Aggregate(aggregate)) => Some(aggregate.clone()),
+            _ => None,
+        };
+        let mut aggregate_groups = streaming_aggregate.as_ref().map(Self::new_aggregate_groups);
+        let mut aggregate_working_bytes = 0_usize;
+        let mut output_rows = 0_usize;
+        let mut evaluation_budget = crate::expression::EvaluationBudget::new();
+        let mut take_states = BTreeMap::<usize, StreamingTakeState>::new();
+        let mut rows = Vec::with_capacity(
+            candidates
+                .as_ref()
+                .map_or(stats.rows.min(SOURCE_BATCH_MAX_ROWS), Vec::len),
+        );
+        let mut working_bytes = 0_usize;
+        let mut source_exhausted = false;
+        match candidates {
             Some(ids) => {
-                let mut rows = Vec::with_capacity(ids.len());
                 for (position, id) in ids.into_iter().enumerate() {
                     check_deadline_periodically(control, position)?;
                     if let Some(row) =
                         source.get_row(&pipeline.from, id, control, &mut observation)?
                     {
-                        if let Some(limit) = materialized_limit {
-                            materialized_bytes = materialized_bytes
-                                .saturating_add(materialized_row_size(&row.fields)?);
-                            if materialized_bytes > limit {
-                                return Err(Error::new(
-                                    "E_STREAM_LIMIT",
-                                    format!(
-                                        "stream materialized rows exceed {limit} encoded bytes"
-                                    ),
-                                ));
+                        let (row, exhausted) = self.apply_streaming_prefix(
+                            row.fields.clone(),
+                            &pipeline.stages[..streaming_end],
+                            &mut take_states,
+                            &mut evaluation_budget,
+                            working_bytes,
+                            control,
+                        )?;
+                        if let Some(row) = row {
+                            if let (Some(aggregate), Some(groups)) =
+                                (&streaming_aggregate, aggregate_groups.as_mut())
+                            {
+                                self.aggregate_one_row(
+                                    groups,
+                                    &mut aggregate_working_bytes,
+                                    &row,
+                                    aggregate,
+                                )?;
+                                observation.observe_working_bytes(aggregate_working_bytes);
+                            } else if direct_output {
+                                sink.as_deref_mut()
+                                    .expect("direct output has a row sink")
+                                    .row(row)?;
+                                output_rows = output_rows.saturating_add(1);
+                            } else {
+                                working_bytes = append_working_row(
+                                    &mut rows,
+                                    row,
+                                    working_bytes,
+                                    control,
+                                    &mut observation,
+                                )?;
                             }
                         }
-                        rows.push(row.fields.clone());
+                        if exhausted {
+                            break;
+                        }
                     }
                 }
-                rows
             }
             None => {
-                let mut rows = Vec::with_capacity(stats.rows.min(SOURCE_BATCH_MAX_ROWS));
                 let mut cursor = source.scan_rows(&pipeline.from)?;
                 let mut position = 0_usize;
-                while let Some(batch) = cursor.next_batch(control, &mut observation)? {
+                while !source_exhausted
+                    && let Some(batch) = cursor.next_batch(control, &mut observation)?
+                {
                     observation.observe_working_bytes(batch.encoded_bytes);
                     for row in batch.rows {
                         check_deadline_periodically(control, position)?;
-                        if position == MAX_QUERY_WORKING_ROWS {
-                            return Err(Error::new(
-                                "E_LIMIT",
-                                format!(
-                                    "query working rows exceed {MAX_QUERY_WORKING_ROWS}; add a selective indexed filter"
-                                ),
-                            ));
-                        }
                         position = position.saturating_add(1);
-                        if let Some(limit) = materialized_limit {
-                            materialized_bytes = materialized_bytes
-                                .saturating_add(materialized_row_size(&row.fields)?);
-                            if materialized_bytes > limit {
-                                return Err(Error::new(
-                                    "E_STREAM_LIMIT",
-                                    format!(
-                                        "stream materialized rows exceed {limit} encoded bytes"
-                                    ),
-                                ));
+                        let (row, exhausted) = self.apply_streaming_prefix(
+                            row.fields.clone(),
+                            &pipeline.stages[..streaming_end],
+                            &mut take_states,
+                            &mut evaluation_budget,
+                            working_bytes,
+                            control,
+                        )?;
+                        if let Some(row) = row {
+                            if let (Some(aggregate), Some(groups)) =
+                                (&streaming_aggregate, aggregate_groups.as_mut())
+                            {
+                                self.aggregate_one_row(
+                                    groups,
+                                    &mut aggregate_working_bytes,
+                                    &row,
+                                    aggregate,
+                                )?;
+                                observation.observe_working_bytes(aggregate_working_bytes);
+                            } else if direct_output {
+                                sink.as_deref_mut()
+                                    .expect("direct output has a row sink")
+                                    .row(row)?;
+                                output_rows = output_rows.saturating_add(1);
+                            } else {
+                                working_bytes = append_working_row(
+                                    &mut rows,
+                                    row,
+                                    working_bytes,
+                                    control,
+                                    &mut observation,
+                                )?;
                             }
                         }
-                        rows.push(row.fields.clone());
+                        if exhausted {
+                            source_exhausted = true;
+                            break;
+                        }
                     }
                 }
-                rows
             }
+        }
+        let remaining_start = if let (Some(aggregate), Some(groups)) =
+            (&streaming_aggregate, aggregate_groups.take())
+        {
+            rows = self.finish_aggregate_groups(groups, aggregate, control)?;
+            working_bytes = check_materialized_rows(&rows, control)?;
+            observation.observe_working_bytes(working_bytes);
+            streaming_end.saturating_add(1)
+        } else {
+            streaming_end
         };
-        let mut evaluation_budget = crate::expression::EvaluationBudget::new();
         observation.observe_working_bytes(check_materialized_rows(&rows, control)?);
         let mut deferred_selects = Vec::new();
         let mut page_info = None;
-        let final_sort = pipeline
+        for (stage_position, stage) in pipeline
             .stages
-            .iter()
-            .rposition(|stage| matches!(stage, Stage::Sort(_)));
-        for (stage_position, stage) in pipeline.stages.into_iter().enumerate() {
+            .into_iter()
+            .enumerate()
+            .skip(remaining_start)
+        {
             match stage {
                 Stage::Let(_) => {}
                 Stage::Filter(expression) => {
@@ -4018,7 +4904,7 @@ impl Database {
             observation.observe_working_bytes(check_materialized_rows(&rows, control)?);
         }
         check_deadline(control)?;
-        if rows.len() > MAX_RESULT_ROWS {
+        if sink.is_none() && rows.len() > MAX_RESULT_ROWS {
             return Err(Error::new(
                 "E_LIMIT",
                 format!(
@@ -4027,17 +4913,25 @@ impl Database {
                 ),
             ));
         }
+        if let Some(output) = sink.as_deref_mut()
+            && !direct_output
+        {
+            for row in std::mem::take(&mut rows) {
+                check_deadline(control)?;
+                output.row(row)?;
+                output_rows = output_rows.saturating_add(1);
+            }
+        }
+        let row_count = if sink.is_some() {
+            output_rows
+        } else {
+            rows.len()
+        };
         Ok(QueryResponse {
             ok: true,
-            message: format!("{} row(s)", rows.len()),
+            message: format!("{row_count} row(s)"),
             rows,
-            columns: schema
-                .iter()
-                .map(|c| ResponseColumn {
-                    name: c.name.clone(),
-                    ty: self.catalog.describe(&c.ty),
-                })
-                .collect(),
+            columns: response_columns,
             error: None,
             warnings: Vec::new(),
             schema: None,
@@ -4048,6 +4942,93 @@ impl Database {
             page: page_info,
             execution: Some(observation),
         })
+    }
+
+    fn apply_streaming_prefix(
+        &self,
+        mut row: BTreeMap<String, Value>,
+        stages: &[Stage],
+        take_states: &mut BTreeMap<usize, StreamingTakeState>,
+        evaluation_budget: &mut crate::expression::EvaluationBudget,
+        resident_bytes: usize,
+        control: Option<&ExecutionControl>,
+    ) -> Result<(Option<BTreeMap<String, Value>>, bool)> {
+        let mut exhausted = false;
+        for (position, stage) in stages.iter().enumerate() {
+            check_deadline_periodically(control, position)?;
+            match stage {
+                Stage::Let(_) | Stage::Sort(_) => {}
+                Stage::Filter(expression) => {
+                    if !crate::expression::evaluate(
+                        &self.catalog,
+                        expression,
+                        |path| row_field(&row, path),
+                        evaluation_budget,
+                    )? {
+                        return Ok((None, exhausted));
+                    }
+                }
+                Stage::FilterMatch(predicate) => {
+                    if !crate::matching::evaluate(
+                        &self.catalog,
+                        &row,
+                        predicate,
+                        evaluation_budget,
+                    )? {
+                        return Ok((None, exhausted));
+                    }
+                }
+                Stage::DeriveMatch(derive) => {
+                    let value = crate::matching::evaluate_derive(
+                        &self.catalog,
+                        &row,
+                        derive,
+                        evaluation_budget,
+                    )?;
+                    row.insert(derive.name.clone(), value);
+                    check_streaming_row_bytes(&row, resident_bytes, control)?;
+                }
+                Stage::Derive(derive) => {
+                    let output_type = derive.output_type.as_ref().ok_or_else(|| {
+                        Error::new("E_TYPE", "derived expression has no bound output type")
+                    })?;
+                    let raw = crate::expression::evaluate_derive(
+                        &self.catalog,
+                        &derive.expression,
+                        |path| row_field(&row, path),
+                        evaluation_budget,
+                    )?;
+                    let value = self.catalog.coerce(
+                        &raw,
+                        output_type,
+                        &format!("derive '{}' result", derive.name),
+                    )?;
+                    row.insert(derive.name.clone(), value);
+                    check_streaming_row_bytes(&row, resident_bytes, control)?;
+                }
+                Stage::Select(columns) => {
+                    row = project_row(row, columns);
+                    check_streaming_row_bytes(&row, resident_bytes, control)?;
+                }
+                Stage::Take { offset, limit } => {
+                    let state = take_states.entry(position).or_default();
+                    if state.seen < *offset {
+                        state.seen = state.seen.saturating_add(1);
+                        return Ok((None, exhausted));
+                    }
+                    if state.emitted >= *limit {
+                        return Ok((None, true));
+                    }
+                    state.seen = state.seen.saturating_add(1);
+                    state.emitted = state.emitted.saturating_add(1);
+                    exhausted |= state.emitted == *limit;
+                }
+                Stage::Aggregate(_) | Stage::Page(_) => {
+                    unreachable!("blocking stages are excluded from the streaming prefix")
+                }
+            }
+        }
+        Ok((Some(row), exhausted))
     }
 
     fn orderable(&self, ty: &ScalarType) -> Result<bool> {
@@ -4702,6 +5683,15 @@ impl Database {
         let component_count = u8::try_from(definition.effective_components().len())
             .map_err(|_| Error::new("E_STORAGE", "stored index has too many components"))?;
         Ok((definition.id, component_count))
+    }
+
+    pub(crate) fn source_index_value(
+        &self,
+        table: &str,
+        definition: &IndexDefinition,
+        row: &Row,
+    ) -> Result<Value> {
+        index_value(&row.fields, &definition.effective_components(), table)
     }
 
     pub(crate) fn source_has_index(&self, table: &str, shape: &str) -> bool {
@@ -5692,6 +6682,27 @@ fn replace_or_append_column(schema: &mut Vec<Column>, column: Column) {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct CountingSink {
+        began: bool,
+        rows: usize,
+    }
+
+    impl QueryRowSink for CountingSink {
+        fn begin(&mut self, columns: &[ResponseColumn], _: &SchemaInfo) -> Result<()> {
+            assert_eq!(columns.len(), 1);
+            self.began = true;
+            Ok(())
+        }
+
+        fn row(&mut self, row: BTreeMap<String, Value>) -> Result<()> {
+            assert!(self.began);
+            assert!(row.contains_key("id"));
+            self.rows = self.rows.saturating_add(1);
+            Ok(())
+        }
+    }
+
     fn execute(database: &mut Database, source: &str) {
         for statement in crate::syntax::parse(source).unwrap() {
             database.execute(statement.statement).unwrap();
@@ -6053,6 +7064,120 @@ mod tests {
                 .get("execution")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn full_scan_fuses_row_local_stages_before_the_working_budget() {
+        let mut database = Database::default();
+        execute(&mut database, "create table entries (id int, payload text)");
+        let payload = "x".repeat(14 * 1024 * 1024);
+        let Some(DbObject::Table(entries)) = database.objects.get_mut("entries") else {
+            unreachable!()
+        };
+        for id in 0..5_u64 {
+            entries.rows.push_back(Arc::new(Row {
+                id,
+                fields: BTreeMap::from([
+                    ("id".into(), Value::Int(id as i64)),
+                    ("payload".into(), Value::Text(payload.clone())),
+                ]),
+            }));
+        }
+        entries.next_row_id = 5;
+
+        // The source contains about 70 MiB of values, but the filter and
+        // projection leave only one tiny working row. Each source batch still
+        // contains one legal large row and remains independently bounded.
+        let response = database
+            .execute(
+                crate::query::parse_statement("from entries | filter id == 4 | select id").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(response.rows[0].len(), 1);
+        assert!(response.rows[0]["id"].cmp_eq(&Value::Int(4)));
+        let observation = response.execution.unwrap();
+        assert_eq!(observation.rows_decoded, 5);
+        assert_eq!(observation.batches, 5);
+        assert!(observation.working_peak_bytes < GENERAL_WORKING_MAX_BYTES);
+
+        let aggregate = database
+            .execute(
+                crate::query::parse_statement("from entries | aggregate {rows = count}").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(aggregate.rows.len(), 1);
+        assert!(aggregate.rows[0]["rows"].cmp_eq(&Value::Int(5)));
+        assert!(aggregate.execution.unwrap().working_peak_bytes < GENERAL_WORKING_MAX_BYTES);
+
+        // A genuinely blocking sort must retain the large rows and therefore
+        // reports the working-state budget instead of growing without bound.
+        let error = database
+            .execute(crate::query::parse_statement("from entries | sort id").unwrap())
+            .unwrap_err();
+        assert_eq!(error.code, "E_LIMIT");
+        assert!(error.message.contains("working state"));
+    }
+
+    #[test]
+    fn stream_sink_pulls_rows_without_building_an_ordinary_result() {
+        let mut database = Database::default();
+        execute(&mut database, "create table entries (id int)");
+        let Some(DbObject::Table(entries)) = database.objects.get_mut("entries") else {
+            unreachable!()
+        };
+        for id in 0..=MAX_RESULT_ROWS as u64 {
+            entries.rows.push_back(Arc::new(Row {
+                id,
+                fields: BTreeMap::from([("id".into(), Value::Int(id as i64))]),
+            }));
+        }
+        entries.next_row_id = MAX_RESULT_ROWS as u64 + 1;
+
+        let statement = crate::query::parse_statement("from entries").unwrap();
+        let mut sink = CountingSink::default();
+        let response = database
+            .execute_read_stream_from(&database, statement, None, &mut sink)
+            .unwrap();
+        assert!(sink.began);
+        assert_eq!(sink.rows, MAX_RESULT_ROWS + 1);
+        assert!(response.rows.is_empty());
+        assert_eq!(response.message, "100001 row(s)");
+        assert_eq!(
+            response.execution.unwrap().batches,
+            (MAX_RESULT_ROWS + 1).div_ceil(SOURCE_BATCH_MAX_ROWS)
+        );
+    }
+
+    #[test]
+    fn bounded_mutation_rejects_an_oversized_change_set_atomically() {
+        let mut database = Database::default();
+        execute(&mut database, "create table entries (id int, payload text)");
+        let payload = "x".repeat(12 * 1024 * 1024);
+        let Some(DbObject::Table(entries)) = database.objects.get_mut("entries") else {
+            unreachable!()
+        };
+        for id in 0..3_u64 {
+            entries.rows.push_back(Arc::new(Row {
+                id,
+                fields: BTreeMap::from([
+                    ("id".into(), Value::Int(id as i64)),
+                    ("payload".into(), Value::Text(payload.clone())),
+                ]),
+            }));
+        }
+        entries.next_row_id = 3;
+
+        let mut candidate = database.metadata_only().unwrap();
+        let statement =
+            crate::query::parse_statement("update entries | set payload = payload").unwrap();
+        let error = candidate
+            .execute_bounded_mutation_from(&database, statement, None)
+            .unwrap_err();
+        assert_eq!(error.code, "E_LIMIT");
+        assert!(error.message.contains("mutation working state"));
+        assert!(candidate.take_write_set().rows.is_empty());
+        assert_eq!(database.table("entries").unwrap().rows.len(), 3);
     }
 
     #[test]

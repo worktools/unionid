@@ -51,7 +51,8 @@ pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVe
 pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
 pub use model::{RowId, Value};
 pub use profile::{
-    DurableCommitMode, DurableCommitProfile, ExecutionObservation, StorageOpenProfile,
+    DurableCommitMode, DurableCommitProfile, ExecutionObservation, StorageCheckProfile,
+    StorageOpenProfile,
 };
 pub use protocol::{
     IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,

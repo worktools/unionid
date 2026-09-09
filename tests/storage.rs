@@ -1593,6 +1593,34 @@ fn redb_rejects_secondary_indexes_that_do_not_match_rows() {
 }
 
 #[test]
+fn production_integrity_check_is_bounded_profiled_and_republishes_reads() {
+    let dir = TempDir::new();
+    let path = dir.0.join("bounded-check.redb");
+    let mut engine = Engine::open_redb(path).unwrap();
+    assert!(
+        engine
+            .execute(
+                "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ncreate unique index entries (label)\ninsert entries {id = 1, label = \"one\"}\ninsert entries {id = 2, label = \"two\"}"
+            )
+            .ok
+    );
+
+    let report = engine.check_integrity().unwrap();
+    assert!(report.backend_clean);
+    assert!(report.profile.bounded);
+    assert_eq!(report.profile.rows_checked, 2);
+    assert_eq!(report.profile.index_entries_checked, 4);
+    assert_eq!(report.profile.point_lookups, 8);
+    assert!(report.profile.row_bytes > 0);
+    assert!(report.profile.index_key_bytes > 0);
+    assert!(report.profile.working_peak_bytes < 1024 * 1024);
+
+    let response = engine.execute("from entries | sort id");
+    assert!(response.ok, "{:?}", response.error);
+    assert_eq!(response.rows.len(), 2);
+}
+
+#[test]
 fn bounded_indexed_read_rejects_a_missing_durable_row_on_demand() {
     let dir = TempDir::new();
     let path = dir.0.join("missing-indexed-row.redb");
