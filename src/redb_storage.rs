@@ -1,7 +1,9 @@
 //! Transactional redb storage for the durable Engine mode.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use redb::{
@@ -20,6 +22,11 @@ use crate::introspection::StorageVersions;
 use crate::migration::MigrationEntry;
 use crate::model::Value;
 use crate::profile::{DurableCommitMode, DurableCommitProfile, StorageOpenProfile};
+use crate::row_source::{
+    EncodedIndexBounds, IndexHit, IndexHitCursor, RowBatch, RowBatchCursor, SOURCE_BATCH_MAX_BYTES,
+    SOURCE_BATCH_MAX_ROWS, SourceIdentity, TableStats, TypedRowSource,
+};
+use crate::{ExecutionObservation, RowId};
 
 const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
 const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
@@ -78,6 +85,548 @@ const RECEIPT_MAGIC: &[u8; 4] = b"UIDR";
 pub(crate) struct RedbStore {
     database: RedbDatabase,
     committed: DurableHead,
+}
+
+type RedbOpen = (
+    RedbStore,
+    Arc<Database>,
+    ReceiptMap,
+    Arc<dyn TypedRowSource>,
+    StorageOpenProfile,
+);
+type BoundedViewLoad = (
+    Arc<Database>,
+    ReceiptMap,
+    DurableHead,
+    Arc<dyn TypedRowSource>,
+    StorageOpenProfile,
+);
+
+const SNAPSHOT_ROW_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+pub(crate) struct RedbReadSource {
+    transaction: redb::ReadTransaction,
+    metadata: Arc<Database>,
+    identity: SourceIdentity,
+    cache: Mutex<SnapshotRowCache>,
+}
+
+#[derive(Default)]
+struct SnapshotRowCache {
+    entries: BTreeMap<(u64, RowId), CachedRow>,
+    bytes: usize,
+    clock: u64,
+}
+
+struct CachedRow {
+    row: Arc<crate::model::Row>,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl SnapshotRowCache {
+    fn get(&mut self, key: (u64, RowId)) -> Option<Arc<crate::model::Row>> {
+        let entry = self.entries.get_mut(&key)?;
+        self.clock = self.clock.saturating_add(1);
+        entry.last_used = self.clock;
+        Some(entry.row.clone())
+    }
+
+    fn insert(&mut self, key: (u64, RowId), row: Arc<crate::model::Row>, bytes: usize) {
+        if bytes > SNAPSHOT_ROW_CACHE_MAX_BYTES {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+        }
+        while self.bytes.saturating_add(bytes) > SNAPSHOT_ROW_CACHE_MAX_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.bytes);
+            }
+        }
+        self.clock = self.clock.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.entries.insert(
+            key,
+            CachedRow {
+                row,
+                bytes,
+                last_used: self.clock,
+            },
+        );
+        debug_assert!(self.bytes <= SNAPSHOT_ROW_CACHE_MAX_BYTES);
+    }
+}
+
+impl RedbReadSource {
+    fn new(transaction: redb::ReadTransaction, metadata: Arc<Database>) -> Self {
+        let identity = SourceIdentity {
+            database_instance: metadata.durable_meta().cursor_instance_id,
+            generation: 0,
+            sequence: metadata.sequence,
+            schema_hash: metadata.schema_info().hash,
+        };
+        Self {
+            transaction,
+            metadata,
+            identity,
+            cache: Mutex::new(SnapshotRowCache::default()),
+        }
+    }
+}
+
+struct RedbRowCursor<'a> {
+    source: &'a RedbReadSource,
+    table: String,
+    table_id: u64,
+    lower: Bound<Vec<u8>>,
+    upper: Bound<Vec<u8>>,
+    done: bool,
+}
+
+struct RedbIndexCursor<'a> {
+    source: &'a RedbReadSource,
+    index_id: u64,
+    component_count: u8,
+    lower: Bound<Vec<u8>>,
+    upper: Bound<Vec<u8>>,
+    reverse: bool,
+    reverse_group: Option<ReverseIndexGroup>,
+    remaining: Option<usize>,
+    done: bool,
+}
+
+struct ReverseIndexGroup {
+    before: Vec<u8>,
+    lower: Bound<Vec<u8>>,
+    upper: Bound<Vec<u8>>,
+}
+
+impl TypedRowSource for RedbReadSource {
+    fn snapshot_identity(&self) -> SourceIdentity {
+        self.identity.clone()
+    }
+
+    fn table_stats(&self, table: &str) -> Result<TableStats> {
+        let (_, next_row_id, _) = self.metadata.source_table_info(table)?;
+        Ok(TableStats {
+            // Format 5 has no persisted live-row cardinality. The monotonic
+            // allocation cursor is a safe upper bound until format 6 adds a
+            // generation manifest with exact statistics.
+            rows: usize::try_from(next_row_id).unwrap_or(usize::MAX),
+            rows_exact: false,
+            next_row_id,
+        })
+    }
+
+    fn has_index(&self, table: &str, shape: &str) -> bool {
+        self.metadata.source_has_index(table, shape)
+    }
+
+    fn estimate_index_span(
+        &self,
+        table: &str,
+        _shape: &str,
+        _bounds: &EncodedIndexBounds,
+    ) -> Result<usize> {
+        // Exact format-5 span cardinality requires walking the durable range.
+        // Explain must remain decode-free, so use the allocation upper bound.
+        Ok(self.table_stats(table)?.rows)
+    }
+
+    fn get_row(
+        &self,
+        table: &str,
+        row_id: RowId,
+        control: Option<&crate::control::ExecutionControl>,
+        observation: &mut ExecutionObservation,
+    ) -> Result<Option<Arc<crate::model::Row>>> {
+        check_source_control(control)?;
+        let (table_id, _, _) = self.metadata.source_table_info(table)?;
+        let cache_key = (table_id, row_id);
+        if let Some(row) = self
+            .cache
+            .lock()
+            .map_err(|_| Error::new("E_STORAGE", "snapshot row cache lock is poisoned"))?
+            .get(cache_key)
+        {
+            observation.row_cache_hits = observation.row_cache_hits.saturating_add(1);
+            return Ok(Some(row));
+        }
+        observation.row_cache_misses = observation.row_cache_misses.saturating_add(1);
+        let key = encode_row_key(table_id, row_id);
+        let bytes = {
+            let rows = self
+                .transaction
+                .open_table(ROWS)
+                .map_err(|error| storage_error("open rows table", error))?;
+            rows.get(key.as_slice())
+                .map_err(|error| storage_error("read durable row", error))?
+                .map(|value| value.value().to_vec())
+        };
+        let Some(bytes) = bytes else {
+            return Err(Error::new(
+                "E_STORAGE",
+                "durable index references a missing row",
+            ));
+        };
+        check_source_control(control)?;
+        let row = self.metadata.decode_source_row(table, row_id, &bytes)?;
+        observation.rows_decoded = observation.rows_decoded.saturating_add(1);
+        let cache_bytes = self.metadata.source_row_cache_size(&row, bytes.len())?;
+        self.cache
+            .lock()
+            .map_err(|_| Error::new("E_STORAGE", "snapshot row cache lock is poisoned"))?
+            .insert(cache_key, row.clone(), cache_bytes);
+        Ok(Some(row))
+    }
+
+    fn scan_rows<'a>(&'a self, table: &str) -> Result<Box<dyn RowBatchCursor + 'a>> {
+        let (table_id, _, _) = self.metadata.source_table_info(table)?;
+        Ok(Box::new(RedbRowCursor {
+            source: self,
+            table: table.to_owned(),
+            table_id,
+            lower: Bound::Included(encode_row_key(table_id, 0)),
+            upper: Bound::Included(encode_row_key(table_id, u64::MAX)),
+            done: false,
+        }))
+    }
+
+    fn scan_index<'a>(
+        &'a self,
+        table: &str,
+        shape: &str,
+        bounds: &EncodedIndexBounds,
+        reverse: bool,
+        read_limit: Option<usize>,
+    ) -> Result<Box<dyn IndexHitCursor + 'a>> {
+        let (index_id, component_count) = self.metadata.source_index_info(table, shape)?;
+        let (lower, upper) = durable_index_bounds(index_id, component_count, bounds)?;
+        Ok(Box::new(RedbIndexCursor {
+            source: self,
+            index_id,
+            component_count,
+            lower,
+            upper,
+            reverse,
+            reverse_group: None,
+            remaining: read_limit,
+            done: read_limit == Some(0),
+        }))
+    }
+}
+
+impl RowBatchCursor for RedbRowCursor<'_> {
+    fn next_batch(
+        &mut self,
+        control: Option<&crate::control::ExecutionControl>,
+        observation: &mut ExecutionObservation,
+    ) -> Result<Option<RowBatch>> {
+        check_source_control(control)?;
+        if self.done {
+            return Ok(None);
+        }
+        let table = self
+            .source
+            .transaction
+            .open_table(ROWS)
+            .map_err(|error| storage_error("open rows table", error))?;
+        let bounds = (borrowed_bound(&self.lower), borrowed_bound(&self.upper));
+        let range = table
+            .range::<&[u8]>(bounds)
+            .map_err(|error| storage_error("scan durable rows", error))?;
+        let mut rows = Vec::with_capacity(SOURCE_BATCH_MAX_ROWS);
+        let mut encoded_bytes = 0_usize;
+        let mut reached_end = true;
+        for entry in range {
+            check_source_control(control)?;
+            let (key, value) =
+                entry.map_err(|error| storage_error("read durable row range", error))?;
+            let key = key.value();
+            let value = value.value();
+            let (table_id, row_id) = decode_row_key(key)?;
+            if table_id != self.table_id {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "durable row range crossed its table boundary",
+                ));
+            }
+            if !rows.is_empty()
+                && (rows.len() == SOURCE_BATCH_MAX_ROWS
+                    || encoded_bytes.saturating_add(value.len()) > SOURCE_BATCH_MAX_BYTES)
+            {
+                reached_end = false;
+                break;
+            }
+            let row = self
+                .source
+                .metadata
+                .decode_source_row(&self.table, row_id, value)?;
+            encoded_bytes = encoded_bytes.saturating_add(value.len());
+            rows.push(row);
+            self.lower = Bound::Excluded(key.to_vec());
+            if rows.len() == SOURCE_BATCH_MAX_ROWS {
+                reached_end = false;
+                break;
+            }
+        }
+        self.done = reached_end;
+        if rows.is_empty() {
+            self.done = true;
+            return Ok(None);
+        }
+        observation.rows_decoded = observation.rows_decoded.saturating_add(rows.len());
+        observation.batches = observation.batches.saturating_add(1);
+        observation.observe_working_bytes(encoded_bytes);
+        Ok(Some(RowBatch {
+            rows,
+            encoded_bytes,
+        }))
+    }
+}
+
+impl IndexHitCursor for RedbIndexCursor<'_> {
+    fn next_batch(
+        &mut self,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<Option<Vec<IndexHit>>> {
+        check_source_control(control)?;
+        if self.done || self.remaining == Some(0) {
+            return Ok(None);
+        }
+        if self.reverse {
+            return self.next_reverse_batch(control);
+        }
+        let table = self
+            .source
+            .transaction
+            .open_table(SECONDARY_INDEX)
+            .map_err(|error| storage_error("open secondary index table", error))?;
+        let bounds = (borrowed_bound(&self.lower), borrowed_bound(&self.upper));
+        let mut range = table
+            .range::<&[u8]>(bounds)
+            .map_err(|error| storage_error("scan durable secondary index", error))?;
+        let mut hits = Vec::with_capacity(SOURCE_BATCH_MAX_ROWS);
+        let mut encoded_bytes = 0_usize;
+        let mut reached_end = true;
+        loop {
+            let Some(entry) = range.next() else {
+                break;
+            };
+            check_source_control(control)?;
+            let (key, _) =
+                entry.map_err(|error| storage_error("read durable index range", error))?;
+            let key = key.value();
+            if !hits.is_empty()
+                && (hits.len() == SOURCE_BATCH_MAX_ROWS
+                    || encoded_bytes.saturating_add(key.len()) > SOURCE_BATCH_MAX_BYTES)
+            {
+                reached_end = false;
+                break;
+            }
+            let hit = decode_durable_index_hit(key, self.index_id, self.component_count)?;
+            encoded_bytes = encoded_bytes.saturating_add(key.len());
+            hits.push(hit);
+            self.lower = Bound::Excluded(key.to_vec());
+            if let Some(remaining) = &mut self.remaining {
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    self.done = true;
+                    break;
+                }
+            }
+            if hits.len() == SOURCE_BATCH_MAX_ROWS {
+                reached_end = false;
+                break;
+            }
+        }
+        self.done |= reached_end;
+        if hits.is_empty() {
+            self.done = true;
+            Ok(None)
+        } else {
+            Ok(Some(hits))
+        }
+    }
+}
+
+impl RedbIndexCursor<'_> {
+    fn next_reverse_batch(
+        &mut self,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<Option<Vec<IndexHit>>> {
+        let mut hits = Vec::with_capacity(SOURCE_BATCH_MAX_ROWS);
+        let mut encoded_bytes = 0_usize;
+        while hits.len() < SOURCE_BATCH_MAX_ROWS && self.remaining != Some(0) {
+            check_source_control(control)?;
+            if self.reverse_group.is_none() {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(SECONDARY_INDEX)
+                    .map_err(|error| storage_error("open secondary index table", error))?;
+                let bounds = (borrowed_bound(&self.lower), borrowed_bound(&self.upper));
+                let mut range = table
+                    .range::<&[u8]>(bounds)
+                    .map_err(|error| storage_error("scan durable secondary index", error))?;
+                let Some(entry) = range.next_back() else {
+                    self.done = true;
+                    break;
+                };
+                let (key, _) =
+                    entry.map_err(|error| storage_error("read durable index range", error))?;
+                let hit =
+                    decode_durable_index_hit(key.value(), self.index_id, self.component_count)?;
+                let mut before = durable_index_prefix(self.index_id, self.component_count);
+                before.extend_from_slice(&hit.boundary);
+                let mut first = before.clone();
+                first.extend_from_slice(&0_u64.to_be_bytes());
+                let mut last = before.clone();
+                last.extend_from_slice(&u64::MAX.to_be_bytes());
+                self.reverse_group = Some(ReverseIndexGroup {
+                    before,
+                    lower: Bound::Included(first),
+                    upper: Bound::Included(last),
+                });
+            }
+
+            let group = self
+                .reverse_group
+                .as_mut()
+                .expect("reverse index group was initialized");
+            let table = self
+                .source
+                .transaction
+                .open_table(SECONDARY_INDEX)
+                .map_err(|error| storage_error("open secondary index table", error))?;
+            let bounds = (borrowed_bound(&group.lower), borrowed_bound(&group.upper));
+            let mut range = table
+                .range::<&[u8]>(bounds)
+                .map_err(|error| storage_error("scan durable secondary index group", error))?;
+            let Some(entry) = range.next() else {
+                self.upper = Bound::Excluded(group.before.clone());
+                self.reverse_group = None;
+                continue;
+            };
+            let (key, _) =
+                entry.map_err(|error| storage_error("read durable index range", error))?;
+            let key = key.value();
+            if !hits.is_empty() && encoded_bytes.saturating_add(key.len()) > SOURCE_BATCH_MAX_BYTES
+            {
+                break;
+            }
+            let hit = decode_durable_index_hit(key, self.index_id, self.component_count)?;
+            encoded_bytes = encoded_bytes.saturating_add(key.len());
+            hits.push(hit);
+            group.lower = Bound::Excluded(key.to_vec());
+            if let Some(remaining) = &mut self.remaining {
+                *remaining = remaining.saturating_sub(1);
+            }
+        }
+        if hits.is_empty() {
+            self.done = true;
+            Ok(None)
+        } else {
+            Ok(Some(hits))
+        }
+    }
+}
+
+fn check_source_control(control: Option<&crate::control::ExecutionControl>) -> Result<()> {
+    control.map_or(Ok(()), crate::control::ExecutionControl::checkpoint)
+}
+
+fn durable_index_prefix(index_id: u64, component_count: u8) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(15);
+    prefix.extend_from_slice(INDEX_MAGIC);
+    prefix.extend_from_slice(&PRODUCTION_INDEX_KEY_VERSION.to_be_bytes());
+    prefix.extend_from_slice(&index_id.to_be_bytes());
+    prefix.push(component_count);
+    prefix
+}
+
+fn durable_index_bound(prefix: &[u8], bound: &Bound<Vec<u8>>, lower: bool) -> Bound<Vec<u8>> {
+    match bound {
+        Bound::Included(tuple) => {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(tuple);
+            let row_id = if lower { 0_u64 } else { u64::MAX };
+            key.extend_from_slice(&row_id.to_be_bytes());
+            Bound::Included(key)
+        }
+        Bound::Excluded(tuple) => {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(tuple);
+            let row_id = if lower { u64::MAX } else { 0_u64 };
+            key.extend_from_slice(&row_id.to_be_bytes());
+            Bound::Excluded(key)
+        }
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn borrowed_bound(bound: &Bound<Vec<u8>>) -> Bound<&[u8]> {
+    match bound {
+        Bound::Included(value) => Bound::Included(value.as_slice()),
+        Bound::Excluded(value) => Bound::Excluded(value.as_slice()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn durable_index_bounds(
+    index_id: u64,
+    component_count: u8,
+    bounds: &EncodedIndexBounds,
+) -> Result<EncodedIndexBounds> {
+    let prefix = durable_index_prefix(index_id, component_count);
+    let lower = match &bounds.0 {
+        Bound::Unbounded => Bound::Included(prefix.clone()),
+        bound => durable_index_bound(&prefix, bound, true),
+    };
+    let upper = match &bounds.1 {
+        Bound::Unbounded => prefix_successor_bytes(&prefix)
+            .map(Bound::Excluded)
+            .unwrap_or(Bound::Unbounded),
+        bound => durable_index_bound(&prefix, bound, false),
+    };
+    Ok((lower, upper))
+}
+
+fn prefix_successor_bytes(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut next = prefix.to_vec();
+    while next.last() == Some(&u8::MAX) {
+        next.pop();
+    }
+    let last = next.last_mut()?;
+    *last = last.saturating_add(1);
+    Some(next)
+}
+
+fn decode_durable_index_hit(key: &[u8], index_id: u64, component_count: u8) -> Result<IndexHit> {
+    validate_index_key(key, PRODUCTION_INDEX_KEY_VERSION)?;
+    if key.len() < 23
+        || u64::from_be_bytes(key[6..14].try_into().unwrap()) != index_id
+        || key[14] != component_count
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "durable secondary index key does not match its catalog definition",
+        ));
+    }
+    let row_start = key.len() - 8;
+    Ok(IndexHit {
+        boundary: key[15..row_start].to_vec(),
+        row_id: u64::from_be_bytes(key[row_start..].try_into().unwrap()),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -207,9 +756,7 @@ impl CommitFailure {
 }
 
 impl RedbStore {
-    pub(crate) fn open(
-        path: impl Into<PathBuf>,
-    ) -> Result<(Self, Database, ReceiptMap, StorageOpenProfile)> {
+    pub(crate) fn open(path: impl Into<PathBuf>) -> Result<RedbOpen> {
         let total_started = Instant::now();
         let path = resolve_path(path.into())?;
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
@@ -240,6 +787,16 @@ impl RedbStore {
         } else {
             0
         };
+        let format = store.current_layout()?.format;
+        if format == PRODUCTION_STORAGE_FORMAT_VERSION {
+            let (loaded, receipts, committed, source, mut profile) = store.load_bounded_view()?;
+            store.committed = committed;
+            profile.total_micros = elapsed_micros(total_started);
+            profile.redb_open_micros = redb_open_micros;
+            profile.bootstrap_micros = bootstrap_micros;
+            profile.fresh = fresh;
+            return Ok((store, loaded, receipts, source, profile));
+        }
         let (loaded, receipts, committed, mut profile) = store.load()?;
         let needs_cursor_upgrade = committed.layout.format < CURSOR_STORAGE_FORMAT_VERSION;
         store.committed = DurableHead::from_prepared(&committed);
@@ -254,11 +811,55 @@ impl RedbStore {
         profile.bootstrap_micros = bootstrap_micros;
         profile.fresh = fresh;
         profile.cursor_upgrade = needs_cursor_upgrade;
-        Ok((store, loaded, receipts, profile))
+        let loaded = Arc::new(loaded);
+        let source: Arc<dyn TypedRowSource> = loaded.clone();
+        Ok((store, loaded, receipts, source, profile))
+    }
+
+    fn current_layout(&self) -> Result<StorageLayout> {
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin redb read transaction", error))?;
+        let table = transaction
+            .open_table(META)
+            .map_err(|error| storage_error("open meta table", error))?;
+        read_meta(&table).map(|(_, layout)| layout)
     }
 
     pub(crate) fn supports_production_scalars(&self) -> bool {
         self.committed.layout.supports_production_scalars()
+    }
+
+    pub(crate) fn committed_view(
+        &self,
+        database: &Database,
+    ) -> Result<(Arc<Database>, Arc<dyn TypedRowSource>)> {
+        if self.committed.layout.format != PRODUCTION_STORAGE_FORMAT_VERSION {
+            let database = Arc::new(database.clone());
+            let source: Arc<dyn TypedRowSource> = database.clone();
+            return Ok((database, source));
+        }
+        let metadata = Arc::new(database.metadata_only()?);
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin committed redb read view", error))?;
+        let (meta, layout) = {
+            let table = transaction
+                .open_table(META)
+                .map_err(|error| storage_error("open committed meta table", error))?;
+            read_meta(&table)?
+        };
+        if layout != self.committed.layout || meta != database.durable_meta() {
+            return Err(Error::new(
+                "E_STORAGE_REOPEN_REQUIRED",
+                "committed redb read view does not match the published database state",
+            ));
+        }
+        let source: Arc<dyn TypedRowSource> =
+            Arc::new(RedbReadSource::new(transaction, metadata.clone()));
+        Ok((metadata, source))
     }
 
     pub(crate) fn versions(&self) -> StorageVersions {
@@ -486,6 +1087,177 @@ impl RedbStore {
         let (database, receipts, committed, _) = self.load()?;
         self.committed = DurableHead::from_prepared(&committed);
         Ok((backend_clean, database, receipts))
+    }
+
+    fn load_bounded_view(&self) -> Result<BoundedViewLoad> {
+        let total_started = Instant::now();
+        let mut profile = StorageOpenProfile {
+            bounded_view: true,
+            ..StorageOpenProfile::default()
+        };
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin redb read transaction", error))?;
+        let meta_started = Instant::now();
+        let (meta, layout) = {
+            let table = transaction
+                .open_table(META)
+                .map_err(|error| storage_error("open meta table", error))?;
+            read_meta(&table)?
+        };
+        profile.meta_micros = elapsed_micros(meta_started);
+        if layout != StorageLayout::production() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "bounded Legacy0 reads require the production format-5 layout",
+            ));
+        }
+
+        let catalog_started = Instant::now();
+        let (entries, catalog_canonical) = {
+            let table = transaction
+                .open_table(CATALOG)
+                .map_err(|error| storage_error("open catalog table", error))?;
+            let mut entries = Vec::new();
+            let mut canonical = true;
+            for entry in table
+                .iter()
+                .map_err(|error| storage_error("iterate catalog table", error))?
+            {
+                let (key, value) =
+                    entry.map_err(|error| storage_error("read catalog entry", error))?;
+                let key = key.value();
+                let value = value.value();
+                entries.push(decode_catalog_entry(key, value, layout.catalog)?);
+                canonical &= value
+                    .get(4..6)
+                    .and_then(|version| version.try_into().ok())
+                    .map(u16::from_be_bytes)
+                    == Some(layout.catalog);
+            }
+            (entries, canonical)
+        };
+        profile.catalog_micros = elapsed_micros(catalog_started);
+        profile.catalog_entries = entries.len();
+
+        // Opening the physical tables proves that the expected Legacy0 table
+        // definitions exist without traversing their entries.
+        let rows_started = Instant::now();
+        {
+            transaction
+                .open_table(ROWS)
+                .map_err(|error| storage_error("open rows table", error))?;
+        }
+        profile.rows_micros = elapsed_micros(rows_started);
+        let indexes_started = Instant::now();
+        {
+            transaction
+                .open_table(SECONDARY_INDEX)
+                .map_err(|error| storage_error("open secondary index table", error))?;
+        }
+        profile.indexes_micros = elapsed_micros(indexes_started);
+
+        let migrations_started = Instant::now();
+        let migrations = {
+            let table = transaction
+                .open_table(MIGRATION_LEDGER)
+                .map_err(|error| storage_error("open migration ledger table", error))?;
+            let mut migrations = Vec::new();
+            for (expected, entry) in table
+                .iter()
+                .map_err(|error| storage_error("iterate migration ledger", error))?
+                .enumerate()
+            {
+                let (sequence, value) =
+                    entry.map_err(|error| storage_error("read migration ledger entry", error))?;
+                if sequence.value() != expected as u64 {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "migration ledger sequence is not contiguous",
+                    ));
+                }
+                migrations.push(decode_migration_entry(value.value())?);
+            }
+            migrations
+        };
+        profile.migrations_micros = elapsed_micros(migrations_started);
+        profile.migration_entries = migrations.len();
+
+        let receipts_started = Instant::now();
+        let receipts = if transaction
+            .list_tables()
+            .map_err(|error| storage_error("list redb tables", error))?
+            .any(|table| table.name() == IDEMPOTENCY_RECEIPTS.name())
+        {
+            let table = transaction
+                .open_table(IDEMPOTENCY_RECEIPTS)
+                .map_err(|error| storage_error("open idempotency receipt table", error))?;
+            let mut receipts = ReceiptMap::new();
+            let mut stored_bytes = 0_usize;
+            for entry in table
+                .iter()
+                .map_err(|error| storage_error("iterate idempotency receipts", error))?
+            {
+                let (key, value) =
+                    entry.map_err(|error| storage_error("read idempotency receipt", error))?;
+                let key = String::from_utf8(key.value().to_vec()).map_err(|error| {
+                    Error::new(
+                        "E_STORAGE",
+                        format!("idempotency key is not UTF-8: {error}"),
+                    )
+                })?;
+                let value = value.value();
+                if value.len() > MAX_IDEMPOTENCY_RECEIPT_BYTES {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "stored idempotency receipt exceeds the supported encoded size",
+                    ));
+                }
+                stored_bytes = stored_bytes
+                    .checked_add(value.len())
+                    .ok_or_else(|| Error::new("E_STORAGE", "idempotency receipt size overflow"))?;
+                if stored_bytes > MAX_IDEMPOTENCY_TOTAL_BYTES {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "stored idempotency receipt total exceeds the supported limit",
+                    ));
+                }
+                if receipts
+                    .insert(key, decode_receipt(value, layout.receipt)?)
+                    .is_some()
+                {
+                    return Err(Error::new("E_STORAGE", "duplicate idempotency receipt key"));
+                }
+            }
+            profile.receipt_bytes = u64::try_from(stored_bytes).unwrap_or(u64::MAX);
+            receipts
+        } else {
+            ReceiptMap::new()
+        };
+        profile.receipts_micros = elapsed_micros(receipts_started);
+        profile.receipt_entries = receipts.len();
+
+        let construct_started = Instant::now();
+        let metadata = Arc::new(Database::from_durable(
+            meta.clone(),
+            entries,
+            Vec::new(),
+            migrations,
+        )?);
+        profile.database_construct_micros = elapsed_micros(construct_started);
+        let validation_started = Instant::now();
+        validate_receipts(&receipts, metadata.sequence)?;
+        profile.validation_micros = elapsed_micros(validation_started);
+        profile.total_micros = elapsed_micros(total_started);
+        let committed = DurableHead {
+            layout,
+            meta,
+            catalog_canonical,
+        };
+        let source: Arc<dyn TypedRowSource> =
+            Arc::new(RedbReadSource::new(transaction, metadata.clone()));
+        Ok((metadata, receipts, committed, source, profile))
     }
 
     fn load(&self) -> Result<(Database, ReceiptMap, PreparedState, StorageOpenProfile)> {
@@ -1840,6 +2612,33 @@ fn storage_error(context: &str, error: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cached_test_row(id: RowId) -> Arc<crate::model::Row> {
+        Arc::new(crate::model::Row {
+            id,
+            fields: BTreeMap::new(),
+        })
+    }
+
+    #[test]
+    fn snapshot_row_cache_is_strictly_byte_bounded_and_lru() {
+        let mut cache = SnapshotRowCache::default();
+        let entry_bytes = 12 * 1024 * 1024;
+        cache.insert((1, 1), cached_test_row(1), entry_bytes);
+        cache.insert((1, 2), cached_test_row(2), entry_bytes);
+        assert!(cache.get((1, 1)).is_some());
+        cache.insert((1, 3), cached_test_row(3), entry_bytes);
+
+        assert!(cache.bytes <= SNAPSHOT_ROW_CACHE_MAX_BYTES);
+        assert!(cache.get((1, 1)).is_some());
+        assert!(cache.get((1, 2)).is_none());
+        assert!(cache.get((1, 3)).is_some());
+
+        let before = cache.bytes;
+        cache.insert((1, 4), cached_test_row(4), SNAPSHOT_ROW_CACHE_MAX_BYTES + 1);
+        assert_eq!(cache.bytes, before);
+        assert!(cache.get((1, 4)).is_none());
+    }
 
     fn execute(database: &mut Database, source: &str) {
         let statements = crate::syntax::parse(source).unwrap();

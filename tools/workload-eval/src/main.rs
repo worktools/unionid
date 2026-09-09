@@ -804,7 +804,7 @@ fn require_write_profile(engine: &Engine, case: &str) -> AnyResult<unionid::Muta
 fn validate_open_profile(
     profile: StorageOpenProfile,
     outer_micros: u64,
-    expected_rows: usize,
+    _expected_rows: usize,
 ) -> AnyResult<()> {
     let exclusive_sum = profile
         .redb_open_micros
@@ -820,13 +820,14 @@ fn validate_open_profile(
     if profile.fresh
         || profile.read_only
         || profile.cursor_upgrade
+        || !profile.bounded_view
         || profile.total_micros > outer_micros
         || exclusive_sum > profile.total_micros
-        || profile.row_entries != expected_rows
-        || profile.index_entries != expected_rows.saturating_mul(4)
+        || profile.row_entries != 0
+        || profile.index_entries != 0
         || profile.catalog_entries == 0
-        || profile.row_bytes == 0
-        || profile.index_key_bytes == 0
+        || profile.row_bytes != 0
+        || profile.index_key_bytes != 0
     {
         return Err(format!("open returned inconsistent phase metadata {profile:?}").into());
     }

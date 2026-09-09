@@ -12,9 +12,18 @@ pub(crate) const GENERAL_WORKING_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) type EncodedIndexBounds = (Bound<Vec<u8>>, Bound<Vec<u8>>);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceIdentity {
+    pub(crate) database_instance: [u8; 16],
+    pub(crate) generation: u64,
+    pub(crate) sequence: u64,
+    pub(crate) schema_hash: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TableStats {
     pub(crate) rows: usize,
+    pub(crate) rows_exact: bool,
     pub(crate) next_row_id: RowId,
 }
 
@@ -42,7 +51,9 @@ pub(crate) trait IndexHitCursor {
     fn next_batch(&mut self, control: Option<&ExecutionControl>) -> Result<Option<Vec<IndexHit>>>;
 }
 
-pub(crate) trait TypedRowSource {
+pub(crate) trait TypedRowSource: Send + Sync {
+    fn snapshot_identity(&self) -> SourceIdentity;
+
     fn table_stats(&self, table: &str) -> Result<TableStats>;
 
     fn has_index(&self, table: &str, shape: &str) -> bool;
@@ -90,6 +101,10 @@ impl<'a> CandidateRowSource<'a> {
 }
 
 impl TypedRowSource for CandidateRowSource<'_> {
+    fn snapshot_identity(&self) -> SourceIdentity {
+        self.candidate.snapshot_identity()
+    }
+
     fn table_stats(&self, table: &str) -> Result<TableStats> {
         self.candidate.table_stats(table)
     }

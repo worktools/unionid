@@ -47,6 +47,9 @@ pub struct StorageOpenProfile {
     pub fresh: bool,
     pub cursor_upgrade: bool,
     pub read_only: bool,
+    /// True when open published a transaction-backed view without loading
+    /// durable rows or secondary-index entries into resident maps.
+    pub bounded_view: bool,
 }
 
 /// Durable preparation path used by a successful mutation.

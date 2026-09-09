@@ -5,7 +5,7 @@ use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use unionid::{Engine, Value};
+use unionid::{Engine, ExecutionObservation, StorageOpenProfile, Value};
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
 
@@ -18,6 +18,12 @@ struct PhaseReport {
     millis: u128,
     peak_rss_bytes: u64,
     database_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    open_profile: Option<StorageOpenProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cold_indexed_read: Option<ExecutionObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    warm_indexed_read: Option<ExecutionObservation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,10 +162,54 @@ fn measure_open(path: &Path, rows: usize) -> AnyResult<()> {
     let started = Instant::now();
     let mut engine = Engine::open_redb(path.to_path_buf())?;
     let millis = started.elapsed().as_millis();
+    let open_profile = engine
+        .open_profile()
+        .ok_or("redb open profile is missing")?;
+    if !open_profile.bounded_view
+        || open_profile.row_entries != 0
+        || open_profile.index_entries != 0
+    {
+        return Err("open materialized durable rows or indexes".into());
+    }
+    let target = rows / 2;
+    let query = format!("from tasks | filter title == \"task-{target:06}\" | select id");
+    let cold = engine.execute(&query);
+    require_id(&cold, target)?;
+    let cold_indexed_read = cold.execution.ok_or("cold query observation is missing")?;
+    if cold_indexed_read.index_entries_examined != 1
+        || cold_indexed_read.rows_decoded != 1
+        || cold_indexed_read.row_cache_misses != 1
+        || cold_indexed_read.row_cache_hits != 0
+    {
+        return Err(
+            format!("unexpected cold indexed-read observation: {cold_indexed_read:?}").into(),
+        );
+    }
+    let warm = engine.execute(&query);
+    require_id(&warm, target)?;
+    let warm_indexed_read = warm.execution.ok_or("warm query observation is missing")?;
+    if warm_indexed_read.index_entries_examined != 1
+        || warm_indexed_read.rows_decoded != 0
+        || warm_indexed_read.row_cache_misses != 0
+        || warm_indexed_read.row_cache_hits != 1
+    {
+        return Err(
+            format!("unexpected warm indexed-read observation: {warm_indexed_read:?}").into(),
+        );
+    }
     let peak_rss_bytes = peak_rss_bytes()?;
     let response = engine.execute("from tasks\naggregate\n  rows = count");
     require_count(&response, rows)?;
-    print_phase("open", path, rows, millis, peak_rss_bytes)
+    print_phase(PhaseReport {
+        phase: "open".into(),
+        rows,
+        millis,
+        peak_rss_bytes,
+        database_bytes: fs::metadata(path)?.len(),
+        open_profile: Some(open_profile),
+        cold_indexed_read: Some(cold_indexed_read),
+        warm_indexed_read: Some(warm_indexed_read),
+    })
 }
 
 fn measure_check(path: &Path, rows: usize) -> AnyResult<()> {
@@ -170,7 +220,32 @@ fn measure_check(path: &Path, rows: usize) -> AnyResult<()> {
     let peak_rss_bytes = peak_rss_bytes()?;
     let response = engine.execute("from tasks\naggregate\n  rows = count");
     require_count(&response, rows)?;
-    print_phase("check", path, rows, millis, peak_rss_bytes)
+    print_phase(PhaseReport {
+        phase: "check".into(),
+        rows,
+        millis,
+        peak_rss_bytes,
+        database_bytes: fs::metadata(path)?.len(),
+        open_profile: None,
+        cold_indexed_read: None,
+        warm_indexed_read: None,
+    })
+}
+
+fn require_id(response: &unionid::QueryResponse, expected: usize) -> AnyResult<()> {
+    if !response.ok {
+        return Err(response.message.clone().into());
+    }
+    let value = response
+        .rows
+        .first()
+        .and_then(|row| row.get("id"))
+        .ok_or("indexed query returned no id")?;
+    let expected = i64::try_from(expected)?;
+    if !value.cmp_eq(&Value::Int(expected)) {
+        return Err(format!("expected id {expected}, received {}", value.source_text()).into());
+    }
+    Ok(())
 }
 
 fn require_count(response: &unionid::QueryResponse, expected: usize) -> AnyResult<()> {
@@ -189,23 +264,8 @@ fn require_count(response: &unionid::QueryResponse, expected: usize) -> AnyResul
     Ok(())
 }
 
-fn print_phase(
-    phase: &str,
-    path: &Path,
-    rows: usize,
-    millis: u128,
-    peak_rss_bytes: u64,
-) -> AnyResult<()> {
-    println!(
-        "{}",
-        serde_json::to_string(&PhaseReport {
-            phase: phase.into(),
-            rows,
-            millis,
-            peak_rss_bytes,
-            database_bytes: fs::metadata(path)?.len(),
-        })?
-    );
+fn print_phase(report: PhaseReport) -> AnyResult<()> {
+    println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
 

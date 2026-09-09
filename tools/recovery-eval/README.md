@@ -1,6 +1,6 @@
 # unionid recovery evaluation
 
-This tool creates a representative typed ADT task database in bounded atomic batches, then measures normal reopen and full `check_integrity` in separate child processes. Each phase reports wall time, process peak RSS, and database bytes as JSON.
+This tool creates a representative typed ADT task database in bounded atomic batches, then measures normal reopen and full `check_integrity` in separate child processes. Each phase reports wall time, process peak RSS, and database bytes as JSON. The open phase also requires a metadata-only bounded view and records cold/warm indexed-read observations, proving that one selected row is decoded once and then served from the committed-view cache.
 
 Run release measurements outside the test suite:
 

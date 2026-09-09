@@ -18,8 +18,8 @@ use crate::query::{
 };
 use crate::row_source::{
     CandidateRowSource, EncodedIndexBounds, GENERAL_WORKING_MAX_BYTES, IndexHit, IndexHitCursor,
-    RowBatch, RowBatchCursor, SOURCE_BATCH_MAX_BYTES, SOURCE_BATCH_MAX_ROWS, TableStats,
-    TypedRowSource,
+    RowBatch, RowBatchCursor, SOURCE_BATCH_MAX_BYTES, SOURCE_BATCH_MAX_ROWS, SourceIdentity,
+    TableStats, TypedRowSource,
 };
 
 mod migration;
@@ -1031,10 +1031,20 @@ pub struct Database {
 }
 
 impl TypedRowSource for Database {
+    fn snapshot_identity(&self) -> SourceIdentity {
+        SourceIdentity {
+            database_instance: *self.cursor_identity.instance_id(),
+            generation: 0,
+            sequence: self.sequence,
+            schema_hash: self.schema_info().hash,
+        }
+    }
+
     fn table_stats(&self, table: &str) -> Result<TableStats> {
         let table = self.table(table)?;
         Ok(TableStats {
             rows: table.rows.len(),
+            rows_exact: true,
             next_row_id: table.next_row_id,
         })
     }
@@ -1326,14 +1336,15 @@ impl Database {
         }
     }
 
-    pub(crate) fn execute_read(
+    pub(crate) fn execute_read_from(
         &self,
+        source: &dyn TypedRowSource,
         stmt: Statement,
         control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
         match stmt {
-            Statement::Explain(pipeline) => self.explain(pipeline),
-            Statement::Pipeline(pipeline) => self.query(pipeline, control),
+            Statement::Explain(pipeline) => self.explain_from(source, pipeline),
+            Statement::Pipeline(pipeline) => self.query_from(source, pipeline, control),
             _ => Err(Error::new(
                 "E_READ_SNAPSHOT",
                 "immutable read snapshots only execute query and explain statements",
@@ -3277,11 +3288,19 @@ impl Database {
         )
     }
 
-    fn explain(&self, mut pipeline: Pipeline) -> Result<QueryResponse> {
+    fn explain(&self, pipeline: Pipeline) -> Result<QueryResponse> {
+        self.explain_from(self, pipeline)
+    }
+
+    fn explain_from(
+        &self,
+        source: &dyn TypedRowSource,
+        mut pipeline: Pipeline,
+    ) -> Result<QueryResponse> {
         let schema = self.prepare_pipeline(&mut pipeline)?;
         let prepared_page = self.prepare_page(&pipeline)?;
         let access = self
-            .plan_access(self, &pipeline, prepared_page.as_ref(), true)?
+            .plan_access(source, &pipeline, prepared_page.as_ref(), true)?
             .plan;
         let result_schema = schema
             .iter()
@@ -3712,6 +3731,7 @@ impl Database {
         });
         let capacity = needed.unwrap_or(0);
         let mut selected = Vec::with_capacity(capacity);
+        let mut seen = BTreeSet::new();
         let mut visited = 0_usize;
         let bounds = (start.clone(), end.clone());
         let source_read_limit = needed.filter(|_| !residual_before_sort);
@@ -3733,6 +3753,12 @@ impl Database {
                     boundary: _boundary,
                     row_id,
                 } = hit;
+                if !seen.insert(row_id) {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "typed index scan returned the same row ID more than once",
+                    ));
+                }
                 let eligible = if needed.is_none() || !residual_before_sort {
                     true
                 } else {
@@ -3778,30 +3804,43 @@ impl Database {
 
     fn query(
         &self,
+        pipeline: Pipeline,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        let source = CandidateRowSource::new(self);
+        self.query_from(&source, pipeline, control)
+    }
+
+    fn query_from(
+        &self,
+        source: &dyn TypedRowSource,
         mut pipeline: Pipeline,
         control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
         check_deadline(control)?;
-        let source = CandidateRowSource::new(self);
         let schema = self.prepare_pipeline(&mut pipeline)?;
         let prepared_page = self.prepare_page(&pipeline)?;
         let stats = source.table_stats(&pipeline.from)?;
-        let access = self.plan_access(&source, &pipeline, prepared_page.as_ref(), false)?;
+        let access = self.plan_access(source, &pipeline, prepared_page.as_ref(), false)?;
         let mut observation = ExecutionObservation::default();
         let candidates = self.materialize_access_candidates(
-            &source,
+            source,
             &pipeline,
             prepared_page.as_ref(),
             &access,
             control,
             &mut observation,
         )?;
-        let working_rows = candidates.as_ref().map_or(stats.rows, std::vec::Vec::len);
-        if working_rows > MAX_QUERY_WORKING_ROWS {
+        let working_rows = candidates
+            .as_ref()
+            .map(std::vec::Vec::len)
+            .or_else(|| stats.rows_exact.then_some(stats.rows));
+        if working_rows.is_some_and(|rows| rows > MAX_QUERY_WORKING_ROWS) {
             return Err(Error::new(
                 "E_LIMIT",
                 format!(
-                    "query needs {working_rows} working rows; limit is {MAX_QUERY_WORKING_ROWS}; add a selective indexed filter"
+                    "query needs {} working rows; limit is {MAX_QUERY_WORKING_ROWS}; add a selective indexed filter",
+                    working_rows.expect("working row count was checked")
                 ),
             ));
         }
@@ -3833,13 +3872,21 @@ impl Database {
                 rows
             }
             None => {
-                let mut rows = Vec::with_capacity(stats.rows);
+                let mut rows = Vec::with_capacity(stats.rows.min(SOURCE_BATCH_MAX_ROWS));
                 let mut cursor = source.scan_rows(&pipeline.from)?;
                 let mut position = 0_usize;
                 while let Some(batch) = cursor.next_batch(control, &mut observation)? {
                     observation.observe_working_bytes(batch.encoded_bytes);
                     for row in batch.rows {
                         check_deadline_periodically(control, position)?;
+                        if position == MAX_QUERY_WORKING_ROWS {
+                            return Err(Error::new(
+                                "E_LIMIT",
+                                format!(
+                                    "query working rows exceed {MAX_QUERY_WORKING_ROWS}; add a selective indexed filter"
+                                ),
+                            ));
+                        }
                         position = position.saturating_add(1);
                         if let Some(limit) = materialized_limit {
                             materialized_bytes = materialized_bytes
@@ -4632,6 +4679,109 @@ impl Database {
             })
             .collect::<Vec<_>>();
         crate::ordered_key::encode_complete(&self.catalog, index_id, &bound, row_id)
+    }
+
+    pub(crate) fn source_table_info(&self, name: &str) -> Result<(u64, RowId, ScalarType)> {
+        let table = self.table(name)?;
+        Ok((
+            table.id,
+            table.next_row_id,
+            table
+                .row_type
+                .map(ScalarType::Ref)
+                .unwrap_or_else(|| ScalarType::Record(table.schema.clone())),
+        ))
+    }
+
+    pub(crate) fn source_index_info(&self, table: &str, shape: &str) -> Result<(u64, u8)> {
+        let definition = self
+            .index_definitions
+            .get(table)
+            .and_then(|definitions| definitions.get(shape))
+            .ok_or_else(|| Error::new("E_STORAGE", "planned index is not in the catalog"))?;
+        let component_count = u8::try_from(definition.effective_components().len())
+            .map_err(|_| Error::new("E_STORAGE", "stored index has too many components"))?;
+        Ok((definition.id, component_count))
+    }
+
+    pub(crate) fn source_has_index(&self, table: &str, shape: &str) -> bool {
+        self.index_definitions
+            .get(table)
+            .is_some_and(|definitions| definitions.contains_key(shape))
+    }
+
+    pub(crate) fn decode_source_row(
+        &self,
+        table: &str,
+        row_id: RowId,
+        bytes: &[u8],
+    ) -> Result<Arc<Row>> {
+        let (_, next_row_id, ty) = self.source_table_info(table)?;
+        if row_id >= next_row_id {
+            return Err(Error::new(
+                "E_STORAGE",
+                format!("table '{table}' has a row ID beyond its allocation cursor"),
+            ));
+        }
+        let value = crate::codec::decode_value(&self.catalog, &ty, bytes)?;
+        let Value::Record(fields) = value.unwrapped() else {
+            return Err(Error::new("E_STORAGE", "durable row is not a record"));
+        };
+        Ok(Arc::new(Row {
+            id: row_id,
+            fields: fields.clone(),
+        }))
+    }
+
+    pub(crate) fn source_row_cache_size(&self, row: &Row, encoded_bytes: usize) -> Result<usize> {
+        Ok(encoded_bytes
+            .saturating_add(materialized_row_size(&row.fields)?)
+            .saturating_add(std::mem::size_of::<Row>()))
+    }
+
+    pub(crate) fn metadata_only(&self) -> Result<Self> {
+        let mut metadata = self.clone();
+        for object in metadata.objects.values_mut() {
+            let DbObject::Table(table) = object;
+            table.rows = imbl::Vector::new();
+        }
+        metadata.rebuild_indexes()?;
+        metadata.pending_writes = LogicalWriteSet::default();
+        Ok(metadata)
+    }
+
+    pub(crate) fn materialize_from_source(
+        &self,
+        source: &dyn TypedRowSource,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Self> {
+        let identity = source.snapshot_identity();
+        let schema = self.schema_info();
+        if identity.database_instance != *self.cursor_identity.instance_id()
+            || identity.generation != 0
+            || identity.sequence != self.sequence
+            || identity.schema_hash != schema.hash
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "typed row source identity does not match the catalog snapshot",
+            ));
+        }
+        let mut materialized = self.metadata_only()?;
+        for table_name in self.table_names() {
+            let mut rows = imbl::Vector::new();
+            let mut cursor = source.scan_rows(&table_name)?;
+            let mut observation = ExecutionObservation::default();
+            while let Some(batch) = cursor.next_batch(control, &mut observation)? {
+                rows.extend(batch.rows);
+            }
+            let Some(DbObject::Table(table)) = materialized.objects.get_mut(&table_name) else {
+                unreachable!("source table came from the same catalog")
+            };
+            table.rows = rows;
+        }
+        materialized.rebuild_indexes()?;
+        Ok(materialized)
     }
 
     pub fn migration_history(&self) -> &[MigrationEntry] {
@@ -5841,6 +5991,7 @@ mod tests {
         let source = CandidateRowSource::new(&database);
         let stats = source.table_stats("entries").unwrap();
         assert_eq!(stats.rows, 2_050);
+        assert!(stats.rows_exact);
         assert_eq!(stats.next_row_id, 2_050);
 
         let mut observation = ExecutionObservation::default();
