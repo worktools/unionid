@@ -115,6 +115,8 @@ cargo run --locked --example getting_started -- /tmp/unionid-embedded.redb
 
 Rust API、本地 CLI 和 TCP 在同一 schema 下返回相同的 typed rows、列和 schema identity。应用可进一步使用 `prepare`、typed parameters 和 schema 前置条件，见[版本化接口与参数](PROTOCOL.md)。
 
+冷热分离的 Rust 持久化示例见 [应用数据边界](APPLICATION_DATA.md)：摘要与 ADT 正文原子写入，摘要有界读取，正文按需获取并携带实际版本。
+
 ## 自动验证整段教程
 
 发布包可在一个空目录中自检上面的本地和 TCP 链路：
@@ -132,3 +134,5 @@ python3 tutorial/validate.py \
 The four files under `tutorial/` form one executable five-minute journey. Start with `unionid version --format json`, run `01_setup.uid` against a new `--db` path, query the `Running` variant with `02_running.uid`, atomically change the pending row with `03_update.uid`, then launch a new process with `04_reopen.uid`. Finish with `unionid doctor --db tasks.redb --format json` and `unionid check --db tasks.redb`: doctor reports compatibility and schema/ledger summaries from a private copy without changing the source, while check opens and verifies the actual database. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
 
 The TCP commands above execute the same files through `unionid cli --addr`. The Rust example calls `Engine::open_redb` with those same sources. `tutorial/validate.py` runs both paths from an empty directory and compares their typed rows, columns, and schema identity.
+
+For atomic summary/content writes and on-demand versioned ADT reads, see the Rust example in [Application data boundaries](APPLICATION_DATA.md).
