@@ -1,12 +1,12 @@
 # unionid 路线图
 
-规划日期：2026-09-08。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
+规划日期：2026-09-09。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[结构化查询语法 RFC](rfc/0005-structured-prql-query-syntax.md)收敛 PRQL 风格的 delimiter、field set、match expression 与 group inner pipeline；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
-v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。[M5 总览 #111](https://github.com/worktools/unionid/issues/111) 的核心范围也已完成。M6 的增量 mutation、typed ordered composite index、range/order/page seek 和 10k/100k 复验已进入 stacked PR 合并队列；最新容量证据把后续工作收敛为 [M7 总览 #177](https://github.com/worktools/unionid/issues/177) 的有界常驻状态与可恢复维护。#118 与 #120 保留为由真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
+v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。[M5 总览 #111](https://github.com/worktools/unionid/issues/111) 的核心范围也已完成。M6 的增量 mutation、typed ordered composite index、range/order/page seek 和 10k/100k 复验已合并；后续工作聚焦 [M7 总览 #177](https://github.com/worktools/unionid/issues/177) 的有界常驻状态与可恢复维护。#118 与 #120 保留为由真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，不使用没有意义的语句末尾分号；花括号、圆括号、方括号和逗号在能明确结构、层级或 precedence 时正常使用。本轮草案采用 `field type`、`option text`／`list text`、结构化声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不沿用 TypeScript 风格的密集字段注解或逐行 `|>`。
 
@@ -159,7 +159,11 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。#181 建立共享 source seam，#182 已实现 format-5 Legacy0 bounded open、durable cursor、MVCC committed view 与 32 MiB cache，并保存 10k/100k 结构证据。后续由 #183 完成 full pipeline/check/backup，#184 实现 generation envelope，二者汇合到 #185 resumable migration，最后由 #186 复验接口与容量。
+#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。#181/#188 建立共享 source seam，#182/#189 实现 format-5 Legacy0 bounded open、durable cursor、MVCC committed view 与 32 MiB cache，#183/#190 已完成 bounded full pipeline/check/backup。接下来由 #184 实现 generation envelope，再由 #185 实现 resumable migration，最后由 #186 复验接口与容量。format 6 仍是后续实现目标，不能因 bounded format-5 reads 已完成而标记整个 M7 完成。
+
+### 应用集成切片
+
+[#191](https://github.com/worktools/unionid/issues/191) 明确 [应用数据边界](APPLICATION_DATA.md)，并用 Rust 冷正文/热摘要示例验证已有事务和查询能力；[#192](https://github.com/worktools/unionid/issues/192) 继续评估 Calcit 原生 typed 数据桥接。Calcium 维护热分区 diff、授权、Resource 生命周期及冷 callback。数据库 CDC、物化视图、view catalog 和 change journal 不作为本轮集成或 M7 的前置条件。命名查询和用户泛型也不阻塞该路径。
 
 ## 维护约定
 
