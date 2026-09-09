@@ -60,6 +60,16 @@ def main():
     binary = ROOT / "target" / target / "release" / executable
     if not binary.is_file():
         raise RuntimeError(f"release binary not found: {binary}")
+    binary_version = json.loads(
+        subprocess.check_output(
+            [binary, "version", "--format", "json"], cwd=ROOT, text=True
+        )
+    )
+    if binary_version["software_version"] != version:
+        raise RuntimeError("release binary version does not match Cargo.toml")
+    if binary_version["target"] != target:
+        raise RuntimeError("release binary target does not match the requested target")
+    storage = binary_version["current_storage"]
 
     package = f"unionid-v{version}-{target}"
     files = {
@@ -83,16 +93,19 @@ def main():
         "target": target,
         "rust_toolchain": command("rustc", "--version"),
         "redb": redb,
-        "storage_format": 3,
-        "storage_formats_readable": [1, 2, 3],
-        "catalog_codec": 2,
-        "value_codec": 1,
-        "index_key_codec": 1,
-        "migration_codec": 1,
-        "receipt_codec": 1,
-        "backup_format": 2,
-        "backup_formats_readable": [1, 2],
-        "protocol": 1,
+        "storage_format": storage["format"],
+        "storage_formats_readable": binary_version["readable_storage_formats"],
+        "catalog_codec": storage["catalog_codec"],
+        "value_codec": storage["value_codec"],
+        "index_key_codec": storage["index_key_codec"],
+        "migration_codec": storage["migration_codec"],
+        "receipt_codec": storage["receipt_codec"],
+        "maintenance_codec": storage["maintenance_codec"],
+        "backup_format": storage["backup_codec"],
+        "backup_formats_readable": binary_version["readable_backup_formats"],
+        "protocol": max(binary_version["protocol_versions"]),
+        "protocol_versions": binary_version["protocol_versions"],
+        "stream_protocol_versions": binary_version["stream_protocol_versions"],
     }
     files[f"{package}/RELEASE.json"] = (
         (json.dumps(release, indent=2, sort_keys=True) + "\n").encode(),

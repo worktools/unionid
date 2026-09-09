@@ -1,0 +1,73 @@
+{
+  "rows": 10000,
+  "batch_rows": 1500,
+  "database_bytes": 8421376,
+  "prepare_millis": 547,
+  "open": {
+    "phase": "open",
+    "rows": 10000,
+    "millis": 3,
+    "peak_rss_bytes": 8830976,
+    "database_bytes": 8421376,
+    "open_profile": {
+      "total_micros": 3866,
+      "redb_open_micros": 3412,
+      "bootstrap_micros": 0,
+      "meta_micros": 2,
+      "catalog_micros": 191,
+      "rows_micros": 0,
+      "indexes_micros": 0,
+      "migrations_micros": 0,
+      "receipts_micros": 4,
+      "database_construct_micros": 73,
+      "validation_micros": 1,
+      "catalog_entries": 6,
+      "row_entries": 0,
+      "index_entries": 0,
+      "migration_entries": 0,
+      "receipt_entries": 0,
+      "row_bytes": 0,
+      "index_key_bytes": 0,
+      "receipt_bytes": 0,
+      "fresh": false,
+      "cursor_upgrade": false,
+      "read_only": false,
+      "bounded_view": true
+    },
+    "cold_indexed_read": {
+      "index_entries_examined": 1,
+      "rows_decoded": 1,
+      "row_cache_hits": 0,
+      "row_cache_misses": 1,
+      "batches": 1,
+      "working_peak_bytes": 36
+    },
+    "warm_indexed_read": {
+      "index_entries_examined": 1,
+      "rows_decoded": 0,
+      "row_cache_hits": 1,
+      "row_cache_misses": 0,
+      "batches": 1,
+      "working_peak_bytes": 36
+    }
+  },
+  "check": {
+    "phase": "check",
+    "rows": 10000,
+    "millis": 163,
+    "peak_rss_bytes": 17891328,
+    "database_bytes": 8421376,
+    "check_profile": {
+      "total_micros": 163764,
+      "backend_micros": 18696,
+      "logical_micros": 145068,
+      "rows_checked": 10000,
+      "row_bytes": 1451227,
+      "index_entries_checked": 30000,
+      "index_key_bytes": 1511239,
+      "point_lookups": 60000,
+      "working_peak_bytes": 307,
+      "bounded": true
+    }
+  }
+}

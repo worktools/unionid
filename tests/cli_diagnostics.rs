@@ -37,6 +37,10 @@ fn version_and_doctor_have_stable_machine_readable_shapes() {
         version["readable_storage_formats"],
         serde_json::json!([1, 2, 3, 4, 5, 6])
     );
+    assert_eq!(
+        version["readable_backup_formats"],
+        serde_json::json!([1, 2, 3, 4])
+    );
     assert_eq!(version["current_storage"]["format"], 6);
     assert_eq!(version["current_storage"]["maintenance_codec"], 1);
     assert!(version["target"].as_str().unwrap().contains('-'));

@@ -38,25 +38,34 @@ def main():
             archive.extractall(temporary, filter="data")
         root = temporary / roots.pop()
         release = json.loads((root / "RELEASE.json").read_text())
+        executable = "unionid.exe" if "windows" in release["target"] else "unionid"
+        binary = root / "bin" / executable
+        binary_report = json.loads(
+            subprocess.check_output(
+                [binary, "version", "--format", "json"], text=True
+            )
+        )
+        storage = binary_report["current_storage"]
         expected_formats = {
-            "storage_format": 3,
-            "storage_formats_readable": [1, 2, 3],
-            "catalog_codec": 2,
-            "value_codec": 1,
-            "index_key_codec": 1,
-            "migration_codec": 1,
-            "receipt_codec": 1,
-            "backup_format": 2,
-            "backup_formats_readable": [1, 2],
-            "protocol": 1,
+            "storage_format": storage["format"],
+            "storage_formats_readable": binary_report["readable_storage_formats"],
+            "catalog_codec": storage["catalog_codec"],
+            "value_codec": storage["value_codec"],
+            "index_key_codec": storage["index_key_codec"],
+            "migration_codec": storage["migration_codec"],
+            "receipt_codec": storage["receipt_codec"],
+            "maintenance_codec": storage["maintenance_codec"],
+            "backup_format": storage["backup_codec"],
+            "backup_formats_readable": binary_report["readable_backup_formats"],
+            "protocol": max(binary_report["protocol_versions"]),
+            "protocol_versions": binary_report["protocol_versions"],
+            "stream_protocol_versions": binary_report["stream_protocol_versions"],
         }
         actual_formats = {key: release.get(key) for key in expected_formats}
         if actual_formats != expected_formats:
             raise RuntimeError(
                 f"release format contract mismatch: expected {expected_formats}, got {actual_formats}"
             )
-        executable = "unionid.exe" if "windows" in release["target"] else "unionid"
-        binary = root / "bin" / executable
         required = [
             binary,
             root / "README.md",
