@@ -7,7 +7,9 @@ use std::time::Duration;
 use rustyline::history::DefaultHistory;
 use rustyline::{CompletionType, Config, Editor, error::ReadlineError};
 
-use crate::migration::{MigrationApply, MigrationPlan, MigrationStatus, load_directory};
+use crate::migration::{
+    MigrationAbort, MigrationApply, MigrationPlan, MigrationStatus, load_directory,
+};
 pub use crate::repl::HistoryOptions;
 use crate::repl::{CompletionHelper, HistoryStore};
 use crate::{
@@ -468,6 +470,16 @@ pub fn migration_status(
     print_migration_status(&status, json)
 }
 
+pub fn migration_abort(db: impl Into<PathBuf>, json: bool) -> Result<(), String> {
+    let db = db.into();
+    require_existing_database(&db)?;
+    let mut engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
+    let result = engine
+        .abort_migration()
+        .map_err(|error| error.to_string())?;
+    print_migration_abort(&result, json)
+}
+
 fn require_existing_database(path: &Path) -> Result<(), String> {
     if path.is_file() {
         Ok(())
@@ -580,6 +592,40 @@ fn print_migration_status(status: &MigrationStatus, json: bool) -> Result<(), St
         for id in &status.pending {
             println!("  pending {id}");
         }
+        if let Some(maintenance) = &status.maintenance {
+            println!(
+                "maintenance {:?} {} generation {} -> {} rows {}/{} indexes {} bytes {} actions {}",
+                maintenance.phase,
+                maintenance.migration_id,
+                maintenance.source_generation,
+                maintenance.target_generation,
+                maintenance.source_rows_seen,
+                maintenance.target_rows_written,
+                maintenance.index_entries_written,
+                maintenance.logical_bytes,
+                maintenance.actions.join(",")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_migration_abort(result: &MigrationAbort, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(result).map_err(|error| error.to_string())?
+        );
+    } else if let Some(id) = &result.migration_id {
+        println!(
+            "cleaned migration maintenance {id}\nschema revision {}\nschema hash {}",
+            result.schema.revision, result.schema.hash
+        );
+    } else {
+        println!(
+            "no unfinished migration\nschema revision {}\nschema hash {}",
+            result.schema.revision, result.schema.hash
+        );
     }
     Ok(())
 }
@@ -841,11 +887,27 @@ fn print_introspection(
                 println!("index key codec {}", versions.index_key_codec);
                 println!("migration codec {}", versions.migration_codec);
                 println!("receipt codec {}", versions.receipt_codec);
+                println!("maintenance codec {}", versions.maintenance_codec);
                 println!("backup codec {}", versions.backup_codec);
             }
             println!("migrations {}", introspection.migration_count);
             if let Some(head) = &introspection.migration_head {
                 println!("migration head {head}");
+            }
+            if let Some(maintenance) = &introspection.maintenance {
+                println!("maintenance phase {:?}", maintenance.phase);
+                println!("maintenance migration {}", maintenance.migration_id);
+                println!(
+                    "maintenance generation {} -> {}",
+                    maintenance.source_generation, maintenance.target_generation
+                );
+                println!(
+                    "maintenance rows {}/{}",
+                    maintenance.source_rows_seen, maintenance.target_rows_written
+                );
+                println!("maintenance indexes {}", maintenance.index_entries_written);
+                println!("maintenance bytes {}", maintenance.logical_bytes);
+                println!("maintenance actions {}", maintenance.actions.join(","));
             }
         }
     }
@@ -862,7 +924,7 @@ fn print_names(names: &[String], noun: &str) {
 
 fn print_repl_help() {
     eprintln!(
-        ".schema   show the canonical schema\n.tables   list tables\n.types    list named types\n.storage  show storage, schema identity, and migration head\n.help     show this help\n.quit     exit\n\nTab completes language keywords and catalog names. A blank line submits a complete script."
+        ".schema   show the canonical schema\n.tables   list tables\n.types    list named types\n.storage  show storage, schema identity, migrations, and maintenance\n.help     show this help\n.quit     exit\n\nTab completes language keywords and catalog names. A blank line submits a complete script."
     );
 }
 

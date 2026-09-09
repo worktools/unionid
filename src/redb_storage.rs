@@ -4,12 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use redb::{
     Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
     TableHandle,
 };
+use sha2::{Digest, Sha256};
 
 use crate::codec::{PRODUCTION_VALUE_CODEC_VERSION, VALUE_CODEC_VERSION};
 use crate::db::{
@@ -21,7 +22,7 @@ use crate::idempotency::{
     encoded_receipt, ensure_legacy_receipts, validate_receipts,
 };
 use crate::introspection::StorageVersions;
-use crate::migration::MigrationEntry;
+use crate::migration::{MigrationEntry, MigrationFile};
 use crate::model::Value;
 use crate::profile::{
     DurableCommitMode, DurableCommitProfile, StorageCheckProfile, StorageOpenProfile,
@@ -50,6 +51,10 @@ const RECEIPT_CODEC_VERSION: u16 = 1;
 const PRODUCTION_RECEIPT_CODEC_VERSION: u16 = 2;
 const MAINTENANCE_CODEC_VERSION: u16 = 1;
 const GENERATION_KEY_CODEC_VERSION: u16 = 1;
+const MAINTENANCE_EXECUTOR_VERSION: u16 = 1;
+const MAINTENANCE_TARGET_BATCH_MAX_BYTES: usize = 32 * 1024 * 1024;
+const MAINTENANCE_GENERATION_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const MAINTENANCE_RECLAIM_MAX_ENTRIES: usize = 1_024;
 
 pub(crate) fn production_versions() -> StorageVersions {
     let layout = StorageLayout::production();
@@ -834,7 +839,7 @@ struct GenerationState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-enum MaintenanceState {
+pub(crate) enum MaintenanceState {
     Building,
     Ready,
     Aborting,
@@ -846,6 +851,87 @@ struct MaintenanceManifest {
     state: MaintenanceState,
     source: GenerationRef,
     target: GenerationRef,
+    #[serde(default)]
+    database_instance: [u8; 16],
+    #[serde(default)]
+    migration_id: String,
+    #[serde(default)]
+    migration_parent: Option<String>,
+    #[serde(default)]
+    migration_checksum: String,
+    #[serde(default)]
+    source_schema_revision: u64,
+    #[serde(default)]
+    source_schema_hash: String,
+    #[serde(default)]
+    source_sequence: u64,
+    #[serde(default)]
+    target_schema_revision: u64,
+    #[serde(default)]
+    target_schema_hash: String,
+    #[serde(default)]
+    target_catalog_digest: String,
+    #[serde(default)]
+    checkpoint: Option<(u64, RowId)>,
+    #[serde(default)]
+    source_rows_seen: u64,
+    #[serde(default)]
+    target_rows_written: u64,
+    #[serde(default)]
+    index_entries_written: u64,
+    #[serde(default)]
+    logical_bytes: u64,
+    #[serde(default)]
+    rolling_digest: String,
+    #[serde(default)]
+    executor_version: u16,
+    #[serde(default)]
+    created_at_unix_ms: u64,
+    #[serde(default)]
+    updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaintenanceInfo {
+    pub(crate) state: MaintenanceState,
+    pub(crate) source_generation: u64,
+    pub(crate) target_generation: u64,
+    pub(crate) migration_id: String,
+    pub(crate) migration_checksum: String,
+    pub(crate) source_schema_revision: u64,
+    pub(crate) source_schema_hash: String,
+    pub(crate) source_sequence: u64,
+    pub(crate) target_schema_revision: u64,
+    pub(crate) target_schema_hash: String,
+    pub(crate) checkpoint: Option<(u64, RowId)>,
+    pub(crate) source_rows_seen: u64,
+    pub(crate) target_rows_written: u64,
+    pub(crate) index_entries_written: u64,
+    pub(crate) logical_bytes: u64,
+    pub(crate) updated_at_unix_ms: u64,
+}
+
+impl MaintenanceInfo {
+    fn from_manifest(manifest: &MaintenanceManifest) -> Self {
+        Self {
+            state: manifest.state,
+            source_generation: manifest.source.encoded(),
+            target_generation: manifest.target.encoded(),
+            migration_id: manifest.migration_id.clone(),
+            migration_checksum: manifest.migration_checksum.clone(),
+            source_schema_revision: manifest.source_schema_revision,
+            source_schema_hash: manifest.source_schema_hash.clone(),
+            source_sequence: manifest.source_sequence,
+            target_schema_revision: manifest.target_schema_revision,
+            target_schema_hash: manifest.target_schema_hash.clone(),
+            checkpoint: manifest.checkpoint,
+            source_rows_seen: manifest.source_rows_seen,
+            target_rows_written: manifest.target_rows_written,
+            index_entries_written: manifest.index_entries_written,
+            logical_bytes: manifest.logical_bytes,
+            updated_at_unix_ms: manifest.updated_at_unix_ms,
+        }
+    }
 }
 
 impl GenerationState {
@@ -962,6 +1048,7 @@ impl StorageLayout {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum CommitFailure {
     Definite(Error),
     Uncertain(Error),
@@ -1136,6 +1223,863 @@ impl RedbStore {
             maintenance_codec: layout.maintenance,
             backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
         }
+    }
+
+    pub(crate) fn maintenance_info(&self) -> Result<Option<MaintenanceInfo>> {
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin maintenance status transaction", error))?;
+        read_maintenance_manifest(&transaction)
+            .map(|entry| entry.map(|(_, manifest)| MaintenanceInfo::from_manifest(&manifest)))
+    }
+
+    fn read_manifest(&self, target_generation: u64) -> Result<MaintenanceManifest> {
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin maintenance manifest read", error))?;
+        let table = transaction
+            .open_table(MAINTENANCE_GENERATION)
+            .map_err(|error| storage_error("open maintenance generation table", error))?;
+        let value = table
+            .get(target_generation)
+            .map_err(|error| storage_error("read maintenance generation", error))?
+            .ok_or_else(|| {
+                Error::new("E_MAINTENANCE_REQUIRED", "maintenance manifest not found")
+            })?;
+        decode_maintenance_manifest(value.value())
+    }
+
+    fn generation_summary(&self, generation: GenerationRef) -> Result<GenerationSummary> {
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin generation summary", error))?;
+        let catalog = match generation {
+            GenerationRef::Legacy0 => transaction
+                .open_table(CATALOG)
+                .map_err(|error| storage_error("open generation catalog", error))?,
+            GenerationRef::Generated(_) => transaction
+                .open_table(GENERATION_CATALOG)
+                .map_err(|error| storage_error("open generation catalog", error))?,
+        };
+        let rows = match generation {
+            GenerationRef::Legacy0 => transaction
+                .open_table(ROWS)
+                .map_err(|error| storage_error("open generation rows", error))?,
+            GenerationRef::Generated(_) => transaction
+                .open_table(GENERATION_ROWS)
+                .map_err(|error| storage_error("open generation rows", error))?,
+        };
+        let indexes = match generation {
+            GenerationRef::Legacy0 => transaction
+                .open_table(SECONDARY_INDEX)
+                .map_err(|error| storage_error("open generation indexes", error))?,
+            GenerationRef::Generated(_) => transaction
+                .open_table(GENERATION_INDEX)
+                .map_err(|error| storage_error("open generation indexes", error))?,
+        };
+        let (lower, upper) = generation_scan_bounds(generation)?;
+        let mut catalog_values = BTreeMap::new();
+        let mut logical_bytes = 0_u64;
+        for entry in catalog
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("scan generation catalog", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read generation catalog", error))?;
+            let key = logical_generation_key(generation, key.value())?.to_vec();
+            let value = value.value().to_vec();
+            logical_bytes = logical_bytes
+                .saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
+            catalog_values.insert(key, value);
+        }
+        let mut row_count = 0_u64;
+        let mut rolling_digest = empty_rolling_digest();
+        for entry in rows
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("scan generation rows", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read generation row", error))?;
+            let key = logical_generation_key(generation, key.value())?.to_vec();
+            let value = value.value().to_vec();
+            logical_bytes = logical_bytes
+                .saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
+            rolling_digest =
+                advance_rolling_digest(&rolling_digest, &BTreeMap::from([(key, value)]))?;
+            row_count = row_count.saturating_add(1);
+        }
+        let mut index_count = 0_u64;
+        for entry in indexes
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("scan generation indexes", error))?
+        {
+            let (key, _) = entry.map_err(|error| storage_error("read generation index", error))?;
+            let key = logical_generation_key(generation, key.value())?;
+            logical_bytes =
+                logical_bytes.saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX));
+            index_count = index_count.saturating_add(1);
+        }
+        Ok(GenerationSummary {
+            catalog_digest: digest_bytes_map(&catalog_values),
+            rows: row_count,
+            indexes: index_count,
+            logical_bytes,
+            rolling_digest,
+        })
+    }
+
+    pub(crate) fn start_maintenance(
+        &mut self,
+        source: &Database,
+        target: &Database,
+        file: &MigrationFile,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        if self.committed.layout.format != PRODUCTION_STORAGE_FORMAT_VERSION {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "recoverable migrations require storage format 6",
+            )));
+        }
+        if source.durable_meta() != self.committed.meta {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "migration source no longer matches the committed database",
+            )));
+        }
+        if target.sequence != source.sequence.saturating_add(1)
+            || target.schema_info().revision != source.schema_info().revision.saturating_add(1)
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "migration target does not extend the source identity",
+            )));
+        }
+        let target_id = self.committed.generation.next_id;
+        let target_generation = GenerationRef::Generated(target_id);
+        let next_id = target_id.checked_add(1).ok_or_else(|| {
+            CommitFailure::Definite(Error::new("E_LIMIT", "maintenance generation ID exhausted"))
+        })?;
+        let target_state = GenerationState {
+            active: target_generation,
+            next_id,
+        };
+        let prepared = PreparedState::new_in_generation(
+            target,
+            &ReceiptMap::new(),
+            self.committed.layout,
+            target_state,
+        )
+        .map_err(CommitFailure::Definite)?;
+        if !prepared.rows.is_empty() || !prepared.secondary_indexes.is_empty() {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "maintenance target planning must not contain resident rows",
+            )));
+        }
+        let catalog_bytes = map_bytes(&prepared.catalog);
+        if catalog_bytes > MAINTENANCE_GENERATION_MAX_BYTES {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_LIMIT",
+                "target generation catalog exceeds the 1 GiB logical budget",
+            )));
+        }
+        let now = maintenance_time_ms().map_err(CommitFailure::Definite)?;
+        let manifest = MaintenanceManifest {
+            state: MaintenanceState::Building,
+            source: self.committed.generation.active,
+            target: target_generation,
+            database_instance: source.durable_meta().cursor_instance_id,
+            migration_id: file.id.clone(),
+            migration_parent: file.parent.clone(),
+            migration_checksum: file.checksum.clone(),
+            source_schema_revision: source.schema_info().revision,
+            source_schema_hash: source.schema_info().hash,
+            source_sequence: source.sequence,
+            target_schema_revision: target.schema_info().revision,
+            target_schema_hash: target.schema_info().hash,
+            target_catalog_digest: digest_bytes_map(&prepared.catalog),
+            checkpoint: None,
+            source_rows_seen: 0,
+            target_rows_written: 0,
+            index_entries_written: 0,
+            logical_bytes: catalog_bytes,
+            rolling_digest: empty_rolling_digest(),
+            executor_version: MAINTENANCE_EXECUTOR_VERSION,
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        };
+        let expected = (
+            self.committed.meta.clone(),
+            self.committed.layout,
+            self.committed.generation,
+        );
+        let next_generation = GenerationState {
+            active: self.committed.generation.active,
+            next_id,
+        };
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin maintenance start", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure maintenance start", error))?;
+        transaction.set_two_phase_commit(true);
+        {
+            let mut manifests = transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("open maintenance manifest", error))?;
+            if manifests
+                .iter()
+                .map_err(|error| CommitFailure::definite("read maintenance manifest", error))?
+                .next()
+                .is_some()
+            {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_CONFLICT",
+                    "another maintenance generation already exists",
+                )));
+            }
+            let encoded =
+                encode_maintenance_manifest(&manifest).map_err(CommitFailure::Definite)?;
+            manifests
+                .insert(target_id, encoded.as_slice())
+                .map_err(|error| CommitFailure::definite("write maintenance manifest", error))?;
+        }
+        {
+            let mut catalog = transaction
+                .open_table(GENERATION_CATALOG)
+                .map_err(|error| CommitFailure::definite("open generation catalog", error))?;
+            for (key, value) in &prepared.catalog {
+                let key = encode_generation_key(target_id, key).map_err(CommitFailure::Definite)?;
+                if catalog
+                    .insert(key.as_slice(), value.as_slice())
+                    .map_err(|error| {
+                        CommitFailure::definite("write target generation catalog", error)
+                    })?
+                    .is_some()
+                {
+                    return Err(CommitFailure::Definite(Error::new(
+                        "E_STORAGE",
+                        "new maintenance generation already contains catalog data",
+                    )));
+                }
+            }
+        }
+        {
+            let mut meta = transaction
+                .open_table(META)
+                .map_err(|error| CommitFailure::definite("open maintenance meta", error))?;
+            write_meta(
+                &mut meta,
+                Some(&expected),
+                &self.committed.meta,
+                self.committed.layout,
+                next_generation,
+            )
+            .map_err(CommitFailure::Definite)?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit maintenance start", error))?;
+        self.committed.generation = next_generation;
+        Ok(MaintenanceInfo::from_manifest(&manifest))
+    }
+
+    pub(crate) fn append_maintenance_batch(
+        &mut self,
+        file: &MigrationFile,
+        target_batch: &Database,
+        checkpoint: (u64, RowId),
+        source_rows: usize,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        if source_rows == 0 || source_rows > SOURCE_BATCH_MAX_ROWS {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_LIMIT",
+                "maintenance source batch must contain 1 to 1024 rows",
+            )));
+        }
+        let current = self
+            .maintenance_info()
+            .map_err(CommitFailure::Definite)?
+            .ok_or_else(|| {
+                CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_REQUIRED",
+                    "no maintenance generation is available to build",
+                ))
+            })?;
+        if current.state != MaintenanceState::Building {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "maintenance generation is not in the building state",
+            )));
+        }
+        verify_maintenance_file(&current, file).map_err(CommitFailure::Definite)?;
+        if current
+            .checkpoint
+            .is_some_and(|previous| checkpoint <= previous)
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "maintenance checkpoint must advance monotonically",
+            )));
+        }
+        let target_id = current.target_generation;
+        let target_state = GenerationState {
+            active: GenerationRef::Generated(target_id),
+            next_id: self.committed.generation.next_id,
+        };
+        let prepared = PreparedState::new_in_generation(
+            target_batch,
+            &ReceiptMap::new(),
+            self.committed.layout,
+            target_state,
+        )
+        .map_err(CommitFailure::Definite)?;
+        if digest_bytes_map(&prepared.catalog)
+            != self
+                .read_manifest(target_id)
+                .map_err(CommitFailure::Definite)?
+                .target_catalog_digest
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "migration target catalog changed while building",
+            )));
+        }
+        let batch_bytes =
+            map_bytes(&prepared.rows).saturating_add(set_bytes(&prepared.secondary_indexes));
+        if batch_bytes > u64::try_from(MAINTENANCE_TARGET_BATCH_MAX_BYTES).unwrap() {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_LIMIT",
+                "maintenance target batch exceeds 32 MiB",
+            )));
+        }
+
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin maintenance batch", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure maintenance batch", error))?;
+        transaction.set_two_phase_commit(true);
+        let mut manifest = {
+            let manifests = transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("open maintenance manifest", error))?;
+            let value = manifests
+                .get(target_id)
+                .map_err(|error| CommitFailure::definite("read maintenance manifest", error))?
+                .ok_or_else(|| {
+                    CommitFailure::Definite(Error::new(
+                        "E_MAINTENANCE_CONFLICT",
+                        "maintenance manifest disappeared",
+                    ))
+                })?;
+            decode_maintenance_manifest(value.value()).map_err(CommitFailure::Definite)?
+        };
+        verify_manifest_file(&manifest, file).map_err(CommitFailure::Definite)?;
+        if manifest.state != MaintenanceState::Building
+            || manifest
+                .checkpoint
+                .is_some_and(|previous| checkpoint <= previous)
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "maintenance checkpoint or state changed before the batch",
+            )));
+        }
+        let next_bytes = manifest
+            .logical_bytes
+            .checked_add(batch_bytes)
+            .ok_or_else(|| {
+                CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_LIMIT",
+                    "maintenance logical byte counter overflow",
+                ))
+            })?;
+        if next_bytes > MAINTENANCE_GENERATION_MAX_BYTES {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_LIMIT",
+                "target generation exceeds the 1 GiB logical budget",
+            )));
+        }
+        {
+            let mut rows = transaction
+                .open_table(GENERATION_ROWS)
+                .map_err(|error| CommitFailure::definite("open target generation rows", error))?;
+            for (key, value) in &prepared.rows {
+                let key = encode_generation_key(target_id, key).map_err(CommitFailure::Definite)?;
+                if rows
+                    .insert(key.as_slice(), value.as_slice())
+                    .map_err(|error| CommitFailure::definite("write target generation row", error))?
+                    .is_some()
+                {
+                    return Err(CommitFailure::Definite(Error::new(
+                        "E_STORAGE",
+                        "target generation row was already written",
+                    )));
+                }
+            }
+        }
+        {
+            let mut indexes = transaction.open_table(GENERATION_INDEX).map_err(|error| {
+                CommitFailure::definite("open target generation indexes", error)
+            })?;
+            for key in &prepared.secondary_indexes {
+                let key = encode_generation_key(target_id, key).map_err(CommitFailure::Definite)?;
+                if indexes
+                    .insert(key.as_slice(), 0)
+                    .map_err(|error| {
+                        CommitFailure::definite("write target generation index", error)
+                    })?
+                    .is_some()
+                {
+                    return Err(CommitFailure::Definite(Error::new(
+                        "E_STORAGE",
+                        "target generation index key was already written",
+                    )));
+                }
+            }
+        }
+        manifest.checkpoint = Some(checkpoint);
+        manifest.source_rows_seen = manifest
+            .source_rows_seen
+            .saturating_add(u64::try_from(source_rows).unwrap_or(u64::MAX));
+        manifest.target_rows_written = manifest
+            .target_rows_written
+            .saturating_add(u64::try_from(prepared.rows.len()).unwrap_or(u64::MAX));
+        manifest.index_entries_written = manifest
+            .index_entries_written
+            .saturating_add(u64::try_from(prepared.secondary_indexes.len()).unwrap_or(u64::MAX));
+        manifest.logical_bytes = next_bytes;
+        manifest.rolling_digest = advance_rolling_digest(&manifest.rolling_digest, &prepared.rows)
+            .map_err(CommitFailure::Definite)?;
+        manifest.updated_at_unix_ms = maintenance_time_ms().map_err(CommitFailure::Definite)?;
+        {
+            let mut manifests = transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("open maintenance manifest", error))?;
+            let encoded =
+                encode_maintenance_manifest(&manifest).map_err(CommitFailure::Definite)?;
+            manifests
+                .insert(target_id, encoded.as_slice())
+                .map_err(|error| CommitFailure::definite("checkpoint maintenance batch", error))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit maintenance batch", error))?;
+        Ok(MaintenanceInfo::from_manifest(&manifest))
+    }
+
+    pub(crate) fn mark_maintenance_ready(
+        &mut self,
+        file: &MigrationFile,
+        target: &Database,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        let current = self
+            .maintenance_info()
+            .map_err(CommitFailure::Definite)?
+            .ok_or_else(|| {
+                CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_REQUIRED",
+                    "no maintenance generation is available to validate",
+                ))
+            })?;
+        verify_maintenance_file(&current, file).map_err(CommitFailure::Definite)?;
+        if current.state == MaintenanceState::Ready {
+            return Ok(current);
+        }
+        if current.state != MaintenanceState::Building
+            || current.target_schema_revision != target.schema_info().revision
+            || current.target_schema_hash != target.schema_info().hash
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "maintenance target identity changed before validation",
+            )));
+        }
+        let target_generation = GenerationRef::Generated(current.target_generation);
+        self.validate_bounded_integrity_for(target, target_generation)
+            .map_err(CommitFailure::Definite)?;
+        let summary = self
+            .generation_summary(target_generation)
+            .map_err(CommitFailure::Definite)?;
+        let manifest = self
+            .read_manifest(current.target_generation)
+            .map_err(CommitFailure::Definite)?;
+        if summary.catalog_digest != manifest.target_catalog_digest
+            || summary.rows != manifest.target_rows_written
+            || summary.indexes != manifest.index_entries_written
+            || summary.logical_bytes != manifest.logical_bytes
+            || summary.rolling_digest != manifest.rolling_digest
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE",
+                "target generation counters or rolling digest do not match its manifest",
+            )));
+        }
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin maintenance validation", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure maintenance validation", error))?;
+        transaction.set_two_phase_commit(true);
+        let mut ready = {
+            let manifests = transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("open maintenance manifest", error))?;
+            let value = manifests
+                .get(current.target_generation)
+                .map_err(|error| CommitFailure::definite("read maintenance manifest", error))?
+                .ok_or_else(|| {
+                    CommitFailure::Definite(Error::new(
+                        "E_MAINTENANCE_CONFLICT",
+                        "maintenance manifest disappeared before validation",
+                    ))
+                })?;
+            decode_maintenance_manifest(value.value()).map_err(CommitFailure::Definite)?
+        };
+        verify_manifest_file(&ready, file).map_err(CommitFailure::Definite)?;
+        if ready.state != MaintenanceState::Building
+            || ready.checkpoint != manifest.checkpoint
+            || ready.rolling_digest != manifest.rolling_digest
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "maintenance generation changed during validation",
+            )));
+        }
+        ready.state = MaintenanceState::Ready;
+        ready.updated_at_unix_ms = maintenance_time_ms().map_err(CommitFailure::Definite)?;
+        {
+            let mut manifests = transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("open maintenance manifest", error))?;
+            let encoded = encode_maintenance_manifest(&ready).map_err(CommitFailure::Definite)?;
+            manifests
+                .insert(current.target_generation, encoded.as_slice())
+                .map_err(|error| CommitFailure::definite("mark maintenance ready", error))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit maintenance validation", error))?;
+        Ok(MaintenanceInfo::from_manifest(&ready))
+    }
+
+    pub(crate) fn cutover_maintenance(
+        &mut self,
+        file: &MigrationFile,
+        target: &Database,
+    ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        let current = self
+            .maintenance_info()
+            .map_err(CommitFailure::Definite)?
+            .ok_or_else(|| {
+                CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_REQUIRED",
+                    "no maintenance generation is ready for cutover",
+                ))
+            })?;
+        verify_maintenance_file(&current, file).map_err(CommitFailure::Definite)?;
+        if current.state != MaintenanceState::Ready
+            || current.source_generation != self.committed.generation.active.encoded()
+            || current.source_schema_revision != self.committed.meta.schema_revision
+            || current.source_schema_hash != self.committed.meta.schema_hash
+            || current.source_sequence != self.committed.meta.sequence
+            || current.target_schema_revision != target.schema_info().revision
+            || current.target_schema_hash != target.schema_info().hash
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "ready maintenance generation no longer matches the cutover source or target",
+            )));
+        }
+        let migration_position = target
+            .durable_migrations()
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| {
+                CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_CONFLICT",
+                    "cutover target has no migration ledger entry",
+                ))
+            })?;
+        let entry = &target.durable_migrations()[migration_position];
+        if entry.id != file.id || entry.checksum != file.checksum {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "cutover migration ledger entry does not match the maintenance file",
+            )));
+        }
+        let target_generation = GenerationRef::Generated(current.target_generation);
+        let next_generation = GenerationState {
+            active: target_generation,
+            next_id: self.committed.generation.next_id,
+        };
+        let expected = (
+            self.committed.meta.clone(),
+            self.committed.layout,
+            self.committed.generation,
+        );
+        let expected_manifest = self
+            .read_manifest(current.target_generation)
+            .map_err(CommitFailure::Definite)?;
+        let mut reclaimable = expected_manifest.clone();
+        reclaimable.state = MaintenanceState::Reclaimable;
+        reclaimable.updated_at_unix_ms = maintenance_time_ms().map_err(CommitFailure::Definite)?;
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin maintenance cutover", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure maintenance cutover", error))?;
+        transaction.set_two_phase_commit(true);
+        {
+            let mut meta = transaction
+                .open_table(META)
+                .map_err(|error| CommitFailure::definite("open cutover meta", error))?;
+            write_meta(
+                &mut meta,
+                Some(&expected),
+                &target.durable_meta(),
+                self.committed.layout,
+                next_generation,
+            )
+            .map_err(CommitFailure::Definite)?;
+        }
+        {
+            let mut ledger = transaction
+                .open_table(MIGRATION_LEDGER)
+                .map_err(|error| CommitFailure::definite("open migration ledger", error))?;
+            if ledger
+                .get(u64::try_from(migration_position).unwrap_or(u64::MAX))
+                .map_err(|error| CommitFailure::definite("read migration ledger", error))?
+                .is_some()
+            {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_CONFLICT",
+                    "cutover migration ledger position is already occupied",
+                )));
+            }
+            let encoded = encode_migration_entry(entry).map_err(CommitFailure::Definite)?;
+            ledger
+                .insert(
+                    u64::try_from(migration_position).unwrap_or(u64::MAX),
+                    encoded.as_slice(),
+                )
+                .map_err(|error| CommitFailure::definite("append migration ledger", error))?;
+        }
+        {
+            let mut manifests = transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("open maintenance manifest", error))?;
+            let value = manifests
+                .get(current.target_generation)
+                .map_err(|error| CommitFailure::definite("read maintenance manifest", error))?
+                .ok_or_else(|| {
+                    CommitFailure::Definite(Error::new(
+                        "E_MAINTENANCE_CONFLICT",
+                        "maintenance manifest disappeared before cutover",
+                    ))
+                })?;
+            let stored =
+                decode_maintenance_manifest(value.value()).map_err(CommitFailure::Definite)?;
+            drop(value);
+            if stored != expected_manifest {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_CONFLICT",
+                    "maintenance manifest changed before cutover",
+                )));
+            }
+            let encoded =
+                encode_maintenance_manifest(&reclaimable).map_err(CommitFailure::Definite)?;
+            manifests
+                .insert(current.target_generation, encoded.as_slice())
+                .map_err(|error| CommitFailure::definite("mark source reclaimable", error))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit maintenance cutover", error))?;
+        self.committed.meta = target.durable_meta();
+        self.committed.generation = next_generation;
+        self.committed.catalog_canonical = true;
+        Ok(MaintenanceInfo::from_manifest(&reclaimable))
+    }
+
+    pub(crate) fn begin_maintenance_abort(
+        &mut self,
+    ) -> std::result::Result<Option<MaintenanceInfo>, CommitFailure> {
+        let Some(current) = self.maintenance_info().map_err(CommitFailure::Definite)? else {
+            return Ok(None);
+        };
+        if current.state == MaintenanceState::Reclaimable {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "an applied migration cannot be aborted; reclaim its old generation instead",
+            )));
+        }
+        if current.state == MaintenanceState::Aborting {
+            return Ok(Some(current));
+        }
+        let mut manifest = self
+            .read_manifest(current.target_generation)
+            .map_err(CommitFailure::Definite)?;
+        if !matches!(
+            manifest.state,
+            MaintenanceState::Building | MaintenanceState::Ready
+        ) {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_CONFLICT",
+                "maintenance generation cannot enter abort cleanup from its current state",
+            )));
+        }
+        manifest.state = MaintenanceState::Aborting;
+        manifest.updated_at_unix_ms = maintenance_time_ms().map_err(CommitFailure::Definite)?;
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin maintenance abort", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure maintenance abort", error))?;
+        transaction.set_two_phase_commit(true);
+        {
+            let mut manifests = transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("open maintenance manifest", error))?;
+            let encoded =
+                encode_maintenance_manifest(&manifest).map_err(CommitFailure::Definite)?;
+            manifests
+                .insert(current.target_generation, encoded.as_slice())
+                .map_err(|error| CommitFailure::definite("mark maintenance aborting", error))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit maintenance abort", error))?;
+        Ok(Some(MaintenanceInfo::from_manifest(&manifest)))
+    }
+
+    pub(crate) fn reclaim_maintenance_step(&mut self) -> std::result::Result<bool, CommitFailure> {
+        let Some(current) = self.maintenance_info().map_err(CommitFailure::Definite)? else {
+            return Ok(true);
+        };
+        let manifest = self
+            .read_manifest(current.target_generation)
+            .map_err(CommitFailure::Definite)?;
+        let generation = match manifest.state {
+            MaintenanceState::Aborting => manifest.target,
+            MaintenanceState::Reclaimable => manifest.source,
+            MaintenanceState::Building | MaintenanceState::Ready => {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_MAINTENANCE_REQUIRED",
+                    "maintenance generation must be aborted or cut over before cleanup",
+                )));
+            }
+        };
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin generation reclaim", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure generation reclaim", error))?;
+        transaction.set_two_phase_commit(true);
+        let mut remaining = MAINTENANCE_RECLAIM_MAX_ENTRIES;
+        match generation {
+            GenerationRef::Legacy0 => {
+                {
+                    let mut table = transaction
+                        .open_table(CATALOG)
+                        .map_err(|error| CommitFailure::definite("open reclaim catalog", error))?;
+                    remaining = remaining.saturating_sub(
+                        delete_bytes_entries(&mut table, generation, remaining)
+                            .map_err(CommitFailure::Definite)?,
+                    );
+                }
+                {
+                    let mut table = transaction
+                        .open_table(ROWS)
+                        .map_err(|error| CommitFailure::definite("open reclaim rows", error))?;
+                    remaining = remaining.saturating_sub(
+                        delete_bytes_entries(&mut table, generation, remaining)
+                            .map_err(CommitFailure::Definite)?,
+                    );
+                }
+                {
+                    let mut table = transaction
+                        .open_table(SECONDARY_INDEX)
+                        .map_err(|error| CommitFailure::definite("open reclaim indexes", error))?;
+                    let _ = delete_set_entries(&mut table, generation, remaining)
+                        .map_err(CommitFailure::Definite)?;
+                }
+            }
+            GenerationRef::Generated(_) => {
+                {
+                    let mut table = transaction
+                        .open_table(GENERATION_CATALOG)
+                        .map_err(|error| CommitFailure::definite("open reclaim catalog", error))?;
+                    remaining = remaining.saturating_sub(
+                        delete_bytes_entries(&mut table, generation, remaining)
+                            .map_err(CommitFailure::Definite)?,
+                    );
+                }
+                {
+                    let mut table = transaction
+                        .open_table(GENERATION_ROWS)
+                        .map_err(|error| CommitFailure::definite("open reclaim rows", error))?;
+                    remaining = remaining.saturating_sub(
+                        delete_bytes_entries(&mut table, generation, remaining)
+                            .map_err(CommitFailure::Definite)?,
+                    );
+                }
+                {
+                    let mut table = transaction
+                        .open_table(GENERATION_INDEX)
+                        .map_err(|error| CommitFailure::definite("open reclaim indexes", error))?;
+                    let _ = delete_set_entries(&mut table, generation, remaining)
+                        .map_err(CommitFailure::Definite)?;
+                }
+            }
+        }
+        let complete =
+            generation_tables_empty(&transaction, generation).map_err(CommitFailure::Definite)?;
+        {
+            let mut manifests = transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("open maintenance manifest", error))?;
+            if complete {
+                manifests
+                    .remove(current.target_generation)
+                    .map_err(|error| {
+                        CommitFailure::definite("remove maintenance manifest", error)
+                    })?;
+            } else {
+                let mut updated = manifest;
+                updated.updated_at_unix_ms =
+                    maintenance_time_ms().map_err(CommitFailure::Definite)?;
+                let encoded =
+                    encode_maintenance_manifest(&updated).map_err(CommitFailure::Definite)?;
+                manifests
+                    .insert(current.target_generation, encoded.as_slice())
+                    .map_err(|error| {
+                        CommitFailure::definite("checkpoint generation reclaim", error)
+                    })?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit generation reclaim", error))?;
+        Ok(complete)
     }
 
     pub(crate) fn upgrade(
@@ -1443,7 +2387,8 @@ impl RedbStore {
             let logical_started = Instant::now();
             let (database, receipts, committed, source, _) = self.load_bounded_view()?;
             drop(source);
-            let mut profile = self.validate_bounded_integrity(&database)?;
+            let mut profile =
+                self.validate_bounded_integrity_for(&database, self.committed.generation.active)?;
             profile.backend_micros = backend_micros;
             profile.logical_micros = elapsed_micros(logical_started);
             profile.total_micros = elapsed_micros(total_started);
@@ -1477,12 +2422,15 @@ impl RedbStore {
         ))
     }
 
-    fn validate_bounded_integrity(&self, metadata: &Database) -> Result<StorageCheckProfile> {
+    fn validate_bounded_integrity_for(
+        &self,
+        metadata: &Database,
+        generation: GenerationRef,
+    ) -> Result<StorageCheckProfile> {
         let transaction = self
             .database
             .begin_read()
             .map_err(|error| storage_error("begin integrity read transaction", error))?;
-        let generation = self.committed.generation.active;
         let rows = match generation {
             GenerationRef::Legacy0 => transaction
                 .open_table(ROWS)
@@ -1707,7 +2655,7 @@ impl RedbStore {
                 "bounded reads require storage format 5 or 6",
             ));
         }
-        validate_generation_state(&transaction, layout, generation)?;
+        validate_generation_state(&transaction, &meta, layout, generation)?;
 
         let catalog_started = Instant::now();
         let (entries, catalog_canonical) = match generation.active {
@@ -1880,7 +2828,7 @@ impl RedbStore {
         };
         profile.meta_micros = elapsed_micros(meta_started);
         let catalog_started = Instant::now();
-        validate_generation_state(&transaction, layout, generation)?;
+        validate_generation_state(&transaction, &meta, layout, generation)?;
         let (entries, stored_catalog) = match generation.active {
             GenerationRef::Legacy0 => {
                 let table = transaction
@@ -3094,7 +4042,6 @@ fn catalog_value_is_canonical(value: &[u8], version: u16) -> bool {
         == Some(version)
 }
 
-#[cfg(test)]
 fn encode_maintenance_manifest(manifest: &MaintenanceManifest) -> Result<Vec<u8>> {
     let mut value = Vec::from(MAINTENANCE_MAGIC.as_slice());
     value.extend_from_slice(&MAINTENANCE_CODEC_VERSION.to_be_bytes());
@@ -3129,8 +4076,220 @@ fn decode_maintenance_manifest(value: &[u8]) -> Result<MaintenanceManifest> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerationSummary {
+    catalog_digest: String,
+    rows: u64,
+    indexes: u64,
+    logical_bytes: u64,
+    rolling_digest: String,
+}
+
+fn read_maintenance_manifest(
+    transaction: &redb::ReadTransaction,
+) -> Result<Option<(u64, MaintenanceManifest)>> {
+    let table = transaction
+        .open_table(MAINTENANCE_GENERATION)
+        .map_err(|error| storage_error("open maintenance generation table", error))?;
+    let mut found = None;
+    for entry in table
+        .iter()
+        .map_err(|error| storage_error("iterate maintenance generation table", error))?
+    {
+        let (id, value) =
+            entry.map_err(|error| storage_error("read maintenance generation", error))?;
+        if found.is_some() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "multiple maintenance generation manifests are not supported",
+            ));
+        }
+        found = Some((id.value(), decode_maintenance_manifest(value.value())?));
+    }
+    Ok(found)
+}
+
+fn verify_manifest_file(manifest: &MaintenanceManifest, file: &MigrationFile) -> Result<()> {
+    if manifest.migration_id != file.id
+        || manifest.migration_parent != file.parent
+        || manifest.migration_checksum != file.checksum
+        || manifest.executor_version != MAINTENANCE_EXECUTOR_VERSION
+    {
+        return Err(Error::new(
+            "E_MAINTENANCE_CONFLICT",
+            "migration file or executor does not match the durable maintenance checkpoint",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_maintenance_file(info: &MaintenanceInfo, file: &MigrationFile) -> Result<()> {
+    if info.migration_id != file.id || info.migration_checksum != file.checksum {
+        return Err(Error::new(
+            "E_MAINTENANCE_CONFLICT",
+            "migration file does not match the durable maintenance checkpoint",
+        ));
+    }
+    Ok(())
+}
+
+fn maintenance_time_ms() -> Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| Error::new("E_TIME", error.to_string()))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| Error::new("E_LIMIT", "maintenance timestamp exceeds u64"))
+}
+
+fn digest_bytes_map(values: &BTreeMap<Vec<u8>, Vec<u8>>) -> String {
+    let mut digest = Sha256::new();
+    for (key, value) in values {
+        digest.update(u64::try_from(key.len()).unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(key);
+        digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(value);
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn empty_rolling_digest() -> String {
+    format!("sha256:{:x}", Sha256::digest([]))
+}
+
+fn advance_rolling_digest(current: &str, rows: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<String> {
+    if !current.starts_with("sha256:") {
+        return Err(Error::new(
+            "E_STORAGE",
+            "maintenance rolling digest is not canonical",
+        ));
+    }
+    let mut rolling = current.to_owned();
+    for (key, value) in rows {
+        let mut digest = Sha256::new();
+        digest.update(rolling.as_bytes());
+        digest.update(u64::try_from(key.len()).unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(key);
+        digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        digest.update(value);
+        rolling = format!("sha256:{:x}", digest.finalize());
+    }
+    Ok(rolling)
+}
+
+fn delete_bytes_entries(
+    table: &mut redb::Table<'_, &[u8], &[u8]>,
+    generation: GenerationRef,
+    limit: usize,
+) -> Result<usize> {
+    if limit == 0 {
+        return Ok(0);
+    }
+    let (lower, upper) = generation_scan_bounds(generation)?;
+    let keys = table
+        .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+        .map_err(|error| storage_error("scan generation entries for reclaim", error))?
+        .take(limit)
+        .map(|entry| {
+            entry
+                .map(|(key, _)| key.value().to_vec())
+                .map_err(|error| storage_error("read generation entry for reclaim", error))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for key in &keys {
+        table
+            .remove(key.as_slice())
+            .map_err(|error| storage_error("delete generation entry", error))?;
+    }
+    Ok(keys.len())
+}
+
+fn delete_set_entries(
+    table: &mut redb::Table<'_, &[u8], u8>,
+    generation: GenerationRef,
+    limit: usize,
+) -> Result<usize> {
+    if limit == 0 {
+        return Ok(0);
+    }
+    let (lower, upper) = generation_scan_bounds(generation)?;
+    let keys = table
+        .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+        .map_err(|error| storage_error("scan generation indexes for reclaim", error))?
+        .take(limit)
+        .map(|entry| {
+            entry
+                .map(|(key, _)| key.value().to_vec())
+                .map_err(|error| storage_error("read generation index for reclaim", error))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for key in &keys {
+        table
+            .remove(key.as_slice())
+            .map_err(|error| storage_error("delete generation index", error))?;
+    }
+    Ok(keys.len())
+}
+
+fn generation_tables_empty(
+    transaction: &redb::WriteTransaction,
+    generation: GenerationRef,
+) -> Result<bool> {
+    let (lower, upper) = generation_scan_bounds(generation)?;
+    let catalog_empty = match generation {
+        GenerationRef::Legacy0 => transaction
+            .open_table(CATALOG)
+            .map_err(|error| storage_error("open reclaim catalog", error))?
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("check reclaim catalog", error))?
+            .next()
+            .is_none(),
+        GenerationRef::Generated(_) => transaction
+            .open_table(GENERATION_CATALOG)
+            .map_err(|error| storage_error("open reclaim catalog", error))?
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("check reclaim catalog", error))?
+            .next()
+            .is_none(),
+    };
+    let rows_empty = match generation {
+        GenerationRef::Legacy0 => transaction
+            .open_table(ROWS)
+            .map_err(|error| storage_error("open reclaim rows", error))?
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("check reclaim rows", error))?
+            .next()
+            .is_none(),
+        GenerationRef::Generated(_) => transaction
+            .open_table(GENERATION_ROWS)
+            .map_err(|error| storage_error("open reclaim rows", error))?
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("check reclaim rows", error))?
+            .next()
+            .is_none(),
+    };
+    let indexes_empty = match generation {
+        GenerationRef::Legacy0 => transaction
+            .open_table(SECONDARY_INDEX)
+            .map_err(|error| storage_error("open reclaim indexes", error))?
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("check reclaim indexes", error))?
+            .next()
+            .is_none(),
+        GenerationRef::Generated(_) => transaction
+            .open_table(GENERATION_INDEX)
+            .map_err(|error| storage_error("open reclaim indexes", error))?
+            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+            .map_err(|error| storage_error("check reclaim indexes", error))?
+            .next()
+            .is_none(),
+    };
+    Ok(catalog_empty && rows_empty && indexes_empty)
+}
+
 fn validate_generation_state(
     transaction: &redb::ReadTransaction,
+    meta: &DurableMeta,
     layout: StorageLayout,
     generation: GenerationState,
 ) -> Result<()> {
@@ -3164,6 +4323,7 @@ fn validate_generation_state(
         .open_table(MAINTENANCE_GENERATION)
         .map_err(|error| storage_error("open maintenance generation table", error))?;
     let mut unfinished = 0_usize;
+    let mut instance_mismatch = false;
     for entry in manifests
         .iter()
         .map_err(|error| storage_error("iterate maintenance generation table", error))?
@@ -3186,6 +4346,7 @@ fn validate_generation_state(
                 "maintenance manifest source generation was never allocated",
             ));
         }
+        instance_mismatch |= manifest.database_instance != meta.cursor_instance_id;
         match manifest.state {
             MaintenanceState::Building | MaintenanceState::Ready | MaintenanceState::Aborting => {
                 unfinished = unfinished.saturating_add(1);
@@ -3210,6 +4371,12 @@ fn validate_generation_state(
         return Err(Error::new(
             "E_STORAGE",
             "multiple unfinished maintenance generations are not supported",
+        ));
+    }
+    if instance_mismatch {
+        return Err(Error::new(
+            "E_STORAGE",
+            "maintenance manifest belongs to a different database instance",
         ));
     }
     Ok(())
@@ -3725,12 +4892,192 @@ mod tests {
             state: MaintenanceState::Building,
             source: GenerationRef::Legacy0,
             target: GenerationRef::Generated(1),
+            database_instance: [7; 16],
+            migration_id: "m0001".into(),
+            migration_parent: None,
+            migration_checksum: "sha256:test".into(),
+            source_schema_revision: 0,
+            source_schema_hash: "sha256:source".into(),
+            source_sequence: 0,
+            target_schema_revision: 1,
+            target_schema_hash: "sha256:target".into(),
+            target_catalog_digest: "sha256:catalog".into(),
+            checkpoint: None,
+            source_rows_seen: 0,
+            target_rows_written: 0,
+            index_entries_written: 0,
+            logical_bytes: 0,
+            rolling_digest: empty_rolling_digest(),
+            executor_version: MAINTENANCE_EXECUTOR_VERSION,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
         };
         let encoded = encode_maintenance_manifest(&manifest).unwrap();
         assert_eq!(decode_maintenance_manifest(&encoded).unwrap(), manifest);
         let mut unknown_version = encoded;
         unknown_version[5] = 2;
         assert!(decode_maintenance_manifest(&unknown_version).is_err());
+    }
+
+    #[test]
+    fn maintenance_checkpoint_reopens_conflicts_and_aborts_without_reusing_generation() {
+        let path = std::env::temp_dir().join(format!(
+            "unionid-maintenance-{}-{}.redb",
+            std::process::id(),
+            maintenance_time_ms().unwrap()
+        ));
+        let empty = Database::default();
+        let mut source_database = Database::default();
+        let mut source = String::from(
+            "type Item =\n  id int\n  value int\ntable items Item\n  key id\ninsert many items [",
+        );
+        for id in 0..1_100 {
+            if id > 0 {
+                source.push_str(", ");
+            }
+            source.push_str(&format!("{{id = {id}, value = {id}}}"));
+        }
+        source.push(']');
+        execute(&mut source_database, &source);
+        let file =
+            MigrationFile::parse("migration m0001_enabled\n  add field Item.enabled bool = true\n")
+                .unwrap();
+        let target = source_database
+            .migration_target(&file.id, &file.steps)
+            .unwrap();
+        {
+            let (mut store, _, _, _, _) = RedbStore::open(&path).unwrap();
+            store
+                .commit(&empty, &source_database, &ReceiptMap::new())
+                .unwrap();
+            let (_, row_source) = store.committed_view(&source_database).unwrap();
+            let started = store
+                .start_maintenance(&source_database, &target, &file)
+                .unwrap();
+            assert_eq!(started.target_generation, 2);
+            let mut cursor = row_source.scan_rows("items").unwrap();
+            let mut observation = ExecutionObservation::default();
+            let batch = cursor.next_batch(None, &mut observation).unwrap().unwrap();
+            assert_eq!(batch.rows.len(), SOURCE_BATCH_MAX_ROWS);
+            let target_batch = source_database
+                .migrate_table_batch(&file.id, &file.steps, "items", &batch.rows)
+                .unwrap();
+            let table_id = match source_database
+                .durable_table_catalog_entry("items")
+                .unwrap()
+            {
+                DurableCatalogEntry::Table(table) => table.id,
+                _ => unreachable!(),
+            };
+            let checkpoint = (table_id, batch.rows.last().unwrap().id);
+            let progress = store
+                .append_maintenance_batch(&file, &target_batch, checkpoint, batch.rows.len())
+                .unwrap();
+            assert_eq!(progress.source_rows_seen, SOURCE_BATCH_MAX_ROWS as u64);
+            assert_eq!(progress.checkpoint, Some(checkpoint));
+            drop(cursor);
+            drop(row_source);
+        }
+
+        {
+            let (mut store, _, _, _, _) = RedbStore::open(&path).unwrap();
+            let progress = store.maintenance_info().unwrap().unwrap();
+            assert_eq!(progress.state, MaintenanceState::Building);
+            assert_eq!(progress.source_rows_seen, SOURCE_BATCH_MAX_ROWS as u64);
+            let changed = MigrationFile::parse(
+                "migration m0001_enabled\n  add field Item.enabled bool = false\n",
+            )
+            .unwrap();
+            let error = store
+                .append_maintenance_batch(&changed, &target, (1, 1), 1)
+                .unwrap_err()
+                .into_error();
+            assert_eq!(error.code, "E_MAINTENANCE_CONFLICT");
+        }
+
+        {
+            let mut engine = crate::Engine::open_redb(&path).unwrap();
+            let progress = engine.introspection().maintenance.unwrap();
+            assert_eq!(progress.phase, crate::MigrationMaintenancePhase::Building);
+            assert_eq!(progress.source_rows_seen, SOURCE_BATCH_MAX_ROWS as u64);
+            let timeout = engine
+                .apply_migrations_until(std::slice::from_ref(&file), std::time::Instant::now())
+                .unwrap_err();
+            assert_eq!(timeout.code, "E_TIMEOUT");
+            let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let control = crate::control::ExecutionControl::cancellable(
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                cancelled,
+                None,
+            );
+            let cancelled = engine
+                .apply_migrations_controlled(std::slice::from_ref(&file), Some(&control))
+                .unwrap_err();
+            assert_eq!(cancelled.code, "E_CANCELLED");
+            assert_eq!(
+                engine.introspection().maintenance.unwrap().source_rows_seen,
+                SOURCE_BATCH_MAX_ROWS as u64
+            );
+            let changed = MigrationFile::parse(
+                "migration m0001_enabled\n  add field Item.enabled bool = false\n",
+            )
+            .unwrap();
+            let conflict = engine.apply_migrations(&[changed]).unwrap_err();
+            assert_eq!(conflict.code, "E_MAINTENANCE_CONFLICT");
+            assert_eq!(
+                engine.introspection().maintenance.unwrap().source_rows_seen,
+                SOURCE_BATCH_MAX_ROWS as u64
+            );
+            let rows = engine.execute("from items | take 1");
+            assert!(rows.ok, "{}", rows.message);
+            let rejected = engine.execute("insert items {id = 2000, value = 2000}");
+            assert_eq!(rejected.error.unwrap().code, "E_MAINTENANCE_REQUIRED");
+            let applied = engine
+                .apply_migrations(std::slice::from_ref(&file))
+                .unwrap();
+            assert_eq!(applied.applied, ["m0001_enabled"]);
+            assert!(engine.introspection().maintenance.is_none());
+            let rows = engine.execute("from items | filter enabled == true");
+            assert!(rows.ok, "{}", rows.message);
+            assert_eq!(rows.rows.len(), 1_100);
+        }
+
+        {
+            let (mut store, loaded, _, _, _) = RedbStore::open(&path).unwrap();
+            let next = MigrationFile::parse(
+                "migration m0002_tag\n  parent m0001_enabled\n  add field Item.tag int = 0\n",
+            )
+            .unwrap();
+            let target = loaded.migration_target(&next.id, &next.steps).unwrap();
+            let restarted = store.start_maintenance(&loaded, &target, &next).unwrap();
+            assert_eq!(restarted.target_generation, 3);
+        }
+        {
+            let mut read_only = crate::Engine::open_redb_read_only(&path).unwrap();
+            assert_eq!(read_only.abort_migration().unwrap_err().code, "E_READ_ONLY");
+            assert_eq!(
+                read_only.introspection().maintenance.unwrap().migration_id,
+                "m0002_tag"
+            );
+        }
+        {
+            let mut engine = crate::Engine::open_redb(&path).unwrap();
+            let aborted = engine.abort_migration().unwrap();
+            assert_eq!(aborted.migration_id.as_deref(), Some("m0002_tag"));
+        }
+        {
+            let (mut store, loaded, _, _, _) = RedbStore::open(&path).unwrap();
+            let next = MigrationFile::parse(
+                "migration m0002_tag\n  parent m0001_enabled\n  add field Item.tag int = 0\n",
+            )
+            .unwrap();
+            let target = loaded.migration_target(&next.id, &next.steps).unwrap();
+            let restarted = store.start_maintenance(&loaded, &target, &next).unwrap();
+            assert_eq!(restarted.target_generation, 4);
+            store.begin_maintenance_abort().unwrap();
+            while !store.reclaim_maintenance_step().unwrap() {}
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     fn execute(database: &mut Database, source: &str) {

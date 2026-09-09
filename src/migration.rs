@@ -53,12 +53,44 @@ pub struct MigrationStatus {
     pub schema: SchemaInfo,
     pub applied: Vec<MigrationEntry>,
     pub pending: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<MigrationMaintenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationMaintenancePhase {
+    Building,
+    Ready,
+    Aborting,
+    Reclaimable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationMaintenance {
+    pub phase: MigrationMaintenancePhase,
+    pub migration_id: String,
+    pub source_generation: u64,
+    pub target_generation: u64,
+    pub source_rows_seen: u64,
+    pub target_rows_written: u64,
+    pub index_entries_written: u64,
+    pub logical_bytes: u64,
+    pub updated_at_unix_ms: u64,
+    pub actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationApply {
     pub applied: Vec<String>,
     pub skipped: Vec<String>,
+    pub schema: SchemaInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationAbort {
+    pub migration_id: Option<String>,
+    pub cleaned: bool,
     pub schema: SchemaInfo,
 }
 

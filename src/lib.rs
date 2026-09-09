@@ -48,7 +48,10 @@ pub use idempotency::{
     IdempotencyReceipt, IdempotencyStatus, IdempotentExecution,
 };
 pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
-pub use migration::{MigrationApply, MigrationFile, MigrationPlan, MigrationStatus};
+pub use migration::{
+    MigrationAbort, MigrationApply, MigrationFile, MigrationMaintenance, MigrationMaintenancePhase,
+    MigrationPlan, MigrationStatus,
+};
 pub use model::{RowId, Value};
 pub use profile::{
     DurableCommitMode, DurableCommitProfile, ExecutionObservation, StorageCheckProfile,

@@ -67,6 +67,16 @@ unionid receipts prune --db app.redb --through-sequence 1200 --max-receipts 500 
 
 无 cutoff、`max-receipts` 不在 1–1000，或存储／只读边界不允许操作时返回稳定错误和对应的分类退出码。清理后的 key 可以再次执行；命令不会按墙钟自动淘汰 receipt。
 
+format-6 schema migration 可以在进程退出后从 durable checkpoint 继续，并提供显式状态与清理命令：
+
+```bash
+unionid migration apply --db app.redb --dir migrations
+unionid migration status --db app.redb --dir migrations --format json
+unionid migration abort --db app.redb --format json
+```
+
+`status.maintenance` 仅在存在 shadow generation 时出现，包含 phase、generation、row/index 进度、逻辑字节和可执行 actions。Building、Ready 或 Aborting 状态保留旧数据查询，但阻止普通 mutation；再次 `apply` 相同 migration 会恢复，不匹配文件返回 `E_MAINTENANCE_CONFLICT`。`abort` 分批删除尚未切换的 target；Reclaimable 时只完成旧 source 清理，不回滚已应用 migration。没有 maintenance 时是成功的 no-op。完整恢复契约见 [MIGRATIONS.md](MIGRATIONS.md#版本化-runner)。
+
 `run`、本地 `cli` 和 `server` 都支持 `--db <path> --read-only`。该模式只打开已经存在的 redb 文件；路径不存在会返回 `E_CONFIG`，不会创建空数据库。查询、`explain` 和 introspection 正常工作，任何包含 DDL、DML 或待应用 migration 的请求都在构造候选状态或 durable transaction 前以 `E_READ_ONLY` 整批拒绝。远程 `cli` 是否只读取决于服务端配置，客户端参数不能替代服务端边界。
 
 REPL 使用 `unionid>` 开始新脚本，`..>` 表示语法还需继续，`ready>` 表示当前脚本完整。完整脚本在空行后提交；Ctrl-C 清空当前缓冲区，Ctrl-D 按当前完整性执行或报告未完成输入。
@@ -80,7 +90,7 @@ REPL 使用 `unionid>` 开始新脚本，`..>` 表示语法还需继续，`ready
 | `.schema` | 可重新解析的规范 schema |
 | `.tables` | 按名称排列的表 |
 | `.types` | 按名称排列的命名类型 |
-| `.storage` | storage mode、read-only 状态、schema revision/hash、migration 数量与 head |
+| `.storage` | storage mode、read-only 状态、schema revision/hash、migration 数量/head 与可选 maintenance 进度 |
 | `.help` | 交互命令和提交方式 |
 | `.quit` | 退出 |
 

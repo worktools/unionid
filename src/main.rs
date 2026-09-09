@@ -226,6 +226,13 @@ enum MigrationCommand {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Abort and clean an unfinished shadow-generation migration.
+    Abort {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
     /// Generate an explicit migration draft from a target schema.
     Diff {
         #[arg(long)]
@@ -392,6 +399,7 @@ impl Args {
                     MigrationCommand::Plan { format, .. }
                     | MigrationCommand::Apply { format, .. }
                     | MigrationCommand::Status { format, .. }
+                    | MigrationCommand::Abort { format, .. }
                     | MigrationCommand::Diff { format, .. },
             } => ErrorOutput {
                 json: matches!(format, Format::Json),
@@ -601,6 +609,9 @@ fn run(args: Args) -> Result<(), String> {
             }
             MigrationCommand::Status { db, dir, format } => {
                 cli::migration_status(db, dir, matches!(format, Format::Json))
+            }
+            MigrationCommand::Abort { db, format } => {
+                cli::migration_abort(db, matches!(format, Format::Json))
             }
             MigrationCommand::Diff {
                 db,

@@ -4,6 +4,48 @@ use crate::query::{MigrationTransform, SchemaMigration};
 use std::sync::Arc;
 
 impl Database {
+    pub(crate) fn migration_target(&self, name: &str, steps: &[SchemaMigration]) -> Result<Self> {
+        let mut target = self.metadata_only()?;
+        target.migrate(name, steps.to_vec())?;
+        target.advance_schema_revision()?;
+        target.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
+        Ok(target)
+    }
+
+    pub(crate) fn migrate_table_batch(
+        &self,
+        name: &str,
+        steps: &[SchemaMigration],
+        table_name: &str,
+        rows: &[Arc<Row>],
+    ) -> Result<Self> {
+        let mut encoded = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (table_id, value) = self.durable_row_with_codec(
+                table_name,
+                row,
+                crate::codec::PRODUCTION_VALUE_CODEC_VERSION,
+            )?;
+            encoded.push((table_id, row.id, value));
+        }
+        let mut batch = Self::from_durable(
+            self.durable_meta(),
+            self.durable_catalog_entries(),
+            encoded,
+            self.migration_history.clone(),
+        )?;
+        batch.migrate(name, steps.to_vec())?;
+        batch.advance_schema_revision()?;
+        batch.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::new("E_LIMIT", "commit sequence exhausted"))?;
+        Ok(batch)
+    }
+
     pub(super) fn migrate(
         &mut self,
         name: &str,
