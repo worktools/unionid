@@ -34,7 +34,7 @@ cargo run --locked --example cold_content -- /tmp/unionid-cold-content-new.redb
 
 数据库不负责应用缓存、WebSocket、客户端 diff、订阅或组件 Resource 生命周期。有限 NDJSON 是单次查询输出，不是实时更新流。若未来真实数据库场景需要 CDC 或物化视图，应以独立证据和 RFC 重新进入计划。
 
-M7 当前专注 [format-6 envelope #184](https://github.com/worktools/unionid/issues/184)、[可恢复维护 #185](https://github.com/worktools/unionid/issues/185) 和 [容量验收 #186](https://github.com/worktools/unionid/issues/186)。当前示例不改变 storage format 5，也不构成宿主语言或网络层容量证明。
+M7 当前专注 [format-6 envelope #184](https://github.com/worktools/unionid/issues/184)、[可恢复维护 #185](https://github.com/worktools/unionid/issues/185) 和 [容量验收 #186](https://github.com/worktools/unionid/issues/186)。当前示例使用二进制默认创建的 storage format，不构成宿主语言或网络层容量证明。
 
 ## English Description
 
@@ -48,4 +48,4 @@ Persist content, summary and application revision in one request before updating
 
 Application caches, WebSockets, client diffs, subscriptions, and component Resource lifecycles remain outside this repository's core plan. Finite NDJSON streaming is a single query. A future CDC or materialized-view proposal requires independent database evidence and an RFC.
 
-M7 #184/#185/#186 implements the generation envelope, resumable maintenance, and database capacity acceptance. This example does not change format 5 or establish host-runtime or network capacity.
+M7 #184/#185/#186 implements the generation envelope, resumable maintenance, and database capacity acceptance. This example uses the binary's default storage format and does not establish host-runtime or network capacity.
