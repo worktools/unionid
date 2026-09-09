@@ -152,6 +152,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | --- | --- | --- |
 | [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | 出现真实 schema 复用需求并能定义有限性、身份和 codec 预算 |
 | [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | 至少两个真实调用方需要共享同一参数化 typed pipeline |
+| [#192](https://github.com/worktools/unionid/issues/192) | [集成] 宿主语言 typed 数据适配 | 真实调用方证明现有 versioned protocol 或 Rust API 无法满足，并列出具体 API 缺口 |
 
 ## M5 收口状态
 
@@ -160,10 +161,6 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 ## 当前执行顺序
 
 任务 #162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。#181/#188 建立共享 source seam，#182/#189 实现 format-5 Legacy0 bounded open、durable cursor、MVCC committed view 与 32 MiB cache，#183/#190 已完成 bounded full pipeline/check/backup。接下来由 #184 实现 generation envelope，再由 #185 实现 resumable migration，最后由 #186 复验接口与容量。format 6 仍是后续实现目标，不能因 bounded format-5 reads 已完成而标记整个 M7 完成。
-
-### 应用集成切片
-
-[#191](https://github.com/worktools/unionid/issues/191) 明确 [应用数据边界](APPLICATION_DATA.md)，并用 Rust 冷正文/热摘要示例验证已有事务和查询能力；[#192](https://github.com/worktools/unionid/issues/192) 继续评估 Calcit 原生 typed 数据桥接。Calcium 维护热分区 diff、授权、Resource 生命周期及冷 callback。数据库 CDC、物化视图、view catalog 和 change journal 不作为本轮集成或 M7 的前置条件。命名查询和用户泛型也不阻塞该路径。
 
 ## 维护约定
 
