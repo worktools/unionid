@@ -5,22 +5,27 @@ use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use unionid::{Engine, QueryAccessKind, QueryResponse, UpsertAction, Value};
+use unionid::{
+    Engine, IndexTraversal, PageAccessKind, PagePlan, QueryAccessKind, QueryAccessPlan, QueryPlan,
+    QueryResponse, UpsertAction, Value,
+};
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
 
 const DEFAULT_SAMPLES: usize = 20;
-const DEFAULT_BATCH_ROWS: usize = 3_000;
+const DEFAULT_BATCH_ROWS: usize = 1_500;
 const WARMUPS: usize = 5;
 const BATCH_WRITE_ROWS: usize = 100;
+const ORDERED_READ_ROWS: usize = 25;
+const MIN_ROWS: usize = 100;
 const MAX_ROWS: usize = 1_000_000;
 
 const MIGRATION: &str = r#"migration benchmark_task_v2
   rename variant State.Running to Claimed
   change variant State.Claimed to {worker text, attempt int, lease option text}
     using old -> {worker = old.worker, attempt = old.attempt, lease = None}
-  add field Task.priority int = 0
-  add index tasks.priority"#;
+  add field Task.migrated_rank int = 0
+  add index tasks.migrated_rank"#;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct RawSamples {
@@ -31,6 +36,8 @@ struct RawSamples {
     peak_rss_bytes: u64,
     access_kind: Option<QueryAccessKind>,
     index: Option<String>,
+    access_plan: Option<QueryAccessPlan>,
+    page_plan: Option<PagePlan>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,10 +62,23 @@ struct CaseReport {
     peak_rss_bytes: u64,
     access_kind: Option<QueryAccessKind>,
     index: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_plan: Option<QueryAccessPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page_plan: Option<PagePlan>,
+}
+
+#[derive(Debug, Serialize)]
+struct EnvironmentReport {
+    os: &'static str,
+    architecture: &'static str,
+    logical_cpus: usize,
+    rustc: String,
 }
 
 #[derive(Debug, Serialize)]
 struct EvaluationReport {
+    environment: EnvironmentReport,
     rows: usize,
     samples: usize,
     warmups: usize,
@@ -66,6 +86,9 @@ struct EvaluationReport {
     batch_write_rows: usize,
     database_bytes: u64,
     prepare_millis: u128,
+    schema_revision: u64,
+    schema_hash: String,
+    open: CaseReport,
     queries: Vec<CaseReport>,
     writes: Vec<CaseReport>,
     migration: CaseReport,
@@ -103,6 +126,9 @@ fn run() -> AnyResult<()> {
         }
         [_, command, path, rows] if command == "measure-migration" => {
             measure_migration(Path::new(path), rows.parse()?)
+        }
+        [_, command, path, rows] if command == "measure-open" => {
+            measure_open(Path::new(path), rows.parse()?)
         }
         [_, path, rows] => evaluate(
             Path::new(path),
@@ -147,8 +173,29 @@ fn evaluate(path: &Path, rows: usize, samples: usize, batch_rows: usize) -> AnyR
     )?;
     let prepare_millis = prepare_started.elapsed().as_millis();
 
+    let mut open_runs = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        open_runs.push(run_child_samples(
+            &executable,
+            "measure-open",
+            path,
+            rows,
+            None,
+            None,
+        )?);
+    }
+    let open = summarize(combine_open_runs(open_runs)?)?;
+
     let mut queries = Vec::new();
-    for case in ["primary_key", "secondary_index", "full_scan"] {
+    for case in [
+        "primary_key",
+        "secondary_index",
+        "full_scan",
+        "composite_range",
+        "composite_order",
+        "page_seek_forward",
+        "page_seek_backward",
+    ] {
         let database = copy_for_case(path, case, 0)?;
         let raw = run_child_samples(
             &executable,
@@ -189,7 +236,14 @@ fn evaluate(path: &Path, rows: usize, samples: usize, batch_rows: usize) -> AnyR
     }
     let migration = summarize(combine_migration_runs(migration_runs)?)?;
 
+    let mut template = Engine::open_redb(path.to_path_buf())?;
+    require_count(&mut template, rows)?;
+    require_integrity(&mut template)?;
+    let schema = template.schema_info();
+    drop(template);
+
     let report = EvaluationReport {
+        environment: environment_report()?,
         rows,
         samples,
         warmups: WARMUPS,
@@ -197,6 +251,9 @@ fn evaluate(path: &Path, rows: usize, samples: usize, batch_rows: usize) -> AnyR
         batch_write_rows: BATCH_WRITE_ROWS,
         database_bytes: fs::metadata(path)?.len(),
         prepare_millis,
+        schema_revision: schema.revision,
+        schema_hash: schema.hash,
+        open,
         queries,
         writes,
         migration,
@@ -262,7 +319,7 @@ fn prepare(path: &Path, rows: usize, batch_rows: usize) -> AnyResult<()> {
     remove_if_exists(path)?;
     let mut engine = Engine::open_redb(path.to_path_buf())?;
     require_ok(engine.execute(
-        "type State =\n  Pending\n  | Running\n    worker text\n    attempt int\n  | Done\n    result text\ntype Task =\n  id int\n  title text\n  tags list text\n  state State\n  score int\ntable tasks Task\n  key id\ncreate index tasks (state)\ncreate index tasks (title)",
+        "type State =\n  Pending\n  | Running\n    worker text\n    attempt int\n  | Done\n    result text\ntype Task =\n  id int\n  tenant text\n  priority int\n  title text\n  tags list text\n  state State\n  score int\ntable tasks Task\n  key id\ncreate index tasks (state)\ncreate index tasks (title)\ncreate index tasks (tenant, -priority, id)",
     ))?;
     for start in (0..rows).step_by(batch_rows) {
         let end = rows.min(start + batch_rows);
@@ -274,6 +331,7 @@ fn prepare(path: &Path, rows: usize, batch_rows: usize) -> AnyResult<()> {
         require_ok(engine.execute(&source))?;
     }
     require_count(&mut engine, rows)?;
+    require_integrity(&mut engine)?;
     Ok(())
 }
 
@@ -281,35 +339,79 @@ fn measure_query(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
     validate_sizes(rows, samples, DEFAULT_BATCH_ROWS)?;
     let mut engine = Engine::open_redb(path.to_path_buf())?;
     let target = rows / 2;
-    let (source, expected_access, expected_index) = match case {
+    let tenant = format!("tenant-{}", target % 10);
+    let ordered = format!("from tasks\nfilter tenant == \"{tenant}\"\nsort {{-priority, id}}");
+    let ordered_read_rows = ORDERED_READ_ROWS.min(rows / 30);
+    let page_source = match case {
+        "page_seek_forward" => Some(page_seek_source(
+            &mut engine,
+            &ordered,
+            ordered_read_rows,
+            false,
+        )?),
+        "page_seek_backward" => Some(page_seek_source(
+            &mut engine,
+            &ordered,
+            ordered_read_rows,
+            true,
+        )?),
+        _ => None,
+    };
+    let composite_index = Some("tasks (tenant, -priority, id)");
+    let (source, expected_access, expected_index, expected_rows) = match case {
         "primary_key" => (
             format!("from tasks | filter id == {target} | take 1"),
             QueryAccessKind::PrimaryKeyLookup,
             Some("tasks.id"),
+            1,
         ),
         "secondary_index" => (
             format!("from tasks | filter title == \"task-{target:06}\" | take 1"),
             QueryAccessKind::SecondaryIndexLookup,
             Some("tasks.title"),
+            1,
         ),
         "full_scan" => (
             "from tasks | filter score >= 0 | take 1".to_string(),
             QueryAccessKind::FullScan,
             None,
+            1,
+        ),
+        "composite_range" => (
+            format!(
+                "from tasks\nfilter tenant == \"{tenant}\"\nfilter priority >= 50\nsort {{-priority, id}}\ntake {ordered_read_rows}"
+            ),
+            QueryAccessKind::RangeScan,
+            composite_index,
+            ordered_read_rows,
+        ),
+        "composite_order" => (
+            format!("{ordered}\ntake {ordered_read_rows}"),
+            QueryAccessKind::OrderedScan,
+            composite_index,
+            ordered_read_rows,
+        ),
+        "page_seek_forward" | "page_seek_backward" => (
+            page_source.expect("page source was prepared"),
+            QueryAccessKind::PageSeek,
+            composite_index,
+            ordered_read_rows,
         ),
         _ => return Err(format!("unknown query case '{case}'").into()),
     };
-    require_plan(&mut engine, &source, expected_access, expected_index)?;
+    let plan = require_plan(&mut engine, &source, expected_access, expected_index)?;
+    validate_query_plan(case, &plan, ordered_read_rows)?;
     for _ in 0..WARMUPS {
-        require_one(engine.execute(&source))?;
+        require_rows(engine.execute(&source), expected_rows)?;
     }
     let mut timings = Vec::with_capacity(samples);
     for _ in 0..samples {
         let started = Instant::now();
         let response = engine.execute(&source);
         timings.push(elapsed_micros(started));
-        require_one(response)?;
+        require_rows(response, expected_rows)?;
     }
+    require_integrity(&mut engine)?;
     print_raw(RawSamples {
         name: case.into(),
         samples_micros: timings,
@@ -318,7 +420,83 @@ fn measure_query(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
         peak_rss_bytes: peak_rss_bytes()?,
         access_kind: Some(expected_access),
         index: expected_index.map(Into::into),
+        access_plan: Some(plan.access),
+        page_plan: plan.page,
     })
+}
+
+fn page_seek_source(
+    engine: &mut Engine,
+    ordered: &str,
+    read_rows: usize,
+    backward: bool,
+) -> AnyResult<String> {
+    let first_source = format!("{ordered}\npage {read_rows}");
+    let first = require_rows(engine.execute(&first_source), read_rows)?;
+    let next = first
+        .page
+        .and_then(|page| page.next_cursor)
+        .ok_or("first ordered page did not return a next cursor")?;
+    let second_source = format!(
+        "{ordered}\npage {read_rows} after {}",
+        serde_json::to_string(&next)?
+    );
+    if !backward {
+        return Ok(second_source);
+    }
+    let second = require_rows(engine.execute(&second_source), read_rows)?;
+    let previous = second
+        .page
+        .and_then(|page| page.previous_cursor)
+        .ok_or("second ordered page did not return a previous cursor")?;
+    Ok(format!(
+        "{ordered}\npage {read_rows} before {}",
+        serde_json::to_string(&previous)?
+    ))
+}
+
+fn validate_query_plan(case: &str, plan: &QueryPlan, read_rows: usize) -> AnyResult<()> {
+    match case {
+        "composite_range" => {
+            let range = plan
+                .access
+                .range
+                .as_ref()
+                .ok_or("range plan omitted range")?;
+            if plan.access.equality_prefix != ["tenant"]
+                || range.column != "priority"
+                || range.lower_inclusive != Some(true)
+                || range.upper_inclusive.is_some()
+                || plan.access.traversal != Some(IndexTraversal::Forward)
+                || !plan.access.sort_satisfied
+            {
+                return Err(format!("unexpected composite range plan: {:?}", plan.access).into());
+            }
+        }
+        "composite_order" => {
+            if plan.access.equality_prefix != ["tenant"]
+                || plan.access.range.is_some()
+                || plan.access.traversal != Some(IndexTraversal::Forward)
+                || !plan.access.sort_satisfied
+            {
+                return Err(format!("unexpected composite order plan: {:?}", plan.access).into());
+            }
+        }
+        "page_seek_forward" | "page_seek_backward" => {
+            let page = plan.page.as_ref().ok_or("page seek omitted page plan")?;
+            if !plan.access.page_seek
+                || plan.access.traversal != Some(IndexTraversal::Forward)
+                || !plan.access.sort_satisfied
+                || page.access != PageAccessKind::IndexSeek
+                || !page.resume_boundary
+                || page.read_limit != read_rows + 1
+            {
+                return Err(format!("unexpected page seek plan: {plan:?}").into());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn measure_write(path: &Path, rows: usize, samples: usize, case: &str) -> AnyResult<()> {
@@ -361,6 +539,7 @@ fn measure_write(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
     }
     let peak_rss_bytes = peak_rss_bytes()?;
     validate_write_result(&mut engine, case, rows, target, total)?;
+    require_integrity(&mut engine)?;
     print_raw(RawSamples {
         name: case.into(),
         samples_micros: timings,
@@ -369,6 +548,8 @@ fn measure_write(path: &Path, rows: usize, samples: usize, case: &str) -> AnyRes
         peak_rss_bytes,
         access_kind,
         index: index.map(Into::into),
+        access_plan: None,
+        page_plan: None,
     })
 }
 
@@ -386,17 +567,18 @@ fn measure_migration(path: &Path, rows: usize) -> AnyResult<()> {
         return Err("migration unexpectedly used the incremental row-only path".into());
     }
     let peak_rss_bytes = peak_rss_bytes()?;
-    let migrated = require_one(engine.execute("from tasks | filter priority == 0 | take 1"))?;
-    if migrated.rows[0]["priority"].cmp_eq(&Value::Int(0)) {
-        require_plan(
+    let migrated = require_one(engine.execute("from tasks | filter migrated_rank == 0 | take 1"))?;
+    if migrated.rows[0]["migrated_rank"].cmp_eq(&Value::Int(0)) {
+        let _ = require_plan(
             &mut engine,
-            "from tasks | filter priority == 0 | take 1",
+            "from tasks | filter migrated_rank == 0 | take 1",
             QueryAccessKind::SecondaryIndexLookup,
-            Some("tasks.priority"),
+            Some("tasks.migrated_rank"),
         )?;
     } else {
-        return Err("migration did not backfill Task.priority".into());
+        return Err("migration did not backfill Task.migrated_rank".into());
     }
+    require_integrity(&mut engine)?;
     print_raw(RawSamples {
         name: "deep_migration".into(),
         samples_micros: vec![timing],
@@ -404,7 +586,30 @@ fn measure_migration(path: &Path, rows: usize) -> AnyResult<()> {
         durable_commit_samples_micros: Some(vec![profile.durable_commit_micros]),
         peak_rss_bytes,
         access_kind: Some(QueryAccessKind::SecondaryIndexLookup),
-        index: Some("tasks.priority".into()),
+        index: Some("tasks.migrated_rank".into()),
+        access_plan: None,
+        page_plan: None,
+    })
+}
+
+fn measure_open(path: &Path, rows: usize) -> AnyResult<()> {
+    validate_sizes(rows, DEFAULT_SAMPLES, DEFAULT_BATCH_ROWS)?;
+    let started = Instant::now();
+    let mut engine = Engine::open_redb(path.to_path_buf())?;
+    let timing = elapsed_micros(started);
+    let peak_rss_bytes = peak_rss_bytes()?;
+    require_count(&mut engine, rows)?;
+    require_integrity(&mut engine)?;
+    print_raw(RawSamples {
+        name: "open".into(),
+        samples_micros: vec![timing],
+        candidate_samples_micros: None,
+        durable_commit_samples_micros: None,
+        peak_rss_bytes,
+        access_kind: None,
+        index: None,
+        access_plan: None,
+        page_plan: None,
     })
 }
 
@@ -445,7 +650,9 @@ fn record_source(id: usize, score: i64) -> String {
         _ => format!("Done {{result = \"result-{id:06}\"}}"),
     };
     format!(
-        "{{id = {id}, title = \"task-{id:06}\", tags = [\"workload\", \"benchmark\"], state = {state}, score = {score}}}"
+        "{{id = {id}, tenant = \"tenant-{}\", priority = {}, title = \"task-{id:06}\", tags = [\"workload\", \"benchmark\"], state = {state}, score = {score}}}",
+        id % 10,
+        id % 100,
     )
 }
 
@@ -504,7 +711,7 @@ fn require_write_profile(engine: &Engine, case: &str) -> AnyResult<unionid::Muta
     }
     let expected_inserts = usize::from(case == "atomic_batch") * BATCH_WRITE_ROWS;
     let expected_updates = usize::from(case != "atomic_batch");
-    let expected_index_inserts = usize::from(case == "atomic_batch") * BATCH_WRITE_ROWS * 3;
+    let expected_index_inserts = usize::from(case == "atomic_batch") * BATCH_WRITE_ROWS * 4;
     if profile.touched_tables != 1
         || profile.row_inserts != expected_inserts
         || profile.row_updates != expected_updates
@@ -523,7 +730,7 @@ fn require_plan(
     source: &str,
     expected: QueryAccessKind,
     index: Option<&str>,
-) -> AnyResult<()> {
+) -> AnyResult<QueryPlan> {
     let indented = source
         .lines()
         .map(|line| format!("  {line}"))
@@ -538,7 +745,7 @@ fn require_plan(
         )
         .into());
     }
-    Ok(())
+    Ok(plan)
 }
 
 fn require_count(engine: &mut Engine, expected: usize) -> AnyResult<()> {
@@ -562,6 +769,22 @@ fn require_one(response: QueryResponse) -> AnyResult<QueryResponse> {
     Ok(response)
 }
 
+fn require_rows(response: QueryResponse, expected: usize) -> AnyResult<QueryResponse> {
+    let response = require_ok(response)?;
+    if response.rows.len() != expected {
+        return Err(format!("expected {expected} rows, received {}", response.rows.len()).into());
+    }
+    Ok(response)
+}
+
+fn require_integrity(engine: &mut Engine) -> AnyResult<()> {
+    let integrity = engine.check_integrity()?;
+    if !integrity.backend_clean {
+        return Err("redb backend integrity check was not clean".into());
+    }
+    Ok(())
+}
+
 fn require_ok(response: QueryResponse) -> AnyResult<QueryResponse> {
     if response.ok {
         Ok(response)
@@ -578,7 +801,9 @@ fn combine_migration_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
         durable_commit_samples_micros: Some(Vec::with_capacity(runs.len())),
         peak_rss_bytes: 0,
         access_kind: Some(QueryAccessKind::SecondaryIndexLookup),
-        index: Some("tasks.priority".into()),
+        index: Some("tasks.migrated_rank".into()),
+        access_plan: None,
+        page_plan: None,
     };
     for run in runs {
         if run.name != combined.name
@@ -616,6 +841,34 @@ fn combine_migration_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
     Ok(combined)
 }
 
+fn combine_open_runs(runs: Vec<RawSamples>) -> AnyResult<RawSamples> {
+    let mut combined = RawSamples {
+        name: "open".into(),
+        samples_micros: Vec::with_capacity(runs.len()),
+        candidate_samples_micros: None,
+        durable_commit_samples_micros: None,
+        peak_rss_bytes: 0,
+        access_kind: None,
+        index: None,
+        access_plan: None,
+        page_plan: None,
+    };
+    for run in runs {
+        if run.name != combined.name
+            || run.samples_micros.len() != 1
+            || run.candidate_samples_micros.is_some()
+            || run.durable_commit_samples_micros.is_some()
+            || run.access_kind.is_some()
+            || run.index.is_some()
+        {
+            return Err("open child returned inconsistent metadata".into());
+        }
+        combined.samples_micros.push(run.samples_micros[0]);
+        combined.peak_rss_bytes = combined.peak_rss_bytes.max(run.peak_rss_bytes);
+    }
+    Ok(combined)
+}
+
 fn summarize(mut raw: RawSamples) -> AnyResult<CaseReport> {
     if raw.samples_micros.is_empty() {
         return Err(format!("{} returned no samples", raw.name).into());
@@ -643,6 +896,21 @@ fn summarize(mut raw: RawSamples) -> AnyResult<CaseReport> {
         peak_rss_bytes: raw.peak_rss_bytes,
         access_kind: raw.access_kind,
         index: raw.index,
+        access_plan: raw.access_plan,
+        page_plan: raw.page_plan,
+    })
+}
+
+fn environment_report() -> AnyResult<EnvironmentReport> {
+    let rustc = Command::new("rustc").arg("--version").output()?;
+    if !rustc.status.success() {
+        return Err("rustc --version failed".into());
+    }
+    Ok(EnvironmentReport {
+        os: std::env::consts::OS,
+        architecture: std::env::consts::ARCH,
+        logical_cpus: std::thread::available_parallelism()?.get(),
+        rustc: String::from_utf8(rustc.stdout)?.trim().to_string(),
     })
 }
 
@@ -698,11 +966,17 @@ fn validate_sizes(rows: usize, samples: usize, batch_rows: usize) -> AnyResult<(
     if rows > MAX_ROWS {
         return Err(format!("rows must not exceed {MAX_ROWS}").into());
     }
+    if rows < MIN_ROWS {
+        return Err(format!("rows must be at least {MIN_ROWS} for ordered/page cases").into());
+    }
     if samples > 1_000 {
         return Err("samples must not exceed 1,000".into());
     }
     if batch_rows > DEFAULT_BATCH_ROWS {
-        return Err("batch-rows must not exceed 3,000 to stay below parser limits".into());
+        return Err(format!(
+            "batch-rows must not exceed {DEFAULT_BATCH_ROWS} to stay below parser limits"
+        )
+        .into());
     }
     Ok(())
 }

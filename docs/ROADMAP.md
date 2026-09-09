@@ -127,9 +127,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#167](https://github.com/worktools/unionid/issues/167) | [路线图] M6 总览与验收顺序 | P0 | M5 核心完成 |
 | [#162](https://github.com/worktools/unionid/issues/162) | [设计] 增量候选状态与原子发布 RFC | 已完成 | [RFC 0008](rfc/0008-incremental-candidate-state.md)；[#168](https://github.com/worktools/unionid/pull/168) |
 | [#163](https://github.com/worktools/unionid/issues/163) | [核心] 增量 row-only DML 候选状态 | 已完成 | [#162](https://github.com/worktools/unionid/issues/162)；[#169](https://github.com/worktools/unionid/pull/169) |
-| [#164](https://github.com/worktools/unionid/issues/164) | [设计] 有序复合索引与范围访问 RFC | 当前 | 当前 typed equality/order 与 cursor 契约 |
-| [#165](https://github.com/worktools/unionid/issues/165) | [查询] 有序复合索引、range/ordered scan 与 page seek | P1 | [#163](https://github.com/worktools/unionid/issues/163)、[#164](https://github.com/worktools/unionid/issues/164) |
-| [#166](https://github.com/worktools/unionid/issues/166) | [质量] 复验 10k/100k 写入与有序访问成本 | P0 | [#163](https://github.com/worktools/unionid/issues/163)、[#165](https://github.com/worktools/unionid/issues/165) |
+| [#164](https://github.com/worktools/unionid/issues/164) | [设计] 有序复合索引与范围访问 RFC | 已完成 | [RFC 0009](rfc/0009-ordered-composite-indexes.md)；[#170](https://github.com/worktools/unionid/pull/170) |
+| [#165](https://github.com/worktools/unionid/issues/165) | [查询] 有序复合索引、range/ordered scan 与 page seek | 评审中 | [#174](https://github.com/worktools/unionid/pull/174)；[#175](https://github.com/worktools/unionid/pull/175) |
+| [#166](https://github.com/worktools/unionid/issues/166) | [质量] 复验 10k/100k 写入与有序访问成本 | 当前 | [#163](https://github.com/worktools/unionid/issues/163)、[#165](https://github.com/worktools/unionid/issues/165) |
 
 ### 独立 P2 探索
 
@@ -144,7 +144,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-#162／RFC 0008 已冻结普通 DML 的增量候选状态、约束验证、redb commit 和 immutable snapshot 发布边界；#163 已由 #169 实现。当前由 #164 冻结 typed total order、复合索引语法、范围访问与格式升级边界；#165 在 #164 合并后实现。最后由 #166 用保存原始样本的 10k/100k workload 复验能力边界。
+#162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek。当前由 #166 保存并核验 10k/100k 原始样本，更新能力边界并收口 M6；合并顺序为 #174 → #175 → #166 的评测与文档 PR。
 
 ## 维护约定
 

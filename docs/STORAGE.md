@@ -70,6 +70,8 @@ macOS/Linux 测试还在隔离子进程中用操作系统 `RLIMIT_FSIZE` 把 red
 
 可重复的恢复测量工具位于 `tools/recovery-eval`。2026-09-07 的三次中位数显示：10,000 行 ADT 工作集 open/check 为 66/78 ms，峰值 RSS 为 52.67/81.48 MiB；100,000 行为 653/741 ms，峰值 RSS 为 459.28/745.84 MiB。100,000 行检查的内存放大来自当前完整加载和索引验证，因此作为 v0.1 已测试上限，不作为日常目标。环境、命令、数据库大小和完整结果见[恢复成本记录](benchmarks/recovery-2026-09-07.md)。
 
+M6 使用更宽的 row 与额外复合索引重新测量完整工作负载：10k/100k 的增量单行 write p95 都约 10 ms，但 100k Engine open p95 约 5.6 s、resident query 接近 1 GiB，完整深层 migration p95 约 49.9 s、peak RSS 约 1.44 GiB。普通 write set 已不再复制整库；open/check 与 schema/data full rebuild 仍是大工作集的主要限制。完整方法、结构化访问计划和原始样本见 [M6 工作负载记录](benchmarks/workload-2026-09-09.md)。
+
 ## 与旧原型格式的关系
 
 `--wal-path` 和 `--snapshot-path` 暂时保留，用于兼容早期原型。它们通过源码回放恢复，不是 redb 格式，也不会与 `--db` 双写；同一个 server 命令不能混用这两套入口。它们不能保存幂等回执；需要该保证时应先用 `import-legacy` 转换到新的 redb 路径，并继续保留原 WAL 和 snapshot 文件。

@@ -635,7 +635,7 @@ take 20
 | `E_CURSOR_LIMIT` / `E_CURSOR_CODEC` / `E_CURSOR_INTEGRITY` | cursor 超限、编码无效或 HMAC 验证失败 |
 | `E_CURSOR_DATABASE` / `E_CURSOR_SCHEMA` / `E_CURSOR_QUERY` / `E_CURSOR_STALE` | cursor 的数据库、schema、绑定查询/参数/方向/limit 或 commit sequence 不匹配 |
 
-查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。分页查询另带 `page` 元数据；`explain` 的 `plan.page` 显示 limit、方向、唯一排序 tuple、resume boundary、snapshot sequence、候选行、`limit + 1` 读取预算、cursor 上限，以及 `sorted_scan` 或 `index_seek`。insert/upsert/update/delete 成功响应包含 `affected_rows`；单行 upsert 还包含 `upsert_action`，批量 upsert 包含 `upsert_actions`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。当前 indexed query、full scan、写入和 migration 的 10k/100k 实测边界见[工作负载成本记录](benchmarks/workload-2026-09-07.md)。
+查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。分页查询另带 `page` 元数据；`explain` 的 `plan.page` 显示 limit、方向、唯一排序 tuple、resume boundary、snapshot sequence、候选行、`limit + 1` 读取预算、cursor 上限，以及 `sorted_scan` 或 `index_seek`。insert/upsert/update/delete 成功响应包含 `affected_rows`；单行 upsert 还包含 `upsert_action`，批量 upsert 包含 `upsert_actions`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。当前 primary/secondary lookup、full scan、复合 range/order、前后向 page seek、写入和 migration 的 10k/100k 实测边界见 [M6 工作负载成本记录](benchmarks/workload-2026-09-09.md)。
 
 以下片段是故意失败的反例：
 
