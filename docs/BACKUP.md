@@ -7,7 +7,7 @@ unionid backup --db app.redb --output app.backup.json
 unionid restore --backup app.backup.json --db restored.redb
 ```
 
-`backup` 通过独占打开 redb 获得一致状态，先验证逻辑行、codec、索引和 ledger，再发布到不存在的输出路径。`restore` 在内存校验格式版本、checksum、schema、所有 typed rows、RowId、索引定义和 ledger head，成功后才创建新的 redb 目标。命令从不覆盖已有备份或数据库；损坏或未知版本的输入不会创建目标。两条命令都支持 `--format json`。
+`backup` 通过独占打开 redb 获得一致 committed view，先执行有界 full check，再从同一 view 顺序读取 typed rows。第一次读取直接计算 format-4 payload checksum，第二次直接写出 envelope；两次都不构造完整 resident `Database` 或 JSON byte buffer。输出只在完整写入、flush 与 sync 成功后发布，失败会删除未完成文件。`restore` 在内存校验格式版本、checksum、schema、所有 typed rows、RowId、索引定义和 ledger head，成功后才创建新的 redb 目标。命令从不覆盖已有备份或数据库；损坏或未知版本的输入不会创建目标。两条命令都支持 `--format json`。
 
 没有 receipt 的逻辑备份继续使用 format 1，并保持原 checksum 算法；含 receipt 的备份使用 format 2，checksum 同时覆盖 Database 与 receipt map。新实现读取两种格式，但旧二进制必须拒绝 format 2，不能在 restore 时静默丢失重试身份。恢复得到原 revision、migration history 和 receipt；之后继续使用相同 migration 目录执行 `migration status/plan/apply`。
 

@@ -94,7 +94,7 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
         );
     } else {
         println!(
-            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt codecs {}/{}/{}/{}/{}",
+            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt codecs {}/{}/{}/{}/{}\nlogical check {}\nrows/indexes checked {}/{}\npoint lookups {}\nworking peak bytes {}\ntotal/backend/logical micros {}/{}/{}",
             if report.backend_clean {
                 "backend was clean"
             } else {
@@ -107,7 +107,19 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
             report.versions.value_codec,
             report.versions.index_key_codec,
             report.versions.migration_codec,
-            report.versions.receipt_codec
+            report.versions.receipt_codec,
+            if report.profile.bounded {
+                "bounded"
+            } else {
+                "resident"
+            },
+            report.profile.rows_checked,
+            report.profile.index_entries_checked,
+            report.profile.point_lookups,
+            report.profile.working_peak_bytes,
+            report.profile.total_micros,
+            report.profile.backend_micros,
+            report.profile.logical_micros
         );
     }
     Ok(())

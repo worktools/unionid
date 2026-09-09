@@ -52,6 +52,23 @@ pub struct StorageOpenProfile {
     pub bounded_view: bool,
 }
 
+/// Value-free progress and resource observations for one explicit full check.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct StorageCheckProfile {
+    pub total_micros: u64,
+    pub backend_micros: u64,
+    pub logical_micros: u64,
+    pub rows_checked: usize,
+    pub row_bytes: u64,
+    pub index_entries_checked: usize,
+    pub index_key_bytes: u64,
+    pub point_lookups: usize,
+    pub working_peak_bytes: usize,
+    /// True when logical validation retained only catalog state and one row's
+    /// expected index keys instead of rebuilding every row and index entry.
+    pub bounded: bool,
+}
+
 /// Durable preparation path used by a successful mutation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

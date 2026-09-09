@@ -10,6 +10,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 use crate::control::ExecutionControl;
+use crate::db::QueryRowSink;
 use crate::protocol::{
     MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, ReceiptOperation, ReceiptOperationResult,
     Request as ProtocolRequest, Response as ProtocolResponse, VERSION, supported_version,
@@ -598,29 +599,34 @@ impl ReadOperation {
         &self.id
     }
 
+    pub(crate) fn stream_control(&self) -> ExecutionControl {
+        ExecutionControl::cancellable(
+            self.deadline,
+            Arc::clone(&self.cancelled),
+            self.shutdown.clone(),
+        )
+    }
+
+    pub(crate) fn request_id(&self) -> &str {
+        self.request
+            .as_ref()
+            .map(|request| request.request_id.as_str())
+            .expect("registered read has a request")
+    }
+
+    pub(crate) fn version(&self) -> u32 {
+        self.request
+            .as_ref()
+            .map(|request| request.version)
+            .expect("registered read has a request")
+    }
+
     pub fn start(self) -> ProtocolResponse {
         self.execute_registered().finish_response()
     }
 
-    pub(crate) fn start_stream(self) -> StreamReadExecution {
-        let mut execution = self.execute_registered();
-        if let Err(error) = execution
-            .terminal
-            .engine
-            .operation_phase(&execution.operation_id, OperationPhase::Emitting)
-        {
-            execution.response = ProtocolResponse::failure(
-                execution.request_id.clone(),
-                error,
-                execution
-                    .response
-                    .schema
-                    .clone()
-                    .unwrap_or_else(|| execution.terminal.engine.schema_info()),
-            );
-            execution.response.version = execution.version;
-        }
-        execution
+    pub(crate) fn start_stream(self, sink: &mut dyn QueryRowSink) -> StreamReadExecution {
+        self.execute_stream_registered(sink)
     }
 
     fn execute_registered(mut self) -> StreamReadExecution {
@@ -656,6 +662,58 @@ impl ReadOperation {
                         )
                     })
             });
+        let mut response = match result {
+            Ok(response) => ProtocolResponse::from_query(request_id, response),
+            Err(error) => ProtocolResponse::failure(request_id, error, self.engine.schema_info()),
+        };
+        response.version = version;
+        StreamReadExecution {
+            operation_id: self.id.clone(),
+            request_id: request.request_id,
+            version,
+            response,
+            control,
+            terminal,
+        }
+    }
+
+    fn execute_stream_registered(mut self, sink: &mut dyn QueryRowSink) -> StreamReadExecution {
+        let request = self.request.take().expect("read operation starts once");
+        let statements = self
+            .statements
+            .take()
+            .expect("registered read owns its parsed statement");
+        let terminal = OperationGuard {
+            engine: self.engine.clone(),
+            id: self.id.clone(),
+            finished: false,
+        };
+        let request_id = request.request_id.clone();
+        let version = request.version;
+        let control = ExecutionControl::cancellable(
+            self.deadline,
+            Arc::clone(&self.cancelled),
+            self.shutdown.clone(),
+        );
+        let result = self
+            .engine
+            .operation_phase(&self.id, OperationPhase::Queued)
+            .and_then(|()| request.decode_params())
+            .and_then(|parameters| {
+                self.engine
+                    .with_controlled_read_snapshot(&self.id, &control, |snapshot| {
+                        self.engine
+                            .operation_phase(&self.id, OperationPhase::Emitting)?;
+                        snapshot.execute_read_stream_controlled(
+                            statements,
+                            parameters,
+                            request.schema.as_ref(),
+                            &control,
+                            sink,
+                        )
+                    })
+            })
+            .and_then(|response| response);
         let mut response = match result {
             Ok(response) => ProtocolResponse::from_query(request_id, response),
             Err(error) => ProtocolResponse::failure(request_id, error, self.engine.schema_info()),

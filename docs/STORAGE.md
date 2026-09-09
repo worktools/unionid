@@ -33,7 +33,7 @@ cargo run -- check --db ./data/unionid.redb
 cargo run -- check --db ./data/unionid.redb --format json
 ```
 
-`check` 先打开并验证 unionid 逻辑格式，再运行 redb `check_integrity`；该过程可能修复 redb 的 allocator/commit 元数据，随后会重新加载并再次核对 unionid 的 schema、rows 和 indexes。输出中的 `backend_clean = true` 表示 redb 未发现需要修复的内部状态；`false` 表示修复已执行且修复后的逻辑状态通过验证。服务占用文件时，`check` 返回 `E_BUSY`。
+`check` 先打开并验证 unionid catalog，再运行 redb `check_integrity`；该过程可能修复 redb 的 allocator/commit 元数据，随后从新的 committed view 做有界逻辑检查。检查逐 row 验证 type、RowId 和 watermark，为每个 row 点查所有期望 index entry，再逐 stored index entry 反查 row 并重算 exact key；cardinality 与相邻 unique key 检查发现缺失、多余或重复项。它不建立完整 typed `Database` 或派生 index set。输出中的 `backend_clean = true` 表示 redb 未发现需要修复的内部状态；`false` 表示修复已执行且修复后的逻辑状态通过验证。`profile` 报告 backend/logical 耗时、rows/index entries/bytes、point lookups、working peak 和 `bounded`。服务占用文件时，`check` 返回 `E_BUSY`。
 
 ## 提交语义
 
@@ -41,7 +41,7 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 语法、类型、约束、编码或 redb transaction commit 之前的写入错误属于明确中止：返回 `E_STORAGE`，候选状态不发布，事务回滚，当前句柄仍可继续使用和重试。真正进入 redb `commit` 后返回的 I/O 错误属于结果不确定：当前 Engine 关闭 redb 句柄并禁用后续写入；读取仍反映进程内最后一次明确成功的状态。客户端不能把未确认写入当作确定回滚，也不应自动按 exactly-once 重试。重新打开数据库后，应通过业务主键查询确认结果。
 
-普通 row-only mutation 会生成合并的逻辑 write set，并只编码其中变化的 catalog、`(table_id, row_id)`、版本化 index key 和 receipt key。redb transaction 只删除消失的键，只写入新增或编码内容变化的键；普通数据写入不触碰 `migration_ledger`。meta 的固定版本与水位值保持同步更新。删除或覆盖时会核对 redb 中的旧值是否与 Engine 基线一致，不一致则在 commit 前明确中止并回滚事务。
+format-5 上的单条 insert/upsert/update/delete 直接从 committed source 构造有界 change set，不先物化全表。update/delete 的 filter/match/index-order/take target 只保留 RowId，再按需读取目标 row；primary/unique constraint 通过 durable typed index 点查验证。change set 同时受 250,000 rows 与 64 MiB working-state 上限，returning 仍受独立 100,000 rows／8 MiB 上限。它生成合并的逻辑 write set，并只编码其中变化的 catalog、`(table_id, row_id)`、版本化 index key 和 receipt key。redb transaction 只删除消失的键，只写入新增或编码内容变化的键；普通数据写入不触碰 `migration_ledger`。meta 的固定版本与水位值保持同步更新。删除或覆盖时会核对 redb 中的旧值是否与 Engine 基线一致，不一致则在 commit 前明确中止并回滚事务。多语句原子脚本、旧 storage format 和需要 catalog 规范化的兼容写入仍使用完整候选。
 
 DDL、schema/data migration、格式升级、restore 与 receipt prune 仍走 full-rebuild 路径：重新加载 durable 前态，编码完整候选状态，再按稳定键计算差异。该路径保留同一原子提交契约，但 CPU 和峰值内存仍随完整数据规模增长。
 
@@ -76,9 +76,7 @@ M6 使用更宽的 row 与额外复合索引重新测量完整工作负载：10k
 
 M7 的分阶段复测显示：100k open p50 约 5.44 s，其中完整派生索引重算与逻辑验证约 4.72 s，typed `Database` 构造约 0.55 s；row/index 读取合计约 0.15 s。100k migration durable commit p50 约 47.18 s，其中完整候选编码约 41.01 s、重载并验证前态约 5.44 s，而 transaction apply 与 sync 合计约 0.76 s。下一阶段应消除重复全量验证/编码并引入可恢复 generation，而不是只优化 redb I/O。边界、完整样本和解释见 [M7 存储阶段记录](benchmarks/storage-phases-2026-09-09.md)。
 
-[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结物理边界：memory/redb 共用 typed row source 和 query IR；format-5 redb committed view 已绑定一个 MVCC transaction、schema/sequence/receipt root 和严格 32 MiB snapshot-local row cache，并按 RowId/index span 解码实际候选。100k 结构化测量中，普通 open 未遍历 rows/indexes，冷／热唯一索引查询分别只解码 1／0 行，详见 [Legacy0 有界读取记录](benchmarks/bounded-legacy-read-2026-09-09.md)。full scan、check、backup 和 mutation candidate 仍在 #183 继续接入完整有界 pipeline；format 6 将通过 Legacy0 兼容 format 5，再以 shadow generation 分批构建、验证和原子 cutover schema/data migration。
-
-format-5 bounded view 上的 mutation 当前会先把 source 物化为私有 candidate，再复用既有类型、约束和原子 DML 实现；提交到 redb 时仍只编码并核对 write set 中变化的稳定键。这个过渡边界保持结果与文件格式兼容，但 candidate working set 尚未有界，由 #183 继续处理。
+[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结物理边界：memory/redb 共用 typed row source 和 query IR；format-5 redb committed view 绑定一个 MVCC transaction、schema/sequence/receipt root 和严格 32 MiB snapshot-local row cache，并按 RowId/index span 解码实际候选。full scan 的 filter/match/derive/select/take 逐行融合，aggregate/group 保留有界 accumulator，blocking sort 才物化受 250,000 rows／64 MiB 限制的 working buffer；NDJSON、single-statement mutation、full check 和 logical backup 都消费同一 source。100k check 为 1.44 s／80.62 MiB，详见 [有界 full pipeline 记录](benchmarks/bounded-full-pipeline-2026-09-09.md)。format 6 将通过 Legacy0 兼容 format 5，再以 shadow generation 分批构建、验证和原子 cutover schema/data migration。
 
 ## 与旧原型格式的关系
 

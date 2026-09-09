@@ -170,4 +170,4 @@ HTTP/TCP Rust adapter 还可使用 `Request::query`、`Request::with_serde_param
 {"stream_version":1,"operation":"cancel","request_id":"cancel-42","operation_id":"o1.ABC..."}
 ```
 
-TCP 与 HTTP 复用 `stream::accept`、`AcceptedStream::start` 和同一有界 frame producer；typed row 继续使用 `WireValue`。完整状态机、资源数值和竞态见 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md)。stream 在 `complete` 前断开时是不可恢复的 partial result，不能从半帧或行号隐式续传；短查询和需要可靠重试/续传的遍历应使用完整 response 或 stable cursor page。
+TCP 与 HTTP 复用 `stream::accept`、`AcceptedStream::start` 和同一有界 frame producer；typed row 继续使用 `WireValue`。producer 把 frame sink 直接交给 query pipeline：row-local full scan 可以逐行编码并等待有界 channel，不先构造完整 `QueryResponse.rows`；aggregate、group 或 blocking sort 仍先完成各自有界状态，再开始发送 rows。一个 stream 从 schema 到 terminal frame 始终持有同一个 request-scoped MVCC snapshot，背压、cancel、shutdown 和 deadline 都通过同一个 execution control 收敛。完整状态机、资源数值和竞态见 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md)。stream 在 `complete` 前断开时是不可恢复的 partial result，不能从半帧或行号隐式续传；短查询和需要可靠重试/续传的遍历应使用完整 response 或 stable cursor page。

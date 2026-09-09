@@ -7,12 +7,13 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::ResponseColumn;
+use crate::control::ExecutionControl;
+use crate::db::{QueryRowSink, ResponseColumn};
 use crate::protocol::{Request as ProtocolRequest, WireValue};
 use crate::server::{
     CancelResult, ConcurrentEngine, OperationOutcome, ReadOperation, StreamReadExecution,
 };
-use crate::{Error, SchemaInfo};
+use crate::{Error, SchemaInfo, Value};
 
 pub const VERSION: u32 = 1;
 pub const MAX_QUEUED_FRAMES: usize = 8;
@@ -120,14 +121,7 @@ impl AcceptedStream {
         let (sender, receiver) = sync_channel(MAX_QUEUED_FRAMES);
         let budget = Arc::new(ByteBudget::default());
         let accepted_bytes = self.accepted.len();
-        std::thread::spawn(move || {
-            produce(
-                self.operation.start_stream(),
-                accepted_bytes,
-                sender,
-                budget,
-            )
-        });
+        std::thread::spawn(move || produce(self.operation, accepted_bytes, sender, budget));
         StreamReceiver { receiver }
     }
 }
@@ -230,20 +224,38 @@ pub fn encode(value: &impl Serialize) -> Result<Vec<u8>, Error> {
 }
 
 fn produce(
-    mut execution: StreamReadExecution,
+    operation: ReadOperation,
     accepted_bytes: usize,
     sender: SyncSender<StreamChunk>,
     budget: Arc<ByteBudget>,
 ) {
-    let mut emitted_rows = 0_usize;
-    let mut encoded_bytes = accepted_bytes;
-    let result = produce_result(
-        &mut execution,
-        &sender,
-        &budget,
-        &mut emitted_rows,
-        &mut encoded_bytes,
-    );
+    let control = operation.stream_control();
+    let operation_id = operation.id().to_owned();
+    let request_id = operation.request_id().to_owned();
+    let version = operation.version();
+    let mut output = PipelineFrameSink {
+        request_id,
+        operation_id: operation_id.clone(),
+        version,
+        sender: &sender,
+        budget: &budget,
+        control,
+        emitted_rows: 0,
+        encoded_bytes: accepted_bytes,
+    };
+    let mut execution = operation.start_stream(&mut output);
+    let result = if execution.response.ok {
+        Ok(())
+    } else {
+        Err(execution
+            .response
+            .error
+            .take()
+            .unwrap_or_else(|| Error::new("E_QUERY", "stream query failed")))
+    };
+    let emitted_rows = output.emitted_rows;
+    let encoded_bytes = output.encoded_bytes;
+    drop(output);
     let proposed = match &result {
         Ok(()) => OperationOutcome::Completed,
         Err(error) if error.code == "E_CANCELLED" => OperationOutcome::Cancelled,
@@ -277,61 +289,65 @@ fn produce(
     }
 }
 
-fn produce_result(
-    execution: &mut StreamReadExecution,
-    sender: &SyncSender<StreamChunk>,
-    budget: &Arc<ByteBudget>,
-    emitted_rows: &mut usize,
-    encoded_bytes: &mut usize,
-) -> Result<(), Error> {
-    if !execution.response.ok {
-        return Err(execution
-            .response
-            .error
-            .take()
-            .unwrap_or_else(|| Error::new("E_QUERY", "stream query failed")));
+struct PipelineFrameSink<'a> {
+    request_id: String,
+    operation_id: String,
+    version: u32,
+    sender: &'a SyncSender<StreamChunk>,
+    budget: &'a Arc<ByteBudget>,
+    control: ExecutionControl,
+    emitted_rows: usize,
+    encoded_bytes: usize,
+}
+
+impl QueryRowSink for PipelineFrameSink<'_> {
+    fn begin(&mut self, columns: &[ResponseColumn], schema: &SchemaInfo) -> Result<(), Error> {
+        let frame = Frame::Schema {
+            stream_version: VERSION,
+            request_id: self.request_id.clone(),
+            operation_id: self.operation_id.clone(),
+            columns: columns.to_vec(),
+            schema: schema.clone(),
+        };
+        self.encoded_bytes = self.encoded_bytes.saturating_add(send_frame_controlled(
+            &self.control,
+            self.sender,
+            self.budget,
+            frame,
+            Some(self.encoded_bytes),
+        )?);
+        Ok(())
     }
-    let schema = execution
-        .response
-        .schema
-        .clone()
-        .ok_or_else(|| Error::new("E_INTERNAL", "stream response has no schema"))?;
-    let schema_frame = Frame::Schema {
-        stream_version: VERSION,
-        request_id: execution.request_id.clone(),
-        operation_id: execution.operation_id.clone(),
-        columns: std::mem::take(&mut execution.response.columns),
-        schema,
-    };
-    *encoded_bytes = encoded_bytes.saturating_add(send_frame(
-        execution,
-        sender,
-        budget,
-        schema_frame,
-        Some(*encoded_bytes),
-    )?);
-    for (sequence, row) in std::mem::take(&mut execution.response.rows)
-        .into_iter()
-        .enumerate()
-    {
-        execution.checkpoint()?;
+
+    fn row(&mut self, row: BTreeMap<String, Value>) -> Result<(), Error> {
+        self.control.checkpoint()?;
+        let row = row
+            .into_iter()
+            .map(|(name, value)| (name, WireValue::from(&value)))
+            .collect::<BTreeMap<_, _>>();
+        if self.version == crate::protocol::VERSION && row.values().any(WireValue::requires_v2) {
+            return Err(Error::new(
+                "E_PROTOCOL_TYPE",
+                "production scalar rows require protocol version 2",
+            ));
+        }
         let frame = Frame::Row {
             stream_version: VERSION,
-            request_id: execution.request_id.clone(),
-            operation_id: execution.operation_id.clone(),
-            sequence: sequence.to_string(),
+            request_id: self.request_id.clone(),
+            operation_id: self.operation_id.clone(),
+            sequence: self.emitted_rows.to_string(),
             row,
         };
-        *encoded_bytes = encoded_bytes.saturating_add(send_frame(
-            execution,
-            sender,
-            budget,
+        self.encoded_bytes = self.encoded_bytes.saturating_add(send_frame_controlled(
+            &self.control,
+            self.sender,
+            self.budget,
             frame,
-            Some(*encoded_bytes),
+            Some(self.encoded_bytes),
         )?);
-        *emitted_rows += 1;
+        self.emitted_rows = self.emitted_rows.saturating_add(1);
+        Ok(())
     }
-    Ok(())
 }
 
 fn error_frame(execution: &StreamReadExecution, emitted_rows: usize, error: Error) -> Frame {
@@ -346,6 +362,32 @@ fn error_frame(execution: &StreamReadExecution, emitted_rows: usize, error: Erro
 
 fn send_frame(
     execution: &StreamReadExecution,
+    sender: &SyncSender<StreamChunk>,
+    budget: &Arc<ByteBudget>,
+    frame: Frame,
+    accounted_bytes: Option<usize>,
+) -> Result<usize, Error> {
+    send_frame_controlled(execution, sender, budget, frame, accounted_bytes)
+}
+
+trait StreamCheckpoint {
+    fn checkpoint(&self) -> Result<(), Error>;
+}
+
+impl StreamCheckpoint for StreamReadExecution {
+    fn checkpoint(&self) -> Result<(), Error> {
+        StreamReadExecution::checkpoint(self)
+    }
+}
+
+impl StreamCheckpoint for ExecutionControl {
+    fn checkpoint(&self) -> Result<(), Error> {
+        ExecutionControl::checkpoint(self)
+    }
+}
+
+fn send_frame_controlled(
+    execution: &dyn StreamCheckpoint,
     sender: &SyncSender<StreamChunk>,
     budget: &Arc<ByteBudget>,
     frame: Frame,
@@ -398,7 +440,7 @@ impl ByteBudget {
     fn reserve(
         self: &Arc<Self>,
         size: usize,
-        execution: &StreamReadExecution,
+        execution: &dyn StreamCheckpoint,
         checked: bool,
         terminal_deadline: Option<Instant>,
     ) -> Result<ByteReservation, Error> {
@@ -500,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_backpressure_releases_snapshot_and_cancel_ends_partial_stream() {
+    fn bounded_backpressure_keeps_one_snapshot_and_cancel_ends_partial_stream() {
         let engine = ConcurrentEngine::new(Engine::memory());
         assert!(engine.execute("create table items (id int)").ok);
         let source = (0..32)
@@ -521,7 +563,7 @@ mod tests {
         assert!(matches!(decode(&schema), Frame::Schema { .. }));
         let first_row = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(matches!(decode(&first_row), Frame::Row { .. }));
-        wait_for(|| engine.stats().active_reads == 0);
+        wait_for(|| engine.stats().active_reads == 1);
         assert_eq!(
             engine.cancel(&operation_id).unwrap().status,
             crate::server::CancelStatus::Accepted
@@ -534,6 +576,7 @@ mod tests {
             matches!(frames.last(), Some(Frame::Error { error, .. }) if error.code == "E_CANCELLED")
         );
         assert_eq!(engine.stats().registered_operations, 0);
+        assert_eq!(engine.stats().active_reads, 0);
     }
 
     #[test]

@@ -12,7 +12,9 @@ use redb::{
 };
 
 use crate::codec::{PRODUCTION_VALUE_CODEC_VERSION, VALUE_CODEC_VERSION};
-use crate::db::{Database, DurableCatalogEntry, DurableMeta, LogicalWriteSet};
+use crate::db::{
+    Database, DurableCatalogEntry, DurableMeta, DurableTable, IndexDefinition, LogicalWriteSet,
+};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyReceipt, MAX_IDEMPOTENCY_RECEIPT_BYTES, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap,
@@ -21,7 +23,9 @@ use crate::idempotency::{
 use crate::introspection::StorageVersions;
 use crate::migration::MigrationEntry;
 use crate::model::Value;
-use crate::profile::{DurableCommitMode, DurableCommitProfile, StorageOpenProfile};
+use crate::profile::{
+    DurableCommitMode, DurableCommitProfile, StorageCheckProfile, StorageOpenProfile,
+};
 use crate::row_source::{
     EncodedIndexBounds, IndexHit, IndexHitCursor, RowBatch, RowBatchCursor, SOURCE_BATCH_MAX_BYTES,
     SOURCE_BATCH_MAX_ROWS, SourceIdentity, TableStats, TypedRowSource,
@@ -831,6 +835,11 @@ impl RedbStore {
         self.committed.layout.supports_production_scalars()
     }
 
+    pub(crate) fn supports_bounded_row_mutation(&self) -> bool {
+        self.committed.layout.format == PRODUCTION_STORAGE_FORMAT_VERSION
+            && self.committed.catalog_canonical
+    }
+
     pub(crate) fn committed_view(
         &self,
         database: &Database,
@@ -1079,14 +1088,236 @@ impl RedbStore {
         })
     }
 
-    pub(crate) fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap)> {
+    pub(crate) fn check_integrity(
+        &mut self,
+    ) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
+        let total_started = Instant::now();
+        let backend_started = Instant::now();
         let backend_clean = self
             .database
             .check_integrity()
             .map_err(|error| storage_error("check redb integrity", error))?;
-        let (database, receipts, committed, _) = self.load()?;
+        let backend_micros = elapsed_micros(backend_started);
+        if self.committed.layout == StorageLayout::production() {
+            let logical_started = Instant::now();
+            let (database, receipts, committed, source, _) = self.load_bounded_view()?;
+            drop(source);
+            let mut profile = self.validate_bounded_integrity(&database)?;
+            profile.backend_micros = backend_micros;
+            profile.logical_micros = elapsed_micros(logical_started);
+            profile.total_micros = elapsed_micros(total_started);
+            self.committed = committed;
+            return Ok((backend_clean, database.as_ref().clone(), receipts, profile));
+        }
+        let logical_started = Instant::now();
+        let (database, receipts, committed, open_profile) = self.load()?;
         self.committed = DurableHead::from_prepared(&committed);
-        Ok((backend_clean, database, receipts))
+        Ok((
+            backend_clean,
+            database,
+            receipts,
+            StorageCheckProfile {
+                total_micros: elapsed_micros(total_started),
+                backend_micros,
+                logical_micros: elapsed_micros(logical_started),
+                rows_checked: open_profile.row_entries,
+                row_bytes: open_profile.row_bytes,
+                index_entries_checked: open_profile.index_entries,
+                index_key_bytes: open_profile.index_key_bytes,
+                point_lookups: 0,
+                working_peak_bytes: usize::try_from(
+                    open_profile
+                        .row_bytes
+                        .saturating_add(open_profile.index_key_bytes),
+                )
+                .unwrap_or(usize::MAX),
+                bounded: false,
+            },
+        ))
+    }
+
+    fn validate_bounded_integrity(&self, metadata: &Database) -> Result<StorageCheckProfile> {
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin integrity read transaction", error))?;
+        let rows = transaction
+            .open_table(ROWS)
+            .map_err(|error| storage_error("open rows table", error))?;
+        let indexes = transaction
+            .open_table(SECONDARY_INDEX)
+            .map_err(|error| storage_error("open secondary index table", error))?;
+
+        let mut tables = BTreeMap::<u64, DurableTable>::new();
+        let mut definitions = BTreeMap::<u64, (DurableTable, IndexDefinition)>::new();
+        let mut by_table = BTreeMap::<u64, Vec<IndexDefinition>>::new();
+        let catalog_entries = metadata.durable_catalog_entries();
+        for entry in &catalog_entries {
+            if let DurableCatalogEntry::Table(table) = entry {
+                tables.insert(table.id, table.clone());
+            }
+        }
+        for entry in catalog_entries {
+            if let DurableCatalogEntry::Index { table, definition } = entry {
+                let durable_table = tables
+                    .get(&definition.table_id)
+                    .filter(|candidate| candidate.name == table)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Error::new("E_STORAGE", "index references an unknown durable table")
+                    })?;
+                by_table
+                    .entry(definition.table_id)
+                    .or_default()
+                    .push(definition.clone());
+                definitions.insert(definition.id, (durable_table, definition));
+            }
+        }
+
+        let mut profile = StorageCheckProfile {
+            bounded: true,
+            ..StorageCheckProfile::default()
+        };
+        let mut expected_index_entries = 0_usize;
+        for entry in rows
+            .iter()
+            .map_err(|error| storage_error("iterate rows for integrity check", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read row for integrity check", error))?;
+            let (table_id, row_id) = decode_row_key(key.value())?;
+            let table = tables.get(&table_id).ok_or_else(|| {
+                Error::new(
+                    "E_STORAGE",
+                    format!("row references unknown table ID {table_id}"),
+                )
+            })?;
+            let row = metadata.decode_source_row(&table.name, row_id, value.value())?;
+            profile.rows_checked = profile.rows_checked.saturating_add(1);
+            profile.row_bytes = profile
+                .row_bytes
+                .saturating_add(u64::try_from(value.value().len()).unwrap_or(u64::MAX));
+            let mut row_working = value.value().len();
+            if let Some(table_indexes) = by_table.get(&table_id) {
+                for definition in table_indexes {
+                    let indexed = metadata.source_index_value(&table.name, definition, &row)?;
+                    let expected = encode_index_key(
+                        metadata,
+                        definition.id,
+                        &indexed,
+                        row_id,
+                        PRODUCTION_INDEX_KEY_VERSION,
+                    )?;
+                    row_working = row_working.saturating_add(expected.len());
+                    profile.point_lookups = profile.point_lookups.saturating_add(1);
+                    if indexes
+                        .get(expected.as_slice())
+                        .map_err(|error| storage_error("lookup expected secondary index", error))?
+                        .is_none()
+                    {
+                        return Err(Error::new(
+                            "E_STORAGE",
+                            format!(
+                                "durable secondary indexes do not match the stored rows and catalog: row {row_id} is missing from index '{} ({})'",
+                                table.name,
+                                definition.display_shape()
+                            ),
+                        ));
+                    }
+                    expected_index_entries =
+                        expected_index_entries.checked_add(1).ok_or_else(|| {
+                            Error::new("E_STORAGE", "secondary index cardinality overflow")
+                        })?;
+                }
+            }
+            profile.working_peak_bytes = profile.working_peak_bytes.max(row_working);
+        }
+
+        let mut previous_unique_prefix: Option<Vec<u8>> = None;
+        for entry in indexes
+            .iter()
+            .map_err(|error| storage_error("iterate indexes for integrity check", error))?
+        {
+            let (key, _) =
+                entry.map_err(|error| storage_error("read index for integrity check", error))?;
+            let key = key.value();
+            validate_index_key(key, PRODUCTION_INDEX_KEY_VERSION)?;
+            let index_id = u64::from_be_bytes(key[6..14].try_into().unwrap());
+            let component_count = key[14] as usize;
+            let row_id = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+            let (table, definition) = definitions.get(&index_id).ok_or_else(|| {
+                Error::new(
+                    "E_STORAGE",
+                    format!("secondary index references unknown index ID {index_id}"),
+                )
+            })?;
+            if component_count != definition.effective_components().len() {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "secondary index component count does not match its catalog definition",
+                ));
+            }
+            let row_key = encode_row_key(table.id, row_id);
+            profile.point_lookups = profile.point_lookups.saturating_add(1);
+            let stored_row = rows
+                .get(row_key.as_slice())
+                .map_err(|error| storage_error("lookup indexed row", error))?
+                .ok_or_else(|| {
+                    Error::new("E_STORAGE", "secondary index references a missing row")
+                })?;
+            let row = metadata.decode_source_row(&table.name, row_id, stored_row.value())?;
+            let indexed = metadata.source_index_value(&table.name, definition, &row)?;
+            let expected = encode_index_key(
+                metadata,
+                definition.id,
+                &indexed,
+                row_id,
+                PRODUCTION_INDEX_KEY_VERSION,
+            )?;
+            if key != expected.as_slice() {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!(
+                        "secondary index '{} ({})' does not match row {row_id}",
+                        table.name,
+                        definition.display_shape()
+                    ),
+                ));
+            }
+            let unique = definition.kind.is_unique()
+                || definition.is_primary_index(table.primary_key.as_deref());
+            let prefix = &key[..key.len() - 8];
+            if unique && previous_unique_prefix.as_deref() == Some(prefix) {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!(
+                        "unique index '{} ({})' contains duplicate values",
+                        table.name,
+                        definition.display_shape()
+                    ),
+                ));
+            }
+            previous_unique_prefix = unique.then(|| prefix.to_vec());
+            profile.index_entries_checked = profile.index_entries_checked.saturating_add(1);
+            profile.index_key_bytes = profile
+                .index_key_bytes
+                .saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX));
+            profile.working_peak_bytes = profile.working_peak_bytes.max(
+                key.len()
+                    .saturating_add(stored_row.value().len())
+                    .saturating_add(expected.len()),
+            );
+        }
+        if profile.index_entries_checked != expected_index_entries {
+            return Err(Error::new(
+                "E_STORAGE",
+                format!(
+                    "secondary index cardinality mismatch: expected {expected_index_entries}, found {}",
+                    profile.index_entries_checked
+                ),
+            ));
+        }
+        Ok(profile)
     }
 
     fn load_bounded_view(&self) -> Result<BoundedViewLoad> {

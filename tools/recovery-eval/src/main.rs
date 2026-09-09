@@ -5,7 +5,7 @@ use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use unionid::{Engine, ExecutionObservation, StorageOpenProfile, Value};
+use unionid::{Engine, ExecutionObservation, StorageCheckProfile, StorageOpenProfile, Value};
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
 
@@ -24,6 +24,8 @@ struct PhaseReport {
     cold_indexed_read: Option<ExecutionObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     warm_indexed_read: Option<ExecutionObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    check_profile: Option<StorageCheckProfile>,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,13 +211,14 @@ fn measure_open(path: &Path, rows: usize) -> AnyResult<()> {
         open_profile: Some(open_profile),
         cold_indexed_read: Some(cold_indexed_read),
         warm_indexed_read: Some(warm_indexed_read),
+        check_profile: None,
     })
 }
 
 fn measure_check(path: &Path, rows: usize) -> AnyResult<()> {
     let mut engine = Engine::open_redb(path.to_path_buf())?;
     let started = Instant::now();
-    engine.check_integrity()?;
+    let check_profile = engine.check_integrity()?.profile;
     let millis = started.elapsed().as_millis();
     let peak_rss_bytes = peak_rss_bytes()?;
     let response = engine.execute("from tasks\naggregate\n  rows = count");
@@ -229,6 +232,7 @@ fn measure_check(path: &Path, rows: usize) -> AnyResult<()> {
         open_profile: None,
         cold_indexed_read: None,
         warm_indexed_read: None,
+        check_profile: Some(check_profile),
     })
 }
 
