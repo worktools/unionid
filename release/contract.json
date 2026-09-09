@@ -1,0 +1,33 @@
+{
+  "backup_format": 4,
+  "backup_formats_readable": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "catalog_codec": 4,
+  "index_key_codec": 3,
+  "maintenance_codec": 1,
+  "migration_codec": 1,
+  "protocol": 2,
+  "protocol_versions": [
+    1,
+    2
+  ],
+  "receipt_codec": 2,
+  "storage_format": 6,
+  "storage_formats_readable": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "stream_protocol_versions": [
+    1
+  ],
+  "value_codec": 2,
+  "version_report_schema": 1
+}

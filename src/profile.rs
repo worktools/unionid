@@ -69,6 +69,25 @@ pub struct StorageCheckProfile {
     pub bounded: bool,
 }
 
+/// Value-free phase and cardinality observations for one successful format-6
+/// shadow-generation migration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct MigrationProfile {
+    pub total_micros: u64,
+    pub prepare_micros: u64,
+    pub build_micros: u64,
+    pub validate_micros: u64,
+    pub cutover_micros: u64,
+    pub reclaim_micros: u64,
+    pub source_generation: u64,
+    pub target_generation: u64,
+    pub source_rows_seen: u64,
+    pub target_rows_written: u64,
+    pub index_entries_written: u64,
+    pub logical_bytes: u64,
+    pub reclaim_complete: bool,
+}
+
 /// Durable preparation path used by a successful mutation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

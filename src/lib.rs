@@ -54,8 +54,8 @@ pub use migration::{
 };
 pub use model::{RowId, Value};
 pub use profile::{
-    DurableCommitMode, DurableCommitProfile, ExecutionObservation, StorageCheckProfile,
-    StorageOpenProfile,
+    DurableCommitMode, DurableCommitProfile, ExecutionObservation, MigrationProfile,
+    StorageCheckProfile, StorageOpenProfile,
 };
 pub use protocol::{
     IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,

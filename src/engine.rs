@@ -20,7 +20,9 @@ use crate::migration::{
     MigrationMaintenancePhase, MigrationPlan, MigrationPlanItem, MigrationStatus, describe_step,
     validate_files_against_history,
 };
-use crate::profile::{DurableCommitProfile, StorageCheckProfile, StorageOpenProfile};
+use crate::profile::{
+    DurableCommitProfile, MigrationProfile, StorageCheckProfile, StorageOpenProfile,
+};
 use crate::query::{LocatedStatement, PageSpec, Stage, Statement};
 use crate::redb_storage::{CommitFailure, MaintenanceInfo, MaintenanceState, RedbStore};
 use crate::row_source::TypedRowSource;
@@ -46,6 +48,7 @@ pub struct Engine {
     storage_mode: StorageMode,
     snapshot_storage_versions: Option<StorageVersions>,
     last_mutation_profile: Option<MutationProfile>,
+    last_migration_profile: Option<MigrationProfile>,
     open_profile: Option<StorageOpenProfile>,
     _locks: Vec<DatabaseLock>,
 }
@@ -490,6 +493,7 @@ impl Engine {
             storage_mode,
             snapshot_storage_versions: None,
             last_mutation_profile: None,
+            last_migration_profile: None,
             open_profile: None,
             _locks: locks,
         })
@@ -543,6 +547,12 @@ impl Engine {
 
     pub fn last_mutation_profile(&self) -> Option<MutationProfile> {
         self.last_mutation_profile
+    }
+
+    /// Return the value-free phase profile for the last successful format-6
+    /// shadow-generation migration applied through this Engine.
+    pub fn last_migration_profile(&self) -> Option<MigrationProfile> {
+        self.last_migration_profile
     }
 
     /// Return the value-free phase profile captured by the successful durable
@@ -1668,6 +1678,7 @@ impl Engine {
         files: &[MigrationFile],
         control: Option<&ExecutionControl>,
     ) -> Result<MigrationApply> {
+        self.last_migration_profile = None;
         ensure_deadline(control)?;
         if self.wal.is_some() {
             return Err(Error::new(
@@ -1773,7 +1784,9 @@ impl Engine {
         file: &MigrationFile,
         control: Option<&ExecutionControl>,
     ) -> Result<()> {
+        let total_started = std::time::Instant::now();
         ensure_deadline(control)?;
+        let prepare_started = std::time::Instant::now();
         let source_database = self.committed.db.clone();
         let source = self.committed.source.clone();
         let mut target = source_database
@@ -1794,7 +1807,9 @@ impl Engine {
             schema_hash: schema.hash,
             applied_at_unix_ms,
         })?;
+        let mut prepare_micros = elapsed_micros(prepare_started);
 
+        let cleanup_started = std::time::Instant::now();
         loop {
             ensure_deadline(control)?;
             let info = self
@@ -1819,7 +1834,9 @@ impl Engine {
                 break;
             }
         }
+        prepare_micros = prepare_micros.saturating_add(elapsed_micros(cleanup_started));
 
+        let build_started = std::time::Instant::now();
         let mut info = self
             .durable
             .as_ref()
@@ -1901,6 +1918,10 @@ impl Engine {
                     }
                 }
             }
+        }
+        let build_micros = elapsed_micros(build_started);
+        let validate_started = std::time::Instant::now();
+        if info.state == MaintenanceState::Building {
             ensure_deadline(control)?;
             let result = self
                 .durable
@@ -1915,12 +1936,15 @@ impl Engine {
                 }
             };
         }
+        let validate_micros = elapsed_micros(validate_started);
         if info.state != MaintenanceState::Ready {
             return Err(Error::new(
                 "E_MAINTENANCE_CONFLICT",
                 "migration checkpoint is not ready for cutover",
             ));
         }
+        let ready_info = info.clone();
+        let cutover_started = std::time::Instant::now();
         ensure_deadline(control)?;
         let result = self
             .durable
@@ -1951,6 +1975,8 @@ impl Engine {
                 ));
             }
         }
+        let cutover_micros = elapsed_micros(cutover_started);
+        let reclaim_started = std::time::Instant::now();
         while self
             .durable
             .as_ref()
@@ -1970,6 +1996,28 @@ impl Engine {
                 break;
             }
         }
+        let reclaim_complete = self
+            .durable
+            .as_ref()
+            .expect("successful cutover keeps the durable backend")
+            .maintenance_info()?
+            .is_none();
+        let reclaim_micros = elapsed_micros(reclaim_started);
+        self.last_migration_profile = Some(MigrationProfile {
+            total_micros: elapsed_micros(total_started),
+            prepare_micros,
+            build_micros,
+            validate_micros,
+            cutover_micros,
+            reclaim_micros,
+            source_generation: ready_info.source_generation,
+            target_generation: ready_info.target_generation,
+            source_rows_seen: ready_info.source_rows_seen,
+            target_rows_written: ready_info.target_rows_written,
+            index_entries_written: ready_info.index_entries_written,
+            logical_bytes: ready_info.logical_bytes,
+            reclaim_complete,
+        });
         Ok(())
     }
 

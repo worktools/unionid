@@ -11,6 +11,7 @@ import tarfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+CONTRACT_PATH = ROOT / "release" / "contract.json"
 
 
 def command(*args):
@@ -27,6 +28,26 @@ def add_bytes(archive, name, data, mode=0o644):
     info.uname = "root"
     info.gname = "root"
     archive.addfile(info, io.BytesIO(data))
+
+
+def reported_capabilities(report):
+    storage = report["current_storage"]
+    return {
+        "version_report_schema": report["schema_version"],
+        "storage_format": storage["format"],
+        "storage_formats_readable": report["readable_storage_formats"],
+        "catalog_codec": storage["catalog_codec"],
+        "value_codec": storage["value_codec"],
+        "index_key_codec": storage["index_key_codec"],
+        "migration_codec": storage["migration_codec"],
+        "receipt_codec": storage["receipt_codec"],
+        "maintenance_codec": storage["maintenance_codec"],
+        "backup_format": storage["backup_codec"],
+        "backup_formats_readable": report["readable_backup_formats"],
+        "protocol": max(report["protocol_versions"]),
+        "protocol_versions": report["protocol_versions"],
+        "stream_protocol_versions": report["stream_protocol_versions"],
+    }
 
 
 def main():
@@ -60,6 +81,22 @@ def main():
     binary = ROOT / "target" / target / "release" / executable
     if not binary.is_file():
         raise RuntimeError(f"release binary not found: {binary}")
+    binary_version = json.loads(
+        subprocess.check_output(
+            [binary, "version", "--format", "json"], cwd=ROOT, text=True
+        )
+    )
+    if binary_version["software_version"] != version:
+        raise RuntimeError("release binary version does not match Cargo.toml")
+    if binary_version["target"] != target:
+        raise RuntimeError("release binary target does not match the requested target")
+    capabilities = reported_capabilities(binary_version)
+    contract = json.loads(CONTRACT_PATH.read_text())
+    if capabilities != contract:
+        raise RuntimeError(
+            f"release binary does not match {CONTRACT_PATH.relative_to(ROOT)}: "
+            f"expected {contract}, got {capabilities}"
+        )
 
     package = f"unionid-v{version}-{target}"
     files = {
@@ -83,16 +120,7 @@ def main():
         "target": target,
         "rust_toolchain": command("rustc", "--version"),
         "redb": redb,
-        "storage_format": 3,
-        "storage_formats_readable": [1, 2, 3],
-        "catalog_codec": 2,
-        "value_codec": 1,
-        "index_key_codec": 1,
-        "migration_codec": 1,
-        "receipt_codec": 1,
-        "backup_format": 2,
-        "backup_formats_readable": [1, 2],
-        "protocol": 1,
+        **capabilities,
     }
     files[f"{package}/RELEASE.json"] = (
         (json.dumps(release, indent=2, sort_keys=True) + "\n").encode(),

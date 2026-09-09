@@ -219,6 +219,24 @@ fn redb_shadow_generation_migrates_multiple_bounded_batches() {
     engine
         .apply_migrations(&[initial.clone(), changed.clone()])
         .unwrap();
+    let profile = engine
+        .last_migration_profile()
+        .expect("format-6 migration profile");
+    assert_eq!(profile.source_rows_seen, 2_500);
+    assert_eq!(profile.target_rows_written, 2_500);
+    assert!(profile.index_entries_written >= 2_500);
+    assert!(profile.logical_bytes > 0);
+    assert!(profile.source_generation < profile.target_generation);
+    assert!(profile.reclaim_complete);
+    assert!(
+        profile
+            .prepare_micros
+            .saturating_add(profile.build_micros)
+            .saturating_add(profile.validate_micros)
+            .saturating_add(profile.cutover_micros)
+            .saturating_add(profile.reclaim_micros)
+            <= profile.total_micros
+    );
     assert_eq!(engine.schema_info().revision, before.revision + 1);
     let rows = ok(
         &mut engine,

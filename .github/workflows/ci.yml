@@ -36,4 +36,10 @@ jobs:
       - run: cargo run --locked --example cold_content -- "${RUNNER_TEMP}/unionid-cold-content.redb"
       - run: cargo run --locked --example todolist -- "${RUNNER_TEMP}/unionid-todolist"
       - run: python3 scripts/package-release.py --output "${RUNNER_TEMP}/unionid-dist"
-      - run: python3 scripts/verify-release.py --dist "${RUNNER_TEMP}/unionid-dist"
+      - name: Record archive digest outside the artifact
+        id: release-digest
+        shell: bash
+        run: |
+          digest="$(python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(next(pathlib.Path(sys.argv[1]).glob("*.tar.gz")).read_bytes()).hexdigest())' "${RUNNER_TEMP}/unionid-dist")"
+          echo "sha256=${digest}" >> "${GITHUB_OUTPUT}"
+      - run: python3 scripts/verify-release.py --dist "${RUNNER_TEMP}/unionid-dist" --expected-sha256 "${{ steps.release-digest.outputs.sha256 }}"
