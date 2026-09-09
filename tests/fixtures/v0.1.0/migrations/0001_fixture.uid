@@ -1,0 +1,18 @@
+migration m0001_fixture
+  add type Contact =
+    email text
+    nickname option text
+  add type State =
+    Pending
+    | Running
+      worker text
+      attempt int
+    | Done text
+  add type Task =
+    id int
+    title text
+    owner Contact
+    tags list text
+    state State
+  add table tasks Task key id
+  add index tasks.owner.email

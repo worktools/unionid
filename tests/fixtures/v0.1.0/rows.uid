@@ -1,0 +1,29 @@
+insert tasks
+  id = 1
+  title = "sync files"
+  owner = {
+    email = "alice@example.com"
+    nickname = None
+  }
+  tags = ["sync", "local"]
+  state = Running {worker = "desktop", attempt = 1}
+
+insert tasks
+  id = 2
+  title = "refresh config"
+  owner = {
+    email = "bob@example.com"
+    nickname = Some("Bob")
+  }
+  tags = ["config"]
+  state = Pending
+
+insert tasks
+  id = 3
+  title = "publish report"
+  owner = {
+    email = "carol@example.com"
+    nickname = Some("Carol")
+  }
+  tags = ["report", "archive"]
+  state = Done("ok")
