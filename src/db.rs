@@ -5748,7 +5748,6 @@ impl Database {
         let identity = source.snapshot_identity();
         let schema = self.schema_info();
         if identity.database_instance != *self.cursor_identity.instance_id()
-            || identity.generation != 0
             || identity.sequence != self.sequence
             || identity.schema_hash != schema.hash
         {

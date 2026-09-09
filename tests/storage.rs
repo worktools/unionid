@@ -5,12 +5,20 @@ use redb::{
     TableDefinition,
 };
 use std::process::Command;
-use unionid::{DurableCommitMode, Engine, MigrationFile, QueryAccessKind, UpsertAction, Value};
+use unionid::{
+    DurableCommitMode, Engine, MigrationFile, PageSpec, QueryAccessKind, UpsertAction, Value,
+};
 
 const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
 const REDB_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
 const REDB_SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("secondary_index");
+const REDB_GENERATION_CATALOG: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("generation_catalog");
+const REDB_GENERATION_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("generation_rows");
+const REDB_GENERATION_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("generation_index");
+const REDB_MAINTENANCE_GENERATION: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("maintenance_generation");
 const REDB_MIGRATION_LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("migration_ledger");
 const REDB_IDEMPOTENCY_RECEIPTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("idempotency_receipts");
@@ -20,6 +28,7 @@ const DISK_LIMIT_PATH_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_PATH";
 const DISK_LIMIT_RESULT_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_RESULT";
 const UPGRADE_PATH_ENV: &str = "UNIONID_TEST_REDB_UPGRADE_PATH";
 const UPGRADE_READY_ENV: &str = "UNIONID_TEST_REDB_UPGRADE_READY";
+const UPGRADE_TARGET_ENV: &str = "UNIONID_TEST_REDB_UPGRADE_TARGET";
 const CRASH_BEFORE_COMMIT: i32 = 91;
 const CRASH_AFTER_COMMIT: i32 = 92;
 const DISK_LIMIT_FAILURE: i32 = 93;
@@ -252,6 +261,9 @@ fn create_empty_format3(path: &std::path::Path) {
     let mut transaction = database.begin_write().unwrap();
     transaction.set_durability(Durability::Immediate).unwrap();
     transaction.set_two_phase_commit(true);
+    transaction.open_table(REDB_CATALOG).unwrap();
+    transaction.open_table(REDB_ROWS).unwrap();
+    transaction.open_table(REDB_SECONDARY_INDEX).unwrap();
     let mut meta = transaction.open_table(REDB_META).unwrap();
     for (key, value) in [
         ("storage_format_version", 3_u32.to_be_bytes().to_vec()),
@@ -264,6 +276,117 @@ fn create_empty_format3(path: &std::path::Path) {
         meta.insert(key, value.as_slice()).unwrap();
     }
     drop(meta);
+    transaction.commit().unwrap();
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LegacyPhysicalSnapshot {
+    identity_meta: Vec<(&'static str, Vec<u8>)>,
+    catalog: Vec<(Vec<u8>, Vec<u8>)>,
+    rows: Vec<(Vec<u8>, Vec<u8>)>,
+    indexes: Vec<Vec<u8>>,
+    ledger: Vec<(u64, Vec<u8>)>,
+    receipts: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+fn legacy_physical_snapshot(path: &std::path::Path) -> LegacyPhysicalSnapshot {
+    let database = RedbDatabase::open(path).unwrap();
+    let transaction = database.begin_read().unwrap();
+    let meta = transaction.open_table(REDB_META).unwrap();
+    let identity_meta = [
+        "commit_sequence",
+        "schema_revision",
+        "next_catalog_id",
+        "schema_hash",
+        "cursor_instance_id",
+        "cursor_secret",
+    ]
+    .into_iter()
+    .map(|key| (key, meta.get(key).unwrap().unwrap().value().to_vec()))
+    .collect();
+    let catalog = transaction
+        .open_table(REDB_CATALOG)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (key, value) = entry.unwrap();
+            (key.value().to_vec(), value.value().to_vec())
+        })
+        .collect();
+    let rows = transaction
+        .open_table(REDB_ROWS)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (key, value) = entry.unwrap();
+            (key.value().to_vec(), value.value().to_vec())
+        })
+        .collect();
+    let indexes = transaction
+        .open_table(REDB_SECONDARY_INDEX)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .map(|entry| entry.unwrap().0.value().to_vec())
+        .collect();
+    let ledger = transaction
+        .open_table(REDB_MIGRATION_LEDGER)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (key, value) = entry.unwrap();
+            (key.value(), value.value().to_vec())
+        })
+        .collect();
+    let receipts = transaction
+        .open_table(REDB_IDEMPOTENCY_RECEIPTS)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (key, value) = entry.unwrap();
+            (key.value().to_vec(), value.value().to_vec())
+        })
+        .collect();
+    LegacyPhysicalSnapshot {
+        identity_meta,
+        catalog,
+        rows,
+        indexes,
+        ledger,
+        receipts,
+    }
+}
+
+fn write_format6_generation_state(
+    path: &std::path::Path,
+    active: u64,
+    next: u64,
+    manifests: &[(u64, serde_json::Value)],
+) {
+    let database = RedbDatabase::open(path).unwrap();
+    let mut transaction = database.begin_write().unwrap();
+    transaction.set_durability(Durability::Immediate).unwrap();
+    transaction.set_two_phase_commit(true);
+    {
+        let mut meta = transaction.open_table(REDB_META).unwrap();
+        meta.insert("active_generation", active.to_be_bytes().as_slice())
+            .unwrap();
+        meta.insert("next_generation_id", next.to_be_bytes().as_slice())
+            .unwrap();
+    }
+    {
+        let mut table = transaction.open_table(REDB_MAINTENANCE_GENERATION).unwrap();
+        for (id, manifest) in manifests {
+            let mut encoded = b"UIDN".to_vec();
+            encoded.extend_from_slice(&1_u16.to_be_bytes());
+            encoded.extend(serde_json::to_vec(manifest).unwrap());
+            table.insert(*id, encoded.as_slice()).unwrap();
+        }
+    }
     transaction.commit().unwrap();
 }
 
@@ -301,7 +424,7 @@ fn idempotent_effect_and_receipt_commit_together_and_survive_reopen() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            5_u32.to_be_bytes()
+            6_u32.to_be_bytes()
         );
         let receipts = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
         assert_eq!(receipts.len().unwrap(), 1);
@@ -460,7 +583,7 @@ fn composite_index_shapes_and_tuples_survive_redb_reopen() {
         let duplicate = engine.execute("insert tasks {id = 3, tenant = \"acme\", priority = 4}");
         assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
         assert!(engine.check_integrity().unwrap().backend_clean);
-        assert_eq!(engine.introspection().storage_versions.unwrap().format, 5);
+        assert_eq!(engine.introspection().storage_versions.unwrap().format, 6);
     }
 
     let mut reopened = Engine::open_redb(&path).unwrap();
@@ -498,6 +621,11 @@ fn format4_requires_explicit_upgrade_for_new_index_shapes() {
         "E_STORAGE_UPGRADE_REQUIRED"
     );
     assert_eq!(engine.schema_info(), before);
+
+    let skipped = engine.upgrade_storage(6).unwrap_err();
+    assert_eq!(skipped.code, "E_STORAGE_UPGRADE");
+    assert!(skipped.message.contains("requires format 5"));
+    assert_eq!(engine.introspection().storage_versions.unwrap().format, 4);
 
     let upgraded = engine.upgrade_storage(5).unwrap();
     assert_eq!(upgraded.previous_format, 4);
@@ -843,9 +971,13 @@ fn redb_upgrade_child() {
         return;
     };
     let ready = std::env::var(UPGRADE_READY_ENV).unwrap();
+    let target = std::env::var(UPGRADE_TARGET_ENV)
+        .ok()
+        .map(|value| value.parse::<u32>().unwrap())
+        .unwrap_or(5);
     let mut engine = Engine::open_redb(path).unwrap();
     std::fs::write(ready, b"ready").unwrap();
-    engine.upgrade_storage(5).unwrap();
+    engine.upgrade_storage(target).unwrap();
 }
 
 #[test]
@@ -903,6 +1035,70 @@ fn interrupted_format5_upgrade_recovers_as_complete_old_or_new_state() {
         assert!(reopened.upgrade_storage(5).unwrap().changed);
     }
     assert_eq!(reopened.introspection().storage_versions.unwrap().format, 5);
+}
+
+#[test]
+fn interrupted_format6_metadata_upgrade_recovers_as_complete_legacy0_state() {
+    let dir = TempDir::new();
+    let path = dir.0.join("interrupted-format6-upgrade.redb");
+    let ready = dir.0.join("format6-upgrade-ready");
+    create_empty_format3(&path);
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let migration = MigrationFile::parse(
+            "migration m0001_initial\n  add type Entry =\n    id int\n    value text\n  add table entries Entry key id\n  add index entries.value\n",
+        )
+        .unwrap();
+        engine
+            .apply_migrations(std::slice::from_ref(&migration))
+            .unwrap();
+        assert!(
+            engine
+                .execute("insert entries {id = 1, value = \"complete\"}")
+                .ok
+        );
+        assert!(engine.upgrade_storage(4).unwrap().changed);
+        assert!(engine.upgrade_storage(5).unwrap().changed);
+    }
+    let before = legacy_physical_snapshot(&path);
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "redb_upgrade_child", "--nocapture"])
+        .env(UPGRADE_PATH_ENV, &path)
+        .env(UPGRADE_READY_ENV, &ready)
+        .env(UPGRADE_TARGET_ENV, "6")
+        .spawn()
+        .unwrap();
+    for _ in 0..1_000 {
+        if ready.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        ready.exists(),
+        "upgrade child did not reach format-6 upgrade"
+    );
+    let _ = child.kill();
+    child.wait().unwrap();
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let format = reopened.introspection().storage_versions.unwrap().format;
+    assert!(matches!(format, 5 | 6));
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+    assert_eq!(
+        reopened
+            .execute("from entries | filter value == \"complete\"")
+            .rows
+            .len(),
+        1
+    );
+    if format == 5 {
+        assert!(reopened.upgrade_storage(6).unwrap().changed);
+    }
+    assert_eq!(reopened.introspection().storage_versions.unwrap().format, 6);
+    drop(reopened);
+    assert_eq!(legacy_physical_snapshot(&path), before);
 }
 
 #[test]
@@ -1285,17 +1481,17 @@ fn redb_update_delete_preserve_row_ids_constraints_and_indexes() {
 
     let database = RedbDatabase::open(&path).unwrap();
     let transaction = database.begin_read().unwrap();
-    let rows = transaction.open_table(REDB_ROWS).unwrap();
+    let rows = transaction.open_table(REDB_GENERATION_ROWS).unwrap();
     let row_ids = rows
         .iter()
         .unwrap()
         .map(|entry| {
             let (key, _) = entry.unwrap();
-            u64::from_be_bytes(key.value()[8..].try_into().unwrap())
+            u64::from_be_bytes(key.value()[22..].try_into().unwrap())
         })
         .collect::<Vec<_>>();
     assert_eq!(row_ids, vec![0, 2, 3, 4]);
-    let catalog = transaction.open_table(REDB_CATALOG).unwrap();
+    let catalog = transaction.open_table(REDB_GENERATION_CATALOG).unwrap();
     let cursor = catalog
         .iter()
         .unwrap()
@@ -1319,11 +1515,27 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            5_u32.to_be_bytes()
+            6_u32.to_be_bytes()
         );
-        transaction.open_table(REDB_CATALOG).unwrap();
-        transaction.open_table(REDB_ROWS).unwrap();
-        transaction.open_table(REDB_SECONDARY_INDEX).unwrap();
+        assert_eq!(
+            meta.get("maintenance_codec_version")
+                .unwrap()
+                .unwrap()
+                .value(),
+            1_u16.to_be_bytes()
+        );
+        assert_eq!(
+            meta.get("active_generation").unwrap().unwrap().value(),
+            1_u64.to_be_bytes()
+        );
+        assert_eq!(
+            meta.get("next_generation_id").unwrap().unwrap().value(),
+            2_u64.to_be_bytes()
+        );
+        transaction.open_table(REDB_GENERATION_CATALOG).unwrap();
+        transaction.open_table(REDB_GENERATION_ROWS).unwrap();
+        transaction.open_table(REDB_GENERATION_INDEX).unwrap();
+        transaction.open_table(REDB_MAINTENANCE_GENERATION).unwrap();
         transaction.open_table(REDB_MIGRATION_LEDGER).unwrap();
     }
     {
@@ -1341,6 +1553,67 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
     let error = Engine::open_redb(path).err().unwrap();
     assert_eq!(error.code, "E_STORAGE");
     assert!(error.message.contains("unsupported storage_format_version"));
+}
+
+#[test]
+fn format6_generation_state_contradictions_fail_closed() {
+    let non_monotonic = TempDir::new();
+    let path = non_monotonic.0.join("non-monotonic.redb");
+    drop(Engine::open_redb(&path).unwrap());
+    write_format6_generation_state(&path, 1, 1, &[]);
+    let error = Engine::open_redb(&path).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("active/next generation"));
+
+    let contradictory = TempDir::new();
+    let path = contradictory.0.join("contradictory-manifest.redb");
+    drop(Engine::open_redb(&path).unwrap());
+    write_format6_generation_state(
+        &path,
+        1,
+        3,
+        &[(
+            2,
+            serde_json::json!({
+                "state": "building",
+                "source": "legacy0",
+                "target": {"generated": 2}
+            }),
+        )],
+    );
+    let error = Engine::open_redb(&path).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("contradicts the active generation"));
+
+    let multiple = TempDir::new();
+    let path = multiple.0.join("multiple-building.redb");
+    drop(Engine::open_redb(&path).unwrap());
+    write_format6_generation_state(
+        &path,
+        1,
+        4,
+        &[
+            (
+                2,
+                serde_json::json!({
+                    "state": "building",
+                    "source": {"generated": 1},
+                    "target": {"generated": 2}
+                }),
+            ),
+            (
+                3,
+                serde_json::json!({
+                    "state": "ready",
+                    "source": {"generated": 1},
+                    "target": {"generated": 3}
+                }),
+            ),
+        ],
+    );
+    let error = Engine::open_redb(&path).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("multiple unfinished"));
 }
 
 #[test]
@@ -1482,6 +1755,155 @@ fn explicit_format5_upgrade_rewrites_every_durable_codec_and_reopens() {
 }
 
 #[test]
+fn format5_to_6_is_an_identity_preserving_legacy0_metadata_upgrade() {
+    let dir = TempDir::new();
+    let path = dir.0.join("format5-to-6.redb");
+    create_empty_format3(&path);
+
+    let schema;
+    let history;
+    let cursor;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let migration = MigrationFile::parse(
+            "migration m0001_initial\n  add type Entry =\n    id int\n    value text\n  add table entries Entry key id\n  add index entries.value\n",
+        )
+        .unwrap();
+        engine
+            .apply_migrations(std::slice::from_ref(&migration))
+            .unwrap();
+        engine
+            .execute_idempotent_with_params(
+                "format6-receipt",
+                TEST_IDEMPOTENCY_DIGEST,
+                "insert entries {id = 1, value = \"one\"}\nreturning id",
+                std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            engine
+                .execute(
+                    "insert entries {id = 2, value = \"two\"}\ninsert entries {id = 3, value = \"three\"}",
+                )
+                .ok
+        );
+        assert!(engine.upgrade_storage(4).unwrap().changed);
+        assert!(engine.upgrade_storage(5).unwrap().changed);
+        schema = engine.schema_info();
+        history = engine.migration_history().to_vec();
+        cursor = engine
+            .execute_page("from entries | sort id", PageSpec::forward(1))
+            .page
+            .unwrap()
+            .next_cursor
+            .unwrap();
+    }
+
+    let before = legacy_physical_snapshot(&path);
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let upgraded = engine.upgrade_storage(6).unwrap();
+        assert_eq!(upgraded.previous_format, 5);
+        assert_eq!(upgraded.format, 6);
+        assert!(upgraded.changed);
+        assert!(!engine.upgrade_storage(6).unwrap().changed);
+        let versions = engine.introspection().storage_versions.unwrap();
+        assert_eq!(
+            (
+                versions.format,
+                versions.catalog_codec,
+                versions.value_codec,
+                versions.index_key_codec,
+                versions.migration_codec,
+                versions.receipt_codec,
+                versions.maintenance_codec,
+                versions.backup_codec,
+            ),
+            (6, 4, 2, 3, 1, 2, 1, 4)
+        );
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(engine.migration_history(), history);
+        let downgrade = engine.upgrade_storage(5).unwrap_err();
+        assert_eq!(downgrade.code, "E_STORAGE_UPGRADE");
+        assert!(downgrade.message.contains("downgrades are not supported"));
+    }
+
+    assert_eq!(legacy_physical_snapshot(&path), before);
+    let database = RedbDatabase::open(&path).unwrap();
+    let transaction = database.begin_read().unwrap();
+    let meta = transaction.open_table(REDB_META).unwrap();
+    assert_eq!(
+        meta.get("active_generation").unwrap().unwrap().value(),
+        0_u64.to_be_bytes()
+    );
+    assert_eq!(
+        meta.get("next_generation_id").unwrap().unwrap().value(),
+        1_u64.to_be_bytes()
+    );
+    assert_eq!(
+        transaction
+            .open_table(REDB_GENERATION_CATALOG)
+            .unwrap()
+            .len()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        transaction
+            .open_table(REDB_GENERATION_ROWS)
+            .unwrap()
+            .len()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        transaction
+            .open_table(REDB_GENERATION_INDEX)
+            .unwrap()
+            .len()
+            .unwrap(),
+        0
+    );
+    drop(meta);
+    drop(transaction);
+    drop(database);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let resumed = reopened.execute_page("from entries | sort id", PageSpec::after(1, cursor));
+    assert!(resumed.ok, "{}", resumed.message);
+    assert!(resumed.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    let replay = reopened
+        .execute_idempotent_with_params(
+            "format6-receipt",
+            TEST_IDEMPOTENCY_DIGEST,
+            "matching receipts replay without parsing this source",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert!(reopened.check_integrity().unwrap().profile.bounded);
+    assert!(
+        reopened
+            .execute("insert entries {id = 4, value = \"four\"}")
+            .ok
+    );
+    drop(reopened);
+
+    let after_write = legacy_physical_snapshot(&path);
+    assert_eq!(after_write.rows.len(), before.rows.len() + 1);
+    assert_eq!(
+        Engine::open_redb(&path)
+            .unwrap()
+            .execute("from entries | sort id")
+            .rows
+            .len(),
+        4
+    );
+}
+
+#[test]
 fn redb_unknown_codec_versions_fail_closed() {
     for (key, value) in [
         ("catalog_codec_version", 99_u16.to_be_bytes()),
@@ -1489,6 +1911,7 @@ fn redb_unknown_codec_versions_fail_closed() {
         ("index_key_version", 99_u16.to_be_bytes()),
         ("migration_codec_version", 99_u16.to_be_bytes()),
         ("receipt_codec_version", 99_u16.to_be_bytes()),
+        ("maintenance_codec_version", 99_u16.to_be_bytes()),
     ] {
         let dir = TempDir::new();
         let path = dir.0.join("state.redb");
@@ -1578,7 +2001,7 @@ fn redb_rejects_secondary_indexes_that_do_not_match_rows() {
         transaction.set_durability(Durability::Immediate).unwrap();
         transaction.set_two_phase_commit(true);
         transaction
-            .open_table(REDB_SECONDARY_INDEX)
+            .open_table(REDB_GENERATION_INDEX)
             .unwrap()
             .retain(|_, _| false)
             .unwrap();
@@ -1640,7 +2063,7 @@ fn bounded_indexed_read_rejects_a_missing_durable_row_on_demand() {
         transaction.set_durability(Durability::Immediate).unwrap();
         transaction.set_two_phase_commit(true);
         transaction
-            .open_table(REDB_ROWS)
+            .open_table(REDB_GENERATION_ROWS)
             .unwrap()
             .retain(|_, _| false)
             .unwrap();

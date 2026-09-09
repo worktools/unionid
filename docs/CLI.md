@@ -22,13 +22,13 @@ unionid doctor --db app.redb --format json
 `version` 的 version 1 JSON 形态如下。未来版本可以增加字段，但不会改变或删除当前字段的含义：
 
 ```json
-{"schema_version":1,"software_version":"0.1.0","target":"aarch64-apple-darwin","protocol_versions":[1,2],"readable_storage_formats":[1,2,3,4,5],"current_storage":{"format":5,"catalog_codec":4,"value_codec":2,"index_key_codec":3,"migration_codec":1,"receipt_codec":2,"backup_codec":4}}
+{"schema_version":1,"software_version":"0.1.0","target":"aarch64-apple-darwin","protocol_versions":[1,2],"readable_storage_formats":[1,2,3,4,5,6],"current_storage":{"format":6,"catalog_codec":4,"value_codec":2,"index_key_codec":3,"migration_codec":1,"receipt_codec":2,"maintenance_codec":1,"backup_codec":4}}
 ```
 
 `doctor` 成功结果增加 `ok`，并把同一个版本对象放在 `version`。指定 `--db` 后还会返回 `database.storage`、`storage_versions`、`read_only`、schema identity、migration 边界和 table/type 数量；不返回数据库路径、schema 源码、表名或类型名。未指定数据库时省略 `database`：
 
 ```json
-{"schema_version":1,"ok":true,"version":{"schema_version":1,"software_version":"0.1.0","target":"aarch64-apple-darwin","protocol_versions":[1,2],"readable_storage_formats":[1,2,3,4,5],"current_storage":{"format":5,"catalog_codec":4,"value_codec":2,"index_key_codec":3,"migration_codec":1,"receipt_codec":2,"backup_codec":4}}}
+{"schema_version":1,"ok":true,"version":{"schema_version":1,"software_version":"0.1.0","target":"aarch64-apple-darwin","protocol_versions":[1,2],"readable_storage_formats":[1,2,3,4,5,6],"current_storage":{"format":6,"catalog_codec":4,"value_codec":2,"index_key_codec":3,"migration_codec":1,"receipt_codec":2,"maintenance_codec":1,"backup_codec":4}}}
 ```
 
 `doctor --db` 要求路径已经存在且是文件。为避免 redb 的打开恢复改变原文件，它只读取一个权限受限的临时字节副本；不会创建、修复、升级或锁定请求的数据库，退出时删除副本。应对静止数据库或一致备份运行它；若源文件在复制时仍有写入，诊断结果不应作为一致快照。需要证明原文件自身可完整打开时使用 `check --db`。

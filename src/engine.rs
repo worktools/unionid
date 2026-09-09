@@ -81,7 +81,6 @@ impl CommittedView {
         let identity = source.snapshot_identity();
         let schema = db.schema_info();
         if identity.database_instance != db.durable_meta().cursor_instance_id
-            || identity.generation != 0
             || identity.sequence != db.sequence
             || identity.schema_hash != schema.hash
         {
@@ -1727,7 +1726,17 @@ impl Engine {
         if self.read_only {
             return Err(Error::new("E_READ_ONLY", "storage upgrade is a mutation"));
         }
-        let database = self.mutable_candidate(None)?;
+        let metadata_only_upgrade = target
+            == crate::redb_storage::PRODUCTION_STORAGE_FORMAT_VERSION
+            && self
+                .durable
+                .as_ref()
+                .is_some_and(|durable| durable.versions().format == 5);
+        let database = if metadata_only_upgrade {
+            self.committed.db.as_ref().clone()
+        } else {
+            self.mutable_candidate(None)?
+        };
         let durable = self.durable.as_mut().ok_or_else(|| {
             Error::new(
                 "E_CONFIG",
@@ -2044,6 +2053,7 @@ mod tests {
                 index_key_codec: 2,
                 migration_codec: 1,
                 receipt_codec: 2,
+                maintenance_codec: 0,
                 backup_codec: 3,
             }
         }
@@ -2101,6 +2111,7 @@ mod tests {
                 index_key_codec: 3,
                 migration_codec: 1,
                 receipt_codec: 2,
+                maintenance_codec: 1,
                 backup_codec: 4,
             }
         }

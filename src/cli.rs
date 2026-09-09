@@ -94,7 +94,7 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
         );
     } else {
         println!(
-            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt codecs {}/{}/{}/{}/{}\nlogical check {}\nrows/indexes checked {}/{}\npoint lookups {}\nworking peak bytes {}\ntotal/backend/logical micros {}/{}/{}",
+            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance codecs {}/{}/{}/{}/{}/{}\nlogical check {}\nrows/indexes checked {}/{}\npoint lookups {}\nworking peak bytes {}\ntotal/backend/logical micros {}/{}/{}",
             if report.backend_clean {
                 "backend was clean"
             } else {
@@ -108,6 +108,7 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
             report.versions.index_key_codec,
             report.versions.migration_codec,
             report.versions.receipt_codec,
+            report.versions.maintenance_codec,
             if report.profile.bounded {
                 "bounded"
             } else {

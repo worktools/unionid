@@ -33,7 +33,12 @@ fn version_and_doctor_have_stable_machine_readable_shapes() {
     assert_eq!(version["software_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(version["protocol_versions"], serde_json::json!([1, 2]));
     assert_eq!(version["stream_protocol_versions"], serde_json::json!([1]));
-    assert_eq!(version["current_storage"]["format"], 5);
+    assert_eq!(
+        version["readable_storage_formats"],
+        serde_json::json!([1, 2, 3, 4, 5, 6])
+    );
+    assert_eq!(version["current_storage"]["format"], 6);
+    assert_eq!(version["current_storage"]["maintenance_codec"], 1);
     assert!(version["target"].as_str().unwrap().contains('-'));
 
     let dir = TempDir::new();

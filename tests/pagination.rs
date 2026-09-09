@@ -404,12 +404,18 @@ fn redb_reopen_preserves_cursor_but_logical_restore_rotates_identity() {
 #[test]
 fn legacy_redb_meta_is_upgraded_with_cursor_identity() {
     const META: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+    const CATALOG: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("catalog");
+    const ROWS: redb::TableDefinition<&[u8], &[u8]> = redb::TableDefinition::new("rows");
+    const INDEX: redb::TableDefinition<&[u8], u8> = redb::TableDefinition::new("secondary_index");
     let dir = TempDir::new();
     let path = dir.0.join("legacy.redb");
     drop(Engine::open_redb(&path).unwrap());
     {
         let database = redb::Database::open(&path).unwrap();
         let transaction = database.begin_write().unwrap();
+        transaction.open_table(CATALOG).unwrap();
+        transaction.open_table(ROWS).unwrap();
+        transaction.open_table(INDEX).unwrap();
         {
             let mut meta = transaction.open_table(META).unwrap();
             meta.insert("storage_format_version", 1_u32.to_be_bytes().as_slice())

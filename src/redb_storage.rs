@@ -36,7 +36,8 @@ const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
 const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
 const CURSOR_STORAGE_FORMAT_VERSION: u32 = 3;
 const SCALAR_STORAGE_FORMAT_VERSION: u32 = 4;
-pub(crate) const PRODUCTION_STORAGE_FORMAT_VERSION: u32 = 5;
+const LEGACY_BOUNDED_STORAGE_FORMAT_VERSION: u32 = 5;
+pub(crate) const PRODUCTION_STORAGE_FORMAT_VERSION: u32 = 6;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
 const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
@@ -47,6 +48,8 @@ const PRODUCTION_INDEX_KEY_VERSION: u16 = crate::ordered_key::INDEX_KEY_CODEC_VE
 const MIGRATION_CODEC_VERSION: u16 = 1;
 const RECEIPT_CODEC_VERSION: u16 = 1;
 const PRODUCTION_RECEIPT_CODEC_VERSION: u16 = 2;
+const MAINTENANCE_CODEC_VERSION: u16 = 1;
+const GENERATION_KEY_CODEC_VERSION: u16 = 1;
 
 pub(crate) fn production_versions() -> StorageVersions {
     let layout = StorageLayout::production();
@@ -57,6 +60,7 @@ pub(crate) fn production_versions() -> StorageVersions {
         index_key_codec: layout.index,
         migration_codec: layout.migration,
         receipt_codec: layout.receipt,
+        maintenance_codec: layout.maintenance,
         backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
     }
 }
@@ -68,6 +72,12 @@ const SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("second
 const MIGRATION_LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("migration_ledger");
 const IDEMPOTENCY_RECEIPTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("idempotency_receipts");
+const GENERATION_CATALOG: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("generation_catalog");
+const GENERATION_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("generation_rows");
+const GENERATION_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("generation_index");
+const MAINTENANCE_GENERATION: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("maintenance_generation");
 
 const FORMAT_KEY: &str = "storage_format_version";
 const CATALOG_CODEC_KEY: &str = "catalog_codec_version";
@@ -75,6 +85,9 @@ const VALUE_CODEC_KEY: &str = "value_codec_version";
 const INDEX_KEY_CODEC_KEY: &str = "index_key_version";
 const MIGRATION_CODEC_KEY: &str = "migration_codec_version";
 const RECEIPT_CODEC_KEY: &str = "receipt_codec_version";
+const MAINTENANCE_CODEC_KEY: &str = "maintenance_codec_version";
+const ACTIVE_GENERATION_KEY: &str = "active_generation";
+const NEXT_GENERATION_ID_KEY: &str = "next_generation_id";
 const SEQUENCE_KEY: &str = "commit_sequence";
 const SCHEMA_REVISION_KEY: &str = "schema_revision";
 const NEXT_CATALOG_ID_KEY: &str = "next_catalog_id";
@@ -85,6 +98,8 @@ const CATALOG_MAGIC: &[u8; 4] = b"UIDC";
 const INDEX_MAGIC: &[u8; 4] = b"UIDI";
 const MIGRATION_MAGIC: &[u8; 4] = b"UIDM";
 const RECEIPT_MAGIC: &[u8; 4] = b"UIDR";
+const GENERATION_KEY_MAGIC: &[u8; 4] = b"UIDG";
+const MAINTENANCE_MAGIC: &[u8; 4] = b"UIDN";
 
 pub(crate) struct RedbStore {
     database: RedbDatabase,
@@ -105,12 +120,15 @@ type BoundedViewLoad = (
     Arc<dyn TypedRowSource>,
     StorageOpenProfile,
 );
+type OwnedKeyBounds = (Bound<Vec<u8>>, Bound<Vec<u8>>);
+type StoredCatalog = (Vec<DurableCatalogEntry>, BTreeMap<Vec<u8>, Vec<u8>>);
 
 const SNAPSHOT_ROW_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) struct RedbReadSource {
     transaction: redb::ReadTransaction,
     metadata: Arc<Database>,
+    generation: GenerationRef,
     identity: SourceIdentity,
     cache: Mutex<SnapshotRowCache>,
 }
@@ -171,18 +189,45 @@ impl SnapshotRowCache {
 }
 
 impl RedbReadSource {
-    fn new(transaction: redb::ReadTransaction, metadata: Arc<Database>) -> Self {
+    fn new(
+        transaction: redb::ReadTransaction,
+        metadata: Arc<Database>,
+        generation: GenerationRef,
+    ) -> Self {
         let identity = SourceIdentity {
             database_instance: metadata.durable_meta().cursor_instance_id,
-            generation: 0,
+            generation: generation.encoded(),
             sequence: metadata.sequence,
             schema_hash: metadata.schema_info().hash,
         };
         Self {
             transaction,
             metadata,
+            generation,
             identity,
             cache: Mutex::new(SnapshotRowCache::default()),
+        }
+    }
+
+    fn physical_key(&self, logical: &[u8]) -> Result<Vec<u8>> {
+        match self.generation {
+            GenerationRef::Legacy0 => Ok(logical.to_vec()),
+            GenerationRef::Generated(generation) => encode_generation_key(generation, logical),
+        }
+    }
+
+    fn logical_key<'a>(&self, physical: &'a [u8]) -> Result<&'a [u8]> {
+        match self.generation {
+            GenerationRef::Legacy0 => Ok(physical),
+            GenerationRef::Generated(generation) => decode_generation_key(physical, generation),
+        }
+    }
+
+    fn physical_bound(&self, bound: Bound<Vec<u8>>) -> Result<Bound<Vec<u8>>> {
+        match bound {
+            Bound::Included(key) => Ok(Bound::Included(self.physical_key(&key)?)),
+            Bound::Excluded(key) => Ok(Bound::Excluded(self.physical_key(&key)?)),
+            Bound::Unbounded => Ok(Bound::Unbounded),
         }
     }
 }
@@ -222,9 +267,10 @@ impl TypedRowSource for RedbReadSource {
     fn table_stats(&self, table: &str) -> Result<TableStats> {
         let (_, next_row_id, _) = self.metadata.source_table_info(table)?;
         Ok(TableStats {
-            // Format 5 has no persisted live-row cardinality. The monotonic
-            // allocation cursor is a safe upper bound until format 6 adds a
-            // generation manifest with exact statistics.
+            // Legacy0 and the initial format-6 envelope have no persisted
+            // live-row cardinality. The monotonic allocation cursor remains
+            // a safe upper bound until maintenance manifests publish exact
+            // generation statistics.
             rows: usize::try_from(next_row_id).unwrap_or(usize::MAX),
             rows_exact: false,
             next_row_id,
@@ -241,7 +287,7 @@ impl TypedRowSource for RedbReadSource {
         _shape: &str,
         _bounds: &EncodedIndexBounds,
     ) -> Result<usize> {
-        // Exact format-5 span cardinality requires walking the durable range.
+        // Exact active-generation span cardinality requires walking the durable range.
         // Explain must remain decode-free, so use the allocation upper bound.
         Ok(self.table_stats(table)?.rows)
     }
@@ -266,15 +312,26 @@ impl TypedRowSource for RedbReadSource {
             return Ok(Some(row));
         }
         observation.row_cache_misses = observation.row_cache_misses.saturating_add(1);
-        let key = encode_row_key(table_id, row_id);
-        let bytes = {
-            let rows = self
-                .transaction
-                .open_table(ROWS)
-                .map_err(|error| storage_error("open rows table", error))?;
-            rows.get(key.as_slice())
-                .map_err(|error| storage_error("read durable row", error))?
-                .map(|value| value.value().to_vec())
+        let key = self.physical_key(&encode_row_key(table_id, row_id))?;
+        let bytes = match self.generation {
+            GenerationRef::Legacy0 => {
+                let rows = self
+                    .transaction
+                    .open_table(ROWS)
+                    .map_err(|error| storage_error("open rows table", error))?;
+                rows.get(key.as_slice())
+                    .map_err(|error| storage_error("read durable row", error))?
+                    .map(|value| value.value().to_vec())
+            }
+            GenerationRef::Generated(_) => {
+                let rows = self
+                    .transaction
+                    .open_table(GENERATION_ROWS)
+                    .map_err(|error| storage_error("open generation rows table", error))?;
+                rows.get(key.as_slice())
+                    .map_err(|error| storage_error("read durable generation row", error))?
+                    .map(|value| value.value().to_vec())
+            }
         };
         let Some(bytes) = bytes else {
             return Err(Error::new(
@@ -295,12 +352,14 @@ impl TypedRowSource for RedbReadSource {
 
     fn scan_rows<'a>(&'a self, table: &str) -> Result<Box<dyn RowBatchCursor + 'a>> {
         let (table_id, _, _) = self.metadata.source_table_info(table)?;
+        let lower = self.physical_bound(Bound::Included(encode_row_key(table_id, 0)))?;
+        let upper = self.physical_bound(Bound::Included(encode_row_key(table_id, u64::MAX)))?;
         Ok(Box::new(RedbRowCursor {
             source: self,
             table: table.to_owned(),
             table_id,
-            lower: Bound::Included(encode_row_key(table_id, 0)),
-            upper: Bound::Included(encode_row_key(table_id, u64::MAX)),
+            lower,
+            upper,
             done: false,
         }))
     }
@@ -315,6 +374,8 @@ impl TypedRowSource for RedbReadSource {
     ) -> Result<Box<dyn IndexHitCursor + 'a>> {
         let (index_id, component_count) = self.metadata.source_index_info(table, shape)?;
         let (lower, upper) = durable_index_bounds(index_id, component_count, bounds)?;
+        let lower = self.physical_bound(lower)?;
+        let upper = self.physical_bound(upper)?;
         Ok(Box::new(RedbIndexCursor {
             source: self,
             index_id,
@@ -339,11 +400,34 @@ impl RowBatchCursor for RedbRowCursor<'_> {
         if self.done {
             return Ok(None);
         }
-        let table = self
-            .source
-            .transaction
-            .open_table(ROWS)
-            .map_err(|error| storage_error("open rows table", error))?;
+        match self.source.generation {
+            GenerationRef::Legacy0 => {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(ROWS)
+                    .map_err(|error| storage_error("open rows table", error))?;
+                self.next_batch_from(&table, control, observation)
+            }
+            GenerationRef::Generated(_) => {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(GENERATION_ROWS)
+                    .map_err(|error| storage_error("open generation rows table", error))?;
+                self.next_batch_from(&table, control, observation)
+            }
+        }
+    }
+}
+
+impl RedbRowCursor<'_> {
+    fn next_batch_from(
+        &mut self,
+        table: &impl ReadableTable<&'static [u8], &'static [u8]>,
+        control: Option<&crate::control::ExecutionControl>,
+        observation: &mut ExecutionObservation,
+    ) -> Result<Option<RowBatch>> {
         let bounds = (borrowed_bound(&self.lower), borrowed_bound(&self.upper));
         let range = table
             .range::<&[u8]>(bounds)
@@ -355,8 +439,9 @@ impl RowBatchCursor for RedbRowCursor<'_> {
             check_source_control(control)?;
             let (key, value) =
                 entry.map_err(|error| storage_error("read durable row range", error))?;
-            let key = key.value();
+            let physical_key = key.value();
             let value = value.value();
+            let key = self.source.logical_key(physical_key)?;
             let (table_id, row_id) = decode_row_key(key)?;
             if table_id != self.table_id {
                 return Err(Error::new(
@@ -377,7 +462,7 @@ impl RowBatchCursor for RedbRowCursor<'_> {
                 .decode_source_row(&self.table, row_id, value)?;
             encoded_bytes = encoded_bytes.saturating_add(value.len());
             rows.push(row);
-            self.lower = Bound::Excluded(key.to_vec());
+            self.lower = Bound::Excluded(physical_key.to_vec());
             if rows.len() == SOURCE_BATCH_MAX_ROWS {
                 reached_end = false;
                 break;
@@ -410,11 +495,33 @@ impl IndexHitCursor for RedbIndexCursor<'_> {
         if self.reverse {
             return self.next_reverse_batch(control);
         }
-        let table = self
-            .source
-            .transaction
-            .open_table(SECONDARY_INDEX)
-            .map_err(|error| storage_error("open secondary index table", error))?;
+        match self.source.generation {
+            GenerationRef::Legacy0 => {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(SECONDARY_INDEX)
+                    .map_err(|error| storage_error("open secondary index table", error))?;
+                self.next_forward_batch_from(&table, control)
+            }
+            GenerationRef::Generated(_) => {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(GENERATION_INDEX)
+                    .map_err(|error| storage_error("open generation index table", error))?;
+                self.next_forward_batch_from(&table, control)
+            }
+        }
+    }
+}
+
+impl RedbIndexCursor<'_> {
+    fn next_forward_batch_from(
+        &mut self,
+        table: &impl ReadableTable<&'static [u8], u8>,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<Option<Vec<IndexHit>>> {
         let bounds = (borrowed_bound(&self.lower), borrowed_bound(&self.upper));
         let mut range = table
             .range::<&[u8]>(bounds)
@@ -429,18 +536,19 @@ impl IndexHitCursor for RedbIndexCursor<'_> {
             check_source_control(control)?;
             let (key, _) =
                 entry.map_err(|error| storage_error("read durable index range", error))?;
-            let key = key.value();
+            let physical_key = key.value();
             if !hits.is_empty()
                 && (hits.len() == SOURCE_BATCH_MAX_ROWS
-                    || encoded_bytes.saturating_add(key.len()) > SOURCE_BATCH_MAX_BYTES)
+                    || encoded_bytes.saturating_add(physical_key.len()) > SOURCE_BATCH_MAX_BYTES)
             {
                 reached_end = false;
                 break;
             }
+            let key = self.source.logical_key(physical_key)?;
             let hit = decode_durable_index_hit(key, self.index_id, self.component_count)?;
-            encoded_bytes = encoded_bytes.saturating_add(key.len());
+            encoded_bytes = encoded_bytes.saturating_add(physical_key.len());
             hits.push(hit);
-            self.lower = Bound::Excluded(key.to_vec());
+            self.lower = Bound::Excluded(physical_key.to_vec());
             if let Some(remaining) = &mut self.remaining {
                 *remaining = remaining.saturating_sub(1);
                 if *remaining == 0 {
@@ -473,23 +581,13 @@ impl RedbIndexCursor<'_> {
         while hits.len() < SOURCE_BATCH_MAX_ROWS && self.remaining != Some(0) {
             check_source_control(control)?;
             if self.reverse_group.is_none() {
-                let table = self
-                    .source
-                    .transaction
-                    .open_table(SECONDARY_INDEX)
-                    .map_err(|error| storage_error("open secondary index table", error))?;
                 let bounds = (borrowed_bound(&self.lower), borrowed_bound(&self.upper));
-                let mut range = table
-                    .range::<&[u8]>(bounds)
-                    .map_err(|error| storage_error("scan durable secondary index", error))?;
-                let Some(entry) = range.next_back() else {
+                let Some(physical_key) = self.last_key(bounds)? else {
                     self.done = true;
                     break;
                 };
-                let (key, _) =
-                    entry.map_err(|error| storage_error("read durable index range", error))?;
-                let hit =
-                    decode_durable_index_hit(key.value(), self.index_id, self.component_count)?;
+                let key = self.source.logical_key(&physical_key)?;
+                let hit = decode_durable_index_hit(key, self.index_id, self.component_count)?;
                 let mut before = durable_index_prefix(self.index_id, self.component_count);
                 before.extend_from_slice(&hit.boundary);
                 let mut first = before.clone();
@@ -497,41 +595,42 @@ impl RedbIndexCursor<'_> {
                 let mut last = before.clone();
                 last.extend_from_slice(&u64::MAX.to_be_bytes());
                 self.reverse_group = Some(ReverseIndexGroup {
-                    before,
-                    lower: Bound::Included(first),
-                    upper: Bound::Included(last),
+                    before: self.source.physical_key(&before)?,
+                    lower: self.source.physical_bound(Bound::Included(first))?,
+                    upper: self.source.physical_bound(Bound::Included(last))?,
                 });
             }
 
-            let group = self
-                .reverse_group
-                .as_mut()
-                .expect("reverse index group was initialized");
-            let table = self
-                .source
-                .transaction
-                .open_table(SECONDARY_INDEX)
-                .map_err(|error| storage_error("open secondary index table", error))?;
-            let bounds = (borrowed_bound(&group.lower), borrowed_bound(&group.upper));
-            let mut range = table
-                .range::<&[u8]>(bounds)
-                .map_err(|error| storage_error("scan durable secondary index group", error))?;
-            let Some(entry) = range.next() else {
-                self.upper = Bound::Excluded(group.before.clone());
+            let (group_lower, group_upper, group_before) = {
+                let group = self
+                    .reverse_group
+                    .as_ref()
+                    .expect("reverse index group was initialized");
+                (
+                    group.lower.clone(),
+                    group.upper.clone(),
+                    group.before.clone(),
+                )
+            };
+            let bounds = (borrowed_bound(&group_lower), borrowed_bound(&group_upper));
+            let Some(physical_key) = self.first_key(bounds)? else {
+                self.upper = Bound::Excluded(group_before);
                 self.reverse_group = None;
                 continue;
             };
-            let (key, _) =
-                entry.map_err(|error| storage_error("read durable index range", error))?;
-            let key = key.value();
-            if !hits.is_empty() && encoded_bytes.saturating_add(key.len()) > SOURCE_BATCH_MAX_BYTES
+            if !hits.is_empty()
+                && encoded_bytes.saturating_add(physical_key.len()) > SOURCE_BATCH_MAX_BYTES
             {
                 break;
             }
+            let key = self.source.logical_key(&physical_key)?;
             let hit = decode_durable_index_hit(key, self.index_id, self.component_count)?;
-            encoded_bytes = encoded_bytes.saturating_add(key.len());
+            encoded_bytes = encoded_bytes.saturating_add(physical_key.len());
             hits.push(hit);
-            group.lower = Bound::Excluded(key.to_vec());
+            self.reverse_group
+                .as_mut()
+                .expect("reverse index group was initialized")
+                .lower = Bound::Excluded(physical_key);
             if let Some(remaining) = &mut self.remaining {
                 *remaining = remaining.saturating_sub(1);
             }
@@ -541,6 +640,76 @@ impl RedbIndexCursor<'_> {
             Ok(None)
         } else {
             Ok(Some(hits))
+        }
+    }
+
+    fn last_key(&self, bounds: (Bound<&[u8]>, Bound<&[u8]>)) -> Result<Option<Vec<u8>>> {
+        match self.source.generation {
+            GenerationRef::Legacy0 => {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(SECONDARY_INDEX)
+                    .map_err(|error| storage_error("open secondary index table", error))?;
+                let mut range = table
+                    .range::<&[u8]>(bounds)
+                    .map_err(|error| storage_error("scan durable secondary index", error))?;
+                range
+                    .next_back()
+                    .transpose()
+                    .map_err(|error| storage_error("read durable index range", error))
+                    .map(|entry| entry.map(|(key, _)| key.value().to_vec()))
+            }
+            GenerationRef::Generated(_) => {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(GENERATION_INDEX)
+                    .map_err(|error| storage_error("open generation index table", error))?;
+                let mut range = table
+                    .range::<&[u8]>(bounds)
+                    .map_err(|error| storage_error("scan generation index", error))?;
+                range
+                    .next_back()
+                    .transpose()
+                    .map_err(|error| storage_error("read generation index range", error))
+                    .map(|entry| entry.map(|(key, _)| key.value().to_vec()))
+            }
+        }
+    }
+
+    fn first_key(&self, bounds: (Bound<&[u8]>, Bound<&[u8]>)) -> Result<Option<Vec<u8>>> {
+        match self.source.generation {
+            GenerationRef::Legacy0 => {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(SECONDARY_INDEX)
+                    .map_err(|error| storage_error("open secondary index table", error))?;
+                let mut range = table
+                    .range::<&[u8]>(bounds)
+                    .map_err(|error| storage_error("scan durable secondary index group", error))?;
+                range
+                    .next()
+                    .transpose()
+                    .map_err(|error| storage_error("read durable index range", error))
+                    .map(|entry| entry.map(|(key, _)| key.value().to_vec()))
+            }
+            GenerationRef::Generated(_) => {
+                let table = self
+                    .source
+                    .transaction
+                    .open_table(GENERATION_INDEX)
+                    .map_err(|error| storage_error("open generation index table", error))?;
+                let mut range = table
+                    .range::<&[u8]>(bounds)
+                    .map_err(|error| storage_error("scan generation index group", error))?;
+                range
+                    .next()
+                    .transpose()
+                    .map_err(|error| storage_error("read generation index range", error))
+                    .map(|entry| entry.map(|(key, _)| key.value().to_vec()))
+            }
         }
     }
 }
@@ -633,11 +802,74 @@ fn decode_durable_index_hit(key: &[u8], index_id: u64, component_count: u8) -> R
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GenerationRef {
+    Legacy0,
+    Generated(u64),
+}
+
+impl GenerationRef {
+    fn encoded(self) -> u64 {
+        match self {
+            Self::Legacy0 => 0,
+            Self::Generated(id) => id,
+        }
+    }
+
+    fn from_encoded(value: u64) -> Self {
+        if value == 0 {
+            Self::Legacy0
+        } else {
+            Self::Generated(value)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GenerationState {
+    active: GenerationRef,
+    next_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MaintenanceState {
+    Building,
+    Ready,
+    Aborting,
+    Reclaimable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct MaintenanceManifest {
+    state: MaintenanceState,
+    source: GenerationRef,
+    target: GenerationRef,
+}
+
+impl GenerationState {
+    const fn legacy() -> Self {
+        Self {
+            active: GenerationRef::Legacy0,
+            next_id: 1,
+        }
+    }
+
+    const fn initial() -> Self {
+        Self {
+            active: GenerationRef::Generated(1),
+            next_id: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DurableHead {
     layout: StorageLayout,
     meta: DurableMeta,
     catalog_canonical: bool,
+    generation: GenerationState,
 }
 
 impl DurableHead {
@@ -652,6 +884,7 @@ impl DurableHead {
                     .map(u16::from_be_bytes)
                     == Some(state.layout.catalog)
             }),
+            generation: state.generation,
         }
     }
 }
@@ -664,6 +897,7 @@ struct StorageLayout {
     index: u16,
     migration: u16,
     receipt: u16,
+    maintenance: u16,
 }
 
 impl StorageLayout {
@@ -675,6 +909,7 @@ impl StorageLayout {
             index: INDEX_KEY_VERSION,
             migration: MIGRATION_CODEC_VERSION,
             receipt: RECEIPT_CODEC_VERSION,
+            maintenance: 0,
         }
     }
 
@@ -686,6 +921,7 @@ impl StorageLayout {
             index: PRODUCTION_INDEX_KEY_VERSION,
             migration: MIGRATION_CODEC_VERSION,
             receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
+            maintenance: MAINTENANCE_CODEC_VERSION,
         }
     }
 
@@ -697,12 +933,23 @@ impl StorageLayout {
             index: SCALAR_INDEX_KEY_VERSION,
             migration: MIGRATION_CODEC_VERSION,
             receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
+            maintenance: 0,
         }
     }
 
     const fn for_format(format: u32) -> Self {
         if format >= PRODUCTION_STORAGE_FORMAT_VERSION {
             Self::production()
+        } else if format == LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
+            Self {
+                format,
+                catalog: PRODUCTION_CATALOG_CODEC_VERSION,
+                value: PRODUCTION_VALUE_CODEC_VERSION,
+                index: PRODUCTION_INDEX_KEY_VERSION,
+                migration: MIGRATION_CODEC_VERSION,
+                receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
+                maintenance: 0,
+            }
         } else if format == SCALAR_STORAGE_FORMAT_VERSION {
             Self::scalar()
         } else {
@@ -792,7 +1039,7 @@ impl RedbStore {
             0
         };
         let format = store.current_layout()?.format;
-        if format == PRODUCTION_STORAGE_FORMAT_VERSION {
+        if format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
             let (loaded, receipts, committed, source, mut profile) = store.load_bounded_view()?;
             store.committed = committed;
             profile.total_micros = elapsed_micros(total_started);
@@ -828,7 +1075,7 @@ impl RedbStore {
         let table = transaction
             .open_table(META)
             .map_err(|error| storage_error("open meta table", error))?;
-        read_meta(&table).map(|(_, layout)| layout)
+        read_meta(&table).map(|(_, layout, _)| layout)
     }
 
     pub(crate) fn supports_production_scalars(&self) -> bool {
@@ -836,7 +1083,7 @@ impl RedbStore {
     }
 
     pub(crate) fn supports_bounded_row_mutation(&self) -> bool {
-        self.committed.layout.format == PRODUCTION_STORAGE_FORMAT_VERSION
+        self.committed.layout.format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
             && self.committed.catalog_canonical
     }
 
@@ -844,7 +1091,7 @@ impl RedbStore {
         &self,
         database: &Database,
     ) -> Result<(Arc<Database>, Arc<dyn TypedRowSource>)> {
-        if self.committed.layout.format != PRODUCTION_STORAGE_FORMAT_VERSION {
+        if self.committed.layout.format < LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
             let database = Arc::new(database.clone());
             let source: Arc<dyn TypedRowSource> = database.clone();
             return Ok((database, source));
@@ -854,20 +1101,26 @@ impl RedbStore {
             .database
             .begin_read()
             .map_err(|error| storage_error("begin committed redb read view", error))?;
-        let (meta, layout) = {
+        let (meta, layout, generation) = {
             let table = transaction
                 .open_table(META)
                 .map_err(|error| storage_error("open committed meta table", error))?;
             read_meta(&table)?
         };
-        if layout != self.committed.layout || meta != database.durable_meta() {
+        if layout != self.committed.layout
+            || generation != self.committed.generation
+            || meta != database.durable_meta()
+        {
             return Err(Error::new(
                 "E_STORAGE_REOPEN_REQUIRED",
                 "committed redb read view does not match the published database state",
             ));
         }
-        let source: Arc<dyn TypedRowSource> =
-            Arc::new(RedbReadSource::new(transaction, metadata.clone()));
+        let source: Arc<dyn TypedRowSource> = Arc::new(RedbReadSource::new(
+            transaction,
+            metadata.clone(),
+            generation.active,
+        ));
         Ok((metadata, source))
     }
 
@@ -880,6 +1133,7 @@ impl RedbStore {
             index_key_codec: layout.index,
             migration_codec: layout.migration,
             receipt_codec: layout.receipt,
+            maintenance_codec: layout.maintenance,
             backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
         }
     }
@@ -892,7 +1146,9 @@ impl RedbStore {
     ) -> std::result::Result<UpgradeResult, CommitFailure> {
         if !matches!(
             target,
-            SCALAR_STORAGE_FORMAT_VERSION | PRODUCTION_STORAGE_FORMAT_VERSION
+            SCALAR_STORAGE_FORMAT_VERSION
+                | LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
+                | PRODUCTION_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
@@ -912,6 +1168,60 @@ impl RedbStore {
                 "E_STORAGE_UPGRADE",
                 "storage downgrades are not supported",
             )));
+        }
+        if target == PRODUCTION_STORAGE_FORMAT_VERSION {
+            if previous.format != LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_STORAGE_UPGRADE",
+                    "storage format 6 requires format 5; upgrade to 5 first",
+                )));
+            }
+            let generation = GenerationState::legacy();
+            let layout = StorageLayout::production();
+            let expected = (database.durable_meta(), previous, self.committed.generation);
+            let mut transaction = self
+                .database
+                .begin_write()
+                .map_err(|error| CommitFailure::definite("begin format-6 upgrade", error))?;
+            transaction
+                .set_durability(Durability::Immediate)
+                .map_err(|error| CommitFailure::definite("configure format-6 upgrade", error))?;
+            transaction.set_two_phase_commit(true);
+            transaction
+                .open_table(GENERATION_CATALOG)
+                .map_err(|error| CommitFailure::definite("create generation catalog", error))?;
+            transaction
+                .open_table(GENERATION_ROWS)
+                .map_err(|error| CommitFailure::definite("create generation rows", error))?;
+            transaction
+                .open_table(GENERATION_INDEX)
+                .map_err(|error| CommitFailure::definite("create generation index", error))?;
+            transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| CommitFailure::definite("create maintenance generation", error))?;
+            {
+                let mut meta = transaction
+                    .open_table(META)
+                    .map_err(|error| CommitFailure::definite("open format-6 meta", error))?;
+                write_meta(
+                    &mut meta,
+                    Some(&expected),
+                    &database.durable_meta(),
+                    layout,
+                    generation,
+                )
+                .map_err(CommitFailure::Definite)?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| CommitFailure::uncertain("commit format-6 upgrade", error))?;
+            self.committed.layout = layout;
+            self.committed.generation = generation;
+            return Ok(UpgradeResult {
+                previous_format: previous.format,
+                format: target,
+                changed: true,
+            });
         }
         self.committed.layout = StorageLayout::for_format(target);
         if let Err(error) = self.commit(database, database, receipts) {
@@ -940,7 +1250,8 @@ impl RedbStore {
         let reload_previous_micros = elapsed_micros(reload_started);
         let encode_started = Instant::now();
         let next =
-            PreparedState::new(database, receipts, layout).map_err(CommitFailure::Definite)?;
+            PreparedState::new_in_generation(database, receipts, layout, self.committed.generation)
+                .map_err(CommitFailure::Definite)?;
         let encode_next_micros = elapsed_micros(encode_started);
         let diff_started = Instant::now();
         let prepared = PreparedDelta::between(&previous, &next);
@@ -1037,29 +1348,59 @@ impl RedbStore {
                 prepared.expected_meta.as_ref(),
                 &prepared.meta,
                 prepared.layout,
+                prepared.generation,
             )
             .map_err(CommitFailure::Definite)?;
         }
-        {
-            let mut table = transaction
-                .open_table(CATALOG)
-                .map_err(|error| CommitFailure::definite("open catalog table", error))?;
-            apply_bytes_delta(&mut table, &prepared.catalog, "catalog entry")
-                .map_err(CommitFailure::Definite)?;
+        match prepared.generation.active {
+            GenerationRef::Legacy0 => {
+                let mut catalog = transaction
+                    .open_table(CATALOG)
+                    .map_err(|error| CommitFailure::definite("open catalog table", error))?;
+                apply_bytes_delta(&mut catalog, &prepared.catalog, "catalog entry")
+                    .map_err(CommitFailure::Definite)?;
+                let mut rows = transaction
+                    .open_table(ROWS)
+                    .map_err(|error| CommitFailure::definite("open rows table", error))?;
+                apply_bytes_delta(&mut rows, &prepared.rows, "row")
+                    .map_err(CommitFailure::Definite)?;
+                let mut indexes = transaction.open_table(SECONDARY_INDEX).map_err(|error| {
+                    CommitFailure::definite("open secondary index table", error)
+                })?;
+                apply_set_delta(&mut indexes, &prepared.secondary_indexes)
+                    .map_err(CommitFailure::Definite)?;
+            }
+            GenerationRef::Generated(generation) => {
+                let catalog_delta = generation_bytes_delta(&prepared.catalog, generation)
+                    .map_err(CommitFailure::Definite)?;
+                let row_delta = generation_bytes_delta(&prepared.rows, generation)
+                    .map_err(CommitFailure::Definite)?;
+                let index_delta = generation_set_delta(&prepared.secondary_indexes, generation)
+                    .map_err(CommitFailure::Definite)?;
+                let mut catalog = transaction
+                    .open_table(GENERATION_CATALOG)
+                    .map_err(|error| {
+                        CommitFailure::definite("open generation catalog table", error)
+                    })?;
+                apply_bytes_delta(&mut catalog, &catalog_delta, "generation catalog entry")
+                    .map_err(CommitFailure::Definite)?;
+                let mut rows = transaction.open_table(GENERATION_ROWS).map_err(|error| {
+                    CommitFailure::definite("open generation rows table", error)
+                })?;
+                apply_bytes_delta(&mut rows, &row_delta, "generation row")
+                    .map_err(CommitFailure::Definite)?;
+                let mut indexes = transaction.open_table(GENERATION_INDEX).map_err(|error| {
+                    CommitFailure::definite("open generation index table", error)
+                })?;
+                apply_set_delta(&mut indexes, &index_delta).map_err(CommitFailure::Definite)?;
+            }
         }
-        {
-            let mut table = transaction
-                .open_table(ROWS)
-                .map_err(|error| CommitFailure::definite("open rows table", error))?;
-            apply_bytes_delta(&mut table, &prepared.rows, "row")
-                .map_err(CommitFailure::Definite)?;
-        }
-        {
-            let mut table = transaction
-                .open_table(SECONDARY_INDEX)
-                .map_err(|error| CommitFailure::definite("open secondary index table", error))?;
-            apply_set_delta(&mut table, &prepared.secondary_indexes)
-                .map_err(CommitFailure::Definite)?;
+        if prepared.layout.format >= PRODUCTION_STORAGE_FORMAT_VERSION {
+            transaction
+                .open_table(MAINTENANCE_GENERATION)
+                .map_err(|error| {
+                    CommitFailure::definite("open maintenance generation table", error)
+                })?;
         }
         {
             let mut table = transaction
@@ -1098,7 +1439,7 @@ impl RedbStore {
             .check_integrity()
             .map_err(|error| storage_error("check redb integrity", error))?;
         let backend_micros = elapsed_micros(backend_started);
-        if self.committed.layout == StorageLayout::production() {
+        if self.committed.layout.format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
             let logical_started = Instant::now();
             let (database, receipts, committed, source, _) = self.load_bounded_view()?;
             drop(source);
@@ -1141,12 +1482,23 @@ impl RedbStore {
             .database
             .begin_read()
             .map_err(|error| storage_error("begin integrity read transaction", error))?;
-        let rows = transaction
-            .open_table(ROWS)
-            .map_err(|error| storage_error("open rows table", error))?;
-        let indexes = transaction
-            .open_table(SECONDARY_INDEX)
-            .map_err(|error| storage_error("open secondary index table", error))?;
+        let generation = self.committed.generation.active;
+        let rows = match generation {
+            GenerationRef::Legacy0 => transaction
+                .open_table(ROWS)
+                .map_err(|error| storage_error("open rows table", error))?,
+            GenerationRef::Generated(_) => transaction
+                .open_table(GENERATION_ROWS)
+                .map_err(|error| storage_error("open generation rows table", error))?,
+        };
+        let indexes = match generation {
+            GenerationRef::Legacy0 => transaction
+                .open_table(SECONDARY_INDEX)
+                .map_err(|error| storage_error("open secondary index table", error))?,
+            GenerationRef::Generated(_) => transaction
+                .open_table(GENERATION_INDEX)
+                .map_err(|error| storage_error("open generation index table", error))?,
+        };
 
         let mut tables = BTreeMap::<u64, DurableTable>::new();
         let mut definitions = BTreeMap::<u64, (DurableTable, IndexDefinition)>::new();
@@ -1179,13 +1531,15 @@ impl RedbStore {
             ..StorageCheckProfile::default()
         };
         let mut expected_index_entries = 0_usize;
+        let (row_lower, row_upper) = generation_scan_bounds(generation)?;
         for entry in rows
-            .iter()
+            .range::<&[u8]>((borrowed_bound(&row_lower), borrowed_bound(&row_upper)))
             .map_err(|error| storage_error("iterate rows for integrity check", error))?
         {
             let (key, value) =
                 entry.map_err(|error| storage_error("read row for integrity check", error))?;
-            let (table_id, row_id) = decode_row_key(key.value())?;
+            let logical_key = logical_generation_key(generation, key.value())?;
+            let (table_id, row_id) = decode_row_key(logical_key)?;
             let table = tables.get(&table_id).ok_or_else(|| {
                 Error::new(
                     "E_STORAGE",
@@ -1210,8 +1564,9 @@ impl RedbStore {
                     )?;
                     row_working = row_working.saturating_add(expected.len());
                     profile.point_lookups = profile.point_lookups.saturating_add(1);
+                    let physical_expected = physical_generation_key(generation, &expected)?;
                     if indexes
-                        .get(expected.as_slice())
+                        .get(physical_expected.as_slice())
                         .map_err(|error| storage_error("lookup expected secondary index", error))?
                         .is_none()
                     {
@@ -1234,13 +1589,15 @@ impl RedbStore {
         }
 
         let mut previous_unique_prefix: Option<Vec<u8>> = None;
+        let (index_lower, index_upper) = generation_scan_bounds(generation)?;
         for entry in indexes
-            .iter()
+            .range::<&[u8]>((borrowed_bound(&index_lower), borrowed_bound(&index_upper)))
             .map_err(|error| storage_error("iterate indexes for integrity check", error))?
         {
             let (key, _) =
                 entry.map_err(|error| storage_error("read index for integrity check", error))?;
-            let key = key.value();
+            let physical_key = key.value();
+            let key = logical_generation_key(generation, physical_key)?;
             validate_index_key(key, PRODUCTION_INDEX_KEY_VERSION)?;
             let index_id = u64::from_be_bytes(key[6..14].try_into().unwrap());
             let component_count = key[14] as usize;
@@ -1258,9 +1615,10 @@ impl RedbStore {
                 ));
             }
             let row_key = encode_row_key(table.id, row_id);
+            let physical_row_key = physical_generation_key(generation, &row_key)?;
             profile.point_lookups = profile.point_lookups.saturating_add(1);
             let stored_row = rows
-                .get(row_key.as_slice())
+                .get(physical_row_key.as_slice())
                 .map_err(|error| storage_error("lookup indexed row", error))?
                 .ok_or_else(|| {
                     Error::new("E_STORAGE", "secondary index references a missing row")
@@ -1301,10 +1659,12 @@ impl RedbStore {
             profile.index_entries_checked = profile.index_entries_checked.saturating_add(1);
             profile.index_key_bytes = profile
                 .index_key_bytes
-                .saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX));
+                .saturating_add(u64::try_from(physical_key.len()).unwrap_or(u64::MAX));
             profile.working_peak_bytes = profile.working_peak_bytes.max(
-                key.len()
+                physical_key
+                    .len()
                     .saturating_add(stored_row.value().len())
+                    .saturating_add(physical_row_key.len())
                     .saturating_add(expected.len()),
             );
         }
@@ -1331,43 +1691,38 @@ impl RedbStore {
             .begin_read()
             .map_err(|error| storage_error("begin redb read transaction", error))?;
         let meta_started = Instant::now();
-        let (meta, layout) = {
+        let (meta, layout, generation) = {
             let table = transaction
                 .open_table(META)
                 .map_err(|error| storage_error("open meta table", error))?;
             read_meta(&table)?
         };
         profile.meta_micros = elapsed_micros(meta_started);
-        if layout != StorageLayout::production() {
+        if !matches!(
+            layout.format,
+            LEGACY_BOUNDED_STORAGE_FORMAT_VERSION | PRODUCTION_STORAGE_FORMAT_VERSION
+        ) {
             return Err(Error::new(
                 "E_STORAGE",
-                "bounded Legacy0 reads require the production format-5 layout",
+                "bounded reads require storage format 5 or 6",
             ));
         }
+        validate_generation_state(&transaction, layout, generation)?;
 
         let catalog_started = Instant::now();
-        let (entries, catalog_canonical) = {
-            let table = transaction
-                .open_table(CATALOG)
-                .map_err(|error| storage_error("open catalog table", error))?;
-            let mut entries = Vec::new();
-            let mut canonical = true;
-            for entry in table
-                .iter()
-                .map_err(|error| storage_error("iterate catalog table", error))?
-            {
-                let (key, value) =
-                    entry.map_err(|error| storage_error("read catalog entry", error))?;
-                let key = key.value();
-                let value = value.value();
-                entries.push(decode_catalog_entry(key, value, layout.catalog)?);
-                canonical &= value
-                    .get(4..6)
-                    .and_then(|version| version.try_into().ok())
-                    .map(u16::from_be_bytes)
-                    == Some(layout.catalog);
+        let (entries, catalog_canonical) = match generation.active {
+            GenerationRef::Legacy0 => {
+                let table = transaction
+                    .open_table(CATALOG)
+                    .map_err(|error| storage_error("open catalog table", error))?;
+                read_catalog_table(&table, layout, None)?
             }
-            (entries, canonical)
+            GenerationRef::Generated(id) => {
+                let table = transaction
+                    .open_table(GENERATION_CATALOG)
+                    .map_err(|error| storage_error("open generation catalog table", error))?;
+                read_catalog_table(&table, layout, Some(id))?
+            }
         };
         profile.catalog_micros = elapsed_micros(catalog_started);
         profile.catalog_entries = entries.len();
@@ -1375,17 +1730,31 @@ impl RedbStore {
         // Opening the physical tables proves that the expected Legacy0 table
         // definitions exist without traversing their entries.
         let rows_started = Instant::now();
-        {
-            transaction
-                .open_table(ROWS)
-                .map_err(|error| storage_error("open rows table", error))?;
+        match generation.active {
+            GenerationRef::Legacy0 => {
+                transaction
+                    .open_table(ROWS)
+                    .map_err(|error| storage_error("open rows table", error))?;
+            }
+            GenerationRef::Generated(_) => {
+                transaction
+                    .open_table(GENERATION_ROWS)
+                    .map_err(|error| storage_error("open generation rows table", error))?;
+            }
         }
         profile.rows_micros = elapsed_micros(rows_started);
         let indexes_started = Instant::now();
-        {
-            transaction
-                .open_table(SECONDARY_INDEX)
-                .map_err(|error| storage_error("open secondary index table", error))?;
+        match generation.active {
+            GenerationRef::Legacy0 => {
+                transaction
+                    .open_table(SECONDARY_INDEX)
+                    .map_err(|error| storage_error("open secondary index table", error))?;
+            }
+            GenerationRef::Generated(_) => {
+                transaction
+                    .open_table(GENERATION_INDEX)
+                    .map_err(|error| storage_error("open generation index table", error))?;
+            }
         }
         profile.indexes_micros = elapsed_micros(indexes_started);
 
@@ -1485,9 +1854,13 @@ impl RedbStore {
             layout,
             meta,
             catalog_canonical,
+            generation,
         };
-        let source: Arc<dyn TypedRowSource> =
-            Arc::new(RedbReadSource::new(transaction, metadata.clone()));
+        let source: Arc<dyn TypedRowSource> = Arc::new(RedbReadSource::new(
+            transaction,
+            metadata.clone(),
+            generation.active,
+        ));
         Ok((metadata, receipts, committed, source, profile))
     }
 
@@ -1499,7 +1872,7 @@ impl RedbStore {
             .database
             .begin_read()
             .map_err(|error| storage_error("begin redb read transaction", error))?;
-        let (meta, layout) = {
+        let (meta, layout, generation) = {
             let table = transaction
                 .open_table(META)
                 .map_err(|error| storage_error("open meta table", error))?;
@@ -1507,66 +1880,55 @@ impl RedbStore {
         };
         profile.meta_micros = elapsed_micros(meta_started);
         let catalog_started = Instant::now();
-        let (entries, stored_catalog) = {
-            let table = transaction
-                .open_table(CATALOG)
-                .map_err(|error| storage_error("open catalog table", error))?;
-            let mut entries = Vec::new();
-            let mut stored = BTreeMap::new();
-            for entry in table
-                .iter()
-                .map_err(|error| storage_error("iterate catalog table", error))?
-            {
-                let (key, value) =
-                    entry.map_err(|error| storage_error("read catalog entry", error))?;
-                let key = key.value().to_vec();
-                let value = value.value().to_vec();
-                entries.push(decode_catalog_entry(&key, &value, layout.catalog)?);
-                stored.insert(key, value);
+        validate_generation_state(&transaction, layout, generation)?;
+        let (entries, stored_catalog) = match generation.active {
+            GenerationRef::Legacy0 => {
+                let table = transaction
+                    .open_table(CATALOG)
+                    .map_err(|error| storage_error("open catalog table", error))?;
+                read_complete_catalog_table(&table, layout, None)?
             }
-            (entries, stored)
+            GenerationRef::Generated(id) => {
+                let table = transaction
+                    .open_table(GENERATION_CATALOG)
+                    .map_err(|error| storage_error("open generation catalog table", error))?;
+                read_complete_catalog_table(&table, layout, Some(id))?
+            }
         };
         profile.catalog_micros = elapsed_micros(catalog_started);
         profile.catalog_entries = stored_catalog.len();
         let rows_started = Instant::now();
-        let (rows, stored_rows) = {
-            let table = transaction
-                .open_table(ROWS)
-                .map_err(|error| storage_error("open rows table", error))?;
-            let mut rows = Vec::new();
-            let mut stored = BTreeMap::new();
-            for entry in table
-                .iter()
-                .map_err(|error| storage_error("iterate rows table", error))?
-            {
-                let (key, value) = entry.map_err(|error| storage_error("read row", error))?;
-                let key = key.value().to_vec();
-                let value = value.value().to_vec();
-                let (table_id, row_id) = decode_row_key(&key)?;
-                rows.push((table_id, row_id, value.clone()));
-                stored.insert(key, value);
+        let (rows, stored_rows) = match generation.active {
+            GenerationRef::Legacy0 => {
+                let table = transaction
+                    .open_table(ROWS)
+                    .map_err(|error| storage_error("open rows table", error))?;
+                read_complete_rows_table(&table, None)?
             }
-            (rows, stored)
+            GenerationRef::Generated(id) => {
+                let table = transaction
+                    .open_table(GENERATION_ROWS)
+                    .map_err(|error| storage_error("open generation rows table", error))?;
+                read_complete_rows_table(&table, Some(id))?
+            }
         };
         profile.rows_micros = elapsed_micros(rows_started);
         profile.row_entries = stored_rows.len();
         profile.row_bytes = map_bytes(&stored_rows);
         let indexes_started = Instant::now();
-        let stored_indexes = {
-            let table = transaction
-                .open_table(SECONDARY_INDEX)
-                .map_err(|error| storage_error("open secondary index table", error))?;
-            let mut keys = BTreeSet::new();
-            for entry in table
-                .iter()
-                .map_err(|error| storage_error("iterate secondary index table", error))?
-            {
-                let (key, _) =
-                    entry.map_err(|error| storage_error("read secondary index entry", error))?;
-                validate_index_key(key.value(), layout.index)?;
-                keys.insert(key.value().to_vec());
+        let stored_indexes = match generation.active {
+            GenerationRef::Legacy0 => {
+                let table = transaction
+                    .open_table(SECONDARY_INDEX)
+                    .map_err(|error| storage_error("open secondary index table", error))?;
+                read_complete_index_table(&table, layout, None)?
             }
-            keys
+            GenerationRef::Generated(id) => {
+                let table = transaction
+                    .open_table(GENERATION_INDEX)
+                    .map_err(|error| storage_error("open generation index table", error))?;
+                read_complete_index_table(&table, layout, Some(id))?
+            }
         };
         profile.indexes_micros = elapsed_micros(indexes_started);
         profile.index_entries = stored_indexes.len();
@@ -1689,6 +2051,7 @@ impl RedbStore {
         };
         let committed = PreparedState {
             layout: committed_layout,
+            generation,
             meta,
             catalog: stored_catalog,
             rows: stored_rows,
@@ -1703,6 +2066,7 @@ impl RedbStore {
 
 struct PreparedState {
     layout: StorageLayout,
+    generation: GenerationState,
     meta: DurableMeta,
     catalog: BTreeMap<Vec<u8>, Vec<u8>>,
     rows: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -1713,6 +2077,20 @@ struct PreparedState {
 
 impl PreparedState {
     fn new(database: &Database, receipts: &ReceiptMap, layout: StorageLayout) -> Result<Self> {
+        let generation = if layout.format >= PRODUCTION_STORAGE_FORMAT_VERSION {
+            GenerationState::initial()
+        } else {
+            GenerationState::legacy()
+        };
+        Self::new_in_generation(database, receipts, layout, generation)
+    }
+
+    fn new_in_generation(
+        database: &Database,
+        receipts: &ReceiptMap,
+        layout: StorageLayout,
+        generation: GenerationState,
+    ) -> Result<Self> {
         if !layout.supports_production_scalars() {
             database.ensure_legacy_scalars()?;
             ensure_legacy_receipts(receipts)?;
@@ -1760,6 +2138,7 @@ impl PreparedState {
             .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(Self {
             layout,
+            generation,
             meta: database.durable_meta(),
             catalog,
             rows,
@@ -1773,7 +2152,8 @@ impl PreparedState {
 #[derive(Debug, PartialEq, Eq)]
 struct PreparedDelta {
     layout: StorageLayout,
-    expected_meta: Option<(DurableMeta, StorageLayout)>,
+    generation: GenerationState,
+    expected_meta: Option<(DurableMeta, StorageLayout, GenerationState)>,
     meta: DurableMeta,
     catalog: BytesDelta,
     rows: BytesDelta,
@@ -1952,7 +2332,12 @@ impl PreparedDelta {
 
         Ok(Self {
             layout,
-            expected_meta: Some((committed.meta.clone(), committed.layout)),
+            generation: committed.generation,
+            expected_meta: Some((
+                committed.meta.clone(),
+                committed.layout,
+                committed.generation,
+            )),
             meta: database.durable_meta(),
             catalog,
             rows,
@@ -1968,6 +2353,7 @@ impl PreparedDelta {
     fn between(previous: &PreparedState, next: &PreparedState) -> Self {
         Self {
             layout: next.layout,
+            generation: next.generation,
             expected_meta: None,
             meta: next.meta.clone(),
             catalog: BytesDelta::between(&previous.catalog, &next.catalog),
@@ -2135,6 +2521,47 @@ impl SetDelta {
     }
 }
 
+fn generation_bytes_delta(delta: &BytesDelta, generation: u64) -> Result<BytesDelta> {
+    Ok(BytesDelta {
+        deletes: delta
+            .deletes
+            .iter()
+            .map(|entry| {
+                Ok(BytesDelete {
+                    key: encode_generation_key(generation, &entry.key)?,
+                    expected: entry.expected.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        writes: delta
+            .writes
+            .iter()
+            .map(|entry| {
+                Ok(BytesWrite {
+                    key: encode_generation_key(generation, &entry.key)?,
+                    expected: entry.expected.clone(),
+                    value: entry.value.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+fn generation_set_delta(delta: &SetDelta, generation: u64) -> Result<SetDelta> {
+    Ok(SetDelta {
+        deletes: delta
+            .deletes
+            .iter()
+            .map(|key| encode_generation_key(generation, key))
+            .collect::<Result<Vec<_>>>()?,
+        inserts: delta
+            .inserts
+            .iter()
+            .map(|key| encode_generation_key(generation, key))
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
 fn apply_bytes_delta(
     table: &mut redb::Table<'_, &[u8], &[u8]>,
     delta: &BytesDelta,
@@ -2219,12 +2646,15 @@ fn apply_set_delta(table: &mut redb::Table<'_, &[u8], u8>, delta: &SetDelta) -> 
 
 fn write_meta(
     table: &mut redb::Table<'_, &str, &[u8]>,
-    expected: Option<&(DurableMeta, StorageLayout)>,
+    expected: Option<&(DurableMeta, StorageLayout, GenerationState)>,
     meta: &DurableMeta,
     layout: StorageLayout,
+    generation: GenerationState,
 ) -> Result<()> {
-    if let Some((expected_meta, expected_layout)) = expected {
-        for (key, expected_value) in meta_entries(expected_meta, *expected_layout) {
+    if let Some((expected_meta, expected_layout, expected_generation)) = expected {
+        for (key, expected_value) in
+            meta_entries(expected_meta, *expected_layout, *expected_generation)
+        {
             let actual = table
                 .get(key)
                 .map_err(|error| storage_error("read expected meta entry", error))?;
@@ -2236,7 +2666,7 @@ fn write_meta(
             }
         }
     }
-    for (key, value) in meta_entries(meta, layout) {
+    for (key, value) in meta_entries(meta, layout, generation) {
         table
             .insert(key, value.as_slice())
             .map_err(|error| storage_error("write meta entry", error))?;
@@ -2244,8 +2674,12 @@ fn write_meta(
     Ok(())
 }
 
-fn meta_entries(meta: &DurableMeta, layout: StorageLayout) -> [(&'static str, Vec<u8>); 12] {
-    [
+fn meta_entries(
+    meta: &DurableMeta,
+    layout: StorageLayout,
+    generation: GenerationState,
+) -> Vec<(&'static str, Vec<u8>)> {
+    let mut entries = vec![
         (FORMAT_KEY, layout.format.to_be_bytes().to_vec()),
         (CATALOG_CODEC_KEY, layout.catalog.to_be_bytes().to_vec()),
         (VALUE_CODEC_KEY, layout.value.to_be_bytes().to_vec()),
@@ -2267,12 +2701,29 @@ fn meta_entries(meta: &DurableMeta, layout: StorageLayout) -> [(&'static str, Ve
             meta.cursor_instance_id.as_slice().to_vec(),
         ),
         (CURSOR_SECRET_KEY, meta.cursor_secret.as_slice().to_vec()),
-    ]
+    ];
+    if layout.format >= PRODUCTION_STORAGE_FORMAT_VERSION {
+        entries.extend([
+            (
+                MAINTENANCE_CODEC_KEY,
+                layout.maintenance.to_be_bytes().to_vec(),
+            ),
+            (
+                ACTIVE_GENERATION_KEY,
+                generation.active.encoded().to_be_bytes().to_vec(),
+            ),
+            (
+                NEXT_GENERATION_ID_KEY,
+                generation.next_id.to_be_bytes().to_vec(),
+            ),
+        ]);
+    }
+    entries
 }
 
 fn read_meta(
     table: &impl ReadableTable<&'static str, &'static [u8]>,
-) -> Result<(DurableMeta, StorageLayout)> {
+) -> Result<(DurableMeta, StorageLayout, GenerationState)> {
     let format_version = u32::from_be_bytes(read_fixed::<4>(table, FORMAT_KEY)?);
     if !matches!(
         format_version,
@@ -2280,6 +2731,7 @@ fn read_meta(
             | RECEIPT_STORAGE_FORMAT_VERSION
             | CURSOR_STORAGE_FORMAT_VERSION
             | SCALAR_STORAGE_FORMAT_VERSION
+            | LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
             | PRODUCTION_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
@@ -2316,6 +2768,11 @@ fn read_meta(
     let migration =
         read_optional_version(table, MIGRATION_CODEC_KEY)?.unwrap_or(MIGRATION_CODEC_VERSION);
     let receipt = read_optional_version(table, RECEIPT_CODEC_KEY)?.unwrap_or(RECEIPT_CODEC_VERSION);
+    let maintenance = if format_version >= PRODUCTION_STORAGE_FORMAT_VERSION {
+        u16::from_be_bytes(read_fixed::<2>(table, MAINTENANCE_CODEC_KEY)?)
+    } else {
+        0
+    };
     if migration != expected.migration {
         return Err(Error::new(
             "E_STORAGE",
@@ -2328,6 +2785,12 @@ fn read_meta(
             format!("unsupported {RECEIPT_CODEC_KEY}"),
         ));
     }
+    if maintenance != expected.maintenance {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported {MAINTENANCE_CODEC_KEY}"),
+        ));
+    }
     let layout = StorageLayout {
         format: format_version,
         catalog: catalog_version,
@@ -2335,6 +2798,7 @@ fn read_meta(
         index,
         migration,
         receipt,
+        maintenance,
     };
     let sequence = u64::from_be_bytes(read_fixed::<8>(table, SEQUENCE_KEY)?);
     let schema_revision = u64::from_be_bytes(read_fixed::<8>(table, SCHEMA_REVISION_KEY)?);
@@ -2350,6 +2814,22 @@ fn read_meta(
     } else {
         crate::pagination::CursorIdentity::generate()?
     };
+    let generation = if format_version >= PRODUCTION_STORAGE_FORMAT_VERSION {
+        let active = GenerationRef::from_encoded(u64::from_be_bytes(read_fixed::<8>(
+            table,
+            ACTIVE_GENERATION_KEY,
+        )?));
+        let next_id = u64::from_be_bytes(read_fixed::<8>(table, NEXT_GENERATION_ID_KEY)?);
+        if next_id == 0 || matches!(active, GenerationRef::Generated(id) if id >= next_id) {
+            return Err(Error::new(
+                "E_STORAGE",
+                "active/next generation metadata is contradictory",
+            ));
+        }
+        GenerationState { active, next_id }
+    } else {
+        GenerationState::legacy()
+    };
     Ok((
         DurableMeta {
             sequence,
@@ -2360,6 +2840,7 @@ fn read_meta(
             cursor_secret: *identity.secret(),
         },
         layout,
+        generation,
     ))
 }
 
@@ -2431,6 +2912,307 @@ fn read_bytes(
         .map_err(|error| storage_error("read meta entry", error))?
         .map(|value| value.value().to_vec())
         .ok_or_else(|| Error::new("E_STORAGE", format!("missing meta key '{key}'")))
+}
+
+fn generation_bounds(generation: u64) -> Result<OwnedKeyBounds> {
+    let prefix = generation_prefix(generation)?;
+    let upper = prefix_successor_bytes(&prefix)
+        .map(Bound::Excluded)
+        .ok_or_else(|| Error::new("E_STORAGE", "generation key prefix has no successor"))?;
+    Ok((Bound::Included(prefix), upper))
+}
+
+fn generation_scan_bounds(generation: GenerationRef) -> Result<OwnedKeyBounds> {
+    match generation {
+        GenerationRef::Legacy0 => Ok((Bound::Unbounded, Bound::Unbounded)),
+        GenerationRef::Generated(id) => generation_bounds(id),
+    }
+}
+
+fn physical_generation_key(generation: GenerationRef, logical: &[u8]) -> Result<Vec<u8>> {
+    match generation {
+        GenerationRef::Legacy0 => Ok(logical.to_vec()),
+        GenerationRef::Generated(id) => encode_generation_key(id, logical),
+    }
+}
+
+fn logical_generation_key(generation: GenerationRef, physical: &[u8]) -> Result<&[u8]> {
+    match generation {
+        GenerationRef::Legacy0 => Ok(physical),
+        GenerationRef::Generated(id) => decode_generation_key(physical, id),
+    }
+}
+
+fn read_catalog_table(
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    layout: StorageLayout,
+    generation: Option<u64>,
+) -> Result<(Vec<DurableCatalogEntry>, bool)> {
+    let mut entries = Vec::new();
+    let mut canonical = true;
+    if let Some(generation) = generation {
+        let (lower, upper) = generation_bounds(generation)?;
+        let bounds = (borrowed_bound(&lower), borrowed_bound(&upper));
+        for entry in table
+            .range::<&[u8]>(bounds)
+            .map_err(|error| storage_error("iterate generation catalog table", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read generation catalog entry", error))?;
+            let key = decode_generation_key(key.value(), generation)?;
+            let value = value.value();
+            entries.push(decode_catalog_entry(key, value, layout.catalog)?);
+            canonical &= catalog_value_is_canonical(value, layout.catalog);
+        }
+    } else {
+        for entry in table
+            .iter()
+            .map_err(|error| storage_error("iterate catalog table", error))?
+        {
+            let (key, value) = entry.map_err(|error| storage_error("read catalog entry", error))?;
+            let value = value.value();
+            entries.push(decode_catalog_entry(key.value(), value, layout.catalog)?);
+            canonical &= catalog_value_is_canonical(value, layout.catalog);
+        }
+    }
+    Ok((entries, canonical))
+}
+
+fn read_complete_catalog_table(
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    layout: StorageLayout,
+    generation: Option<u64>,
+) -> Result<StoredCatalog> {
+    let mut entries = Vec::new();
+    let mut stored = BTreeMap::new();
+    if let Some(generation) = generation {
+        let (lower, upper) = generation_bounds(generation)?;
+        let bounds = (borrowed_bound(&lower), borrowed_bound(&upper));
+        for entry in table
+            .range::<&[u8]>(bounds)
+            .map_err(|error| storage_error("iterate generation catalog table", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read generation catalog entry", error))?;
+            let key = decode_generation_key(key.value(), generation)?.to_vec();
+            let value = value.value().to_vec();
+            entries.push(decode_catalog_entry(&key, &value, layout.catalog)?);
+            stored.insert(key, value);
+        }
+    } else {
+        for entry in table
+            .iter()
+            .map_err(|error| storage_error("iterate catalog table", error))?
+        {
+            let (key, value) = entry.map_err(|error| storage_error("read catalog entry", error))?;
+            let key = key.value().to_vec();
+            let value = value.value().to_vec();
+            entries.push(decode_catalog_entry(&key, &value, layout.catalog)?);
+            stored.insert(key, value);
+        }
+    }
+    Ok((entries, stored))
+}
+
+type StoredRows = (Vec<(u64, RowId, Vec<u8>)>, BTreeMap<Vec<u8>, Vec<u8>>);
+
+fn read_complete_rows_table(
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    generation: Option<u64>,
+) -> Result<StoredRows> {
+    let mut rows = Vec::new();
+    let mut stored = BTreeMap::new();
+    if let Some(generation) = generation {
+        let (lower, upper) = generation_bounds(generation)?;
+        let bounds = (borrowed_bound(&lower), borrowed_bound(&upper));
+        for entry in table
+            .range::<&[u8]>(bounds)
+            .map_err(|error| storage_error("iterate generation rows table", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read generation row", error))?;
+            let key = decode_generation_key(key.value(), generation)?.to_vec();
+            let value = value.value().to_vec();
+            let (table_id, row_id) = decode_row_key(&key)?;
+            rows.push((table_id, row_id, value.clone()));
+            stored.insert(key, value);
+        }
+    } else {
+        for entry in table
+            .iter()
+            .map_err(|error| storage_error("iterate rows table", error))?
+        {
+            let (key, value) = entry.map_err(|error| storage_error("read row", error))?;
+            let key = key.value().to_vec();
+            let value = value.value().to_vec();
+            let (table_id, row_id) = decode_row_key(&key)?;
+            rows.push((table_id, row_id, value.clone()));
+            stored.insert(key, value);
+        }
+    }
+    Ok((rows, stored))
+}
+
+fn read_complete_index_table(
+    table: &impl ReadableTable<&'static [u8], u8>,
+    layout: StorageLayout,
+    generation: Option<u64>,
+) -> Result<BTreeSet<Vec<u8>>> {
+    let mut keys = BTreeSet::new();
+    if let Some(generation) = generation {
+        let (lower, upper) = generation_bounds(generation)?;
+        let bounds = (borrowed_bound(&lower), borrowed_bound(&upper));
+        for entry in table
+            .range::<&[u8]>(bounds)
+            .map_err(|error| storage_error("iterate generation index table", error))?
+        {
+            let (key, _) =
+                entry.map_err(|error| storage_error("read generation index entry", error))?;
+            let key = decode_generation_key(key.value(), generation)?.to_vec();
+            validate_index_key(&key, layout.index)?;
+            keys.insert(key);
+        }
+    } else {
+        for entry in table
+            .iter()
+            .map_err(|error| storage_error("iterate secondary index table", error))?
+        {
+            let (key, _) =
+                entry.map_err(|error| storage_error("read secondary index entry", error))?;
+            validate_index_key(key.value(), layout.index)?;
+            keys.insert(key.value().to_vec());
+        }
+    }
+    Ok(keys)
+}
+
+fn catalog_value_is_canonical(value: &[u8], version: u16) -> bool {
+    value
+        .get(4..6)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u16::from_be_bytes)
+        == Some(version)
+}
+
+#[cfg(test)]
+fn encode_maintenance_manifest(manifest: &MaintenanceManifest) -> Result<Vec<u8>> {
+    let mut value = Vec::from(MAINTENANCE_MAGIC.as_slice());
+    value.extend_from_slice(&MAINTENANCE_CODEC_VERSION.to_be_bytes());
+    value.extend(serde_json::to_vec(manifest).map_err(|error| {
+        Error::new(
+            "E_STORAGE",
+            format!("encode maintenance generation manifest: {error}"),
+        )
+    })?);
+    Ok(value)
+}
+
+fn decode_maintenance_manifest(value: &[u8]) -> Result<MaintenanceManifest> {
+    if value.len() < 6 || &value[..4] != MAINTENANCE_MAGIC {
+        return Err(Error::new(
+            "E_STORAGE",
+            "invalid maintenance generation manifest codec magic",
+        ));
+    }
+    let version = u16::from_be_bytes(value[4..6].try_into().unwrap());
+    if version != MAINTENANCE_CODEC_VERSION {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported maintenance generation manifest codec version {version}"),
+        ));
+    }
+    serde_json::from_slice(&value[6..]).map_err(|error| {
+        Error::new(
+            "E_STORAGE",
+            format!("decode maintenance generation manifest: {error}"),
+        )
+    })
+}
+
+fn validate_generation_state(
+    transaction: &redb::ReadTransaction,
+    layout: StorageLayout,
+    generation: GenerationState,
+) -> Result<()> {
+    if layout.format < PRODUCTION_STORAGE_FORMAT_VERSION {
+        if generation != GenerationState::legacy() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "pre-generation storage has generation metadata",
+            ));
+        }
+        return Ok(());
+    }
+    if generation.next_id == 0
+        || matches!(generation.active, GenerationRef::Generated(id) if id >= generation.next_id)
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "active generation is not below the next monotonic generation ID",
+        ));
+    }
+    transaction
+        .open_table(GENERATION_CATALOG)
+        .map_err(|error| storage_error("open generation catalog table", error))?;
+    transaction
+        .open_table(GENERATION_ROWS)
+        .map_err(|error| storage_error("open generation rows table", error))?;
+    transaction
+        .open_table(GENERATION_INDEX)
+        .map_err(|error| storage_error("open generation index table", error))?;
+    let manifests = transaction
+        .open_table(MAINTENANCE_GENERATION)
+        .map_err(|error| storage_error("open maintenance generation table", error))?;
+    let mut unfinished = 0_usize;
+    for entry in manifests
+        .iter()
+        .map_err(|error| storage_error("iterate maintenance generation table", error))?
+    {
+        let (id, value) =
+            entry.map_err(|error| storage_error("read maintenance generation", error))?;
+        let id = id.value();
+        let manifest = decode_maintenance_manifest(value.value())?;
+        if id == 0 || manifest.target != GenerationRef::Generated(id) || id >= generation.next_id {
+            return Err(Error::new(
+                "E_STORAGE",
+                "maintenance manifest contradicts its generation ID allocation",
+            ));
+        }
+        if let GenerationRef::Generated(source) = manifest.source
+            && source >= generation.next_id
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "maintenance manifest source generation was never allocated",
+            ));
+        }
+        match manifest.state {
+            MaintenanceState::Building | MaintenanceState::Ready | MaintenanceState::Aborting => {
+                unfinished = unfinished.saturating_add(1);
+                if manifest.source != generation.active || manifest.target == generation.active {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "unfinished maintenance manifest contradicts the active generation",
+                    ));
+                }
+            }
+            MaintenanceState::Reclaimable => {
+                if manifest.target != generation.active || manifest.source == generation.active {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "reclaimable maintenance manifest contradicts the active generation",
+                    ));
+                }
+            }
+        }
+    }
+    if unfinished > 1 {
+        return Err(Error::new(
+            "E_STORAGE",
+            "multiple unfinished maintenance generations are not supported",
+        ));
+    }
+    Ok(())
 }
 
 fn encode_catalog_key(kind: u8, stable_id: u64) -> Vec<u8> {
@@ -2588,6 +3370,49 @@ fn encode_row_key(table_id: u64, row_id: u64) -> Vec<u8> {
     key.extend_from_slice(&table_id.to_be_bytes());
     key.extend_from_slice(&row_id.to_be_bytes());
     key
+}
+
+fn encode_generation_key(generation: u64, inner: &[u8]) -> Result<Vec<u8>> {
+    if generation == 0 {
+        return Err(Error::new(
+            "E_STORAGE",
+            "generated key requires a nonzero generation ID",
+        ));
+    }
+    let mut key = Vec::with_capacity(14_usize.saturating_add(inner.len()));
+    key.extend_from_slice(GENERATION_KEY_MAGIC);
+    key.extend_from_slice(&GENERATION_KEY_CODEC_VERSION.to_be_bytes());
+    key.extend_from_slice(&generation.to_be_bytes());
+    key.extend_from_slice(inner);
+    Ok(key)
+}
+
+fn decode_generation_key(key: &[u8], expected_generation: u64) -> Result<&[u8]> {
+    if key.len() < 14 || &key[..4] != GENERATION_KEY_MAGIC {
+        return Err(Error::new(
+            "E_STORAGE",
+            "invalid generation key codec magic",
+        ));
+    }
+    let version = u16::from_be_bytes(key[4..6].try_into().unwrap());
+    if version != GENERATION_KEY_CODEC_VERSION {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported generation key codec version {version}"),
+        ));
+    }
+    let generation = u64::from_be_bytes(key[6..14].try_into().unwrap());
+    if generation == 0 || generation != expected_generation {
+        return Err(Error::new(
+            "E_STORAGE",
+            "generation key does not match the active generation",
+        ));
+    }
+    Ok(&key[14..])
+}
+
+fn generation_prefix(generation: u64) -> Result<Vec<u8>> {
+    encode_generation_key(generation, &[])
 }
 
 fn decode_row_key(key: &[u8]) -> Result<(u64, u64)> {
@@ -2869,6 +3694,43 @@ mod tests {
         cache.insert((1, 4), cached_test_row(4), SNAPSHOT_ROW_CACHE_MAX_BYTES + 1);
         assert_eq!(cache.bytes, before);
         assert!(cache.get((1, 4)).is_none());
+    }
+
+    #[test]
+    fn generation_key_codec_has_stable_prefixes_and_rejects_malformed_input() {
+        let encoded = encode_generation_key(1, &[0xaa, 0xbb]).unwrap();
+        assert_eq!(
+            encoded,
+            [
+                b'U', b'I', b'D', b'G', 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0xaa, 0xbb,
+            ]
+        );
+        assert_eq!(decode_generation_key(&encoded, 1).unwrap(), [0xaa, 0xbb]);
+        assert!(generation_prefix(1).unwrap() < generation_prefix(2).unwrap());
+        let (lower, upper) = generation_bounds(1).unwrap();
+        assert_eq!(lower, Bound::Included(generation_prefix(1).unwrap()));
+        assert_eq!(upper, Bound::Excluded(generation_prefix(2).unwrap()));
+
+        assert!(encode_generation_key(0, b"row").is_err());
+        assert!(decode_generation_key(&encoded[..13], 1).is_err());
+        let mut unknown_version = encoded.clone();
+        unknown_version[5] = 2;
+        assert!(decode_generation_key(&unknown_version, 1).is_err());
+        assert!(decode_generation_key(&encoded, 2).is_err());
+    }
+
+    #[test]
+    fn maintenance_manifest_codec_round_trips_and_rejects_unknown_versions() {
+        let manifest = MaintenanceManifest {
+            state: MaintenanceState::Building,
+            source: GenerationRef::Legacy0,
+            target: GenerationRef::Generated(1),
+        };
+        let encoded = encode_maintenance_manifest(&manifest).unwrap();
+        assert_eq!(decode_maintenance_manifest(&encoded).unwrap(), manifest);
+        let mut unknown_version = encoded;
+        unknown_version[5] = 2;
+        assert!(decode_maintenance_manifest(&unknown_version).is_err());
     }
 
     fn execute(database: &mut Database, source: &str) {

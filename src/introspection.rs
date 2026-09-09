@@ -29,6 +29,8 @@ pub struct StorageVersions {
     pub index_key_codec: u16,
     pub migration_codec: u16,
     pub receipt_codec: u16,
+    #[serde(default)]
+    pub maintenance_codec: u16,
     pub backup_codec: u32,
 }
 
