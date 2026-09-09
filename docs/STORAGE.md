@@ -76,6 +76,8 @@ M6 使用更宽的 row 与额外复合索引重新测量完整工作负载：10k
 
 M7 的分阶段复测显示：100k open p50 约 5.44 s，其中完整派生索引重算与逻辑验证约 4.72 s，typed `Database` 构造约 0.55 s；row/index 读取合计约 0.15 s。100k migration durable commit p50 约 47.18 s，其中完整候选编码约 41.01 s、重载并验证前态约 5.44 s，而 transaction apply 与 sync 合计约 0.76 s。下一阶段应消除重复全量验证/编码并引入可恢复 generation，而不是只优化 redb I/O。边界、完整样本和解释见 [M7 存储阶段记录](benchmarks/storage-phases-2026-09-09.md)。
 
+[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结下一阶段物理边界：memory/redb 共用 typed row source 和 query IR；redb committed view 绑定一个 MVCC transaction/generation 并按 RowId/index span 解码；format 6 通过 Legacy0 兼容 format 5，再以 shadow generation 分批构建、验证和原子 cutover schema/data migration。该 RFC 尚未改变当前 format-5 文件；具体格式升级只会随对应实现和故障矩阵一起合并。
+
 ## 与旧原型格式的关系
 
 `--wal-path` 和 `--snapshot-path` 暂时保留，用于兼容早期原型。它们通过源码回放恢复，不是 redb 格式，也不会与 `--db` 双写；同一个 server 命令不能混用这两套入口。它们不能保存幂等回执；需要该保证时应先用 `import-legacy` 转换到新的 redb 路径，并继续保留原 WAL 和 snapshot 文件。
