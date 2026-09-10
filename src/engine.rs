@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::control::ExecutionControl;
 use crate::db::{Database, DurableCatalogEntry, LogicalWriteSet, QueryResponse, QueryRowSink};
@@ -21,11 +22,14 @@ use crate::migration::{
     MigrationStatus, describe_step, validate_files_against_history,
 };
 use crate::profile::{
-    DurableCommitProfile, MigrationProfile, StorageCheckProfile, StorageOpenProfile,
+    DurableCommitProfile, ExecutionObservation, MigrationProfile, StorageCheckProfile,
+    StorageOpenProfile,
 };
 use crate::query::{LocatedStatement, PageSpec, Stage, Statement};
-use crate::redb_storage::{CommitFailure, MaintenanceInfo, MaintenanceState, RedbStore};
-use crate::row_source::TypedRowSource;
+use crate::redb_storage::{
+    CommitFailure, MaintenanceInfo, MaintenanceState, RedbCompaction, RedbStore,
+};
+use crate::row_source::{SourceIdentity, TypedRowSource};
 use crate::snapshot::SnapshotStore;
 use crate::syntax;
 use crate::wal::Wal;
@@ -165,6 +169,27 @@ pub struct StorageUpgrade {
     pub changed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StorageCompaction {
+    pub version: u16,
+    pub changed: bool,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub schema: crate::db::SchemaInfo,
+    pub sequence: u64,
+    pub storage: StorageVersions,
+    pub identity_preserved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactionIdentity {
+    logical: Vec<u8>,
+    rows_digest: [u8; 32],
+    source: SourceIdentity,
+    storage: StorageVersions,
+}
+
 /// Phase timings for the last successful mutating request.
 ///
 /// This observation is intended for diagnostics and workload evaluation. It
@@ -245,6 +270,12 @@ trait DurableBackend: Send {
         write_set: Option<&LogicalWriteSet>,
     ) -> std::result::Result<DurableCommitProfile, CommitFailure>;
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)>;
+    fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "durable backend does not support compaction",
+        )))
+    }
     fn supports_production_scalars(&self) -> bool;
     fn supports_bounded_row_mutation(&self) -> bool {
         false
@@ -344,6 +375,10 @@ impl DurableBackend for RedbStore {
 
     fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
         RedbStore::check_integrity(self)
+    }
+
+    fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
+        RedbStore::compact(self)
     }
 
     fn supports_production_scalars(&self) -> bool {
@@ -547,6 +582,22 @@ impl Engine {
             open_profile: Some(open_profile),
             ..Self::default()
         })
+    }
+
+    /// Compact an existing redb file through the same offline maintenance
+    /// boundary as [`Engine::compact_storage`]. A missing path is rejected.
+    pub fn compact_redb(path: impl Into<PathBuf>) -> Result<StorageCompaction> {
+        let path = path.into();
+        if !path.is_file() {
+            return Err(Error::new(
+                "E_CONFIG",
+                format!(
+                    "database '{}' does not exist or is not a file",
+                    path.display()
+                ),
+            ));
+        }
+        Self::open_redb(path)?.compact_storage()
     }
 
     /// Open an existing durable redb database behind a read-only execution
@@ -2447,6 +2498,217 @@ impl Engine {
         })
     }
 
+    /// Compact the currently opened redb database in place.
+    ///
+    /// This operation requires exclusive access: retained read snapshots make
+    /// it fail with `E_BUSY`. Native redb storage errors have an uncertain
+    /// result and close this Engine's durable handle until it is reopened.
+    pub fn compact_storage(&mut self) -> Result<StorageCompaction> {
+        if self.write_failed || self.read_reopen_required {
+            return Err(Error::new(
+                "E_STORAGE_REOPEN_REQUIRED",
+                "storage compaction requires reopening after an uncertain durable operation",
+            ));
+        }
+        if self.read_only {
+            return Err(Error::new(
+                "E_READ_ONLY",
+                "storage compaction is a mutation",
+            ));
+        }
+        if self.snapshot_execution {
+            return Err(Error::new(
+                "E_CONFIG",
+                "storage compaction is unavailable on a read snapshot",
+            ));
+        }
+        let maintenance = self
+            .durable
+            .as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    "E_CONFIG",
+                    "storage compaction requires a database opened with Engine::open_redb",
+                )
+            })?
+            .maintenance_info()?;
+        if maintenance.is_some() {
+            return Err(Error::new(
+                "E_MAINTENANCE_REQUIRED",
+                "storage compaction is blocked until migration maintenance is completed or aborted",
+            ));
+        }
+
+        self.check_integrity()?;
+        let before_identity = self.compaction_identity()?;
+        let metadata = self.committed.db.clone();
+        let receipts = self.committed.receipts.clone();
+        self.committed = Arc::new(CommittedView::memory(
+            metadata.as_ref().clone(),
+            receipts.as_ref().clone(),
+        ));
+
+        let compacted = match self
+            .durable
+            .as_mut()
+            .expect("durable backend checked above")
+            .compact()
+        {
+            Ok(compacted) => compacted,
+            Err(CommitFailure::Definite(error)) => {
+                let view = self
+                    .durable
+                    .as_ref()
+                    .expect("durable backend checked above")
+                    .committed_view(&metadata)
+                    .and_then(|(database, source)| CommittedView::new(database, source, receipts));
+                match view {
+                    Ok(view) => {
+                        self.committed = Arc::new(view);
+                        return Err(error);
+                    }
+                    Err(view_error) => {
+                        return Err(self.compaction_reopen_required(format!(
+                            "storage compaction was rejected but its read view could not be restored: {}",
+                            view_error.message
+                        )));
+                    }
+                }
+            }
+            Err(CommitFailure::Uncertain(error)) => {
+                return Err(self.compaction_reopen_required(format!(
+                    "storage compaction result is uncertain: {}",
+                    error.message
+                )));
+            }
+        };
+
+        let (database, checked_receipts) = {
+            let durable = self
+                .durable
+                .as_mut()
+                .expect("durable backend checked above");
+            match durable.check_integrity() {
+                Ok((_backend_clean, database, receipts, _profile)) => (database, receipts),
+                Err(error) => {
+                    return Err(self.compaction_reopen_required(format!(
+                        "storage compaction finished but its integrity check failed: {}",
+                        error.message
+                    )));
+                }
+            }
+        };
+        let view = self
+            .durable
+            .as_ref()
+            .expect("durable backend checked above")
+            .committed_view(&database)
+            .and_then(|(database, source)| {
+                CommittedView::new(database, source, Arc::new(checked_receipts))
+            });
+        self.committed = match view {
+            Ok(view) => Arc::new(view),
+            Err(error) => {
+                return Err(self.compaction_reopen_required(format!(
+                    "storage compaction finished but its read view could not be created: {}",
+                    error.message
+                )));
+            }
+        };
+
+        let after_identity = match self.compaction_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Err(self.compaction_reopen_required(format!(
+                    "storage compaction finished but its durable identity could not be verified: {}",
+                    error.message
+                )));
+            }
+        };
+        if after_identity != before_identity {
+            return Err(self.compaction_reopen_required(
+                "storage compaction changed durable database identity".to_string(),
+            ));
+        }
+        Ok(StorageCompaction {
+            version: 1,
+            changed: compacted.changed,
+            before_bytes: compacted.before_bytes,
+            after_bytes: compacted.after_bytes,
+            reclaimed_bytes: compacted.before_bytes.saturating_sub(compacted.after_bytes),
+            schema: self.committed.db.schema_info(),
+            sequence: self.committed.db.sequence,
+            storage: after_identity.storage,
+            identity_preserved: true,
+        })
+    }
+
+    fn compaction_identity(&self) -> Result<CompactionIdentity> {
+        let logical = serde_json::to_vec(&(
+            self.committed.db.durable_meta(),
+            self.committed.db.durable_catalog_entries(),
+            self.committed.db.migration_history(),
+            self.committed.receipts.as_ref(),
+        ))
+        .map_err(|error| {
+            Error::new(
+                "E_STORAGE",
+                format!("encode durable identity for compaction: {error}"),
+            )
+        })?;
+        let storage = self
+            .durable
+            .as_ref()
+            .ok_or_else(|| Error::new("E_CONFIG", "storage compaction requires redb"))?
+            .versions();
+        Ok(CompactionIdentity {
+            logical,
+            rows_digest: self.compaction_rows_digest()?,
+            source: self.committed.source.snapshot_identity(),
+            storage,
+        })
+    }
+
+    fn compaction_rows_digest(&self) -> Result<[u8; 32]> {
+        let mut digest = Sha256::new();
+        for table in self.committed.db.table_names() {
+            digest.update(u64::try_from(table.len()).unwrap_or(u64::MAX).to_be_bytes());
+            digest.update(table.as_bytes());
+            let mut cursor = self.committed.source.scan_rows(&table)?;
+            let mut observation = ExecutionObservation::default();
+            while let Some(batch) = cursor.next_batch(None, &mut observation)? {
+                for row in batch.rows {
+                    let encoded = serde_json::to_vec(row.as_ref()).map_err(|error| {
+                        Error::new(
+                            "E_STORAGE",
+                            format!("encode durable row identity for compaction: {error}"),
+                        )
+                    })?;
+                    digest.update(
+                        u64::try_from(encoded.len())
+                            .unwrap_or(u64::MAX)
+                            .to_be_bytes(),
+                    );
+                    digest.update(encoded);
+                }
+            }
+        }
+        Ok(digest.finalize().into())
+    }
+
+    fn compaction_reopen_required(&mut self, message: String) -> Error {
+        let database = self.committed.db.as_ref().clone();
+        let receipts = self.committed.receipts.as_ref().clone();
+        self.committed = Arc::new(CommittedView::memory(database, receipts));
+        self.durable = None;
+        self.write_failed = true;
+        self.read_reopen_required = true;
+        Error::new(
+            "E_STORAGE_REOPEN_REQUIRED",
+            format!("{message}; reopen the database and run an integrity check before retrying"),
+        )
+    }
+
     pub fn upgrade_storage(&mut self, target: u32) -> Result<StorageUpgrade> {
         if self.write_failed {
             return Err(Error::new(
@@ -2790,6 +3052,10 @@ mod tests {
         committed: Arc<AtomicBool>,
     }
 
+    struct FailCompaction {
+        database: Database,
+    }
+
     impl DurableBackend for FailOnce {
         fn commit(
             &mut self,
@@ -2893,6 +3159,61 @@ mod tests {
 
         fn committed_view(&self, _: &Database) -> Result<(Arc<Database>, Arc<dyn TypedRowSource>)> {
             Err(Error::new("E_STORAGE", "injected committed-view failure"))
+        }
+
+        fn upgrade(
+            &mut self,
+            _: &Database,
+            _: &ReceiptMap,
+            _: u32,
+        ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+            unreachable!()
+        }
+    }
+
+    impl DurableBackend for FailCompaction {
+        fn commit(
+            &mut self,
+            _: &Database,
+            _: &ReceiptMap,
+            _: &Database,
+            _: &ReceiptMap,
+            _: Option<&LogicalWriteSet>,
+        ) -> std::result::Result<DurableCommitProfile, CommitFailure> {
+            unreachable!()
+        }
+
+        fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
+            Ok((
+                true,
+                self.database.clone(),
+                ReceiptMap::new(),
+                StorageCheckProfile::default(),
+            ))
+        }
+
+        fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
+            Err(CommitFailure::Uncertain(Error::new(
+                "E_STORAGE",
+                "injected compact failure",
+            )))
+        }
+
+        fn supports_production_scalars(&self) -> bool {
+            true
+        }
+
+        fn versions(&self) -> StorageVersions {
+            StorageVersions {
+                format: 6,
+                catalog_codec: 4,
+                value_codec: 2,
+                index_key_codec: 3,
+                migration_codec: 1,
+                receipt_codec: 2,
+                maintenance_codec: 1,
+                backup_codec: 4,
+            }
         }
 
         fn upgrade(
@@ -3086,6 +3407,225 @@ mod tests {
         drop(old_snapshot);
         drop(engine);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn redb_compaction_preserves_identity_and_rejects_live_snapshot() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-redb-compact-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(
+            "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ninsert many entries [{ id = 1, label = \"one\" }, { id = 2, label = \"two\" }, { id = 3, label = \"three\" }]",
+        );
+        assert!(setup.ok, "{}", setup.message);
+        engine
+            .execute_idempotent_with_params(
+                "compact-entry",
+                DIGEST_A,
+                "update entries | filter id == 1 | set label = \"updated\"",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        let before_schema = engine.schema_info();
+        let before_identity = engine.compaction_identity().unwrap();
+        let first_page = engine.execute_page("from entries | sort id", PageSpec::forward(1));
+        assert!(first_page.ok, "{}", first_page.message);
+        let cursor = first_page.page.unwrap().next_cursor.unwrap();
+        let snapshot = engine.read_snapshot();
+
+        let error = engine.compact_storage().unwrap_err();
+        assert_eq!(error.code, "E_BUSY");
+        assert!(engine.execute("from entries | filter id == 1").ok);
+        drop(snapshot);
+
+        let report = engine.compact_storage().unwrap();
+        assert_eq!(report.version, 1);
+        assert_eq!(report.schema, before_schema);
+        assert_eq!(report.sequence, before_identity.source.sequence);
+        assert_eq!(report.storage, before_identity.storage);
+        assert!(report.identity_preserved);
+        assert_eq!(engine.compaction_identity().unwrap(), before_identity);
+        let row = engine.execute("from entries | filter id == 1");
+        assert!(row.ok, "{}", row.message);
+        assert_eq!(row.rows.len(), 1);
+        assert!(row.rows[0]["label"].cmp_eq(&crate::Value::Text("updated".into())));
+        let replay = engine
+            .execute_idempotent_with_params(
+                "compact-entry",
+                DIGEST_A,
+                "source is deliberately not parsed on replay",
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        let continued = engine.execute_page("from entries | sort id", PageSpec::after(1, cursor));
+        assert!(continued.ok, "{}", continued.message);
+        assert!(continued.rows[0]["id"].cmp_eq(&crate::Value::Int(2)));
+
+        let no_op = engine.compact_storage().unwrap();
+        assert!(!no_op.changed);
+        assert_eq!(no_op.before_bytes, no_op.after_bytes);
+
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn redb_compaction_rejects_unsupported_and_owned_databases() {
+        assert_eq!(
+            Engine::memory().compact_storage().unwrap_err().code,
+            "E_CONFIG"
+        );
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-redb-compact-owner-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let owner = Engine::open_redb(&path).unwrap();
+        let error = match Engine::open_redb(&path) {
+            Ok(_) => panic!("second redb owner should be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "E_BUSY");
+        drop(owner);
+
+        let mut read_only = Engine::open_redb_read_only(&path).unwrap();
+        assert_eq!(read_only.compact_storage().unwrap_err().code, "E_READ_ONLY");
+        drop(read_only);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn uncertain_compaction_closes_durable_handle_and_blocks_reads() {
+        let database = Database::default();
+        let mut engine = Engine {
+            committed: Arc::new(CommittedView::memory(database.clone(), ReceiptMap::new())),
+            durable: Some(Box::new(FailCompaction { database })),
+            storage_mode: StorageMode::Redb,
+            ..Engine::default()
+        };
+
+        let error = engine.compact_storage().unwrap_err();
+        assert_eq!(error.code, "E_STORAGE_REOPEN_REQUIRED");
+        assert!(engine.write_failed);
+        assert!(engine.read_reopen_required);
+        assert!(engine.durable.is_none());
+        assert_eq!(
+            engine.execute("from missing").error.unwrap().code,
+            "E_STORAGE_REOPEN_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn redb_compaction_rejects_unfinished_migration_maintenance() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-redb-compact-maintenance-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine
+            .execute("type Item =\n  id int\ntable items Item\n  key id\ninsert items { id = 1 }");
+        assert!(setup.ok, "{}", setup.message);
+        let migration =
+            MigrationFile::parse("migration m0001_label\n  add field Item.label text = \"\"\n")
+                .unwrap();
+        let progress = engine
+            .advance_migrations(std::slice::from_ref(&migration), 1)
+            .unwrap();
+        assert!(progress.status.maintenance.is_some());
+
+        let error = engine.compact_storage().unwrap_err();
+        assert_eq!(error.code, "E_MAINTENANCE_REQUIRED");
+
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn redb_compaction_shrinks_reclaimed_generation() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-redb-compact-reclaimed-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let payload = "x".repeat(512);
+        let mut source = String::from(
+            "type Item =\n  id int\n  label text\ntable items Item\n  key id\ncreate index items (label)\ninsert many items [",
+        );
+        for id in 0..1_100 {
+            if id > 0 {
+                source.push_str(", ");
+            }
+            source.push_str(&format!(
+                "{{ id = {id}, label = {} }}",
+                serde_json::to_string(&format!("{payload}-{id}")).unwrap()
+            ));
+        }
+        source.push(']');
+        let inserted = engine.execute(&source);
+        assert!(inserted.ok, "{}", inserted.message);
+        let migration =
+            MigrationFile::parse("migration m0001_enabled\n  add field Item.enabled bool = true\n")
+                .unwrap();
+        engine
+            .apply_migrations(std::slice::from_ref(&migration))
+            .unwrap();
+        assert!(engine.introspection().maintenance.is_none());
+        let before = std::fs::metadata(&path).unwrap().len();
+
+        let report = engine.compact_storage().unwrap();
+        assert!(report.changed);
+        assert_eq!(report.before_bytes, before);
+        assert!(report.after_bytes < report.before_bytes);
+        assert!(report.reclaimed_bytes > 0);
+        assert_eq!(engine.migration_history().len(), 1);
+        assert!(engine.check_integrity().unwrap().backend_clean);
+        let indexed = engine.execute(&format!(
+            "from items | filter label == {}",
+            serde_json::to_string(&format!("{payload}-1099")).unwrap()
+        ));
+        assert!(indexed.ok, "{}", indexed.message);
+        assert_eq!(indexed.rows.len(), 1);
+        assert!(indexed.rows[0]["id"].cmp_eq(&crate::Value::Int(1_099)));
+        assert!(indexed.rows[0]["enabled"].cmp_eq(&crate::Value::Bool(true)));
+
+        drop(engine);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn compact_redb_rejects_missing_path_without_creating_it() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-redb-missing-compact-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let error = Engine::compact_redb(&path).unwrap_err();
+        assert_eq!(error.code, "E_CONFIG");
+        assert!(!path.exists());
     }
 
     #[test]
