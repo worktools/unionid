@@ -7,7 +7,10 @@ use std::time::Instant;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use unionid::{Engine, IdempotencyPruneOptions, IdempotencyStatus, QueryAccessKind, Value, backup};
+use unionid::{
+    Engine, IdempotencyPruneOptions, IdempotencyStatus, MigrationFile, MigrationProfile,
+    QueryAccessKind, Value, backup,
+};
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
 
@@ -36,6 +39,12 @@ table entries Entry
   key id
 create index entries (revision)
 create index entries (payload)"#;
+
+const MIGRATIONS: [&str; 3] = [
+    "migration churn_generation_1\n  add field Entry.maintenance_epoch int = 0\n  add index entries (maintenance_epoch)",
+    "migration churn_generation_2\n  parent churn_generation_1\n  rename field Entry.maintenance_epoch to epoch",
+    "migration churn_generation_3\n  parent churn_generation_2\n  add field Entry.audit option text = None\n  add index entries (audit)",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -80,6 +89,19 @@ struct RoundReport {
     schema_revision: u64,
     schema_hash: String,
     reference_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    migration: Option<MigrationRound>,
+}
+
+#[derive(Debug, Serialize)]
+struct MigrationRound {
+    id: String,
+    ledger_count: usize,
+    ledger_head: String,
+    file_bytes_before: u64,
+    file_bytes_after: u64,
+    file_growth_bytes: i128,
+    profile: MigrationProfile,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,11 +169,24 @@ fn evaluate(
     require_ok(&engine.execute(SCHEMA), "create schema")?;
     prepare(&mut engine, &mut reference, rows, seed, batch_rows)?;
     validate_state(&mut engine, &reference)?;
+    let migrations = MIGRATIONS
+        .into_iter()
+        .map(MigrationFile::parse)
+        .collect::<unionid::Result<Vec<_>>>()?;
 
     let mut reports = Vec::with_capacity(rounds);
     let mut previous_database_bytes = fs::metadata(&database_path)?.len();
     for round in 0..rounds {
         let operations = mutate_round(&mut engine, &mut reference, round, rows, seed)?;
+        let migration = if round < migrations.len() {
+            Some(apply_migration_round(
+                &mut engine,
+                &database_path,
+                &migrations[..=round],
+            )?)
+        } else {
+            None
+        };
         let validated = validate_state(&mut engine, &reference)?;
         let receipt_status = engine.idempotency_status()?;
         drop(engine);
@@ -182,6 +217,18 @@ fn evaluate(
         if reopened_receipts != receipt_status {
             return Err(format!("round {round}: reopen changed receipt boundaries").into());
         }
+        let introspection = engine.introspection();
+        if introspection.maintenance.is_some() {
+            return Err(format!("round {round}: reopen retained unfinished maintenance").into());
+        }
+        let expected_migrations = migrations.len().min(round + 1);
+        if introspection.migration_count != expected_migrations
+            || (expected_migrations > 0
+                && introspection.migration_head.as_deref()
+                    != Some(migrations[expected_migrations - 1].id.as_str()))
+        {
+            return Err(format!("round {round}: reopen changed the migration ledger").into());
+        }
 
         let database_bytes = fs::metadata(&database_path)?.len();
         reports.push(RoundReport {
@@ -201,6 +248,7 @@ fn evaluate(
             schema_revision: reopened.schema_revision,
             schema_hash: reopened.schema_hash,
             reference_digest: reopened.reference_digest,
+            migration,
         });
         previous_database_bytes = database_bytes;
     }
@@ -219,6 +267,66 @@ fn evaluate(
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+fn apply_migration_round(
+    engine: &mut Engine,
+    database_path: &Path,
+    files: &[MigrationFile],
+) -> AnyResult<MigrationRound> {
+    let file = files.last().ok_or("migration prefix is empty")?;
+    let plan = engine.plan_migrations(files)?;
+    if plan.applied_count + 1 != files.len()
+        || plan.pending.len() != 1
+        || plan.pending[0].id != file.id
+    {
+        return Err(format!(
+            "migration {} did not produce one exact pending plan",
+            file.id
+        )
+        .into());
+    }
+    let file_bytes_before = fs::metadata(database_path)?.len();
+    let applied = engine.apply_migrations(files)?;
+    if applied.applied != [file.id.clone()]
+        || !applied
+            .skipped
+            .iter()
+            .eq(files[..files.len() - 1].iter().map(|file| &file.id))
+    {
+        return Err(format!("migration {} apply result differs from its plan", file.id).into());
+    }
+    let profile = engine
+        .last_migration_profile()
+        .ok_or("shadow migration has no phase profile")?;
+    if !profile.reclaim_complete
+        || profile.target_generation <= profile.source_generation
+        || profile.source_rows_seen != profile.target_rows_written
+    {
+        return Err(format!(
+            "migration {} did not complete generation reclamation",
+            file.id
+        )
+        .into());
+    }
+    let status = engine.migration_status(files)?;
+    if status.maintenance.is_some()
+        || status.applied.len() != files.len()
+        || !status.pending.is_empty()
+        || status.applied.last().map(|entry| entry.id.as_str()) != Some(file.id.as_str())
+    {
+        return Err(format!("migration {} left an inconsistent ledger", file.id).into());
+    }
+    let file_bytes_after = fs::metadata(database_path)?.len();
+    Ok(MigrationRound {
+        id: file.id.clone(),
+        ledger_count: status.applied.len(),
+        ledger_head: file.id.clone(),
+        file_bytes_before,
+        file_bytes_after,
+        file_growth_bytes: i128::from(file_bytes_after) - i128::from(file_bytes_before),
+        profile,
+    })
 }
 
 fn prepare(
