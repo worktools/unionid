@@ -631,11 +631,15 @@ impl ConcurrentEngine {
 
 fn record_wait(admissions: &AtomicU64, total: &AtomicU64, maximum: &AtomicU64, elapsed: Duration) {
     let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
-    admissions.fetch_add(1, Ordering::Relaxed);
-    let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(micros))
-    });
+    saturating_add(admissions, 1);
+    saturating_add(total, micros);
     maximum.fetch_max(micros, Ordering::Relaxed);
+}
+
+fn saturating_add(counter: &AtomicU64, amount: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(amount))
+    });
 }
 
 impl OperationRegistry {
@@ -1865,6 +1869,17 @@ mod tests {
             assert!(Instant::now() < deadline, "condition did not become true");
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn queue_wait_lifetime_counters_saturate_instead_of_wrapping() {
+        let admissions = AtomicU64::new(u64::MAX);
+        let total = AtomicU64::new(u64::MAX);
+        let maximum = AtomicU64::new(0);
+        record_wait(&admissions, &total, &maximum, Duration::from_micros(7));
+        assert_eq!(admissions.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(total.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(maximum.load(Ordering::Relaxed), 7);
     }
 
     #[test]
