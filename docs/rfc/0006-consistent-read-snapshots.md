@@ -18,7 +18,7 @@
 - 分类使用与执行相同的 parser AST；解析失败走只读路径返回原诊断，快照自身仍拒绝 mutation；
 - `with_exclusive` 为 migration/check 等管理操作提供同一串行边界。HTTP adapter 应在 blocking worker 中调用同步入口，示例见 `examples/todolist.rs`。
 
-首版最多允许 8 个 active read snapshots。其余读取进入有界队列，等待受请求绝对 deadline 控制；shutdown 不再接纳新快照，已执行请求由原 deadline 收敛。`ConcurrencyStats` 暴露 active/queued reads/writes、peak active reads 和上限；没有脱离请求生命周期的公开快照句柄。
+首版最多允许 8 个 active read snapshots。其余读取进入有界队列，等待受请求绝对 deadline 控制；shutdown 不再接纳新快照，已执行请求由原 deadline 收敛。`ConcurrencyStats` 暴露 active/queued reads/writes、peak active reads 和上限，并按进程生命周期累计 read/write admission 次数、总 queue wait 与最大 queue wait（微秒）；这些无业务值的聚合量为 adapter 评测提供统一口径，不是逐请求 tracing。没有脱离请求生命周期的公开快照句柄。
 
 ## 存储方案比较
 
@@ -54,4 +54,4 @@ cargo run --release --locked --manifest-path tools/concurrency-eval/Cargo.toml -
 
 ## English Summary
 
-The service publishes each complete committed database and receipt state behind immutable `Arc` references. Reads capture those references under the single writer lock and execute outside it; writes and maintenance remain serialized. At most eight request-scoped snapshots run concurrently, deadlines bound queue waits, shutdown rejects new admissions, and live counters expose active/queued reads and writes. A 10k-row, eight-reader release sample improved throughput by 1.85× with 2.65× peak RSS because each query still owns its working state. Cross-request transactions and user-held long-lived snapshots remain out of scope. Cancellation and backpressured streaming were implemented later by #135 and RFC 0007 without extending snapshot lifetime into network emission.
+The service publishes each complete committed database and receipt state behind immutable `Arc` references. Reads capture those references under the single writer lock and execute outside it; writes and maintenance remain serialized. At most eight request-scoped snapshots run concurrently, deadlines bound queue waits, and shutdown rejects new admissions. Live counters expose active/queued reads and writes plus process-lifetime read/write admission counts, total queue wait, and maximum queue wait in microseconds. These value-free aggregates give adapters one evaluation boundary rather than per-request tracing. A 10k-row, eight-reader release sample improved throughput by 1.85× with 2.65× peak RSS because each query still owns its working state. Cross-request transactions and user-held long-lived snapshots remain out of scope. Cancellation and backpressured streaming were implemented later by #135 and RFC 0007 without extending snapshot lifetime into network emission.

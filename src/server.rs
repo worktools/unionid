@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,12 @@ pub struct ConcurrencyStats {
     pub cancelling_operations: usize,
     pub cancelled_operations: usize,
     pub max_read_operations: usize,
+    pub read_admissions: u64,
+    pub read_queue_wait_micros: u64,
+    pub max_read_queue_wait_micros: u64,
+    pub write_admissions: u64,
+    pub write_queue_wait_micros: u64,
+    pub max_write_queue_wait_micros: u64,
 }
 
 #[derive(Clone)]
@@ -70,6 +76,12 @@ struct ConcurrentEngineInner {
     queued_writes: AtomicUsize,
     peak_active_reads: AtomicUsize,
     cancelled_operations: AtomicUsize,
+    read_admissions: AtomicU64,
+    read_queue_wait_micros: AtomicU64,
+    max_read_queue_wait_micros: AtomicU64,
+    write_admissions: AtomicU64,
+    write_queue_wait_micros: AtomicU64,
+    max_write_queue_wait_micros: AtomicU64,
     operations: Mutex<OperationRegistry>,
 }
 
@@ -161,6 +173,12 @@ impl ConcurrentEngine {
                 queued_writes: AtomicUsize::new(0),
                 peak_active_reads: AtomicUsize::new(0),
                 cancelled_operations: AtomicUsize::new(0),
+                read_admissions: AtomicU64::new(0),
+                read_queue_wait_micros: AtomicU64::new(0),
+                max_read_queue_wait_micros: AtomicU64::new(0),
+                write_admissions: AtomicU64::new(0),
+                write_queue_wait_micros: AtomicU64::new(0),
+                max_write_queue_wait_micros: AtomicU64::new(0),
                 operations: Mutex::new(OperationRegistry::default()),
             }),
         }
@@ -344,6 +362,18 @@ impl ConcurrentEngine {
                 .count(),
             cancelled_operations: self.inner.cancelled_operations.load(Ordering::Relaxed),
             max_read_operations: MAX_READ_OPERATIONS,
+            read_admissions: self.inner.read_admissions.load(Ordering::Relaxed),
+            read_queue_wait_micros: self.inner.read_queue_wait_micros.load(Ordering::Relaxed),
+            max_read_queue_wait_micros: self
+                .inner
+                .max_read_queue_wait_micros
+                .load(Ordering::Relaxed),
+            write_admissions: self.inner.write_admissions.load(Ordering::Relaxed),
+            write_queue_wait_micros: self.inner.write_queue_wait_micros.load(Ordering::Relaxed),
+            max_write_queue_wait_micros: self
+                .inner
+                .max_write_queue_wait_micros
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -440,6 +470,7 @@ impl ConcurrentEngine {
     }
 
     fn with_writer<T>(&self, execute: impl FnOnce(&mut Engine) -> T) -> T {
+        let queued_at = Instant::now();
         self.inner.queued_writes.fetch_add(1, Ordering::AcqRel);
         let mut engine = self
             .inner
@@ -447,6 +478,12 @@ impl ConcurrentEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.inner.queued_writes.fetch_sub(1, Ordering::AcqRel);
+        record_wait(
+            &self.inner.write_admissions,
+            &self.inner.write_queue_wait_micros,
+            &self.inner.max_write_queue_wait_micros,
+            queued_at.elapsed(),
+        );
         self.inner.active_writes.fetch_add(1, Ordering::AcqRel);
         struct ActiveWrite<'a>(&'a AtomicUsize);
         impl Drop for ActiveWrite<'_> {
@@ -482,6 +519,7 @@ impl ConcurrentEngine {
         deadline: Instant,
         shutdown: Option<&AtomicBool>,
     ) -> Result<ReadPermit<'_>, Error> {
+        let queued_at = Instant::now();
         self.inner.queued_reads.fetch_add(1, Ordering::AcqRel);
         if shutdown.is_some_and(|signal| signal.load(Ordering::Acquire)) {
             self.inner.queued_reads.fetch_sub(1, Ordering::AcqRel);
@@ -513,6 +551,12 @@ impl ConcurrentEngine {
             active = next;
         }
         *active += 1;
+        record_wait(
+            &self.inner.read_admissions,
+            &self.inner.read_queue_wait_micros,
+            &self.inner.max_read_queue_wait_micros,
+            queued_at.elapsed(),
+        );
         Ok(ReadPermit {
             owner: self,
             started: false,
@@ -541,6 +585,7 @@ impl ConcurrentEngine {
     }
 
     fn acquire_controlled_read(&self, control: &ExecutionControl) -> Result<ReadPermit<'_>, Error> {
+        let queued_at = Instant::now();
         self.inner.queued_reads.fetch_add(1, Ordering::AcqRel);
         let mut active = self
             .inner
@@ -571,11 +616,30 @@ impl ConcurrentEngine {
             return Err(error);
         }
         *active += 1;
+        record_wait(
+            &self.inner.read_admissions,
+            &self.inner.read_queue_wait_micros,
+            &self.inner.max_read_queue_wait_micros,
+            queued_at.elapsed(),
+        );
         Ok(ReadPermit {
             owner: self,
             started: false,
         })
     }
+}
+
+fn record_wait(admissions: &AtomicU64, total: &AtomicU64, maximum: &AtomicU64, elapsed: Duration) {
+    let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    saturating_add(admissions, 1);
+    saturating_add(total, micros);
+    maximum.fetch_max(micros, Ordering::Relaxed);
+}
+
+fn saturating_add(counter: &AtomicU64, amount: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(amount))
+    });
 }
 
 impl OperationRegistry {
@@ -1808,6 +1872,17 @@ mod tests {
     }
 
     #[test]
+    fn queue_wait_lifetime_counters_saturate_instead_of_wrapping() {
+        let admissions = AtomicU64::new(u64::MAX);
+        let total = AtomicU64::new(u64::MAX);
+        let maximum = AtomicU64::new(0);
+        record_wait(&admissions, &total, &maximum, Duration::from_micros(7));
+        assert_eq!(admissions.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(total.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(maximum.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
     fn read_snapshot_observes_one_commit_without_blocking_the_next_write() {
         let shared = ConcurrentEngine::new(Engine::memory());
         assert!(shared.execute("create table items (id int, value text)").ok);
@@ -1880,7 +1955,11 @@ mod tests {
         assert_eq!(error.code, "E_SHUTDOWN");
         drop(permits);
         wait_for(|| shared.stats().active_reads == 0);
-        assert_eq!(shared.stats().max_active_reads, MAX_CONCURRENT_READS);
+        let stats = shared.stats();
+        assert_eq!(stats.max_active_reads, MAX_CONCURRENT_READS);
+        assert_eq!(stats.read_admissions, (MAX_CONCURRENT_READS + 1) as u64);
+        assert!(stats.read_queue_wait_micros >= stats.max_read_queue_wait_micros);
+        assert!(stats.max_read_queue_wait_micros > 0);
     }
 
     #[test]
@@ -1897,7 +1976,11 @@ mod tests {
         assert_eq!(shared.stats().active_writes, 0);
         drop(lock);
         assert!(received.recv_timeout(Duration::from_secs(2)).unwrap().ok);
-        assert_eq!(shared.stats().queued_writes, 0);
+        let stats = shared.stats();
+        assert_eq!(stats.queued_writes, 0);
+        assert_eq!(stats.write_admissions, 1);
+        assert!(stats.write_queue_wait_micros >= stats.max_write_queue_wait_micros);
+        assert!(stats.max_write_queue_wait_micros > 0);
     }
 
     #[test]
