@@ -2503,6 +2503,10 @@ impl Engine {
     /// This operation requires exclusive access: retained read snapshots make
     /// it fail with `E_BUSY`. Native redb storage errors have an uncertain
     /// result and close this Engine's durable handle until it is reopened.
+    /// It synchronously performs two complete integrity checks and two
+    /// streaming row-identity scans. Run it as offline maintenance; there is no
+    /// deadline or cancellation boundary because native redb compaction cannot
+    /// be safely interrupted once its internal commits begin.
     pub fn compact_storage(&mut self) -> Result<StorageCompaction> {
         if self.write_failed || self.read_reopen_required {
             return Err(Error::new(
