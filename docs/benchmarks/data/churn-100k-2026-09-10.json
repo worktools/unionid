@@ -1,0 +1,360 @@
+{
+  "environment": {
+    "os": "macos",
+    "architecture": "aarch64",
+    "logical_cpus": 8,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)"
+  },
+  "initial_rows": 100000,
+  "rounds": 6,
+  "seed": 20260910,
+  "preparation_batch_rows": 500,
+  "database_path": "/tmp/unionid-churn-evidence-100k.redb",
+  "final_rows": 100006,
+  "final_reference_digest": "sha256:9e4fd8bfbdbd8f5e7aa81b9df12a35b72158efa54aa166c64be0cf511eb7eae4",
+  "reports": [
+    {
+      "round": 0,
+      "operations": {
+        "updated_id": 4839,
+        "upserted_id": 97152,
+        "replaced_id": 89465,
+        "inserted_id": 100000,
+        "idempotent_id": 33394,
+        "pruned_receipts": 0
+      },
+      "rows": 100001,
+      "logical_row_bytes": 52108880,
+      "database_bytes": 781406208,
+      "database_growth_bytes": 680738816,
+      "logical_to_file_ratio": 0.06668603277848542,
+      "receipt_status": {
+        "count": 1,
+        "encoded_bytes": 363,
+        "max_count": 10000,
+        "max_encoded_bytes": 67108864,
+        "oldest": {
+          "key": "churn-round-0",
+          "committed_sequence": 206,
+          "completed_at_unix_ms": 1789052028282
+        },
+        "newest": {
+          "key": "churn-round-0",
+          "committed_sequence": 206,
+          "completed_at_unix_ms": 1789052028282
+        },
+        "durability": "durable"
+      },
+      "open_micros": 4009,
+      "check_micros": 2304800,
+      "backup_micros": 3519468,
+      "backup_bytes": 54300340,
+      "peak_rss_bytes": 906739712,
+      "schema_revision": 2,
+      "schema_hash": "sha256:0f9243063cd842123db6a5c1420eb0a50724835d87e6886d985d6b857eed26a5",
+      "reference_digest": "sha256:35216ff9dc32c67f331ff7a2cc0f6503c6f3abd265980a390cfeee5b91c8afb9",
+      "migration": {
+        "id": "churn_generation_1",
+        "ledger_count": 1,
+        "ledger_head": "churn_generation_1",
+        "file_bytes_before": 100667392,
+        "file_bytes_after": 781406208,
+        "file_growth_bytes": 680738816,
+        "profile": {
+          "total_micros": 25835536,
+          "prepare_micros": 57,
+          "build_micros": 5620189,
+          "validate_micros": 2505112,
+          "cutover_micros": 9098,
+          "reclaim_micros": 17508142,
+          "source_generation": 1,
+          "target_generation": 2,
+          "source_rows_seen": 100001,
+          "target_rows_written": 100001,
+          "index_entries_written": 400004,
+          "logical_bytes": 47337887,
+          "reclaim_complete": true
+        },
+        "bounded_checkpoints": [
+          {
+            "point": "build_exit",
+            "committed_steps": 2,
+            "complete": false,
+            "phase": "building",
+            "source_rows_seen": 1024,
+            "target_rows_written": 1024
+          },
+          {
+            "point": "cutover_exit",
+            "committed_steps": 99,
+            "complete": false,
+            "phase": "reclaimable",
+            "source_rows_seen": 100001,
+            "target_rows_written": 100001
+          },
+          {
+            "point": "reclaim_exit",
+            "committed_steps": 1,
+            "complete": false,
+            "phase": "reclaimable",
+            "source_rows_seen": 100001,
+            "target_rows_written": 100001
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "operations": {
+        "updated_id": 39016,
+        "upserted_id": 51990,
+        "replaced_id": 35445,
+        "inserted_id": 100001,
+        "idempotent_id": 48419,
+        "pruned_receipts": 1
+      },
+      "rows": 100002,
+      "logical_row_bytes": 50909205,
+      "database_bytes": 781062144,
+      "database_growth_bytes": -344064,
+      "logical_to_file_ratio": 0.06517945517021498,
+      "receipt_status": {
+        "count": 1,
+        "encoded_bytes": 363,
+        "max_count": 10000,
+        "max_encoded_bytes": 67108864,
+        "oldest": {
+          "key": "churn-round-1",
+          "committed_sequence": 212,
+          "completed_at_unix_ms": 1789052130957
+        },
+        "newest": {
+          "key": "churn-round-1",
+          "committed_sequence": 212,
+          "completed_at_unix_ms": 1789052130957
+        },
+        "durability": "durable"
+      },
+      "open_micros": 3007,
+      "check_micros": 2308456,
+      "backup_micros": 3472949,
+      "backup_bytes": 53100927,
+      "peak_rss_bytes": 1809596416,
+      "schema_revision": 3,
+      "schema_hash": "sha256:aef4e235b28c8912a88c12b280e3d8ff4f57bd71411177e55a2e3685e1f00b8b",
+      "reference_digest": "sha256:37a7d7675ccce39f99289f9243951ac51c8f3889ea3975dfdc85fca46c0c7adb",
+      "migration": {
+        "id": "churn_generation_2",
+        "ledger_count": 2,
+        "ledger_head": "churn_generation_2",
+        "file_bytes_before": 781406208,
+        "file_bytes_after": 781406208,
+        "file_growth_bytes": 0,
+        "profile": {
+          "total_micros": 13485087,
+          "prepare_micros": 21,
+          "build_micros": 5902056,
+          "validate_micros": 2451996,
+          "cutover_micros": 8996,
+          "reclaim_micros": 5122016,
+          "source_generation": 2,
+          "target_generation": 3,
+          "source_rows_seen": 100002,
+          "target_rows_written": 100002,
+          "index_entries_written": 400008,
+          "logical_bytes": 47337804,
+          "reclaim_complete": true
+        },
+        "bounded_checkpoints": []
+      }
+    },
+    {
+      "round": 2,
+      "operations": {
+        "updated_id": 56527,
+        "upserted_id": 39058,
+        "replaced_id": 21589,
+        "inserted_id": 100002,
+        "idempotent_id": 4120,
+        "pruned_receipts": 0
+      },
+      "rows": 100003,
+      "logical_row_bytes": 54809970,
+      "database_bytes": 781025280,
+      "database_growth_bytes": -36864,
+      "logical_to_file_ratio": 0.07017694740943596,
+      "receipt_status": {
+        "count": 2,
+        "encoded_bytes": 726,
+        "max_count": 10000,
+        "max_encoded_bytes": 67108864,
+        "oldest": {
+          "key": "churn-round-1",
+          "committed_sequence": 212,
+          "completed_at_unix_ms": 1789052130957
+        },
+        "newest": {
+          "key": "churn-round-2",
+          "committed_sequence": 219,
+          "completed_at_unix_ms": 1789052383536
+        },
+        "durability": "durable"
+      },
+      "open_micros": 3852,
+      "check_micros": 2857523,
+      "backup_micros": 4110041,
+      "backup_bytes": 57002638,
+      "peak_rss_bytes": 1809596416,
+      "schema_revision": 4,
+      "schema_hash": "sha256:7555e4fe04584c1da4c905b98464600eaa2b9a6d2ed7b0604a5d5f7d5a1b34f0",
+      "reference_digest": "sha256:e75516a615573f1ccf87600684d7f829c452c22e6ac07cd47931c1f0aa909ec9",
+      "migration": {
+        "id": "churn_generation_3",
+        "ledger_count": 3,
+        "ledger_head": "churn_generation_3",
+        "file_bytes_before": 781062144,
+        "file_bytes_after": 781062144,
+        "file_growth_bytes": 0,
+        "profile": {
+          "total_micros": 14549573,
+          "prepare_micros": 26,
+          "build_micros": 6247417,
+          "validate_micros": 2972174,
+          "cutover_micros": 8093,
+          "reclaim_micros": 5321860,
+          "source_generation": 3,
+          "target_generation": 4,
+          "source_rows_seen": 100003,
+          "target_rows_written": 100003,
+          "index_entries_written": 500015,
+          "logical_bytes": 50638671,
+          "reclaim_complete": true
+        },
+        "bounded_checkpoints": []
+      }
+    },
+    {
+      "round": 3,
+      "operations": {
+        "updated_id": 40241,
+        "upserted_id": 69179,
+        "replaced_id": 98117,
+        "inserted_id": 100003,
+        "idempotent_id": 39001,
+        "pruned_receipts": 1
+      },
+      "rows": 100004,
+      "logical_row_bytes": 54809951,
+      "database_bytes": 781025280,
+      "database_growth_bytes": 0,
+      "logical_to_file_ratio": 0.0701769230824385,
+      "receipt_status": {
+        "count": 2,
+        "encoded_bytes": 726,
+        "max_count": 10000,
+        "max_encoded_bytes": 67108864,
+        "oldest": {
+          "key": "churn-round-2",
+          "committed_sequence": 219,
+          "completed_at_unix_ms": 1789052383536
+        },
+        "newest": {
+          "key": "churn-round-3",
+          "committed_sequence": 225,
+          "completed_at_unix_ms": 1789052533154
+        },
+        "durability": "durable"
+      },
+      "open_micros": 2949,
+      "check_micros": 2884717,
+      "backup_micros": 4161204,
+      "backup_bytes": 57002643,
+      "peak_rss_bytes": 1929805824,
+      "schema_revision": 4,
+      "schema_hash": "sha256:7555e4fe04584c1da4c905b98464600eaa2b9a6d2ed7b0604a5d5f7d5a1b34f0",
+      "reference_digest": "sha256:878b26d15a2143786f4ef7fedec57b93d17942760b5dae46a10c996dbdcbd5ef"
+    },
+    {
+      "round": 4,
+      "operations": {
+        "updated_id": 72435,
+        "upserted_id": 65784,
+        "replaced_id": 45925,
+        "inserted_id": 100004,
+        "idempotent_id": 26066,
+        "pruned_receipts": 0
+      },
+      "rows": 100005,
+      "logical_row_bytes": 54810907,
+      "database_bytes": 781025280,
+      "database_growth_bytes": 0,
+      "logical_to_file_ratio": 0.07017814711452106,
+      "receipt_status": {
+        "count": 3,
+        "encoded_bytes": 1089,
+        "max_count": 10000,
+        "max_encoded_bytes": 67108864,
+        "oldest": {
+          "key": "churn-round-2",
+          "committed_sequence": 219,
+          "completed_at_unix_ms": 1789052383536
+        },
+        "newest": {
+          "key": "churn-round-4",
+          "committed_sequence": 231,
+          "completed_at_unix_ms": 1789052843472
+        },
+        "durability": "durable"
+      },
+      "open_micros": 3864,
+      "check_micros": 2875633,
+      "backup_micros": 4132222,
+      "backup_bytes": 57003997,
+      "peak_rss_bytes": 1929805824,
+      "schema_revision": 4,
+      "schema_hash": "sha256:7555e4fe04584c1da4c905b98464600eaa2b9a6d2ed7b0604a5d5f7d5a1b34f0",
+      "reference_digest": "sha256:c464c794aef5955b67e17fff3a88f56e2c046cacf9c5bb4072a7e5414c5073d5"
+    },
+    {
+      "round": 5,
+      "operations": {
+        "updated_id": 54581,
+        "upserted_id": 18674,
+        "replaced_id": 82772,
+        "inserted_id": 100005,
+        "idempotent_id": 46865,
+        "pruned_receipts": 1
+      },
+      "rows": 100006,
+      "logical_row_bytes": 54811552,
+      "database_bytes": 781025280,
+      "database_growth_bytes": 0,
+      "logical_to_file_ratio": 0.07017897295206629,
+      "receipt_status": {
+        "count": 3,
+        "encoded_bytes": 1089,
+        "max_count": 10000,
+        "max_encoded_bytes": 67108864,
+        "oldest": {
+          "key": "churn-round-3",
+          "committed_sequence": 225,
+          "completed_at_unix_ms": 1789052533154
+        },
+        "newest": {
+          "key": "churn-round-5",
+          "committed_sequence": 236,
+          "completed_at_unix_ms": 1789052932408
+        },
+        "durability": "durable"
+      },
+      "open_micros": 3908,
+      "check_micros": 2866622,
+      "backup_micros": 4140341,
+      "backup_bytes": 57004666,
+      "peak_rss_bytes": 1929805824,
+      "schema_revision": 4,
+      "schema_hash": "sha256:7555e4fe04584c1da4c905b98464600eaa2b9a6d2ed7b0604a5d5f7d5a1b34f0",
+      "reference_digest": "sha256:9e4fd8bfbdbd8f5e7aa81b9df12a35b72158efa54aa166c64be0cf511eb7eae4"
+    }
+  ]
+}

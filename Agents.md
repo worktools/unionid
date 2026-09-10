@@ -78,6 +78,7 @@
 - `ConcurrentEngine::register_read` / `ReadOperation::start` / `cancel` 已实现 transport-neutral 可取消读取核心：active registry 64、terminal tombstone 256/60 秒，统一 `ExecutionControl` 在 admission、bind 与 query 循环按 cancel/shutdown/deadline 检查。operation capability 不持久化、不记录查询数据。
 - stream protocol version 1 使用独立 query/cancel envelope 和 accepted/schema/row/complete/error NDJSON frame；TCP 与 HTTP todolist 共用最多 8 帧/16 MiB 的 producer、typed `WireValue` 和 operation registry。完整结果在进入 emitting 前释放 snapshot，partial stream 不提供隐式续传。
 - format-6 migration 可通过 `Engine::advance_migrations` 和 `migration advance --max-steps` 按已提交 maintenance action 确定性有界推进；普通 `apply` 保持一次完成，并可在 cutover 后重开时继续 reclaim。churn runner 用独立子进程覆盖 Building、Reclaimable 和再次恢复。
+- M9 长期 churn 已保存同一 release 二进制、固定 6 轮与 seed 的 10k/100k 原始 JSON；每轮重开、check、backup 并逐行核对参考模型，前三轮执行连续 migration。reclaim 后文件不再逐轮增长，但 redb 保留第一次 shadow migration 形成的约 46/745 MiB 文件高水位；100k evaluator peak RSS 约 1.80 GiB，继续作为已测试上限。完整结论见 `docs/benchmarks/churn-2026-09-10.md`。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）
