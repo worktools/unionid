@@ -1142,6 +1142,13 @@ pub fn serve_until_concurrent(
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // BSD platforms can inherit O_NONBLOCK from the listener on an
+                // accepted socket. Connection workers use bounded read/write
+                // timeouts and blocking I/O, so normalize the socket before a
+                // large response can surface EAGAIN or a partial frame.
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| format!("set accepted connection blocking: {error}"))?;
                 if stats.active.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
                     stats.active.fetch_sub(1, Ordering::AcqRel);
                     stats.rejected.fetch_add(1, Ordering::Relaxed);
