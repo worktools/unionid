@@ -6,7 +6,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -130,6 +130,12 @@ struct Sample {
     micros: u64,
     sequence: u64,
     kind: RequestKind,
+}
+
+#[derive(Default)]
+struct WorkerReport {
+    samples: Vec<Sample>,
+    errors: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -272,7 +278,14 @@ fn measure(
     let mut warmup = Client::connect(&warmup_runtime.endpoint)?;
     for index in 0..WARMUPS {
         let request = build_request(RequestKind::Point, 0, index, rows)?;
-        validate_response(RequestKind::Point, &warmup.send(&request)?, &schema)?;
+        validate_response(
+            RequestKind::Point,
+            &warmup.send(&request)?,
+            &schema,
+            0,
+            index,
+            rows,
+        )?;
     }
     drop(warmup);
     warmup_runtime.stop()?;
@@ -281,37 +294,89 @@ fn measure(
     // the measured runtime starts with clean counters after adapter-specific warmup.
     let runtime = AdapterRuntime::start(adapter, Engine::open_redb(&database)?)?;
     let baseline = runtime.engine.stats();
-    let barrier = Arc::new(Barrier::new(clients + 1));
-    let started = Instant::now();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let mut handles = Vec::new();
+    let mut releases = Vec::new();
     for client_id in 0..clients {
         let endpoint = runtime.endpoint.clone();
-        let barrier = Arc::clone(&barrier);
         let schema = schema.clone();
-        handles.push(std::thread::spawn(move || -> AnyResult<Vec<Sample>> {
-            let mut client = Client::connect(&endpoint)?;
-            let mut samples = Vec::with_capacity(requests);
-            barrier.wait();
+        let ready_tx = ready_tx.clone();
+        let (release_tx, release_rx) = mpsc::channel();
+        releases.push(release_tx);
+        handles.push(std::thread::spawn(move || -> WorkerReport {
+            let mut report = WorkerReport {
+                samples: Vec::with_capacity(requests),
+                errors: BTreeMap::new(),
+            };
+            let mut client = match Client::connect(&endpoint) {
+                Ok(client) => {
+                    let _ = ready_tx.send((client_id, true));
+                    client
+                }
+                Err(_) => {
+                    add_errors(&mut report.errors, "connect", requests);
+                    let _ = ready_tx.send((client_id, false));
+                    return report;
+                }
+            };
+            if release_rx.recv().is_err() {
+                add_errors(&mut report.errors, "coordination", requests);
+                return report;
+            }
             for index in 0..requests {
                 let kind = request_kind(index, read_percent);
-                let request = build_request(kind, client_id, index, rows)?;
+                let request = match build_request(kind, client_id, index, rows) {
+                    Ok(request) => request,
+                    Err(_) => {
+                        increment_error(&mut report.errors, "request_build");
+                        continue;
+                    }
+                };
                 let sample_started = Instant::now();
-                let response = client.send(&request)?;
+                let response = match client.send(&request) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        increment_error(&mut report.errors, "transport");
+                        continue;
+                    }
+                };
                 let micros = elapsed_micros(sample_started.elapsed());
-                let sequence = validate_response(kind, &response, &schema)?;
-                samples.push(Sample {
+                let sequence =
+                    match validate_response(kind, &response, &schema, client_id, index, rows) {
+                        Ok(sequence) => sequence,
+                        Err(_) => {
+                            increment_error(&mut report.errors, "response_validation");
+                            continue;
+                        }
+                    };
+                report.samples.push(Sample {
                     micros,
                     sequence,
                     kind,
                 });
             }
-            Ok(samples)
+            report
         }));
     }
-    barrier.wait();
+    drop(ready_tx);
+    let mut ready = vec![false; clients];
+    for _ in 0..clients {
+        if let Ok((client_id, is_ready)) = ready_rx.recv() {
+            ready[client_id] = is_ready;
+        }
+    }
+    let started = Instant::now();
+    for (is_ready, release) in ready.into_iter().zip(releases) {
+        if is_ready {
+            let _ = release.send(());
+        }
+    }
     let mut samples = Vec::with_capacity(clients * requests);
+    let mut errors = BTreeMap::new();
     for handle in handles {
-        samples.extend(handle.join().map_err(|_| "load client panicked")??);
+        let report = handle.join().map_err(|_| "load client panicked")?;
+        samples.extend(report.samples);
+        merge_errors(&mut errors, report.errors);
     }
     let elapsed = started.elapsed();
     let final_stats = runtime.engine.stats();
@@ -330,6 +395,7 @@ fn measure(
         read_percent,
         requests,
         samples,
+        errors,
         elapsed,
         queue_delta(baseline, final_stats),
         fs::metadata(database)?.len(),
@@ -432,6 +498,9 @@ fn validate_response(
     kind: RequestKind,
     response: &Response,
     schema: &unionid::SchemaInfo,
+    client: usize,
+    index: usize,
+    rows: usize,
 ) -> AnyResult<u64> {
     if !response.ok {
         let code = response
@@ -443,12 +512,18 @@ fn validate_response(
     if response.version != PRODUCTION_VERSION || response.schema.as_ref() != Some(schema) {
         return Err("response protocol or schema identity mismatch".into());
     }
+    if response.request_id != format!("load-{client}-{index}") {
+        return Err("response request identity mismatch".into());
+    }
     let sequence = match kind {
         RequestKind::Point => {
             if response.rows.len() != 1 || response.page.as_ref().map(|page| page.limit) != Some(1)
             {
                 return Err("point-read response shape mismatch".into());
             }
+            validate_task_columns(response)?;
+            validate_task_row(&response.rows[0])?;
+            validate_ids(response, &[(client * 97 + index) % rows])?;
             response.page.as_ref().unwrap().snapshot_sequence.parse()?
         }
         RequestKind::Page => {
@@ -458,12 +533,28 @@ fn validate_response(
             {
                 return Err("page response shape mismatch".into());
             }
+            validate_task_columns(response)?;
+            let tenant = (client + index) % 16;
+            let mut previous = None;
+            for row in &response.rows {
+                validate_task_row(row)?;
+                if wire_int(row.get("tenant")) != Some(tenant) {
+                    return Err("page tenant mismatch".into());
+                }
+                let id = wire_int(row.get("id")).ok_or("page id is not an int")?;
+                if previous.is_some_and(|previous| id <= previous) {
+                    return Err("page rows are not in stable ascending order".into());
+                }
+                previous = Some(id);
+            }
             response.page.as_ref().unwrap().snapshot_sequence.parse()?
         }
         RequestKind::Update => {
             if response.affected_rows != Some(1) || response.rows.len() != 1 {
                 return Err("conditional-update response shape mismatch".into());
             }
+            validate_returning_id(response)?;
+            validate_ids(response, &[(client * 97 + index) % rows])?;
             response
                 .idempotency
                 .as_ref()
@@ -475,6 +566,9 @@ fn validate_response(
             if response.affected_rows != Some(2) || response.rows.len() != 2 {
                 return Err("batch response shape mismatch".into());
             }
+            validate_returning_id(response)?;
+            let base = rows + (client * MAX_REQUESTS + index) * 2;
+            validate_ids(response, &[base, base + 1])?;
             response
                 .idempotency
                 .as_ref()
@@ -484,6 +578,73 @@ fn validate_response(
         }
     };
     Ok(sequence)
+}
+
+fn validate_task_columns(response: &Response) -> AnyResult<()> {
+    let expected = [
+        ("id", "int"),
+        ("tenant", "int"),
+        ("title", "text"),
+        ("state", "State"),
+        ("tags", "list text"),
+        ("touches", "int"),
+    ];
+    if response.columns.len() != expected.len()
+        || response
+            .columns
+            .iter()
+            .zip(expected)
+            .any(|(column, (name, ty))| column.name != name || column.ty != ty)
+    {
+        return Err("task result schema mismatch".into());
+    }
+    Ok(())
+}
+
+fn validate_task_row(row: &BTreeMap<String, unionid::protocol::WireValue>) -> AnyResult<()> {
+    use unionid::protocol::WireValue;
+
+    if row.len() != 6
+        || wire_int(row.get("id")).is_none()
+        || wire_int(row.get("tenant")).is_none()
+        || wire_int(row.get("touches")).is_none()
+        || !matches!(row.get("title"), Some(WireValue::Text { .. }))
+        || !matches!(row.get("tags"), Some(WireValue::List { .. }))
+        || !matches!(row.get("state"), Some(WireValue::Named { .. }))
+    {
+        return Err("task row keys or value types mismatch".into());
+    }
+    Ok(())
+}
+
+fn validate_returning_id(response: &Response) -> AnyResult<()> {
+    if response.columns.len() != 1
+        || response.columns[0].name != "id"
+        || response.columns[0].ty != "int"
+        || response.rows.iter().any(|row| row.len() != 1)
+    {
+        return Err("returning id schema mismatch".into());
+    }
+    Ok(())
+}
+
+fn validate_ids(response: &Response, expected: &[usize]) -> AnyResult<()> {
+    let actual = response
+        .rows
+        .iter()
+        .map(|row| wire_int(row.get("id")).ok_or("returned id is not an int"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if actual != expected {
+        return Err("returned ids mismatch".into());
+    }
+    Ok(())
+}
+
+fn wire_int(value: Option<&unionid::protocol::WireValue>) -> Option<usize> {
+    match value {
+        Some(unionid::protocol::WireValue::Int { value }) => value.parse().ok(),
+        _ => None,
+    }
 }
 
 impl AdapterRuntime {
@@ -706,13 +867,14 @@ fn summarize(
     read_percent: usize,
     requests: usize,
     samples: Vec<Sample>,
+    errors: BTreeMap<String, usize>,
     elapsed: Duration,
     queue: QueueReport,
     database_bytes: u64,
     schema: unionid::SchemaInfo,
 ) -> AnyResult<CaseReport> {
-    if samples.len() != clients * requests {
-        return Err("accepted sample count mismatch".into());
+    if samples.len() + errors.values().sum::<usize>() != clients * requests {
+        return Err("accounted request count mismatch".into());
     }
     let mut counts = Counts::default();
     let mut sequence_min = u64::MAX;
@@ -730,6 +892,11 @@ fn summarize(
         }
     }
     latencies.sort_unstable();
+    let sequence_min = if latencies.is_empty() {
+        0
+    } else {
+        sequence_min
+    };
     Ok(CaseReport {
         adapter,
         rows,
@@ -749,7 +916,7 @@ fn summarize(
         batch_writes: counts.batch_writes,
         sequence_min: sequence_min.to_string(),
         sequence_max: sequence_max.to_string(),
-        errors: BTreeMap::new(),
+        errors,
         queue,
         peak_rss_bytes: peak_rss_bytes()?,
         database_bytes,
@@ -777,8 +944,25 @@ fn queue_delta(before: ConcurrencyStats, after: ConcurrencyStats) -> QueueReport
 }
 
 fn percentile(sorted: &[u64], percent: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
     let rank = sorted.len().saturating_mul(percent).div_ceil(100);
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+fn increment_error(errors: &mut BTreeMap<String, usize>, category: &str) {
+    add_errors(errors, category, 1);
+}
+
+fn add_errors(errors: &mut BTreeMap<String, usize>, category: &str, count: usize) {
+    *errors.entry(category.to_owned()).or_default() += count;
+}
+
+fn merge_errors(target: &mut BTreeMap<String, usize>, source: BTreeMap<String, usize>) {
+    for (category, count) in source {
+        *target.entry(category).or_default() += count;
+    }
 }
 
 fn elapsed_micros(elapsed: Duration) -> u64 {
