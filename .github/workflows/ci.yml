@@ -1,82 +1,49 @@
 name: CI
+
 on:
-  push:
   pull_request:
+  push:
+    branches:
+      - main
+
+# Daily feedback is intentionally Ubuntu-only. Full Ubuntu/macOS acceptance,
+# evaluator smoke runs, examples, and packaging belong to release.yml.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+
 jobs:
   rust:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            expected-target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            expected-target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          # Build the exact candidate recorded in the acceptance report. Pull
-          # request workflows otherwise check out GitHub's synthetic merge commit.
+          # Check the contributor's exact commit instead of GitHub's synthetic
+          # pull-request merge commit.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo check --locked
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
-      - run: cargo run --locked -- run --file examples/tasks.uid
-      - run: cargo fmt --check --manifest-path tools/storage-eval/Cargo.toml
-      - run: cargo check --locked --manifest-path tools/storage-eval/Cargo.toml
-      - run: cargo clippy --locked --manifest-path tools/storage-eval/Cargo.toml --all-targets -- -D warnings
-      - run: cargo run --locked --manifest-path tools/storage-eval/Cargo.toml -- redb "${RUNNER_TEMP}/unionid-redb.db" 5
-      - run: cargo run --locked --manifest-path tools/storage-eval/Cargo.toml -- sqlite "${RUNNER_TEMP}/unionid-sqlite.db" 5
-      - run: cargo fmt --check --manifest-path tools/recovery-eval/Cargo.toml
-      - run: cargo check --locked --manifest-path tools/recovery-eval/Cargo.toml
-      - run: cargo clippy --locked --manifest-path tools/recovery-eval/Cargo.toml --all-targets -- -D warnings
-      - run: cargo run --release --locked --manifest-path tools/recovery-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-recovery.db" 100 50
-      - run: cargo fmt --check --manifest-path tools/workload-eval/Cargo.toml
-      - run: cargo check --locked --manifest-path tools/workload-eval/Cargo.toml
-      - run: cargo clippy --locked --manifest-path tools/workload-eval/Cargo.toml --all-targets -- -D warnings
-      - run: cargo run --release --locked --manifest-path tools/workload-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-workload.db" 100 5 50
-      - run: cargo fmt --check --manifest-path tools/service-load-eval/Cargo.toml
-      - run: cargo check --locked --manifest-path tools/service-load-eval/Cargo.toml
-      - run: cargo clippy --locked --manifest-path tools/service-load-eval/Cargo.toml --all-targets -- -D warnings
-      - run: cargo run --release --locked --manifest-path tools/service-load-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-service-load" 100 12 --smoke
-      - run: cargo fmt --check --manifest-path tools/churn-eval/Cargo.toml
-      - run: cargo check --locked --manifest-path tools/churn-eval/Cargo.toml
-      - run: cargo clippy --locked --manifest-path tools/churn-eval/Cargo.toml --all-targets -- -D warnings
-      - run: cargo run --release --locked --manifest-path tools/churn-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-churn" 30 3 20260910 15
-      - run: cargo run --locked --example getting_started -- "${RUNNER_TEMP}/unionid-embedded.redb"
-      - run: cargo test --locked --example cold_content
-      - run: cargo run --locked --example cold_content -- "${RUNNER_TEMP}/unionid-cold-content.redb"
-      - run: cargo run --locked --example todolist -- "${RUNNER_TEMP}/unionid-todolist"
-      - run: python3 scripts/verify-current-consumer.py
-      - run: python3 scripts/package-release.py --output "${RUNNER_TEMP}/unionid-dist"
-      - name: Record archive digest outside the artifact
-        id: release-digest
+      - name: Check core crate
+        run: |
+          cargo fmt --check
+          cargo check --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Check standalone evaluation tools
         shell: bash
         run: |
-          digest="$(python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(next(pathlib.Path(sys.argv[1]).glob("*.tar.gz")).read_bytes()).hexdigest())' "${RUNNER_TEMP}/unionid-dist")"
-          echo "sha256=${digest}" >> "${GITHUB_OUTPUT}"
-      - run: python3 scripts/verify-release.py --dist "${RUNNER_TEMP}/unionid-dist" --expected-sha256 "${{ steps.release-digest.outputs.sha256 }}"
-      - name: Record release-candidate acceptance
-        shell: bash
-        run: |
-          python3 scripts/record-release-acceptance.py \
-            --dist "${RUNNER_TEMP}/unionid-dist" \
-            --expected-sha256 "${{ steps.release-digest.outputs.sha256 }}" \
-            --expected-target "${{ matrix.expected-target }}" \
-            --candidate "${{ github.event.pull_request.head.sha || github.sha }}" \
-            --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --runner-os "${{ runner.os }}" \
-            --runner-arch "${{ runner.arch }}" \
-            --output "${RUNNER_TEMP}/unionid-v0.2.0-acceptance.json"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: unionid-v0.2.0-acceptance-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/unionid-v0.2.0-acceptance.json
-          if-no-files-found: error
-          retention-days: 90
+          for manifest in \
+            tools/storage-eval/Cargo.toml \
+            tools/recovery-eval/Cargo.toml \
+            tools/workload-eval/Cargo.toml \
+            tools/service-load-eval/Cargo.toml \
+            tools/churn-eval/Cargo.toml
+          do
+            cargo fmt --check --manifest-path "$manifest"
+            cargo check --locked --manifest-path "$manifest"
+            cargo clippy --locked --manifest-path "$manifest" --all-targets -- -D warnings
+          done
