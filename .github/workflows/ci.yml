@@ -2,6 +2,8 @@ name: CI
 on:
   push:
   pull_request:
+permissions:
+  contents: read
 jobs:
   rust:
     strategy:
@@ -39,6 +41,10 @@ jobs:
       - run: cargo check --locked --manifest-path tools/workload-eval/Cargo.toml
       - run: cargo clippy --locked --manifest-path tools/workload-eval/Cargo.toml --all-targets -- -D warnings
       - run: cargo run --release --locked --manifest-path tools/workload-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-workload.db" 100 5 50
+      - run: cargo fmt --check --manifest-path tools/service-load-eval/Cargo.toml
+      - run: cargo check --locked --manifest-path tools/service-load-eval/Cargo.toml
+      - run: cargo clippy --locked --manifest-path tools/service-load-eval/Cargo.toml --all-targets -- -D warnings
+      - run: cargo run --release --locked --manifest-path tools/service-load-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-service-load" 100 12 --smoke
       - run: cargo run --locked --example getting_started -- "${RUNNER_TEMP}/unionid-embedded.redb"
       - run: cargo test --locked --example cold_content
       - run: cargo run --locked --example cold_content -- "${RUNNER_TEMP}/unionid-cold-content.redb"
