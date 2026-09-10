@@ -87,6 +87,21 @@ pub struct MigrationApply {
     pub schema: SchemaInfo,
 }
 
+/// Result of one deterministic, bounded format-6 maintenance call.
+///
+/// Each step is one successfully committed maintenance transaction: generation
+/// creation, a row batch checkpoint, validation, cutover, or one reclamation
+/// batch. Callers can inspect `status` and invoke the operation again with the
+/// same migration files until `complete` becomes true.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationProgress {
+    pub committed_steps: usize,
+    pub applied: Vec<String>,
+    pub skipped: Vec<String>,
+    pub complete: bool,
+    pub status: MigrationStatus,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationAbort {
     pub migration_id: Option<String>,

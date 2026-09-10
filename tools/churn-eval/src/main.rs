@@ -2,14 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unionid::{
-    Engine, IdempotencyPruneOptions, IdempotencyStatus, MigrationFile, MigrationProfile,
-    MigrationStatus, QueryAccessKind, SchemaInfo, Value, backup,
+    Engine, IdempotencyPruneOptions, IdempotencyStatus, MigrationFile, MigrationMaintenancePhase,
+    MigrationProfile, MigrationProgress, MigrationStatus, QueryAccessKind, SchemaInfo, Value,
+    backup,
 };
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
@@ -102,6 +103,23 @@ struct MigrationRound {
     file_bytes_after: u64,
     file_growth_bytes: i128,
     profile: MigrationProfile,
+    bounded_checkpoints: Vec<MigrationCheckpoint>,
+}
+
+#[derive(Debug, Serialize)]
+struct MigrationCheckpoint {
+    point: &'static str,
+    committed_steps: usize,
+    complete: bool,
+    phase: Option<MigrationMaintenancePhase>,
+    source_rows_seen: u64,
+    target_rows_written: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChildAdvance {
+    progress: MigrationProgress,
+    profile: Option<MigrationProfile>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +155,9 @@ fn main() -> ExitCode {
 
 fn run() -> AnyResult<()> {
     let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).map(String::as_str) == Some("--advance-child") {
+        return run_advance_child(&args);
+    }
     let [_, prefix, rows, rounds, seed, batch_rows] = args.as_slice() else {
         return Err(
             "usage: unionid-churn-eval <path-prefix> <rows> <rounds> <seed> <batch-rows>".into(),
@@ -149,6 +170,33 @@ fn run() -> AnyResult<()> {
         seed.parse()?,
         batch_rows.parse()?,
     )
+}
+
+fn run_advance_child(args: &[String]) -> AnyResult<()> {
+    let [_, _, database, migration_count, max_steps] = args else {
+        return Err(
+            "usage: unionid-churn-eval --advance-child <database> <migration-count> <max-steps>"
+                .into(),
+        );
+    };
+    let migration_count = migration_count.parse::<usize>()?;
+    let max_steps = max_steps.parse::<usize>()?;
+    let files = MIGRATIONS
+        .into_iter()
+        .take(migration_count)
+        .map(MigrationFile::parse)
+        .collect::<unionid::Result<Vec<_>>>()?;
+    if files.len() != migration_count {
+        return Err("advance child migration count exceeds the built-in chain".into());
+    }
+    let mut engine = Engine::open_redb(database)?;
+    let progress = engine.advance_migrations(&files, max_steps)?;
+    let output = ChildAdvance {
+        progress,
+        profile: engine.last_migration_profile(),
+    };
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
 }
 
 fn evaluate(
@@ -288,6 +336,16 @@ fn apply_migration_round(
     }
     let expected_schema = plan.target_schema.clone();
     let file_bytes_before = fs::metadata(database_path)?.len();
+    if files.len() == 1 {
+        return apply_interrupted_first_migration(
+            engine,
+            database_path,
+            files,
+            expected_rows,
+            expected_schema,
+            file_bytes_before,
+        );
+    }
     let applied = engine.apply_migrations(files)?;
     if applied.applied != [file.id.clone()]
         || !applied
@@ -322,7 +380,164 @@ fn apply_migration_round(
         file_bytes_after,
         file_growth_bytes: i128::from(file_bytes_after) - i128::from(file_bytes_before),
         profile,
+        bounded_checkpoints: Vec::new(),
     })
+}
+
+fn apply_interrupted_first_migration(
+    engine: &mut Engine,
+    database_path: &Path,
+    files: &[MigrationFile],
+    expected_rows: usize,
+    expected_schema: SchemaInfo,
+    file_bytes_before: u64,
+) -> AnyResult<MigrationRound> {
+    let file = files.last().ok_or("migration prefix is empty")?;
+    let total_started = Instant::now();
+    close_engine(engine);
+    let build = run_child_advance(database_path, files.len(), 2)?;
+    let building = build
+        .progress
+        .status
+        .maintenance
+        .as_ref()
+        .ok_or("build interruption did not retain maintenance")?;
+    if build.progress.committed_steps != 2
+        || build.progress.complete
+        || building.phase != MigrationMaintenancePhase::Building
+        || building.source_rows_seen != u64::try_from(expected_rows.min(1_024))?
+    {
+        return Err("build child did not stop at the deterministic checkpoint".into());
+    }
+    let mut checkpoints = vec![migration_checkpoint("build_exit", &build.progress)];
+
+    *engine = Engine::open_redb(database_path)?;
+    let reopened_build = engine.migration_status(files)?;
+    if reopened_build.maintenance.as_ref() != Some(building) {
+        return Err("reopen changed the build maintenance checkpoint".into());
+    }
+    close_engine(engine);
+
+    let source_batches = expected_rows.div_ceil(1_024);
+    let cutover_steps = source_batches.saturating_sub(1).saturating_add(2);
+    let cutover = run_child_advance(database_path, files.len(), cutover_steps)?;
+    let reclaimable = cutover
+        .progress
+        .status
+        .maintenance
+        .as_ref()
+        .ok_or("cutover interruption did not retain maintenance")?;
+    if cutover.progress.committed_steps != cutover_steps
+        || cutover.progress.complete
+        || cutover.progress.applied != [file.id.clone()]
+        || reclaimable.phase != MigrationMaintenancePhase::Reclaimable
+        || reclaimable.source_rows_seen != u64::try_from(expected_rows)?
+        || reclaimable.target_rows_written != u64::try_from(expected_rows)?
+    {
+        return Err("cutover child did not stop before deterministic reclamation".into());
+    }
+    checkpoints.push(migration_checkpoint("cutover_exit", &cutover.progress));
+
+    *engine = Engine::open_redb(database_path)?;
+    let reopened_cutover = engine.migration_status(files)?;
+    if reopened_cutover.maintenance.as_ref() != Some(reclaimable)
+        || reopened_cutover.applied.len() != 1
+        || !reopened_cutover.pending.is_empty()
+    {
+        return Err("reopen changed the cutover checkpoint or ledger".into());
+    }
+    close_engine(engine);
+
+    let reclaim_started = Instant::now();
+    let reclaim = run_child_advance(database_path, files.len(), 1)?;
+    if reclaim.progress.committed_steps != 1 {
+        return Err("reclaim child did not commit exactly one bounded step".into());
+    }
+    if expected_rows > 1_024
+        && (reclaim.progress.complete
+            || reclaim
+                .progress
+                .status
+                .maintenance
+                .as_ref()
+                .is_none_or(|maintenance| {
+                    maintenance.phase != MigrationMaintenancePhase::Reclaimable
+                }))
+    {
+        return Err("reclaim child did not leave a resumable cleanup checkpoint".into());
+    }
+    checkpoints.push(migration_checkpoint("reclaim_exit", &reclaim.progress));
+
+    *engine = Engine::open_redb(database_path)?;
+    let resumed = engine.apply_migrations(files)?;
+    if !resumed.applied.is_empty() || resumed.skipped != [file.id.clone()] {
+        return Err("post-cutover apply duplicated the migration ledger entry".into());
+    }
+    let status = engine.migration_status(files)?;
+    validate_migration_state(engine, files, &status, &expected_schema, expected_rows)?;
+    let file_bytes_after = fs::metadata(database_path)?.len();
+    let mut profile = cutover
+        .profile
+        .ok_or("cutover child did not report a migration profile")?;
+    profile.total_micros = elapsed_micros(total_started);
+    profile.reclaim_micros = elapsed_micros(reclaim_started);
+    profile.reclaim_complete = true;
+    if profile.source_rows_seen != u64::try_from(expected_rows)?
+        || profile.target_rows_written != u64::try_from(expected_rows)?
+    {
+        return Err("bounded migration profile has incorrect row counters".into());
+    }
+    Ok(MigrationRound {
+        id: file.id.clone(),
+        ledger_count: status.applied.len(),
+        ledger_head: file.id.clone(),
+        file_bytes_before,
+        file_bytes_after,
+        file_growth_bytes: i128::from(file_bytes_after) - i128::from(file_bytes_before),
+        profile,
+        bounded_checkpoints: checkpoints,
+    })
+}
+
+fn close_engine(engine: &mut Engine) {
+    drop(std::mem::replace(engine, Engine::memory()));
+}
+
+fn run_child_advance(
+    database_path: &Path,
+    migration_count: usize,
+    max_steps: usize,
+) -> AnyResult<ChildAdvance> {
+    let output = Command::new(std::env::current_exe()?)
+        .args([
+            "--advance-child",
+            database_path
+                .to_str()
+                .ok_or("database path is not valid UTF-8")?,
+            &migration_count.to_string(),
+            &max_steps.to_string(),
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "bounded migration child failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn migration_checkpoint(point: &'static str, progress: &MigrationProgress) -> MigrationCheckpoint {
+    let maintenance = progress.status.maintenance.as_ref();
+    MigrationCheckpoint {
+        point,
+        committed_steps: progress.committed_steps,
+        complete: progress.complete,
+        phase: maintenance.map(|maintenance| maintenance.phase.clone()),
+        source_rows_seen: maintenance.map_or(0, |maintenance| maintenance.source_rows_seen),
+        target_rows_written: maintenance.map_or(0, |maintenance| maintenance.target_rows_written),
+    }
 }
 
 fn validate_migration_state(

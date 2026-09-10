@@ -17,8 +17,8 @@ use crate::idempotency::{
 use crate::introspection::{Introspection, StorageMode, StorageVersions};
 use crate::migration::{
     MigrationAbort, MigrationApply, MigrationEntry, MigrationFile, MigrationMaintenance,
-    MigrationMaintenancePhase, MigrationPlan, MigrationPlanItem, MigrationStatus, describe_step,
-    validate_files_against_history,
+    MigrationMaintenancePhase, MigrationPlan, MigrationPlanItem, MigrationProgress,
+    MigrationStatus, describe_step, validate_files_against_history,
 };
 use crate::profile::{
     DurableCommitProfile, MigrationProfile, StorageCheckProfile, StorageOpenProfile,
@@ -51,6 +51,43 @@ pub struct Engine {
     last_migration_profile: Option<MigrationProfile>,
     open_profile: Option<StorageOpenProfile>,
     _locks: Vec<DatabaseLock>,
+}
+
+struct MigrationRun {
+    applied: Vec<String>,
+    skipped: Vec<String>,
+}
+
+struct MaintenanceStepBudget {
+    remaining: Option<usize>,
+    committed: usize,
+}
+
+impl MaintenanceStepBudget {
+    const fn unlimited() -> Self {
+        Self {
+            remaining: None,
+            committed: 0,
+        }
+    }
+
+    const fn bounded(steps: usize) -> Self {
+        Self {
+            remaining: Some(steps),
+            committed: 0,
+        }
+    }
+
+    fn exhausted(&self) -> bool {
+        self.remaining == Some(0)
+    }
+
+    fn record_commit(&mut self) {
+        self.committed = self.committed.saturating_add(1);
+        if let Some(remaining) = &mut self.remaining {
+            *remaining = remaining.saturating_sub(1);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1664,6 +1701,41 @@ impl Engine {
         self.apply_migrations_controlled(files, None)
     }
 
+    /// Advance format-6 migration maintenance by at most the requested number
+    /// of durable commits and return a structured checkpoint that can be resumed.
+    pub fn advance_migrations(
+        &mut self,
+        files: &[MigrationFile],
+        max_steps: usize,
+    ) -> Result<MigrationProgress> {
+        if max_steps == 0 {
+            return Err(Error::new(
+                "E_LIMIT",
+                "migration max_steps must be greater than zero",
+            ));
+        }
+        if self
+            .durable
+            .as_ref()
+            .is_none_or(|durable| durable.versions().format != 6)
+        {
+            return Err(Error::new(
+                "E_CONFIG",
+                "bounded migration progress requires a format-6 redb database",
+            ));
+        }
+        let mut budget = MaintenanceStepBudget::bounded(max_steps);
+        let run = self.apply_migrations_run(files, None, &mut budget)?;
+        let status = self.migration_status(files)?;
+        Ok(MigrationProgress {
+            committed_steps: budget.committed,
+            applied: run.applied,
+            skipped: run.skipped,
+            complete: status.pending.is_empty() && status.maintenance.is_none(),
+            status,
+        })
+    }
+
     pub fn apply_migrations_until(
         &mut self,
         files: &[MigrationFile],
@@ -1678,6 +1750,21 @@ impl Engine {
         files: &[MigrationFile],
         control: Option<&ExecutionControl>,
     ) -> Result<MigrationApply> {
+        let mut budget = MaintenanceStepBudget::unlimited();
+        let run = self.apply_migrations_run(files, control, &mut budget)?;
+        Ok(MigrationApply {
+            applied: run.applied,
+            skipped: run.skipped,
+            schema: self.committed.db.schema_info(),
+        })
+    }
+
+    fn apply_migrations_run(
+        &mut self,
+        files: &[MigrationFile],
+        control: Option<&ExecutionControl>,
+        budget: &mut MaintenanceStepBudget,
+    ) -> Result<MigrationRun> {
         self.last_migration_profile = None;
         ensure_deadline(control)?;
         if self.wal.is_some() {
@@ -1688,10 +1775,17 @@ impl Engine {
         }
         let applied_count =
             validate_files_against_history(files, self.committed.db.migration_history())?;
-        if self.read_only && applied_count < files.len() {
+        let has_maintenance = self
+            .durable
+            .as_ref()
+            .map(|durable| durable.maintenance_info())
+            .transpose()?
+            .flatten()
+            .is_some();
+        if self.read_only && (applied_count < files.len() || has_maintenance) {
             return Err(Error::new(
                 "E_READ_ONLY",
-                "pending migrations cannot be applied through a read-only Engine",
+                "migration progress cannot be committed through a read-only Engine",
             ));
         }
         let skipped = files[..applied_count]
@@ -1699,36 +1793,84 @@ impl Engine {
             .map(|file| file.id.clone())
             .collect();
         let mut applied = Vec::new();
+        if !self.resume_maintenance_cleanup(control, budget)? {
+            return Ok(MigrationRun { applied, skipped });
+        }
         for file in &files[applied_count..] {
             ensure_deadline(control)?;
-            if let Err(error) = self.apply_migration_file(file, control) {
-                if applied.is_empty() {
-                    return Err(error);
+            let file_applied = match self.apply_migration_file(file, control, budget) {
+                Ok(applied) => applied,
+                Err(error) => {
+                    if applied.is_empty() {
+                        return Err(error);
+                    }
+                    return Err(Error::new(
+                        &error.code,
+                        format!(
+                            "{}; {} earlier migration(s) were committed: {}",
+                            error.message,
+                            applied.len(),
+                            applied.join(", ")
+                        ),
+                    ));
                 }
-                return Err(Error::new(
-                    &error.code,
-                    format!(
-                        "{}; {} earlier migration(s) were committed: {}",
-                        error.message,
-                        applied.len(),
-                        applied.join(", ")
-                    ),
-                ));
+            };
+            if file_applied {
+                applied.push(file.id.clone());
             }
-            applied.push(file.id.clone());
+            if !file_applied || budget.exhausted() {
+                break;
+            }
+            if !self.resume_maintenance_cleanup(control, budget)? {
+                break;
+            }
         }
-        Ok(MigrationApply {
-            applied,
-            skipped,
-            schema: self.committed.db.schema_info(),
-        })
+        Ok(MigrationRun { applied, skipped })
+    }
+
+    fn resume_maintenance_cleanup(
+        &mut self,
+        control: Option<&ExecutionControl>,
+        budget: &mut MaintenanceStepBudget,
+    ) -> Result<bool> {
+        loop {
+            ensure_deadline(control)?;
+            let info = self
+                .durable
+                .as_ref()
+                .map(|durable| durable.maintenance_info())
+                .transpose()?
+                .flatten();
+            if !info.is_some_and(|info| {
+                matches!(
+                    info.state,
+                    MaintenanceState::Aborting | MaintenanceState::Reclaimable
+                )
+            }) {
+                return Ok(true);
+            }
+            if budget.exhausted() {
+                return Ok(false);
+            }
+            let result = self
+                .durable
+                .as_mut()
+                .expect("maintenance cleanup has a durable backend")
+                .reclaim_maintenance_step();
+            let complete = self.finish_maintenance_result(result)?;
+            budget.record_commit();
+            if complete {
+                return Ok(true);
+            }
+        }
     }
 
     fn apply_migration_file(
         &mut self,
         file: &MigrationFile,
         control: Option<&ExecutionControl>,
-    ) -> Result<()> {
+        budget: &mut MaintenanceStepBudget,
+    ) -> Result<bool> {
         ensure_deadline(control)?;
         if self.write_failed {
             return Err(Error::new(
@@ -1741,7 +1883,7 @@ impl Engine {
             .as_ref()
             .is_some_and(|durable| durable.versions().format == 6)
         {
-            return self.apply_migration_file_shadow(file, control);
+            return self.apply_migration_file_shadow(file, control, budget);
         }
         let mut candidate = self.mutable_candidate(None)?;
         candidate
@@ -1776,14 +1918,15 @@ impl Engine {
         })?;
         let mut response = QueryResponse::ok_message(format!("migration '{}' applied", file.id));
         self.commit_candidate(candidate, None, &mut response, None, None)
-            .map(|_| ())
+            .map(|_| true)
     }
 
     fn apply_migration_file_shadow(
         &mut self,
         file: &MigrationFile,
         control: Option<&ExecutionControl>,
-    ) -> Result<()> {
+        budget: &mut MaintenanceStepBudget,
+    ) -> Result<bool> {
         let total_started = std::time::Instant::now();
         ensure_deadline(control)?;
         let prepare_started = std::time::Instant::now();
@@ -1810,29 +1953,8 @@ impl Engine {
         let mut prepare_micros = elapsed_micros(prepare_started);
 
         let cleanup_started = std::time::Instant::now();
-        loop {
-            ensure_deadline(control)?;
-            let info = self
-                .durable
-                .as_ref()
-                .expect("format-6 migration has a durable backend")
-                .maintenance_info()?;
-            if !info.is_some_and(|info| {
-                matches!(
-                    info.state,
-                    MaintenanceState::Aborting | MaintenanceState::Reclaimable
-                )
-            }) {
-                break;
-            }
-            let result = self
-                .durable
-                .as_mut()
-                .expect("format-6 migration has a durable backend")
-                .reclaim_maintenance_step();
-            if self.finish_maintenance_result(result)? {
-                break;
-            }
+        if !self.resume_maintenance_cleanup(control, budget)? {
+            return Ok(false);
         }
         prepare_micros = prepare_micros.saturating_add(elapsed_micros(cleanup_started));
 
@@ -1843,12 +1965,16 @@ impl Engine {
             .expect("format-6 migration has a durable backend")
             .maintenance_info()?;
         if info.is_none() {
+            if budget.exhausted() {
+                return Ok(false);
+            }
             let result = self
                 .durable
                 .as_mut()
                 .expect("format-6 migration has a durable backend")
                 .start_maintenance(&source_database, &target, file);
             info = Some(self.finish_maintenance_result(result)?);
+            budget.record_commit();
         }
         let mut info = info.expect("maintenance was started or resumed");
         if info.state == MaintenanceState::Building {
@@ -1871,7 +1997,13 @@ impl Engine {
                 }
                 let mut cursor = source.scan_rows(&table_name)?;
                 let mut observation = crate::ExecutionObservation::default();
-                while let Some(batch) = cursor.next_batch(control, &mut observation)? {
+                loop {
+                    if budget.exhausted() {
+                        return Ok(false);
+                    }
+                    let Some(batch) = cursor.next_batch(control, &mut observation)? else {
+                        break;
+                    };
                     let rows = batch
                         .rows
                         .into_iter()
@@ -1910,7 +2042,10 @@ impl Engine {
                         .expect("format-6 migration has a durable backend")
                         .append_maintenance_batch(file, &target_batch, checkpoint, rows.len());
                     match self.finish_maintenance_result(result) {
-                        Ok(next) => info = next,
+                        Ok(next) => {
+                            info = next;
+                            budget.record_commit();
+                        }
                         Err(error) => {
                             self.abort_after_nonrecoverable_maintenance_failure(&error);
                             return Err(error);
@@ -1923,13 +2058,19 @@ impl Engine {
         let validate_started = std::time::Instant::now();
         if info.state == MaintenanceState::Building {
             ensure_deadline(control)?;
+            if budget.exhausted() {
+                return Ok(false);
+            }
             let result = self
                 .durable
                 .as_mut()
                 .expect("format-6 migration has a durable backend")
                 .mark_maintenance_ready(file, &target);
             info = match self.finish_maintenance_result(result) {
-                Ok(next) => next,
+                Ok(next) => {
+                    budget.record_commit();
+                    next
+                }
                 Err(error) => {
                     self.abort_after_nonrecoverable_maintenance_failure(&error);
                     return Err(error);
@@ -1946,12 +2087,16 @@ impl Engine {
         let ready_info = info.clone();
         let cutover_started = std::time::Instant::now();
         ensure_deadline(control)?;
+        if budget.exhausted() {
+            return Ok(false);
+        }
         let result = self
             .durable
             .as_mut()
             .expect("format-6 migration has a durable backend")
             .cutover_maintenance(file, &target);
         self.finish_maintenance_result(result)?;
+        budget.record_commit();
         let view = self
             .durable
             .as_ref()
@@ -1984,12 +2129,17 @@ impl Engine {
             .maintenance_info()?
             .is_some()
         {
+            if budget.exhausted() {
+                break;
+            }
             let result = self
                 .durable
                 .as_mut()
                 .expect("successful cutover keeps the durable backend")
                 .reclaim_maintenance_step();
-            if self.finish_maintenance_result(result)? {
+            let complete = self.finish_maintenance_result(result)?;
+            budget.record_commit();
+            if complete {
                 break;
             }
             if ensure_deadline(control).is_err() {
@@ -2018,7 +2168,7 @@ impl Engine {
             logical_bytes: ready_info.logical_bytes,
             reclaim_complete,
         });
-        Ok(())
+        Ok(true)
     }
 
     fn finish_maintenance_result<T>(
@@ -2534,19 +2684,19 @@ fn migration_maintenance(info: MaintenanceInfo) -> MigrationMaintenance {
     let (phase, actions) = match info.state {
         MaintenanceState::Building => (
             MigrationMaintenancePhase::Building,
-            vec!["resume".to_owned(), "abort".to_owned()],
+            vec!["advance".to_owned(), "apply".to_owned(), "abort".to_owned()],
         ),
         MaintenanceState::Ready => (
             MigrationMaintenancePhase::Ready,
-            vec!["resume".to_owned(), "abort".to_owned()],
+            vec!["advance".to_owned(), "apply".to_owned(), "abort".to_owned()],
         ),
         MaintenanceState::Aborting => (
             MigrationMaintenancePhase::Aborting,
-            vec!["abort".to_owned()],
+            vec!["advance".to_owned(), "abort".to_owned()],
         ),
         MaintenanceState::Reclaimable => (
             MigrationMaintenancePhase::Reclaimable,
-            vec!["abort".to_owned()],
+            vec!["advance".to_owned(), "apply".to_owned()],
         ),
     };
     MigrationMaintenance {

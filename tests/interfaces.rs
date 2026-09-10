@@ -9,8 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use unionid::{
     Engine, IdempotencyPruneOptions, IntrospectionKind, MigrationAbort, MigrationApply,
-    MigrationFile, MigrationPlan, MigrationStatus, ProtocolRequest, QueryResponse,
-    ReceiptOperationResult, SchemaCheck, StorageMode, UpsertAction, Value, WireValue, backup, cli,
+    MigrationFile, MigrationMaintenancePhase, MigrationPlan, MigrationProgress, MigrationStatus,
+    ProtocolRequest, QueryResponse, ReceiptOperationResult, SchemaCheck, StorageMode, UpsertAction,
+    Value, WireValue, backup, cli,
 };
 
 #[test]
@@ -33,6 +34,103 @@ fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
     assert!(!output.status.success());
     let response: QueryResponse = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response.error.unwrap().code, "E_TABLE");
+}
+
+#[test]
+fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
+    let dir = TempDir::new();
+    let database = dir.0.join("bounded-migration.redb");
+    let migrations = dir.0.join("migrations");
+    std::fs::create_dir(&migrations).unwrap();
+    std::fs::write(
+        migrations.join("m0001_enabled.uid"),
+        "migration m0001_enabled\n  add field Item.enabled bool = true\n",
+    )
+    .unwrap();
+
+    let mut engine = Engine::open_redb(&database).unwrap();
+    let mut source = String::from(
+        "type Item =\n  id int\n  value int\ntable items Item\n  key id\ninsert many items [",
+    );
+    for id in 0..1_100 {
+        if id > 0 {
+            source.push_str(", ");
+        }
+        source.push_str(&format!("{{id = {id}, value = {id}}}"));
+    }
+    source.push(']');
+    let response = engine.execute(&source);
+    assert!(response.ok, "{}", response.message);
+    drop(engine);
+
+    let advance = |max_steps: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args([
+                "migration",
+                "advance",
+                "--db",
+                database.to_str().unwrap(),
+                "--dir",
+                migrations.to_str().unwrap(),
+                "--max-steps",
+                max_steps,
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<MigrationProgress>(&output.stdout).unwrap()
+    };
+
+    let first = advance("2");
+    assert_eq!(first.committed_steps, 2);
+    assert!(!first.complete);
+    let building = first.status.maintenance.unwrap();
+    assert_eq!(building.phase, MigrationMaintenancePhase::Building);
+    assert_eq!(building.source_rows_seen, 1_024);
+
+    let second = advance("1");
+    assert_eq!(second.committed_steps, 1);
+    assert_eq!(
+        second.status.maintenance.as_ref().unwrap().source_rows_seen,
+        1_100
+    );
+    let ready = advance("1");
+    assert_eq!(
+        ready.status.maintenance.as_ref().unwrap().phase,
+        MigrationMaintenancePhase::Ready
+    );
+    let cutover = advance("1");
+    assert_eq!(cutover.applied, ["m0001_enabled"]);
+    assert_eq!(
+        cutover.status.maintenance.as_ref().unwrap().phase,
+        MigrationMaintenancePhase::Reclaimable
+    );
+
+    let mut complete = false;
+    for _ in 0..8 {
+        let progress = advance("1");
+        assert!(progress.committed_steps <= 1);
+        if progress.complete {
+            assert!(progress.status.maintenance.is_none());
+            assert_eq!(progress.status.applied.len(), 1);
+            assert!(progress.status.pending.is_empty());
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete, "bounded reclaim did not complete");
+
+    let mut reopened = Engine::open_redb(&database).unwrap();
+    reopened.check_integrity().unwrap();
+    let rows = reopened.execute("from items | filter enabled == true");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 1_100);
 }
 
 #[test]

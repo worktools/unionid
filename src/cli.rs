@@ -8,7 +8,8 @@ use rustyline::history::DefaultHistory;
 use rustyline::{CompletionType, Config, Editor, error::ReadlineError};
 
 use crate::migration::{
-    MigrationAbort, MigrationApply, MigrationPlan, MigrationStatus, load_directory,
+    MigrationAbort, MigrationApply, MigrationPlan, MigrationProgress, MigrationStatus,
+    load_directory,
 };
 pub use crate::repl::HistoryOptions;
 use crate::repl::{CompletionHelper, HistoryStore};
@@ -455,6 +456,20 @@ pub fn migration_apply(
     print_migration_apply(&result, json)
 }
 
+pub fn migration_advance(
+    db: impl Into<PathBuf>,
+    directory: impl AsRef<Path>,
+    max_steps: usize,
+    json: bool,
+) -> Result<(), String> {
+    let files = load_directory(directory).map_err(|error| error.to_string())?;
+    let mut engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
+    let result = engine
+        .advance_migrations(&files, max_steps)
+        .map_err(|error| error.to_string())?;
+    print_migration_progress(&result, json)
+}
+
 pub fn migration_status(
     db: impl Into<PathBuf>,
     directory: impl AsRef<Path>,
@@ -567,6 +582,39 @@ fn print_migration_apply(result: &MigrationApply, json: bool) -> Result<(), Stri
         );
         for id in &result.applied {
             println!("  applied {id}");
+        }
+    }
+    Ok(())
+}
+
+fn print_migration_progress(result: &MigrationProgress, json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(result).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "committed {} maintenance step(s)\ncomplete {}\nschema revision {}\nschema hash {}",
+            result.committed_steps,
+            if result.complete { "yes" } else { "no" },
+            result.status.schema.revision,
+            result.status.schema.hash
+        );
+        for id in &result.applied {
+            println!("  applied {id}");
+        }
+        if let Some(maintenance) = &result.status.maintenance {
+            println!(
+                "maintenance {:?} {} generation {} -> {} rows {}/{} actions {}",
+                maintenance.phase,
+                maintenance.migration_id,
+                maintenance.source_generation,
+                maintenance.target_generation,
+                maintenance.source_rows_seen,
+                maintenance.target_rows_written,
+                maintenance.actions.join(",")
+            );
         }
     }
     Ok(())

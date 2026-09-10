@@ -50,7 +50,7 @@ pub use idempotency::{
 pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
 pub use migration::{
     MigrationAbort, MigrationApply, MigrationFile, MigrationMaintenance, MigrationMaintenancePhase,
-    MigrationPlan, MigrationStatus,
+    MigrationPlan, MigrationProgress, MigrationStatus,
 };
 pub use model::{RowId, Value};
 pub use profile::{

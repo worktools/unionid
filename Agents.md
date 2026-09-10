@@ -77,6 +77,7 @@
 - #135 已通过 #155 RFC → #156 核心 operation registry/cancellable read → #157 共享 TCP/HTTP NDJSON adapter 完成。RFC 0007 选择 server-issued 128-bit bearer capability、进程内有界 registry、accepted/schema/row/complete/error frame、唯一 terminal 竞态线性化点，以及 frame/channel/bytes/deadline/idle-write 资源上限；stream 不开放 mutation、page 或隐式断线续传。
 - `ConcurrentEngine::register_read` / `ReadOperation::start` / `cancel` 已实现 transport-neutral 可取消读取核心：active registry 64、terminal tombstone 256/60 秒，统一 `ExecutionControl` 在 admission、bind 与 query 循环按 cancel/shutdown/deadline 检查。operation capability 不持久化、不记录查询数据。
 - stream protocol version 1 使用独立 query/cancel envelope 和 accepted/schema/row/complete/error NDJSON frame；TCP 与 HTTP todolist 共用最多 8 帧/16 MiB 的 producer、typed `WireValue` 和 operation registry。完整结果在进入 emitting 前释放 snapshot，partial stream 不提供隐式续传。
+- format-6 migration 可通过 `Engine::advance_migrations` 和 `migration advance --max-steps` 按已提交 maintenance action 确定性有界推进；普通 `apply` 保持一次完成，并可在 cutover 后重开时继续 reclaim。churn runner 用独立子进程覆盖 Building、Reclaimable 和再次恢复。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）

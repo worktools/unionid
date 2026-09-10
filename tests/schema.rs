@@ -24,6 +24,19 @@ fn schema_check_normalizes_reusable_declarations_and_indexes() {
 }
 
 #[test]
+fn bounded_migration_progress_requires_positive_format_six_steps() {
+    let mut engine = Engine::memory();
+    assert_eq!(
+        engine.advance_migrations(&[], 0).unwrap_err().code,
+        "E_LIMIT"
+    );
+    assert_eq!(
+        engine.advance_migrations(&[], 1).unwrap_err().code,
+        "E_CONFIG"
+    );
+}
+
+#[test]
 fn schema_diff_changes_index_constraint_kind_with_drop_then_add() {
     let base = "type User =\n  id int\n  email text\ntable users User\n  key id\ncreate index users (email)";
     let target = "type User =\n  id int\n  email text\ntable users User\n  key id\ncreate unique index users (email)";
