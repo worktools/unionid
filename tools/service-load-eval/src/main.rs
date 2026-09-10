@@ -1068,7 +1068,7 @@ fn wait_for_emitting(engine: &ConcurrentEngine) -> AnyResult<()> {
         if Instant::now() >= deadline {
             return Err("stream did not enter emitting phase".into());
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_micros(100));
     }
     Ok(())
 }
