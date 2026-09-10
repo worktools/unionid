@@ -111,12 +111,15 @@ returning {id, state}
 
 ## 快速开始 / Quick start
 
-需要 Rust 1.94 或更高版本。Rust 1.94 or newer is required.
+需要 Rust 1.94 或更高版本。crates.io 当前公开版本仍是 0.1.0；v0.2.0 候选在正式发布前从源码安装。
+
+Rust 1.94 or newer is required. The current crates.io release remains 0.1.0; install the v0.2.0 candidate from source until it is published.
 
 ```bash
-cargo install unionid --version 0.2.0 --locked
+cargo install unionid --version 0.1.0 --locked
 git clone https://github.com/worktools/unionid.git
 cd unionid
+cargo install --path . --locked
 unionid run --file examples/tasks.uid
 ```
 

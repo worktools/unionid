@@ -82,7 +82,7 @@ macOS/Linux 测试还在隔离子进程中用操作系统 `RLIMIT_FSIZE` 把 red
 
 这些测试覆盖应用进程退出、真实文件增长失败和库级一致性检查，没有模拟机器掉电、文件系统违反同步承诺、物理设备损坏或每一个空间不足位置。`Immediate` 与 two-phase commit 的掉电保证来自 redb 的事务契约；设备与文件系统仍必须正确实现持久同步。更广的发布环境矩阵继续由 #24 跟踪。
 
-可重复的恢复测量工具位于 `tools/recovery-eval`。2026-09-07 的 v0.1 基线中，10,000 行 ADT 工作集 open/check 为 66/78 ms，峰值 RSS 为 52.67/81.48 MiB；100,000 行为 653/741 ms，峰值 RSS 为 459.28/745.84 MiB。当时 100,000 行检查的内存放大来自完整加载和索引验证；环境、命令、数据库大小和完整结果见[恢复成本记录](benchmarks/recovery-2026-09-07.md)。当前 v0.2 的有界结果见下方 M7 记录。
+可重复的恢复测量工具位于 `tools/recovery-eval`。2026-09-07 的 v0.1 基线为每个规模准备三个独立新数据库，以下均为三次中位数：10,000 行 ADT 工作集 open/check 为 66/78 ms，峰值 RSS 为 52.67/81.48 MiB；100,000 行为 653/741 ms，峰值 RSS 为 459.28/745.84 MiB。当时 100,000 行检查的内存放大来自完整加载和索引验证；环境、命令、数据库大小和完整结果见[恢复成本记录](benchmarks/recovery-2026-09-07.md)。当前 v0.2 的 M7 数据使用 p50/p95 等不同统计口径，见下方记录。
 
 M6 使用更宽的 row 与额外复合索引重新测量完整工作负载：10k/100k 的增量单行 write p95 都约 10 ms，但 100k Engine open p95 约 5.6 s、resident query 接近 1 GiB，完整深层 migration p95 约 49.9 s、peak RSS 约 1.44 GiB。普通 write set 已不再复制整库；open/check 与 schema/data full rebuild 仍是大工作集的主要限制。完整方法、结构化访问计划和原始样本见 [M6 工作负载记录](benchmarks/workload-2026-09-09.md)。
 
