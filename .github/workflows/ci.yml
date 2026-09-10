@@ -43,6 +43,7 @@ jobs:
       - run: cargo test --locked --example cold_content
       - run: cargo run --locked --example cold_content -- "${RUNNER_TEMP}/unionid-cold-content.redb"
       - run: cargo run --locked --example todolist -- "${RUNNER_TEMP}/unionid-todolist"
+      - run: python3 scripts/verify-current-consumer.py
       - run: python3 scripts/package-release.py --output "${RUNNER_TEMP}/unionid-dist"
       - name: Record archive digest outside the artifact
         id: release-digest

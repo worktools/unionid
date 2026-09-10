@@ -164,7 +164,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | --- | --- | --- | --- |
 | [#210](https://github.com/worktools/unionid/issues/210) | [路线图] M9 总览与阶段验收 | P0 | M8 完成 |
 | [#206](https://github.com/worktools/unionid/issues/206) | [文档] 同步 v0.2 发布与当前设计基线 | P0 | 无；首个实现切片 |
-| [#207](https://github.com/worktools/unionid/issues/207) | [质量] 当前 format-6 高层应用旅程 | P0 | [#206](https://github.com/worktools/unionid/issues/206) |
+| [#207](https://github.com/worktools/unionid/issues/207) | [质量] 当前 format-6 高层应用旅程 | P0 | [#206](https://github.com/worktools/unionid/issues/206)；[验收说明](CURRENT-DESIGN-VALIDATION.md) |
 | [#208](https://github.com/worktools/unionid/issues/208) | [性能] embedded/TCP/HTTP 混合服务负载 | P1 | [#207](https://github.com/worktools/unionid/issues/207) |
 | [#209](https://github.com/worktools/unionid/issues/209) | [性能] format-6 长期 churn 与 reclaim | P1 | [#207](https://github.com/worktools/unionid/issues/207) |
 
