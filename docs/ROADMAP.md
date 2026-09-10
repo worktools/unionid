@@ -167,8 +167,8 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#207](https://github.com/worktools/unionid/issues/207) | [质量] 当前 format-6 高层应用旅程 | P0 | [#206](https://github.com/worktools/unionid/issues/206)；[验收说明](CURRENT-DESIGN-VALIDATION.md) |
 | [#208](https://github.com/worktools/unionid/issues/208) | [性能] embedded/TCP/HTTP 混合服务负载 | P1 | [#207](https://github.com/worktools/unionid/issues/207)；[#213](https://github.com/worktools/unionid/issues/213) → [#215](https://github.com/worktools/unionid/issues/215) → [#216](https://github.com/worktools/unionid/issues/216) |
 | [#216](https://github.com/worktools/unionid/issues/216) | [性能] 慢 stream、取消与 writer 隔离 | P1 | [#215](https://github.com/worktools/unionid/issues/215)；[#208](https://github.com/worktools/unionid/issues/208) 的收口切片 |
-| [#209](https://github.com/worktools/unionid/issues/209) | [性能] format-6 长期 churn 与 reclaim | P1 | [#207](https://github.com/worktools/unionid/issues/207) |
-| [#229](https://github.com/worktools/unionid/issues/229) | [质量] 保存 10k/100k 长期 churn 证据与结论 | P1 | [#209](https://github.com/worktools/unionid/issues/209)、[#225](https://github.com/worktools/unionid/issues/225) |
+| [#209](https://github.com/worktools/unionid/issues/209) | [性能] format-6 长期 churn 与 reclaim | 已完成 | [#207](https://github.com/worktools/unionid/issues/207) |
+| [#229](https://github.com/worktools/unionid/issues/229) | [质量] 保存 10k/100k 长期 churn 证据与结论 | 已完成 | [#209](https://github.com/worktools/unionid/issues/209)、[#225](https://github.com/worktools/unionid/issues/225) |
 
 ### M9 证据产生的后续任务
 
