@@ -6,7 +6,7 @@
 
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[结构化查询语法 RFC](rfc/0005-structured-prql-query-syntax.md)收敛 PRQL 风格的 delimiter、field set、match expression 与 group inner pipeline；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
-v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release；M0–M7 均已完成并关闭。`main` 上 M5–M7 的生产边界、增量执行和可恢复维护尚未作为新版本发布，当前工作聚焦 [M8 总览 #202](https://github.com/worktools/unionid/issues/202)：先验证真实 v0.1 数据升级，再冻结和验收 v0.2。#118、#120 与 #192 保留为真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
+`v0.2.0` 已通过 GitHub Actions 发布 crate、macOS/Linux 原生包和 GitHub Release；M0–M8 均已完成并关闭。当前没有外部使用者，[M9 #210](https://github.com/worktools/unionid/issues/210) 直接以 format 6、protocol v2 和当前 Rust API 为基线补齐应用旅程与运行证据，不再为旧数据库或旧客户端增加兼容工作；已有 v0.1 fixture 只保留为历史回归证据，不约束新设计。#118、#120 与 #192 保留为真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，不使用没有意义的语句末尾分号；花括号、圆括号、方括号和逗号在能明确结构、层级或 precedence 时正常使用。本轮草案采用 `field type`、`option text`／`list text`、结构化声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不沿用 TypeScript 风格的密集字段注解或逐行 `|>`。
 
@@ -23,6 +23,7 @@ v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release；M0�
 | [M6 · 增量执行与有序访问](https://github.com/worktools/unionid/milestone/7) | 增量 mutation 候选状态、typed ordered composite index、range/page seek 与容量复验 | 小写集工作量不随完整数据库复制增长，常见有序读取有可验证的有界访问路径 |
 | [M7 · 有界常驻状态与可恢复维护](https://github.com/worktools/unionid/milestone/8) | storage phase 证据、按需 typed row access、generation migration 与容量复验 | bounded read 不加载全表，维护失败只暴露完整旧/新 generation |
 | [M8 · v0.2 兼容收口与发布](https://github.com/worktools/unionid/milestone/9) | 真实 v0.1 升级、版本契约、双平台候选与发布 | v0.2 可升级、可校验，crate/CLI/协议/格式/文档版本一致 |
+| [M9 · 当前设计应用验收与运行证据](https://github.com/worktools/unionid/milestone/10) | 当前 package/API 应用旅程、混合服务负载、长期存储 churn | 从空 format-6 数据库验证组合行为并保留可复现运行证据 |
 
 P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力；P2 为后续语言探索。里程碑不填写未经验证的工期承诺。
 
@@ -151,11 +152,21 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 | Issue | 任务 | 优先级 | 前置依赖 |
 | --- | --- | --- | --- |
-| [#202](https://github.com/worktools/unionid/issues/202) | [路线图] M8 总览与阶段验收 | P0 | M7 完成 |
+| [#202](https://github.com/worktools/unionid/issues/202) | [路线图] M8 总览与阶段验收 | 已完成 | M7 完成 |
 | [#198](https://github.com/worktools/unionid/issues/198) | [兼容] 真实 v0.1 数据升级到 format 6 | 已完成 | 无；首个实现切片 |
 | [#199](https://github.com/worktools/unionid/issues/199) | [发布] 冻结 v0.2 版本契约与用户文档 | 已完成 | [#198](https://github.com/worktools/unionid/issues/198) |
-| [#200](https://github.com/worktools/unionid/issues/200) | [质量] v0.2 双平台产物与接口旅程 | 进行中 | [#199](https://github.com/worktools/unionid/issues/199) |
-| [#201](https://github.com/worktools/unionid/issues/201) | [发布] 公开 v0.2.0 crate 与原生产物 | P0 | [#200](https://github.com/worktools/unionid/issues/200)；具体候选需明确授权 |
+| [#200](https://github.com/worktools/unionid/issues/200) | [质量] v0.2 双平台产物与接口旅程 | 已完成 | [#199](https://github.com/worktools/unionid/issues/199) |
+| [#201](https://github.com/worktools/unionid/issues/201) | [发布] 公开 v0.2.0 crate 与原生产物 | 已完成 | [#200](https://github.com/worktools/unionid/issues/200) |
+
+### M9 · 当前设计应用验收与运行证据
+
+| Issue | 任务 | 优先级 | 前置依赖 |
+| --- | --- | --- | --- |
+| [#210](https://github.com/worktools/unionid/issues/210) | [路线图] M9 总览与阶段验收 | P0 | M8 完成 |
+| [#206](https://github.com/worktools/unionid/issues/206) | [文档] 同步 v0.2 发布与当前设计基线 | P0 | 无；首个实现切片 |
+| [#207](https://github.com/worktools/unionid/issues/207) | [质量] 当前 format-6 高层应用旅程 | P0 | [#206](https://github.com/worktools/unionid/issues/206) |
+| [#208](https://github.com/worktools/unionid/issues/208) | [性能] embedded/TCP/HTTP 混合服务负载 | P1 | [#207](https://github.com/worktools/unionid/issues/207) |
+| [#209](https://github.com/worktools/unionid/issues/209) | [性能] format-6 长期 churn 与 reclaim | P1 | [#207](https://github.com/worktools/unionid/issues/207) |
 
 ### 独立 P2 探索
 
@@ -171,7 +182,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-M0–M7 已完成。#186 以真实接口矩阵和 10k/100k open/query/write/check/shadow-migration 原始样本完成 M7 复验，见 [验收记录](benchmarks/m7-acceptance-2026-09-10.md)。当前按 #202 的 #198 → #199 → #200 → #201 推进：先用公开 v0.1.0 真实数据证明升级兼容，再冻结 0.2.0 版本和文档、验收双平台候选，最后只在具体候选获得明确授权后公开发布。
+M0–M8 已完成。#186 以真实接口矩阵和 10k/100k open/query/write/check/shadow-migration 原始样本完成 M7 复验，见 [验收记录](benchmarks/m7-acceptance-2026-09-10.md)；#198–#202 完成版本契约、双平台候选验收与 `v0.2.0` GitHub Actions 发布。当前按 [M9 #210](https://github.com/worktools/unionid/issues/210) 的 #206 → #207 → (#208、#209) 推进，只验证当前设计下从零建库的完整应用旅程、混合服务负载和长期存储 churn，不扩展旧版本兼容矩阵。
 
 ## 维护约定
 
