@@ -23,7 +23,8 @@ const MIN_ROWS: usize = 100;
 const MAX_ROWS: usize = 100_000;
 const MAX_REQUESTS: usize = 10_000;
 const STREAM_ROWS: usize = 128;
-const STREAM_PAYLOAD_BYTES: usize = 128 * 1024;
+const NORMAL_STREAM_PAYLOAD_BYTES: usize = 128 * 1024;
+const SLOW_STREAM_PAYLOAD_BYTES: usize = 256 * 1024;
 
 const SCHEMA: &str = r#"type State = Pending | Active {owner text} | Done
 type Task =
@@ -144,7 +145,8 @@ struct StreamCaseReport {
     cancel_micros: Option<u64>,
     writer_probe_micros: Option<u64>,
     writer_probe_sequence: Option<String>,
-    emitting_before_cancel: bool,
+    emitting_before_writer_probe: bool,
+    cancel_accepted_after_writer_started: bool,
     writer_probe_before_terminal_read: bool,
     operations_after: usize,
     schema_revision: u64,
@@ -773,9 +775,16 @@ fn measure_stream(
         return Err(format!("rows must be between {MIN_ROWS} and {MAX_ROWS}").into());
     }
     fs::create_dir_all(root)?;
-    let rows = requested_rows.min(STREAM_ROWS);
+    let rows = match consumer {
+        StreamConsumer::Normal => requested_rows.min(STREAM_ROWS),
+        StreamConsumer::Slow => STREAM_ROWS,
+    };
+    let payload_bytes = match consumer {
+        StreamConsumer::Normal => NORMAL_STREAM_PAYLOAD_BYTES,
+        StreamConsumer::Slow => SLOW_STREAM_PAYLOAD_BYTES,
+    };
     let database = root.join("stream-load.redb");
-    prepare_stream(&database, rows)?;
+    prepare_stream(&database, rows, payload_bytes)?;
     let mut engine = Engine::open_redb(&database)?;
     let integrity = engine.check_integrity()?;
     if !integrity.backend_clean || integrity.versions.format != 6 {
@@ -811,25 +820,33 @@ fn measure_stream(
     let mut cancel_micros = None;
     let mut writer_probe_micros = None;
     let mut writer_probe_sequence = None;
-    let mut emitting_before_cancel = false;
+    let mut emitting_before_writer_probe = false;
+    let mut cancel_accepted_after_writer_started = false;
     let mut writer_probe_before_terminal_read = false;
     if consumer == StreamConsumer::Slow {
         wait_for_emitting(&runtime.engine)?;
-        emitting_before_cancel = runtime.engine.stats().emitting_operations == 1;
-        if !emitting_before_cancel {
+        emitting_before_writer_probe = runtime.engine.stats().emitting_operations == 1;
+        if !emitting_before_writer_probe {
             return Err("slow consumer did not retain bounded stream backpressure".into());
         }
 
-        let cancel_started = Instant::now();
-        let response = cancel_client
-            .as_mut()
-            .expect("slow consumer owns a cancellation channel")
-            .send(&request_id, &operation_id)?;
-        cancel_micros = Some(elapsed_micros(cancel_started.elapsed()));
-        cancel_status = Some(response.result.status);
-        if response.result.status != CancelStatus::Accepted {
-            return Err("explicit stream cancellation was not accepted".into());
-        }
+        let mut control = cancel_client
+            .take()
+            .expect("slow consumer owns a cancellation channel");
+        let cancel_request_id = request_id.clone();
+        let cancel_operation_id = operation_id.clone();
+        let writer_started = Arc::new(AtomicBool::new(false));
+        let cancel_writer_started = Arc::clone(&writer_started);
+        let canceler = std::thread::spawn(move || -> AnyResult<_> {
+            // Start cancellation only after the writer invocation begins, but
+            // do not wait for the writer or race the transport idle timeout.
+            while !cancel_writer_started.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let cancel_started = Instant::now();
+            let response = control.send(&cancel_request_id, &cancel_operation_id)?;
+            Ok((response, elapsed_micros(cancel_started.elapsed())))
+        });
 
         let write = Request::query(
             "stream-writer",
@@ -837,6 +854,7 @@ fn measure_stream(
         )
         .with_idempotency_key(format!("{}-stream-writer", adapter.name()))?
         .with_version(PRODUCTION_VERSION)?;
+        writer_started.store(true, Ordering::Release);
         let writer_started = Instant::now();
         let response = runtime.engine.execute_protocol_request(write);
         writer_probe_micros = Some(elapsed_micros(writer_started.elapsed()));
@@ -852,6 +870,16 @@ fn measure_stream(
                 .clone(),
         );
         writer_probe_before_terminal_read = true;
+
+        let (response, elapsed) = canceler
+            .join()
+            .map_err(|_| "stream cancellation client panicked")??;
+        cancel_micros = Some(elapsed);
+        cancel_status = Some(response.result.status);
+        cancel_accepted_after_writer_started = response.result.status == CancelStatus::Accepted;
+        if response.result.status != CancelStatus::Accepted {
+            return Err("explicit stream cancellation was not accepted".into());
+        }
     }
 
     let mut frame_count = 1;
@@ -997,7 +1025,7 @@ fn measure_stream(
         adapter,
         consumer,
         rows,
-        payload_bytes: STREAM_PAYLOAD_BYTES,
+        payload_bytes,
         accepted_micros,
         terminal_micros,
         frames: frame_count,
@@ -1010,7 +1038,8 @@ fn measure_stream(
         cancel_micros,
         writer_probe_micros,
         writer_probe_sequence,
-        emitting_before_cancel,
+        emitting_before_writer_probe,
+        cancel_accepted_after_writer_started,
         writer_probe_before_terminal_read,
         operations_after,
         schema_revision: schema.revision,
@@ -1018,13 +1047,13 @@ fn measure_stream(
     })
 }
 
-fn prepare_stream(path: &Path, rows: usize) -> AnyResult<()> {
+fn prepare_stream(path: &Path, rows: usize, payload_bytes: usize) -> AnyResult<()> {
     let mut engine = Engine::open_redb(path.to_path_buf())?;
     require_ok(engine.execute(STREAM_SCHEMA))?;
     require_ok(engine.execute("insert counters {id = 0, value = 0}"))?;
-    let payload = "x".repeat(STREAM_PAYLOAD_BYTES);
-    for start in (0..rows).step_by(4) {
-        let values = (start..rows.min(start + 4))
+    let payload = "x".repeat(payload_bytes);
+    for start in 0..rows {
+        let values = (start..rows.min(start + 1))
             .map(|id| format!("{{id = {id}, payload = \"{payload}\"}}"))
             .collect::<Vec<_>>()
             .join(",");
