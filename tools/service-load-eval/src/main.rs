@@ -10,9 +10,10 @@ use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use unionid::protocol::{PRODUCTION_VERSION, Request, Response};
-use unionid::server::{ConcurrencyStats, ConcurrentEngine, serve_until_concurrent};
+use unionid::server::{CancelStatus, ConcurrencyStats, ConcurrentEngine, serve_until_concurrent};
+use unionid::stream::{self, Frame as StreamFrame};
 use unionid::{Engine, PageSpec};
 
 type AnyResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -21,6 +22,9 @@ const WARMUPS: usize = 3;
 const MIN_ROWS: usize = 100;
 const MAX_ROWS: usize = 100_000;
 const MAX_REQUESTS: usize = 10_000;
+const STREAM_ROWS: usize = 128;
+const NORMAL_STREAM_PAYLOAD_BYTES: usize = 128 * 1024;
+const SLOW_STREAM_PAYLOAD_BYTES: usize = 256 * 1024;
 
 const SCHEMA: &str = r#"type State = Pending | Active {owner text} | Done
 type Task =
@@ -35,7 +39,19 @@ table tasks Task
 create index tasks (tenant, id)
 "#;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+const STREAM_SCHEMA: &str = r#"type StreamItem =
+  id int
+  payload text
+table stream_items StreamItem
+  key id
+type Counter =
+  id int
+  value int
+table counters Counter
+  key id
+"#;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Adapter {
     Embedded,
@@ -108,6 +124,57 @@ struct EvaluationReport {
     rows: usize,
     requests_per_client: usize,
     cases: Vec<CaseReport>,
+    stream_cases: Vec<StreamCaseReport>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StreamCaseReport {
+    adapter: Adapter,
+    consumer: StreamConsumer,
+    rows: usize,
+    payload_bytes: usize,
+    accepted_micros: u64,
+    terminal_micros: u64,
+    frames: usize,
+    rows_received: usize,
+    encoded_bytes: u64,
+    largest_frame_bytes: usize,
+    terminal: String,
+    outcomes: BTreeMap<String, usize>,
+    cancel_status: Option<CancelStatus>,
+    cancel_micros: Option<u64>,
+    writer_probe_micros: Option<u64>,
+    writer_probe_sequence: Option<String>,
+    emitting_before_writer_probe: bool,
+    cancel_accepted_after_writer_started: bool,
+    writer_probe_before_terminal_read: bool,
+    operations_after: usize,
+    schema_revision: u64,
+    schema_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StreamConsumer {
+    Normal,
+    Slow,
+}
+
+impl StreamConsumer {
+    fn parse(value: &str) -> AnyResult<Self> {
+        match value {
+            "normal" => Ok(Self::Normal),
+            "slow" => Ok(Self::Slow),
+            _ => Err(format!("unknown stream consumer '{value}'").into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Slow => "slow",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -169,6 +236,18 @@ enum Client {
     Http(SocketAddr),
 }
 
+struct StreamConnection {
+    reader: BufReader<TcpStream>,
+}
+
+enum CancelClient {
+    Tcp(TcpStream),
+    Http {
+        address: SocketAddr,
+        socket: TcpStream,
+    },
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -192,6 +271,16 @@ fn run() -> AnyResult<()> {
                 clients.parse()?,
                 read_percent.parse()?,
                 requests.parse()?,
+            )?;
+            serde_json::to_writer(std::io::stdout(), &report)?;
+            Ok(())
+        }
+        [_, command, root, adapter, rows, consumer] if command == "stream-measure" => {
+            let report = measure_stream(
+                Path::new(root),
+                Adapter::parse(adapter)?,
+                rows.parse()?,
+                StreamConsumer::parse(consumer)?,
             )?;
             serde_json::to_writer(std::io::stdout(), &report)?;
             Ok(())
@@ -243,12 +332,38 @@ fn evaluate(root: &Path, rows: usize, requests: usize, smoke: bool) -> AnyResult
             }
         }
     }
+    let mut stream_cases = Vec::new();
+    for adapter in [Adapter::Tcp, Adapter::Http] {
+        for consumer in [StreamConsumer::Normal, StreamConsumer::Slow] {
+            let case_root = root.join(format!("{}-stream-{}", adapter.name(), consumer.name()));
+            let output = Command::new(&executable)
+                .args([
+                    "stream-measure",
+                    case_root.to_str().ok_or("work path is not UTF-8")?,
+                    adapter.name(),
+                    &rows.to_string(),
+                    consumer.name(),
+                ])
+                .output()?;
+            if !output.status.success() {
+                return Err(format!(
+                    "{} {} stream failed: {}",
+                    adapter.name(),
+                    consumer.name(),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+                .into());
+            }
+            stream_cases.push(serde_json::from_slice(&output.stdout)?);
+        }
+    }
     let report = EvaluationReport {
         evidence_only_not_sla: true,
         environment: environment()?,
         rows,
         requests_per_client: requests,
         cases,
+        stream_cases,
     };
     serde_json::to_writer_pretty(std::io::stdout(), &report)?;
     println!();
@@ -647,6 +762,328 @@ fn wire_int(value: Option<&unionid::protocol::WireValue>) -> Option<usize> {
     }
 }
 
+fn measure_stream(
+    root: &Path,
+    adapter: Adapter,
+    requested_rows: usize,
+    consumer: StreamConsumer,
+) -> AnyResult<StreamCaseReport> {
+    if adapter == Adapter::Embedded {
+        return Err("stream transport evaluation requires TCP or HTTP".into());
+    }
+    if !(MIN_ROWS..=MAX_ROWS).contains(&requested_rows) {
+        return Err(format!("rows must be between {MIN_ROWS} and {MAX_ROWS}").into());
+    }
+    fs::create_dir_all(root)?;
+    let rows = match consumer {
+        StreamConsumer::Normal => requested_rows.min(STREAM_ROWS),
+        StreamConsumer::Slow => STREAM_ROWS,
+    };
+    let payload_bytes = match consumer {
+        StreamConsumer::Normal => NORMAL_STREAM_PAYLOAD_BYTES,
+        StreamConsumer::Slow => SLOW_STREAM_PAYLOAD_BYTES,
+    };
+    let database = root.join("stream-load.redb");
+    prepare_stream(&database, rows, payload_bytes)?;
+    let mut engine = Engine::open_redb(&database)?;
+    let integrity = engine.check_integrity()?;
+    if !integrity.backend_clean || integrity.versions.format != 6 {
+        return Err("prepared stream database did not pass format-6 integrity checking".into());
+    }
+    let schema = engine.schema_info();
+    let runtime = AdapterRuntime::start(adapter, engine)?;
+    let request_id = format!("{}-{}-stream", adapter.name(), consumer.name());
+    let request = stream::Request::Query {
+        stream_version: stream::VERSION,
+        request: Request::query(request_id.clone(), "from stream_items\nsort id".to_owned())
+            .with_version(PRODUCTION_VERSION)?,
+    };
+    let mut cancel_client = if consumer == StreamConsumer::Slow {
+        Some(CancelClient::connect(&runtime.endpoint)?)
+    } else {
+        None
+    };
+    let started = Instant::now();
+    let mut connection = StreamConnection::connect(&runtime.endpoint, &request)?;
+    let (accepted, accepted_bytes) = connection.read_frame()?;
+    let accepted_micros = elapsed_micros(started.elapsed());
+    let operation_id = match accepted {
+        StreamFrame::Accepted {
+            stream_version,
+            request_id: frame_request,
+            operation_id,
+        } if stream_version == stream::VERSION && frame_request == request_id => operation_id,
+        _ => return Err("stream did not begin with a matching accepted frame".into()),
+    };
+
+    let mut cancel_status = None;
+    let mut cancel_micros = None;
+    let mut writer_probe_micros = None;
+    let mut writer_probe_sequence = None;
+    let mut emitting_before_writer_probe = false;
+    let mut cancel_accepted_after_writer_started = false;
+    let mut writer_probe_before_terminal_read = false;
+    if consumer == StreamConsumer::Slow {
+        wait_for_emitting(&runtime.engine)?;
+        emitting_before_writer_probe = runtime.engine.stats().emitting_operations == 1;
+        if !emitting_before_writer_probe {
+            return Err("slow consumer did not retain bounded stream backpressure".into());
+        }
+
+        let mut control = cancel_client
+            .take()
+            .expect("slow consumer owns a cancellation channel");
+        let cancel_request_id = request_id.clone();
+        let cancel_operation_id = operation_id.clone();
+        let writer_started = Arc::new(AtomicBool::new(false));
+        let cancel_writer_started = Arc::clone(&writer_started);
+        let canceler = std::thread::spawn(move || -> AnyResult<_> {
+            // Start cancellation only after the writer invocation begins, but
+            // do not wait for the writer or race the transport idle timeout.
+            while !cancel_writer_started.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let cancel_started = Instant::now();
+            let response = control.send(&cancel_request_id, &cancel_operation_id)?;
+            Ok((response, elapsed_micros(cancel_started.elapsed())))
+        });
+
+        let write = Request::query(
+            "stream-writer",
+            "update counters\nfilter id == 0\nset value = value + 1\nreturning id",
+        )
+        .with_idempotency_key(format!("{}-stream-writer", adapter.name()))?
+        .with_version(PRODUCTION_VERSION)?;
+        writer_started.store(true, Ordering::Release);
+        let writer_started = Instant::now();
+        let response = runtime.engine.execute_protocol_request(write);
+        writer_probe_micros = Some(elapsed_micros(writer_started.elapsed()));
+        if !response.ok || response.affected_rows != Some(1) {
+            return Err("writer probe did not commit before slow-stream terminal delivery".into());
+        }
+        writer_probe_sequence = Some(
+            response
+                .idempotency
+                .as_ref()
+                .ok_or("writer probe has no idempotency metadata")?
+                .committed_sequence
+                .clone(),
+        );
+        writer_probe_before_terminal_read = true;
+
+        let (response, elapsed) = canceler
+            .join()
+            .map_err(|_| "stream cancellation client panicked")??;
+        cancel_micros = Some(elapsed);
+        cancel_status = Some(response.result.status);
+        cancel_accepted_after_writer_started = response.result.status == CancelStatus::Accepted;
+        if response.result.status != CancelStatus::Accepted {
+            return Err("explicit stream cancellation was not accepted".into());
+        }
+    }
+
+    let mut frame_count = 1;
+    let mut encoded_bytes = u64::try_from(accepted_bytes)?;
+    let mut largest_frame_bytes = accepted_bytes;
+    let mut rows_received = 0;
+    let mut saw_schema = false;
+    let mut terminal = None;
+    let mut outcomes = BTreeMap::from([
+        ("cancelled".to_owned(), 0),
+        ("completed".to_owned(), 0),
+        ("rejected".to_owned(), 0),
+        ("timeout".to_owned(), 0),
+    ]);
+    while terminal.is_none() {
+        let (frame, bytes) = connection.read_frame()?;
+        if bytes > stream::MAX_FRAME_BYTES {
+            return Err("stream frame exceeded the protocol byte limit".into());
+        }
+        frame_count += 1;
+        largest_frame_bytes = largest_frame_bytes.max(bytes);
+        let encoded_before_frame = encoded_bytes;
+        encoded_bytes = encoded_bytes.saturating_add(u64::try_from(bytes)?);
+        match frame {
+            StreamFrame::Schema {
+                stream_version,
+                request_id: frame_request,
+                operation_id: frame_operation,
+                columns,
+                schema: frame_schema,
+            } => {
+                if saw_schema
+                    || rows_received != 0
+                    || stream_version != stream::VERSION
+                    || frame_request != request_id
+                    || frame_operation != operation_id
+                    || frame_schema != schema
+                    || columns.len() != 2
+                    || columns[0].name != "id"
+                    || columns[1].name != "payload"
+                {
+                    return Err("stream schema frame order or identity mismatch".into());
+                }
+                saw_schema = true;
+            }
+            StreamFrame::Row {
+                stream_version,
+                request_id: frame_request,
+                operation_id: frame_operation,
+                sequence,
+                row,
+            } => {
+                if !saw_schema
+                    || stream_version != stream::VERSION
+                    || frame_request != request_id
+                    || frame_operation != operation_id
+                    || sequence.parse::<usize>()? != rows_received
+                    || wire_int(row.get("id")) != Some(rows_received)
+                {
+                    return Err("stream row frame order, sequence, or identity mismatch".into());
+                }
+                rows_received += 1;
+                if consumer == StreamConsumer::Slow {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            StreamFrame::Complete {
+                stream_version,
+                request_id: frame_request,
+                operation_id: frame_operation,
+                row_count,
+                encoded_bytes: declared_bytes,
+                ..
+            } => {
+                if !saw_schema
+                    || stream_version != stream::VERSION
+                    || frame_request != request_id
+                    || frame_operation != operation_id
+                    || consumer != StreamConsumer::Normal
+                    || row_count.parse::<usize>()? != rows
+                    || rows_received != rows
+                    || declared_bytes.parse::<u64>()? != encoded_before_frame
+                {
+                    return Err("stream completion frame mismatch".into());
+                }
+                *outcomes.get_mut("completed").unwrap() += 1;
+                terminal = Some("complete".to_owned());
+            }
+            StreamFrame::Error {
+                stream_version,
+                request_id: frame_request,
+                operation_id: frame_operation,
+                error,
+                ..
+            } => {
+                if !saw_schema
+                    || stream_version != stream::VERSION
+                    || frame_request != request_id
+                    || frame_operation != operation_id
+                {
+                    return Err("stream error frame order or identity mismatch".into());
+                }
+                let category = match error.code.as_str() {
+                    "E_CANCELLED" => "cancelled",
+                    "E_TIMEOUT" => "timeout",
+                    _ => "rejected",
+                };
+                *outcomes.get_mut(category).unwrap() += 1;
+                terminal = Some(error.code);
+            }
+            StreamFrame::Accepted { .. } => {
+                return Err("stream emitted more than one accepted frame".into());
+            }
+        }
+    }
+    let terminal_micros = elapsed_micros(started.elapsed());
+    if consumer == StreamConsumer::Slow && terminal.as_deref() != Some("E_CANCELLED") {
+        return Err("slow stream did not finish with E_CANCELLED".into());
+    }
+    if encoded_bytes
+        > u64::try_from(stream::MAX_EMITTED_BYTES.saturating_add(stream::MAX_FRAME_BYTES))?
+    {
+        return Err("stream exceeded the total encoded-byte budget".into());
+    }
+    wait_for_operations(&runtime.engine, 0)?;
+    let operations_after = runtime.engine.stats().registered_operations;
+    runtime.stop()?;
+
+    let mut verifier = Engine::open_redb(&database)?;
+    let integrity = verifier.check_integrity()?;
+    if !integrity.backend_clean || verifier.schema_info() != schema {
+        return Err("post-stream integrity or schema validation failed".into());
+    }
+    let response = require_ok(verifier.execute("from counters\nfilter id == 0\nselect value"))?;
+    let expected_value = usize::from(consumer == StreamConsumer::Slow);
+    if response.rows.len() != 1
+        || !matches!(response.rows[0].get("value"), Some(unionid::Value::Int(value)) if *value == expected_value as i64)
+    {
+        return Err("writer probe effect mismatch after stream completion".into());
+    }
+
+    Ok(StreamCaseReport {
+        adapter,
+        consumer,
+        rows,
+        payload_bytes,
+        accepted_micros,
+        terminal_micros,
+        frames: frame_count,
+        rows_received,
+        encoded_bytes,
+        largest_frame_bytes,
+        terminal: terminal.unwrap(),
+        outcomes,
+        cancel_status,
+        cancel_micros,
+        writer_probe_micros,
+        writer_probe_sequence,
+        emitting_before_writer_probe,
+        cancel_accepted_after_writer_started,
+        writer_probe_before_terminal_read,
+        operations_after,
+        schema_revision: schema.revision,
+        schema_hash: schema.hash,
+    })
+}
+
+fn prepare_stream(path: &Path, rows: usize, payload_bytes: usize) -> AnyResult<()> {
+    let mut engine = Engine::open_redb(path.to_path_buf())?;
+    require_ok(engine.execute(STREAM_SCHEMA))?;
+    require_ok(engine.execute("insert counters {id = 0, value = 0}"))?;
+    let payload = "x".repeat(payload_bytes);
+    for start in 0..rows {
+        let values = (start..rows.min(start + 1))
+            .map(|id| format!("{{id = {id}, payload = \"{payload}\"}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        require_ok(engine.execute(&format!("insert many stream_items [{values}]")))?;
+    }
+    Ok(())
+}
+
+fn wait_for_emitting(engine: &ConcurrentEngine) -> AnyResult<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while engine.stats().emitting_operations != 1 {
+        if Instant::now() >= deadline {
+            return Err("stream did not enter emitting phase".into());
+        }
+        std::thread::sleep(Duration::from_micros(100));
+    }
+    Ok(())
+}
+
+fn wait_for_operations(engine: &ConcurrentEngine, expected: usize) -> AnyResult<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while engine.stats().registered_operations != expected {
+        if Instant::now() >= deadline {
+            return Err("stream operation did not reach its terminal state".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
 impl AdapterRuntime {
     fn start(adapter: Adapter, engine: Engine) -> AnyResult<Self> {
         let engine = ConcurrentEngine::new(engine);
@@ -740,6 +1177,155 @@ impl Client {
     }
 }
 
+impl StreamConnection {
+    fn connect(endpoint: &Endpoint, request: &stream::Request) -> AnyResult<Self> {
+        match endpoint {
+            Endpoint::Tcp(address) => {
+                let mut socket = TcpStream::connect(address)?;
+                configure_stream_socket(&socket)?;
+                serde_json::to_writer(&mut socket, request)?;
+                socket.write_all(b"\n")?;
+                socket.flush()?;
+                Ok(Self {
+                    reader: BufReader::new(socket),
+                })
+            }
+            Endpoint::Http(address) => {
+                let body = serde_json::to_vec(request)?;
+                let mut socket = TcpStream::connect(address)?;
+                configure_stream_socket(&socket)?;
+                write!(
+                    socket,
+                    "POST /v1/stream/query HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )?;
+                socket.write_all(&body)?;
+                socket.flush()?;
+                let mut reader = BufReader::new(socket);
+                let mut status = String::new();
+                reader.read_line(&mut status)?;
+                if !status.starts_with("HTTP/1.1 200 ") {
+                    return Err(format!("HTTP stream returned {status:?}").into());
+                }
+                let mut ndjson = false;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line)? == 0 {
+                        return Err("HTTP stream ended before response headers".into());
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if line.to_ascii_lowercase().starts_with("content-type:")
+                        && line.to_ascii_lowercase().contains("application/x-ndjson")
+                    {
+                        ndjson = true;
+                    }
+                }
+                if !ndjson {
+                    return Err("HTTP stream response is not application/x-ndjson".into());
+                }
+                Ok(Self { reader })
+            }
+            Endpoint::Embedded(_) => Err("embedded endpoint has no NDJSON transport".into()),
+        }
+    }
+
+    fn read_frame(&mut self) -> AnyResult<(StreamFrame, usize)> {
+        let mut line = String::new();
+        let bytes = self.reader.read_line(&mut line)?;
+        if bytes == 0 {
+            return Err("stream transport closed before a terminal frame".into());
+        }
+        Ok((serde_json::from_str(&line)?, bytes))
+    }
+}
+
+fn configure_stream_socket(socket: &TcpStream) -> AnyResult<()> {
+    socket.set_read_timeout(Some(Duration::from_secs(25)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(25)))?;
+    Ok(())
+}
+
+impl CancelClient {
+    fn connect(endpoint: &Endpoint) -> AnyResult<Self> {
+        let client = match endpoint {
+            Endpoint::Tcp(address) => {
+                let socket = TcpStream::connect(address)?;
+                socket.set_read_timeout(Some(Duration::from_secs(25)))?;
+                socket.set_write_timeout(Some(Duration::from_secs(25)))?;
+                Self::Tcp(socket)
+            }
+            Endpoint::Http(address) => {
+                let socket = TcpStream::connect(address)?;
+                socket.set_read_timeout(Some(Duration::from_secs(25)))?;
+                socket.set_write_timeout(Some(Duration::from_secs(25)))?;
+                Self::Http {
+                    address: *address,
+                    socket,
+                }
+            }
+            Endpoint::Embedded(_) => {
+                return Err("embedded endpoint has no NDJSON transport".into());
+            }
+        };
+        // The TCP server polls a nonblocking listener every 100 ms. Give both
+        // real adapters time to accept this control connection before starting
+        // the stream so cancellation does not measure accept-loop scheduling.
+        std::thread::sleep(Duration::from_millis(150));
+        Ok(client)
+    }
+
+    fn send(
+        &mut self,
+        stream_request_id: &str,
+        operation_id: &str,
+    ) -> AnyResult<stream::CancelResponse> {
+        let cancel_request_id = format!("cancel-{stream_request_id}");
+        let request = stream::Request::Cancel {
+            stream_version: stream::VERSION,
+            request_id: cancel_request_id.clone(),
+            operation_id: operation_id.to_owned(),
+        };
+        let response: stream::CancelResponse = match self {
+            Self::Tcp(socket) => {
+                serde_json::to_writer(&mut *socket, &request)?;
+                socket.write_all(b"\n")?;
+                socket.flush()?;
+                let mut line = String::new();
+                BufReader::new(socket.try_clone()?).read_line(&mut line)?;
+                serde_json::from_str(&line)?
+            }
+            Self::Http { address, socket } => {
+                let body = serde_json::to_vec(&request)?;
+                write!(
+                    socket,
+                    "POST /v1/stream/cancel HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )?;
+                socket.write_all(&body)?;
+                socket.flush()?;
+                let mut response = Vec::new();
+                socket.read_to_end(&mut response)?;
+                let body_start = response
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .ok_or("HTTP cancel response has no body")?
+                    + 4;
+                serde_json::from_slice(&response[body_start..])?
+            }
+        };
+        if response.stream_version != stream::VERSION
+            || response.request_id != cancel_request_id
+            || response.operation_id != operation_id
+            || !response.ok
+        {
+            return Err("stream cancel response identity or version mismatch".into());
+        }
+        Ok(response)
+    }
+}
+
 fn serve_http(
     listener: TcpListener,
     engine: ConcurrentEngine,
@@ -785,16 +1371,89 @@ fn handle_http(mut stream: TcpStream, engine: ConcurrentEngine) -> AnyResult<()>
     stream.set_read_timeout(Some(Duration::from_secs(25)))?;
     stream.set_write_timeout(Some(Duration::from_secs(25)))?;
     let body = read_http_body(&mut stream)?;
-    let request: Request = serde_json::from_slice(&body)?;
+    let decoded: serde_json::Value = serde_json::from_slice(&body)?;
+    if decoded.get("stream_version").is_some() {
+        return handle_http_stream(&mut stream, engine, serde_json::from_value(decoded)?);
+    }
+    let request: Request = serde_json::from_value(decoded)?;
     let response = engine.execute_protocol_request(request);
-    let encoded = serde_json::to_vec(&response)?;
+    write_http_json(&mut stream, &response)
+}
+
+fn handle_http_stream(
+    socket: &mut TcpStream,
+    engine: ConcurrentEngine,
+    request: stream::Request,
+) -> AnyResult<()> {
+    match request {
+        stream::Request::Cancel {
+            stream_version,
+            request_id,
+            operation_id,
+        } => {
+            let response = if stream_version == stream::VERSION {
+                match stream::cancel(&engine, request_id.clone(), operation_id) {
+                    Ok(response) => serde_json::to_value(response)?,
+                    Err(error) => serde_json::to_value(stream::error_response(request_id, error))?,
+                }
+            } else {
+                serde_json::to_value(stream::error_response(
+                    request_id,
+                    unionid::Error::new("E_STREAM_VERSION", "supported stream version is 1"),
+                ))?
+            };
+            write_http_json(socket, &response)
+        }
+        stream::Request::Query {
+            stream_version,
+            request,
+        } => {
+            let request_id = request.request_id.clone();
+            if stream_version != stream::VERSION {
+                return write_http_json(
+                    socket,
+                    &stream::error_response(
+                        request_id,
+                        unionid::Error::new("E_STREAM_VERSION", "supported stream version is 1"),
+                    ),
+                );
+            }
+            let accepted = match stream::accept(
+                &engine,
+                request,
+                Instant::now() + Duration::from_secs(25),
+                None,
+            ) {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    return write_http_json(socket, &stream::error_response(request_id, error));
+                }
+            };
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n"
+            )?;
+            socket.write_all(accepted.accepted_bytes())?;
+            socket.flush()?;
+            let receiver = accepted.start();
+            while let Ok(chunk) = receiver.recv() {
+                socket.write_all(chunk.as_bytes())?;
+                socket.flush()?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn write_http_json(socket: &mut TcpStream, response: &impl Serialize) -> AnyResult<()> {
+    let encoded = serde_json::to_vec(response)?;
     write!(
-        stream,
+        socket,
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         encoded.len()
     )?;
-    stream.write_all(&encoded)?;
-    stream.flush()?;
+    socket.write_all(&encoded)?;
+    socket.flush()?;
     Ok(())
 }
 
@@ -838,13 +1497,21 @@ fn read_http_body(stream: &mut TcpStream) -> AnyResult<Vec<u8>> {
 }
 
 fn post_http(address: SocketAddr, request: &Request) -> AnyResult<Response> {
+    post_http_json(address, "/v2/query", request)
+}
+
+fn post_http_json<T: Serialize, R: DeserializeOwned>(
+    address: SocketAddr,
+    path: &str,
+    request: &T,
+) -> AnyResult<R> {
     let body = serde_json::to_vec(request)?;
     let mut stream = TcpStream::connect(address)?;
     stream.set_read_timeout(Some(Duration::from_secs(25)))?;
     stream.set_write_timeout(Some(Duration::from_secs(25)))?;
     write!(
         stream,
-        "POST /v2/query HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(&body)?;
