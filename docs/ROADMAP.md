@@ -167,7 +167,14 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#207](https://github.com/worktools/unionid/issues/207) | [质量] 当前 format-6 高层应用旅程 | P0 | [#206](https://github.com/worktools/unionid/issues/206)；[验收说明](CURRENT-DESIGN-VALIDATION.md) |
 | [#208](https://github.com/worktools/unionid/issues/208) | [性能] embedded/TCP/HTTP 混合服务负载 | P1 | [#207](https://github.com/worktools/unionid/issues/207)；[#213](https://github.com/worktools/unionid/issues/213) → [#215](https://github.com/worktools/unionid/issues/215) → [#216](https://github.com/worktools/unionid/issues/216) |
 | [#216](https://github.com/worktools/unionid/issues/216) | [性能] 慢 stream、取消与 writer 隔离 | P1 | [#215](https://github.com/worktools/unionid/issues/215)；[#208](https://github.com/worktools/unionid/issues/208) 的收口切片 |
-| [#209](https://github.com/worktools/unionid/issues/209) | [性能] format-6 长期 churn 与 reclaim | P1 | [#207](https://github.com/worktools/unionid/issues/207) |
+| [#209](https://github.com/worktools/unionid/issues/209) | [性能] format-6 长期 churn 与 reclaim | 已完成 | [#207](https://github.com/worktools/unionid/issues/207) |
+| [#229](https://github.com/worktools/unionid/issues/229) | [质量] 保存 10k/100k 长期 churn 证据与结论 | 已完成 | [#209](https://github.com/worktools/unionid/issues/209)、[#225](https://github.com/worktools/unionid/issues/225) |
+
+### M9 证据产生的后续任务
+
+| Issue | 任务 | 优先级 | 推进依据 |
+| --- | --- | --- | --- |
+| [#230](https://github.com/worktools/unionid/issues/230) | [存储] 设计安全的离线文件压缩 | P1 | #229 观察到 reclaim 后的 redb 文件高水位；独立设计，不反向阻塞 M9 证据验收 |
 
 ### 独立 P2 探索
 
@@ -183,7 +190,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-M0–M8 已完成。#186 以真实接口矩阵和 10k/100k open/query/write/check/shadow-migration 原始样本完成 M7 复验，见 [验收记录](benchmarks/m7-acceptance-2026-09-10.md)；#198–#202 完成版本契约、双平台候选验收与 `v0.2.0` GitHub Actions 发布。当前按 [M9 #210](https://github.com/worktools/unionid/issues/210) 的 #206 → #207 → (#208、#209) 推进，只验证当前设计下从零建库的完整应用旅程、混合服务负载和长期存储 churn，不扩展旧版本兼容矩阵。
+M0–M8 已完成。#186 以真实接口矩阵和 10k/100k open/query/write/check/shadow-migration 原始样本完成 M7 复验，见 [验收记录](benchmarks/m7-acceptance-2026-09-10.md)；#198–#202 完成版本契约、双平台候选验收与 `v0.2.0` GitHub Actions 发布。M9 的应用旅程与[混合服务负载](benchmarks/service-load-2026-09-10.md)已经保留证据；#209/#229 的[长期 churn 记录](benchmarks/churn-2026-09-10.md)补齐固定 10k/100k 写入、三代 migration、中断恢复与 reclaim 后文件高水位。阶段状态仍以 [M9 #210](https://github.com/worktools/unionid/issues/210) 为准，不扩展旧版本兼容矩阵。
 
 ## 维护约定
 

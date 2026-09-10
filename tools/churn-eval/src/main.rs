@@ -19,6 +19,7 @@ const MIN_ROWS: usize = 12;
 const MAX_ROWS: usize = 1_000_000;
 const MAX_ROUNDS: usize = 10_000;
 const MAINTENANCE_BATCH_ROWS: usize = 1_024;
+const VALIDATION_CHUNK_ROWS: usize = 10_000;
 
 const SCHEMA: &str = r#"type Tree =
   Leaf text
@@ -772,18 +773,55 @@ fn validate_state(
     engine: &mut Engine,
     reference: &BTreeMap<i64, ExpectedEntry>,
 ) -> AnyResult<ValidatedState> {
-    let response = engine.execute("from entries\nsort id");
-    require_ok(&response, "read all entries")?;
-    if response.rows.len() != reference.len() {
-        return Err(format!(
-            "expected {} rows, received {}",
-            reference.len(),
-            response.rows.len()
-        )
-        .into());
+    let mut expected_rows = reference.values();
+    let mut row_count = 0usize;
+    // This is the exact compact JSON array size without retaining a second full row set.
+    let mut logical_row_bytes = 2usize;
+    let mut result_schema: Option<SchemaInfo> = None;
+    let upper_bounds = reference
+        .keys()
+        .copied()
+        .skip(VALIDATION_CHUNK_ROWS)
+        .step_by(VALIDATION_CHUNK_ROWS)
+        .collect::<Vec<_>>();
+    let mut lower_bound = None;
+    for upper_bound in upper_bounds.into_iter().map(Some).chain([None]) {
+        let filter = match (lower_bound, upper_bound) {
+            (None, None) => String::new(),
+            (None, Some(upper)) => format!("\nfilter id < {upper}"),
+            (Some(lower), None) => format!("\nfilter id >= {lower}"),
+            (Some(lower), Some(upper)) => {
+                format!("\nfilter id >= {lower} and id < {upper}")
+            }
+        };
+        let response = engine.execute(&format!("from entries{filter}\nsort id"));
+        require_ok(&response, "read entry validation chunk")?;
+        let schema = response
+            .schema
+            .as_ref()
+            .ok_or("validation query response has no schema identity")?;
+        if let Some(first_schema) = &result_schema {
+            if first_schema != schema {
+                return Err("schema identity changed during chunked validation".into());
+            }
+        } else {
+            result_schema = Some(schema.clone());
+        }
+        for row in &response.rows {
+            let expected = expected_rows
+                .next()
+                .ok_or("validation query returned more rows than the reference model")?;
+            validate_row(row, expected)?;
+            if row_count > 0 {
+                logical_row_bytes += 1;
+            }
+            logical_row_bytes += serde_json::to_vec(row)?.len();
+            row_count += 1;
+        }
+        lower_bound = upper_bound;
     }
-    for (row, expected) in response.rows.iter().zip(reference.values()) {
-        validate_row(row, expected)?;
+    if row_count != reference.len() || expected_rows.next().is_some() {
+        return Err(format!("expected {} rows, received {row_count}", reference.len()).into());
     }
 
     let mut revisions = BTreeMap::<i64, BTreeSet<i64>>::new();
@@ -837,11 +875,9 @@ fn validate_state(
     if actual != expected_ids {
         return Err("ADT equality index differs from the reference model".into());
     }
-    let schema = response
-        .schema
-        .ok_or("query response has no schema identity")?;
+    let schema = result_schema.ok_or("validation query returned no schema identity")?;
     Ok(ValidatedState {
-        logical_row_bytes: serde_json::to_vec(&response.rows)?.len(),
+        logical_row_bytes,
         schema_revision: schema.revision,
         schema_hash: schema.hash,
         reference_digest: reference_digest(reference)?,
