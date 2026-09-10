@@ -90,6 +90,7 @@
 
 - 至少保证 `cargo check` 通过。
 - 当前同时运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 和 `cargo test`。
+- 普通 PR 与 main 合并后的 GitHub Actions 只运行 Ubuntu 快速检查；不要为日常变更启用 macOS job。完整 Ubuntu/macOS evaluator、示例、打包与验收仅在发版前通过 release workflow 运行一次。
 - 集成测试使用隔离临时目录与动态 TCP 端口；不要访问开发者已有数据库。
 - 手工验证：
   1. 启动 `server`
