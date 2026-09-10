@@ -79,6 +79,7 @@
 - stream protocol version 1 使用独立 query/cancel envelope 和 accepted/schema/row/complete/error NDJSON frame；TCP 与 HTTP todolist 共用最多 8 帧/16 MiB 的 producer、typed `WireValue` 和 operation registry。完整结果在进入 emitting 前释放 snapshot，partial stream 不提供隐式续传。
 - format-6 migration 可通过 `Engine::advance_migrations` 和 `migration advance --max-steps` 按已提交 maintenance action 确定性有界推进；普通 `apply` 保持一次完成，并可在 cutover 后重开时继续 reclaim。churn runner 用独立子进程覆盖 Building、Reclaimable 和再次恢复。
 - M9 长期 churn 已保存同一 release 二进制、固定 6 轮与 seed 的 10k/100k 原始 JSON；每轮重开、check、backup 并逐行核对参考模型，前三轮执行连续 migration。reclaim 后文件不再逐轮增长，但 redb 保留第一次 shadow migration 形成的约 46/745 MiB 文件高水位；100k evaluator peak RSS 约 1.80 GiB，继续作为已测试上限。完整结论见 `docs/benchmarks/churn-2026-09-10.md`。
+- RFC 0011 选择显式离线、原地的 redb 4.1 native compaction：保留全部 durable identity，前后运行完整检查，活跃 snapshot/unfinished maintenance 明确拒绝，内部多提交错误要求重开 repair/check；实现由 #233–#235 分层跟踪。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）

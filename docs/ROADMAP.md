@@ -174,7 +174,11 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 | Issue | 任务 | 优先级 | 推进依据 |
 | --- | --- | --- | --- |
-| [#230](https://github.com/worktools/unionid/issues/230) | [存储] 设计安全的离线文件压缩 | P1 | #229 观察到 reclaim 后的 redb 文件高水位；独立设计，不反向阻塞 M9 证据验收 |
+| [#230](https://github.com/worktools/unionid/issues/230) | [存储] 安全的离线文件压缩总览 | P1 | #229 观察到 reclaim 后的 redb 文件高水位；独立推进，不反向阻塞 M9 证据验收 |
+| [#232](https://github.com/worktools/unionid/issues/232) | [设计] 冻结 redb 原生 compaction 的离线契约 | 已完成 | [RFC 0011](rfc/0011-offline-redb-compaction.md)；#230 的首个切片 |
+| [#233](https://github.com/worktools/unionid/issues/233) | [存储] 实现保留身份的 redb 原生 compaction | P1 | #232 |
+| [#234](https://github.com/worktools/unionid/issues/234) | [体验] 增加 compact CLI 与机器可读报告 | P1 | #233 |
+| [#235](https://github.com/worktools/unionid/issues/235) | [质量] 验证中断恢复与 10k/100k 空间收益 | P1 | #234 |
 
 ### 独立 P2 探索
 
