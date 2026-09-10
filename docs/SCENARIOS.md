@@ -166,7 +166,7 @@ type Session =
   state SessionState
 ```
 
-高频操作是按 key get、原子替换、到期扫描和批量删除。主键读取已有语义，更新/删除和返回值归 #15，`At` 分支与当前时间参数归 #35/#22。unionid v0.1 不内置后台 TTL 时钟；调用方以显式参数发起清理，保证查询仍是确定的。
+高频操作是按 key get、原子替换、到期扫描和批量删除。主键读取已有语义，更新/删除和返回值归 #15，`At` 分支与当前时间参数归 #35/#22。unionid v0.2 不内置后台 TTL 时钟；调用方以显式参数发起清理，保证查询仍是确定的。
 
 功能开关可以把规则声明为 list of sum，例如 `User text | Group text | Percentage int`。按 key 读取整个 typed flag 很合适；固定规则值可用 `contains`，元素 predicate 可用 `any/all`，需要按不同 constructor 提取 payload 的复杂规则求值仍更适合在应用代码完成。
 
@@ -223,7 +223,7 @@ table payments Payment
 
 ## 功能覆盖与优先级
 
-| 应用需要 | 当前能力 | 缺口与任务 | v0.1 优先级 |
+| 应用需要 | 当前能力 | 缺口与任务 | v0.2 优先级 |
 | --- | --- | --- | --- |
 | 命名 sum/record/tuple/option/list 严格写入 | 已实现 | — | 已满足 |
 | 有限自递归 sum/record 值 | 已实现直接自引用、有限性检查、match、精确索引、migration 和持久恢复 | 互递归、用户泛型、任意深度递归查询延后 | #81，核心切片 |

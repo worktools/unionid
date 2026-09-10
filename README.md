@@ -114,7 +114,7 @@ returning {id, state}
 需要 Rust 1.94 或更高版本。Rust 1.94 or newer is required.
 
 ```bash
-cargo install unionid --version 0.1.0 --locked
+cargo install unionid --version 0.2.0 --locked
 git clone https://github.com/worktools/unionid.git
 cd unionid
 unionid run --file examples/tasks.uid
@@ -203,9 +203,9 @@ See runnable code in [`parameters.rs`](examples/parameters.rs). The complete HTT
 
 ## 当前边界 / Current boundaries
 
-v0.1.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。format-5 Legacy0 和 format-6 active generation 的 redb 普通打开、indexed/page read、full scan、完整 check 和 logical backup 已使用有界 row source：最新 100k 结构测量中 open 约 4 ms，冷查询只解码 1 行，open 与查询峰值约 8.42 MiB；完整 check 约 1.44 s／80.62 MiB。既有深层 migration 测量仍约 50 s／1.44 GiB，因此 schema/data migration 仍需按大操作规划。详见 [有界 full pipeline 记录](docs/benchmarks/bounded-full-pipeline-2026-09-09.md)与[完整工作负载记录](docs/benchmarks/workload-2026-09-09.md)。当前不提供内置认证、TLS、join、window 或分布式执行。
+v0.2.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。format-5 Legacy0 和 format-6 active generation 的普通 open、indexed/page read、融合 full pipeline、完整 check 与 logical backup 使用有界 row source。最新 100k M7 复验中 open p95 为 12.02 ms、主键查询 p95 为 24 µs、完整 check 为 1.54 s／96.33 MiB；完整 shadow migration p95 为 16.51 s／427.98 MiB，仍应按维护操作安排。详见 [M7 验收记录](docs/benchmarks/m7-acceptance-2026-09-10.md)。当前不提供内置认证、TLS、join、window 或分布式执行。
 
-v0.1.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound rather than the routine target. Ordinary format-5 Legacy0 and format-6 active-generation redb open, indexed/page reads, full scans, explicit checks, and logical backups use the bounded row source. The latest 100k structural run opened in about 4 ms, decoded one row for the cold lookup, and peaked near 8.42 MiB across open and lookup; full check took about 1.44 seconds and 80.62 MiB. The existing deep-migration measurement remains near 50 seconds and 1.44 GiB, so schema/data migration still needs large-operation planning. See the [bounded full-pipeline record](docs/benchmarks/bounded-full-pipeline-2026-09-09.md) and [full workload record](docs/benchmarks/workload-2026-09-09.md). Built-in authentication, TLS, joins, windows, and distributed execution are currently out of scope.
+v0.2.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound rather than the routine target. Ordinary format-5 Legacy0 and format-6 active-generation open, indexed/page reads, fused full pipelines, explicit checks, and logical backups use bounded row sources. In the final 100k M7 run, open p95 was 12.02 ms, primary-key query p95 was 24 µs, and full check took 1.54 seconds and 96.33 MiB. Complete shadow-migration p95 was 16.51 seconds with 427.98 MiB peak RSS, so it remains a planned maintenance operation. See the [M7 acceptance record](docs/benchmarks/m7-acceptance-2026-09-10.md). Built-in authentication, TLS, joins, windows, and distributed execution are currently out of scope.
 
 ## 文档 / Documentation
 
@@ -216,6 +216,7 @@ v0.1.0 targets a single machine, one database owner, and a comfortable working s
 | Rust、TCP 与 HTTP 数据协议 / Rust, TCP, and HTTP data protocol | [PROTOCOL.md](docs/PROTOCOL.md) · [HTTP.md](docs/HTTP.md) |
 | Schema 身份与 migration / Schema identity and migrations | [SCHEMA.md](docs/SCHEMA.md) · [MIGRATIONS.md](docs/MIGRATIONS.md) |
 | 持久化、备份与生产边界 / Storage, backup, and production boundaries | [STORAGE.md](docs/STORAGE.md) · [BACKUP.md](docs/BACKUP.md) · [SERVICE.md](docs/SERVICE.md) |
+| v0.2 版本契约与发布说明 / v0.2 contract and release notes | [contract.json](release/contract.json) · [RELEASE-v0.2.0.md](docs/RELEASE-v0.2.0.md) · [UPGRADING.md](docs/UPGRADING.md) |
 | 实际场景与后续计划 / Real scenarios and roadmap | [SCENARIOS.md](docs/SCENARIOS.md) · [ROADMAP.md](docs/ROADMAP.md) |
 | 实现与验证记录 / Implementation and validation history | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | 贡献者与 agent 约定 / Contributor and agent conventions | [Agents.md](Agents.md) |
