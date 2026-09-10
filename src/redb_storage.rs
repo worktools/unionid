@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use redb::{
-    Database as RedbDatabase, Durability, ReadableDatabase, ReadableTable, TableDefinition,
-    TableHandle,
+    CompactionError as RedbCompactionError, Database as RedbDatabase, Durability, ReadableDatabase,
+    ReadableTable, TableDefinition, TableHandle,
 };
 use sha2::{Digest, Sha256};
 
@@ -108,7 +108,15 @@ const MAINTENANCE_MAGIC: &[u8; 4] = b"UIDN";
 
 pub(crate) struct RedbStore {
     database: RedbDatabase,
+    path: PathBuf,
     committed: DurableHead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RedbCompaction {
+    pub(crate) changed: bool,
+    pub(crate) before_bytes: u64,
+    pub(crate) after_bytes: u64,
 }
 
 type RedbOpen = (
@@ -1105,11 +1113,14 @@ impl RedbStore {
         let fresh = std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0);
         let redb_started = Instant::now();
         let database = RedbDatabase::create(&path).map_err(open_error)?;
+        let path = std::fs::canonicalize(&path)
+            .map_err(|error| Error::new("E_IO", format!("resolve opened database: {error}")))?;
         let redb_open_micros = elapsed_micros(redb_started);
         let empty = Database::default();
         let initial = PreparedState::new(&empty, &ReceiptMap::new(), StorageLayout::production())?;
         let mut store = Self {
             database,
+            path,
             committed: DurableHead::from_prepared(&initial),
         };
         let bootstrap_started = Instant::now();
@@ -1172,6 +1183,46 @@ impl RedbStore {
     pub(crate) fn supports_bounded_row_mutation(&self) -> bool {
         self.committed.layout.format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
             && self.committed.catalog_canonical
+    }
+
+    pub(crate) fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
+        let before_bytes = std::fs::metadata(&self.path)
+            .map_err(|error| {
+                CommitFailure::Definite(Error::new(
+                    "E_IO",
+                    format!("read database size before compaction: {error}"),
+                ))
+            })?
+            .len();
+        let relocated = self.database.compact().map_err(|error| match error {
+            RedbCompactionError::PersistentSavepointExists
+            | RedbCompactionError::EphemeralSavepointExists
+            | RedbCompactionError::TransactionInProgress => CommitFailure::Definite(Error::new(
+                "E_BUSY",
+                format!("database compaction requires exclusive access: {error}"),
+            )),
+            RedbCompactionError::Storage(_) => CommitFailure::Uncertain(storage_error(
+                "compact redb database; reopen and run an integrity check before retrying",
+                error,
+            )),
+            _ => CommitFailure::Uncertain(storage_error(
+                "compact redb database; its result is unknown",
+                error,
+            )),
+        })?;
+        let after_bytes = std::fs::metadata(&self.path)
+            .map_err(|error| {
+                CommitFailure::Uncertain(Error::new(
+                    "E_IO",
+                    format!("read database size after compaction: {error}"),
+                ))
+            })?
+            .len();
+        Ok(RedbCompaction {
+            changed: relocated || before_bytes != after_bytes,
+            before_bytes,
+            after_bytes,
+        })
     }
 
     pub(crate) fn committed_view(
@@ -2380,10 +2431,16 @@ impl RedbStore {
     ) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
         let total_started = Instant::now();
         let backend_started = Instant::now();
-        let backend_clean = self
-            .database
-            .check_integrity()
-            .map_err(|error| storage_error("check redb integrity", error))?;
+        let backend_clean = self.database.check_integrity().map_err(|error| {
+            if matches!(error, redb::DatabaseError::TransactionInProgress) {
+                Error::new(
+                    "E_BUSY",
+                    "redb integrity maintenance requires all read snapshots to be released",
+                )
+            } else {
+                storage_error("check redb integrity", error)
+            }
+        })?;
         let backend_micros = elapsed_micros(backend_started);
         if self.committed.layout.format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
             let logical_started = Instant::now();

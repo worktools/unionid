@@ -40,7 +40,9 @@ pub use db::{
     QueryAccessPlan, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind, SchemaInfo,
     TypedPage, UpsertAction,
 };
-pub use engine::{Engine, MutationProfile, PreparedQuery, StorageIntegrity, StorageUpgrade};
+pub use engine::{
+    Engine, MutationProfile, PreparedQuery, StorageCompaction, StorageIntegrity, StorageUpgrade,
+};
 pub use error::{Error, Result, Span};
 pub use formatter::format_source;
 pub use idempotency::{
