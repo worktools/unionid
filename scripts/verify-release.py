@@ -60,6 +60,16 @@ def main():
         raise RuntimeError("release checksum mismatch")
 
     contract = json.loads(CONTRACT_PATH.read_text())
+    expected_contract = {
+        "contract_schema",
+        "software_version",
+        "minimum_rust_version",
+        "redb_version",
+        "capabilities",
+    }
+    if set(contract) != expected_contract or contract["contract_schema"] != 1:
+        raise RuntimeError("unsupported or malformed trusted release contract")
+    capabilities = contract["capabilities"]
 
     with tempfile.TemporaryDirectory(prefix="unionid-release-") as temporary:
         temporary = pathlib.Path(temporary)
@@ -75,11 +85,30 @@ def main():
             archive.extractall(temporary, filter="data")
         root = temporary / roots.pop()
         release = json.loads((root / "RELEASE.json").read_text())
-        release_capabilities = {key: release.get(key) for key in contract}
-        if release_capabilities != contract:
+        if release["name"] != "unionid":
+            raise RuntimeError("unexpected release name")
+        expected_root = f"unionid-v{release['version']}-{release['target']}"
+        if root.name != expected_root:
+            raise RuntimeError("archive root does not match release version and target")
+        packaged_contract = json.loads((root / "release" / "contract.json").read_text())
+        if packaged_contract != contract:
+            raise RuntimeError("packaged release contract does not match the trusted source contract")
+        if release["version"] != contract["software_version"]:
+            raise RuntimeError("release version does not match the release contract")
+        if release["release_contract_schema"] != contract["contract_schema"]:
+            raise RuntimeError("RELEASE.json contract schema does not match the release contract")
+        if release["minimum_rust_version"] != contract["minimum_rust_version"]:
+            raise RuntimeError("RELEASE.json Rust version does not match the release contract")
+        if release["redb"] != contract["redb_version"]:
+            raise RuntimeError("RELEASE.json redb version does not match the release contract")
+        expected_release_notes = f"docs/RELEASE-v{release['version']}.md"
+        if release["release_notes"] != expected_release_notes:
+            raise RuntimeError("RELEASE.json does not select version-specific release notes")
+        release_capabilities = {key: release.get(key) for key in capabilities}
+        if release_capabilities != capabilities:
             raise RuntimeError(
                 f"release manifest does not match {CONTRACT_PATH.relative_to(ROOT)}: "
-                f"expected {contract}, got {release_capabilities}"
+                f"expected {capabilities}, got {release_capabilities}"
             )
         executable = "unionid.exe" if "windows" in release["target"] else "unionid"
         binary = root / "bin" / executable
@@ -89,9 +118,9 @@ def main():
             )
         )
         binary_capabilities = reported_capabilities(binary_report)
-        if binary_capabilities != contract:
+        if binary_capabilities != capabilities:
             raise RuntimeError(
-                f"release binary capability mismatch: expected {contract}, "
+                f"release binary capability mismatch: expected {capabilities}, "
                 f"got {binary_capabilities}"
             )
         if binary_report["software_version"] != release["version"]:
@@ -106,7 +135,8 @@ def main():
             root / "docs" / "MIGRATIONS.md",
             root / "docs" / "PROTOCOL.md",
             root / "docs" / "UPGRADING.md",
-            root / "docs" / "RELEASE-v0.1.0.md",
+            root / release["release_notes"],
+            root / "release" / "contract.json",
             root / "examples" / "tasks.uid",
             root / "examples" / "todolist.rs",
             root / "tutorial" / "validate.py",

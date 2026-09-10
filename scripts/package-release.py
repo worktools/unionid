@@ -60,11 +60,33 @@ def main():
 
     cargo = (ROOT / "Cargo.toml").read_text()
     version = re.search(r'^version = "([^"]+)"$', cargo, re.MULTILINE).group(1)
+    minimum_rust = re.search(r'^rust-version = "([^"]+)"$', cargo, re.MULTILINE).group(1)
     redb = re.search(r'^redb = "=([^"]+)"$', cargo, re.MULTILINE).group(1)
     if args.expect_version and version != args.expect_version:
         raise RuntimeError(
             f"Cargo version {version} does not match requested release {args.expect_version}"
         )
+    contract = json.loads(CONTRACT_PATH.read_text())
+    expected_contract = {
+        "contract_schema",
+        "software_version",
+        "minimum_rust_version",
+        "redb_version",
+        "capabilities",
+    }
+    if set(contract) != expected_contract:
+        raise RuntimeError(f"unexpected keys in {CONTRACT_PATH.relative_to(ROOT)}")
+    if contract["contract_schema"] != 1:
+        raise RuntimeError("unsupported release contract schema")
+    if contract["software_version"] != version:
+        raise RuntimeError("release contract version does not match Cargo.toml")
+    if contract["minimum_rust_version"] != minimum_rust:
+        raise RuntimeError("release contract Rust version does not match Cargo.toml")
+    if contract["redb_version"] != redb:
+        raise RuntimeError("release contract redb version does not match Cargo.toml")
+    release_notes = ROOT / "docs" / f"RELEASE-v{version}.md"
+    if not release_notes.is_file():
+        raise RuntimeError(f"version-specific release notes not found: {release_notes}")
     host = next(
         line.split(":", 1)[1].strip()
         for line in command("rustc", "-vV").splitlines()
@@ -91,17 +113,17 @@ def main():
     if binary_version["target"] != target:
         raise RuntimeError("release binary target does not match the requested target")
     capabilities = reported_capabilities(binary_version)
-    contract = json.loads(CONTRACT_PATH.read_text())
-    if capabilities != contract:
+    if capabilities != contract["capabilities"]:
         raise RuntimeError(
             f"release binary does not match {CONTRACT_PATH.relative_to(ROOT)}: "
-            f"expected {contract}, got {capabilities}"
+            f"expected {contract['capabilities']}, got {capabilities}"
         )
 
     package = f"unionid-v{version}-{target}"
     files = {
         f"{package}/bin/{executable}": (binary.read_bytes(), 0o755),
         f"{package}/README.md": ((ROOT / "README.md").read_bytes(), 0o644),
+        f"{package}/release/contract.json": (CONTRACT_PATH.read_bytes(), 0o644),
         f"{package}/tutorial/validate.py": ((ROOT / "scripts/validate-tutorial.py").read_bytes(), 0o755),
     }
     for source in sorted((ROOT / "docs").rglob("*")):
@@ -117,6 +139,9 @@ def main():
     release = {
         "name": "unionid",
         "version": version,
+        "release_contract_schema": contract["contract_schema"],
+        "release_notes": f"docs/{release_notes.name}",
+        "minimum_rust_version": minimum_rust,
         "target": target,
         "rust_toolchain": command("rustc", "--version"),
         "redb": redb,

@@ -152,8 +152,8 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | Issue | 任务 | 优先级 | 前置依赖 |
 | --- | --- | --- | --- |
 | [#202](https://github.com/worktools/unionid/issues/202) | [路线图] M8 总览与阶段验收 | P0 | M7 完成 |
-| [#198](https://github.com/worktools/unionid/issues/198) | [兼容] 真实 v0.1 数据升级到 format 6 | P0 | 无；首个实现切片 |
-| [#199](https://github.com/worktools/unionid/issues/199) | [发布] 冻结 v0.2 版本契约与用户文档 | P0 | [#198](https://github.com/worktools/unionid/issues/198) |
+| [#198](https://github.com/worktools/unionid/issues/198) | [兼容] 真实 v0.1 数据升级到 format 6 | 已完成 | 无；首个实现切片 |
+| [#199](https://github.com/worktools/unionid/issues/199) | [发布] 冻结 v0.2 版本契约与用户文档 | 进行中 | [#198](https://github.com/worktools/unionid/issues/198) |
 | [#200](https://github.com/worktools/unionid/issues/200) | [质量] v0.2 双平台产物与接口旅程 | P0 | [#199](https://github.com/worktools/unionid/issues/199) |
 | [#201](https://github.com/worktools/unionid/issues/201) | [发布] 公开 v0.2.0 crate 与原生产物 | P0 | [#200](https://github.com/worktools/unionid/issues/200)；具体候选需明确授权 |
 

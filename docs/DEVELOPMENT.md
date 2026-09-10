@@ -40,6 +40,7 @@
 - macOS/Linux 子进程通过 OS `RLIMIT_FSIZE` 强制真实 redb 文件增长失败；Engine 按失败点返回确定中止或结果不确定，父进程重开并验证 typed row、索引、schema、ledger 与完整性只处于完整旧／新状态。
 - `tools/recovery-eval` 在独立进程测量完整 ADT 工作集的 open/check 与 peak RSS；本机三次中位数为 10k 行 66/78 ms、52.67/81.48 MiB，100k 行 653/741 ms、459.28/745.84 MiB。CI 在 macOS/Linux 跑 100 行 smoke，完整环境与容量解释见恢复 benchmark 记录。
 - 公开 v0.1.0 ARM64 产物生成的 format-1 redb 与 logical-backup 夹具固定在 `tests/fixtures/v0.1.0`，并记录 release/archive/fixture SHA-256。跨版本测试只升级临时副本，验证 cursor identity 兼容归一、显式 4→5→6、schema/ledger/typed rows、索引、mutation、protocol v1/v2 和双向 backup/restore；该旅程发现并修复了旧库缺少 format-6 maintenance table 时 upgrade/status 错误访问的问题。
+- v0.2.0 使用源码控制的 `release/contract.json` 冻结软件、最低 Rust、redb、version-report schema、storage/backup/codec、protocol 与 stream 版本。打包会核对 Cargo、二进制报告和 contract，将 contract 与版本对应 release notes 收入原生包；验证器再使用包外可信 contract 和 SHA-256 检查包内 contract、`RELEASE.json`、二进制与空目录教程，tag workflow 不再固定复用 v0.1 release notes。
 - `tests/release_scenarios.rs` 从隔离临时目录驱动真实 CLI 子进程，覆盖任务条件状态转换、深层命名 ADT 配置迁移和 session key 生命周期；每条链路均跨重启执行 migration、check、backup/restore，并比较 schema identity、ledger、typed rows 与 explain。场景暴露并修复了 migration transform 递归展开嵌套命名 record、导致 `old.retry` 丢失类型身份的问题。
 - `tools/workload-eval` 使用新数据库副本和 release 子进程保留原始样本，分别测量 open、primary/secondary lookup、full scan、复合 range/order、前后向 page seek、条件 update、upsert、100-row batch 与深层 migration；每个 query 先断言结构化访问计划，每个子进程在计时外运行完整性检查。M6 实测中，10k/100k 单行 write p95 都约 10 ms，100k 有序访问保持微秒级；但完整 open p95 约 5.6 s，深层 migration p95 约 49.9 s、peak RSS 约 1.44 GiB。方法和完整样本见 [M6 工作负载记录](benchmarks/workload-2026-09-09.md)。
 - `check --db` 调用 redb `check_integrity`，再重新加载并验证 unionid 逻辑状态；无效数据库文件、未知 codec 版本、索引不一致和跨进程占用都有结构化诊断。
@@ -51,7 +52,7 @@
 - 以任务队列、嵌套配置、事件收件箱、离线同步和 session/cache 推演 ADT 与日常操作，形成 [实际场景与查询覆盖矩阵](SCENARIOS.md)；ADT 派生和集合查询分别拆为 #35/#36。
 - 查询参考明确记录当前 grammar、stage schema、执行顺序、match 规则、错误类别和已实现/计划边界；任务、配置、事件三个示例都由语言测试执行。
 - 原子脚本、可读 CLI 输出、JSON 输出、文件/stdin、多行 REPL、正确退出码及 EOF 处理。公开 `input_status` 以 parser 状态区分 complete/incomplete/invalid；本地与 TCP REPL 共用 ready/continuation 状态机，空行和 EOF 不会误提交未完成脚本。
-- 覆盖当前 v0.1 AST 的规范 formatter 与 `fmt --check` 已接入；类型、DML、migration、query/explain、pattern/value 和表达式按固定布局及 precedence 输出，并验证幂等、执行结果和 schema identity round-trip。
+- 覆盖当前 v0.2 AST 的规范 formatter 与 `fmt --check` 已接入；类型、DML、migration、query/explain、pattern/value 和表达式按固定布局及 precedence 输出，并验证幂等、执行结果和 schema identity round-trip。
 - REPL 使用 parser 状态驱动多行输入，并增加关键字／catalog Tab 补全与版本化 JSON Lines 历史。历史默认排除 DDL/DML/migration 和含注释、文本／数字字面量的输入；损坏或超限文件会禁用本次持久化且保持原文件。`.schema`、`.tables`、`.types`、`.storage` 共用 Engine introspection，在 memory、redb 和 version 1 TCP 下保持一致。
 - 修复大整数、浮点零值与 enum 负载的索引/扫描一致性；深层索引键按结构编码，避免重复转义造成指数增长；未知字段在空表上也报错。
 - 用隔离的临时目录、动态 TCP 端口和子进程建立测试；增加 macOS/Linux 的 CI 配置。

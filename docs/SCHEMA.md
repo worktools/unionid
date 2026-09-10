@@ -1,6 +1,6 @@
 # Schema 身份、版本与演进契约
 
-状态：v0.1 契约，2026-09-07。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据、[版本化 ADT value codec](CODEC.md)、[显式 schema migration 与版本化 runner](MIGRATIONS.md)，以及[声明式 schema diff](SCHEMA-DIFF.md)。
+状态：v0.2 契约，2026-09-10。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据、[版本化 ADT value codec](CODEC.md)、[显式 schema migration 与版本化 runner](MIGRATIONS.md)，以及[声明式 schema diff](SCHEMA-DIFF.md)。
 
 存储格式版本、语言／协议版本与应用 schema revision 是三个独立概念：升级 unionid 二进制不自动修改应用 schema，读取目标 schema 文件也不会隐式迁移已有数据。
 
@@ -51,7 +51,7 @@ typed plan、prepared query 和长期连接在绑定时记录 revision 与 hash�
 
 “已有数据仍可解释”与“旧客户端不需要改动”不是同一件事。migration plan 必须分别报告数据安全、查询／客户端兼容和索引影响。
 
-| 变化 | 已有数据 | 查询／客户端 | v0.1 要求 |
+| 变化 | 已有数据 | 查询／客户端 | v0.2 要求 |
 | --- | --- | --- | --- |
 | 新增有默认值的字段 | 可回填 | 读取旧投影通常兼容 | 原子回填并保留其他 ID |
 | 新增 `option T` 字段 | 仍需明确值 | 读取旧投影通常兼容 | 显式默认 `None`，不把遗漏当作 None |

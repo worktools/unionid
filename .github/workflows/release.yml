@@ -75,7 +75,7 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v3
         with:
-          body_path: docs/RELEASE-v0.1.0.md
+          body_path: docs/RELEASE-${{ github.ref_name }}.md
           files: |
             dist/*.tar.gz
             dist/*.sha256

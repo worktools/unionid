@@ -1,4 +1,4 @@
-# v0.1 端到端发布验收
+# v0.2 端到端发布验收
 
 ## 核心正确性场景
 
@@ -24,11 +24,11 @@ cargo test --locked --test release_scenarios
 
 这些场景验证应用进程边界上的查询、DML、schema/data migration、索引重建、ledger 和 backup/restore 一致性。提交前／后退出、真实文件增长失败及 open/check 成本由 #13/#14 的存储测试和[恢复成本记录](benchmarks/recovery-2026-09-07.md)提供。
 
-它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。1 万／10 万行的 query、write 与 migration p50/p95 由 #75 的[工作负载成本记录](benchmarks/workload-2026-09-07.md)单独测量；安装产物和五分钟教程由 #76 验收。
+它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。当前 1 万／10 万行的 query、write、check 与 shadow migration 数据见 [M7 验收记录](benchmarks/m7-acceptance-2026-09-10.md)；v0.2 双平台候选与包内教程由 [#200](https://github.com/worktools/unionid/issues/200) 做最终验收。
 
 ## crates.io 与 GitHub Release 发布
 
-正式版本只由 `.github/workflows/release.yml` 发布，不在开发者工作站运行 `cargo publish`。workflow 的手动非 tag 运行会在双平台原生包验证之外执行：
+正式版本只由 `.github/workflows/release.yml` 发布，不在开发者工作站运行 `cargo publish`。`release/contract.json` 独立冻结软件、最低 Rust、redb、version-report schema、storage/backup/codec、protocol 与 stream 版本；打包脚本要求它与 Cargo 和二进制一致，并将原文件收入压缩包。验证器再从包外可信副本对比包内 contract、`RELEASE.json` 和二进制报告。workflow 的手动非 tag 运行会在双平台原生包验证之外执行：
 
 ```bash
 cargo publish --dry-run --locked --registry crates-io
@@ -44,8 +44,8 @@ cargo publish --dry-run --locked --registry crates-io
 
 The source and restored databases are compared for canonical schema, revision/hash, immutable migration ledger, typed query results, and structured explain access paths. The nested configuration case also prevents migration bindings from erasing the identity of a named record contained inside an outer sum payload.
 
-Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. #75 records workload latency in the [workload cost report](benchmarks/workload-2026-09-07.md), and #76 owns installable release artifacts and the five-minute tutorial.
+Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. The [M7 acceptance record](benchmarks/m7-acceptance-2026-09-10.md) retains current 10k/100k query, write, check, and shadow-migration evidence; [#200](https://github.com/worktools/unionid/issues/200) owns final dual-platform candidate and packaged-tutorial acceptance.
 
-Official versions are published only by `.github/workflows/release.yml`; developers do not run `cargo publish` from a workstation. A manual non-tag run executes `cargo publish --dry-run --locked --registry crates-io` alongside the native artifact checks, then safely checks only that `CARGO_REGISTRY_TOKEN` is visible and non-empty without printing or using its contents. On a `v*` tag, the Ubuntu runner publishes with that secret; only after publication succeeds does the workflow assemble the macOS/Linux assets and create the GitHub Release. Missing credentials or any crate validation/publication failure blocks the GitHub Release job.
+Official versions are published only by `.github/workflows/release.yml`; developers do not run `cargo publish` from a workstation. The independent `release/contract.json` freezes software, minimum Rust, redb, version-report schema, storage/backup/codec, protocol, and stream versions. Packaging requires it to match Cargo and the binary, includes the source contract in the archive, and verification compares that copy plus `RELEASE.json` and the binary report against the trusted contract outside the package. A manual non-tag run executes `cargo publish --dry-run --locked --registry crates-io` alongside the native artifact checks, then safely checks only that `CARGO_REGISTRY_TOKEN` is visible and non-empty without printing or using its contents. On a `v*` tag, the Ubuntu runner publishes with that secret; only after publication succeeds does the workflow assemble the macOS/Linux assets and create the GitHub Release. Missing credentials or any crate validation/publication failure blocks the GitHub Release job. The GitHub Release body is selected from `docs/RELEASE-${tag}.md`, so a tag cannot silently reuse notes from an older version.
 
 The reference `command-pool` workflow uses `katyo/publish-crates@v2`. Because that action currently declares a Node 20 runtime, unionid preserves its GitHub Actions plus registry-token model but invokes Cargo directly on the pinned Rust 1.94.0 runner, avoiding the runtime warning removed in #105.

@@ -20,7 +20,7 @@ version 2 增加 UUID、date、timestamp、duration、decimal 和 bytes wire val
 
 | 字段 | 规则 |
 | --- | --- |
-| <code>version</code> | 支持 1 和开发中的 2；响应回显请求版本，其他值返回 <code>E_PROTOCOL_VERSION</code> |
+| <code>version</code> | 支持 1 和 2；响应回显请求版本，其他值返回 <code>E_PROTOCOL_VERSION</code> |
 | <code>request_id</code> | 客户端提供的 UTF-8 string，最多 1 KiB，响应原样返回；它只用于关联请求，不提供去重或 exactly-once |
 | <code>query</code> | 完整 unionid 源码，最多 1 MiB |
 | <code>introspect</code> | 可选的 `schema`／`tables`／`types`／`storage`；使用时 query 必须为空且不能携带 params/schema |
