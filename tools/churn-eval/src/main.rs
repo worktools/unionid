@@ -9,7 +9,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use unionid::{
     Engine, IdempotencyPruneOptions, IdempotencyStatus, MigrationFile, MigrationProfile,
-    QueryAccessKind, Value, backup,
+    MigrationStatus, QueryAccessKind, SchemaInfo, Value, backup,
 };
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
@@ -183,6 +183,7 @@ fn evaluate(
                 &mut engine,
                 &database_path,
                 &migrations[..=round],
+                reference.len(),
             )?)
         } else {
             None
@@ -217,17 +218,15 @@ fn evaluate(
         if reopened_receipts != receipt_status {
             return Err(format!("round {round}: reopen changed receipt boundaries").into());
         }
-        let introspection = engine.introspection();
-        if introspection.maintenance.is_some() {
-            return Err(format!("round {round}: reopen retained unfinished maintenance").into());
-        }
         let expected_migrations = migrations.len().min(round + 1);
-        if introspection.migration_count != expected_migrations
-            || (expected_migrations > 0
-                && introspection.migration_head.as_deref()
-                    != Some(migrations[expected_migrations - 1].id.as_str()))
-        {
-            return Err(format!("round {round}: reopen changed the migration ledger").into());
+        if expected_migrations > 0 {
+            let prefix = &migrations[..expected_migrations];
+            let status = engine.migration_status(prefix)?;
+            let schema = SchemaInfo {
+                revision: reopened.schema_revision,
+                hash: reopened.schema_hash.clone(),
+            };
+            validate_migration_state(&mut engine, prefix, &status, &schema, reference.len())?;
         }
 
         let database_bytes = fs::metadata(&database_path)?.len();
@@ -273,6 +272,7 @@ fn apply_migration_round(
     engine: &mut Engine,
     database_path: &Path,
     files: &[MigrationFile],
+    expected_rows: usize,
 ) -> AnyResult<MigrationRound> {
     let file = files.last().ok_or("migration prefix is empty")?;
     let plan = engine.plan_migrations(files)?;
@@ -286,6 +286,7 @@ fn apply_migration_round(
         )
         .into());
     }
+    let expected_schema = plan.target_schema.clone();
     let file_bytes_before = fs::metadata(database_path)?.len();
     let applied = engine.apply_migrations(files)?;
     if applied.applied != [file.id.clone()]
@@ -301,7 +302,8 @@ fn apply_migration_round(
         .ok_or("shadow migration has no phase profile")?;
     if !profile.reclaim_complete
         || profile.target_generation <= profile.source_generation
-        || profile.source_rows_seen != profile.target_rows_written
+        || profile.source_rows_seen != u64::try_from(expected_rows)?
+        || profile.target_rows_written != u64::try_from(expected_rows)?
     {
         return Err(format!(
             "migration {} did not complete generation reclamation",
@@ -310,13 +312,7 @@ fn apply_migration_round(
         .into());
     }
     let status = engine.migration_status(files)?;
-    if status.maintenance.is_some()
-        || status.applied.len() != files.len()
-        || !status.pending.is_empty()
-        || status.applied.last().map(|entry| entry.id.as_str()) != Some(file.id.as_str())
-    {
-        return Err(format!("migration {} left an inconsistent ledger", file.id).into());
-    }
+    validate_migration_state(engine, files, &status, &expected_schema, expected_rows)?;
     let file_bytes_after = fs::metadata(database_path)?.len();
     Ok(MigrationRound {
         id: file.id.clone(),
@@ -327,6 +323,93 @@ fn apply_migration_round(
         file_growth_bytes: i128::from(file_bytes_after) - i128::from(file_bytes_before),
         profile,
     })
+}
+
+fn validate_migration_state(
+    engine: &mut Engine,
+    files: &[MigrationFile],
+    status: &MigrationStatus,
+    expected_schema: &SchemaInfo,
+    expected_rows: usize,
+) -> AnyResult<()> {
+    if status.maintenance.is_some()
+        || status.schema != *expected_schema
+        || status.applied.len() != files.len()
+        || !status.pending.is_empty()
+    {
+        return Err("migration status has unexpected maintenance, schema, or cardinality".into());
+    }
+    for (position, (entry, file)) in status.applied.iter().zip(files).enumerate() {
+        if entry.id != file.id
+            || entry.parent != file.parent
+            || entry.checksum != file.checksum
+            || entry.schema_revision != u64::try_from(position + 2)?
+            || entry.applied_at_unix_ms == 0
+        {
+            return Err(format!("migration ledger entry {} differs from its file", file.id).into());
+        }
+    }
+    let Some(last) = status.applied.last() else {
+        return Err("migration ledger is empty".into());
+    };
+    if last.schema_revision != expected_schema.revision || last.schema_hash != expected_schema.hash
+    {
+        return Err("migration ledger head does not match schema identity".into());
+    }
+    let introspection = engine.introspection();
+    if introspection.schema != *expected_schema
+        || introspection.migration_count != files.len()
+        || introspection.migration_head.as_deref() != Some(last.id.as_str())
+        || introspection.maintenance.is_some()
+    {
+        return Err("migration introspection differs from the ledger".into());
+    }
+
+    let epoch_field = if files.len() == 1 {
+        "maintenance_epoch"
+    } else {
+        "epoch"
+    };
+    validate_default_index(engine, epoch_field, "0", expected_rows)?;
+    if files.len() >= 2 {
+        let old = engine.execute("from entries\nselect {maintenance_epoch}");
+        if old.ok || old.error.as_ref().map(|error| error.code.as_str()) != Some("E_FIELD") {
+            return Err("renamed maintenance_epoch field is still queryable".into());
+        }
+    }
+    if files.len() >= 3 {
+        validate_default_index(engine, "audit", "None", expected_rows)?;
+    }
+    Ok(())
+}
+
+fn validate_default_index(
+    engine: &mut Engine,
+    field: &str,
+    value: &str,
+    expected_rows: usize,
+) -> AnyResult<()> {
+    let condition = format!("{field} == {value}");
+    let explained = engine.execute(&format!("explain from entries\nfilter {condition}"));
+    require_ok(&explained, "explain migrated default index")?;
+    let plan = explained.plan.ok_or("migrated field explain has no plan")?;
+    if plan.access.kind != QueryAccessKind::SecondaryIndexLookup
+        || plan.access.index.as_deref() != Some(format!("entries.{field}").as_str())
+    {
+        return Err(format!("migrated field {field} did not retain its secondary index").into());
+    }
+    let rows = engine.execute(&format!(
+        "from entries\nfilter {condition}\naggregate\n  rows = count"
+    ));
+    require_ok(&rows, "query migrated default index")?;
+    let count = rows
+        .rows
+        .first()
+        .ok_or("migrated default query returned no aggregate")?;
+    if value_int(count.get("rows"), "rows")? != i64::try_from(expected_rows)? {
+        return Err(format!("migrated default {field} does not cover every row").into());
+    }
+    Ok(())
 }
 
 fn prepare(
