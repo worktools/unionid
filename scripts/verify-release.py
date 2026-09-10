@@ -101,6 +101,10 @@ def main():
             raise RuntimeError("RELEASE.json Rust version does not match the release contract")
         if release["redb"] != contract["redb_version"]:
             raise RuntimeError("RELEASE.json redb version does not match the release contract")
+        if not re.fullmatch(r"[0-9a-f]{40}", release["source_commit"]):
+            raise RuntimeError("RELEASE.json source commit is not canonical")
+        if release["source_dirty"] is not False:
+            raise RuntimeError("release archive was built from a dirty worktree")
         expected_release_notes = f"docs/RELEASE-v{release['version']}.md"
         if release["release_notes"] != expected_release_notes:
             raise RuntimeError("RELEASE.json does not select version-specific release notes")
