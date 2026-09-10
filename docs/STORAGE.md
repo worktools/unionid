@@ -35,6 +35,12 @@ cargo run -- check --db ./data/unionid.redb --format json
 
 `check` 先打开并验证 unionid catalog，再运行 redb `check_integrity`；该过程可能修复 redb 的 allocator/commit 元数据，随后从新的 committed view 做有界逻辑检查。检查逐 row 验证 type、RowId 和 watermark，为每个 row 点查所有期望 index entry，再逐 stored index entry 反查 row 并重算 exact key；cardinality 与相邻 unique key 检查发现缺失、多余或重复项。它不建立完整 typed `Database` 或派生 index set。输出中的 `backend_clean = true` 表示 redb 未发现需要修复的内部状态；`false` 表示修复已执行且修复后的逻辑状态通过验证。`profile` 报告 backend/logical 耗时、rows/index entries/bytes、point lookups、working peak 和 `bounded`。服务占用文件时，`check` 返回 `E_BUSY`。
 
+format-6 generation reclaim 删除旧 generation 的 catalog、row 和 index key，但 redb 已分配页面可能继续形成文件高水位。停止数据库 owner、保留 verified logical backup 并完成或 abort unfinished migration 后，可显式运行 `unionid compact --db app.redb`。它原地调用 redb native compaction，前后各运行完整物理／逻辑检查，并比较 schema、sequence、codec、stable ID/RowId 水位、ledger、receipt、generation、cursor identity 和 typed-row 摘要。成功不推进 sequence，不改变 cursor 或 receipt replay identity；没有可移动页面也是合法 no-op。
+
+compact 是同步离线维护，会完整遍历数据并执行多次内部同步提交。应按实际数据库副本预估时间、内存和磁盘余量。原生提交开始后 Ctrl-C 不能提供事务级取消保证；中断、storage error、post-check 或 view rebuild 失败后必须重开并运行 `check`。该入口不自动运行，也不属于 query、TCP、HTTP 或 ConcurrentEngine API。
+
+Format-6 generation reclamation removes obsolete logical keys but may leave redb's allocated file high-water mark intact. After stopping the owner, retaining a verified logical backup, and resolving migration maintenance, `unionid compact --db app.redb` performs explicit in-place native compaction. Complete checks and identity comparison surround the operation. It preserves schema, sequence, codecs, stable IDs and RowIds, ledger entries, receipts, generation and cursor identity, and typed rows. The operation is synchronous offline maintenance with full scans and multiple internal commits; after interruption or an uncertain result, reopen and run `check`.
+
 ## 提交语义
 
 一次 `Engine.execute`、一个 `run` 脚本或一个 TCP 请求构成一个原子批次。unionid 先解析并在候选状态中完成类型检查和执行，再把 catalog、rows、secondary indexes 和 meta 写入同一个 redb write transaction。带幂等 key 的 Engine mutation 还会在该事务中写入完整成功回执。事务使用 `Durability::Immediate` 与 two-phase commit；只有 `commit` 成功返回后，Engine 才同时发布候选状态和回执，并向客户端返回成功。

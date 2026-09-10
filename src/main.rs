@@ -21,6 +21,12 @@ enum Format {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CompactFormat {
+    Plain,
+    Json,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Print software, protocol, storage, codec, and target versions.
@@ -109,6 +115,13 @@ enum Command {
         db: PathBuf,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
+    },
+    /// Offline compact an existing redb file after complete pre/post checks.
+    Compact {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, value_enum, default_value = "plain")]
+        format: CompactFormat,
     },
     /// Explicitly upgrade all durable codecs in one transaction.
     Upgrade {
@@ -393,6 +406,11 @@ impl Args {
                 query_response: false,
                 integrity: true,
             },
+            Command::Compact { format, .. } => ErrorOutput {
+                json: matches!(format, CompactFormat::Json),
+                query_response: false,
+                integrity: false,
+            },
             Command::Version { format }
             | Command::Doctor { format, .. }
             | Command::Upgrade { format, .. }
@@ -606,6 +624,9 @@ fn run(args: Args) -> Result<(), String> {
             cli::format_source(&source, check)
         }
         Command::Check { db, format } => cli::check_redb(db, matches!(format, Format::Json)),
+        Command::Compact { db, format } => {
+            cli::compact_redb(db, matches!(format, CompactFormat::Json))
+        }
         Command::Upgrade { db, target, format } => {
             cli::upgrade_redb(db, target, matches!(format, Format::Json))
         }
@@ -828,6 +849,7 @@ fn classify_exit(code: &str, integrity: bool) -> i32 {
         | "E_INPUT"
         | "E_KEY"
         | "E_LIMIT"
+        | "E_MAINTENANCE_REQUIRED"
         | "E_MATCH"
         | "E_MIGRATION"
         | "E_OUTPUTS"
@@ -860,9 +882,22 @@ fn classify_exit(code: &str, integrity: bool) -> i32 {
         | "E_FORMAT_VERSION"
         | "E_IO"
         | "E_STORAGE"
+        | "E_STORAGE_REOPEN_REQUIRED"
         | "E_STORAGE_UPGRADE"
         | "E_STORAGE_UPGRADE_REQUIRED"
         | "E_TIME" => 5,
         _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_exit;
+
+    #[test]
+    fn compaction_state_errors_keep_stable_exit_classes() {
+        assert_eq!(classify_exit("E_MAINTENANCE_REQUIRED", false), 3);
+        assert_eq!(classify_exit("E_BUSY", false), 4);
+        assert_eq!(classify_exit("E_STORAGE_REOPEN_REQUIRED", false), 5);
     }
 }

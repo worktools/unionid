@@ -4,7 +4,7 @@ use std::process::Command;
 
 use common::TempDir;
 use serde_json::Value;
-use unionid::Engine;
+use unionid::{Engine, MigrationFile};
 
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -58,6 +58,119 @@ fn version_and_doctor_have_stable_machine_readable_shapes() {
     assert_eq!(doctor["ok"], true);
     assert!(doctor.get("database").is_none());
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+}
+
+#[test]
+fn compact_cli_reports_success_and_stable_state_errors() {
+    let help = run(&["compact", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--db <DB>"));
+    assert!(help.contains("[possible values: plain, json]"));
+
+    let dir = TempDir::new();
+    let database = dir.0.join("compact.redb");
+    {
+        let mut engine = Engine::open_redb(&database).unwrap();
+        assert!(
+            engine
+                .execute("create table items (id int)\ninsert items { id = 1 }")
+                .ok
+        );
+    }
+
+    let plain = run(&["compact", "--db", database.to_str().unwrap()]);
+    assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    assert!(plain.stderr.is_empty());
+    let plain = String::from_utf8(plain.stdout).unwrap();
+    for field in [
+        "redb compaction completed",
+        "before bytes ",
+        "after bytes ",
+        "reclaimed bytes ",
+        "schema revision 1",
+        "schema hash sha256:",
+        "sequence 1",
+        "storage format 6",
+    ] {
+        assert!(plain.contains(field), "missing {field:?} in {plain:?}");
+    }
+
+    let json_output = run(&[
+        "compact",
+        "--db",
+        database.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert!(json_output.status.success());
+    assert!(json_output.stderr.is_empty());
+    let json_output = json(&json_output);
+    assert_eq!(json_output["version"], 1);
+    assert!(json_output["changed"].is_boolean());
+    assert!(json_output["before_bytes"].is_u64());
+    assert!(json_output["after_bytes"].is_u64());
+    assert!(json_output["reclaimed_bytes"].is_u64());
+    assert_eq!(json_output["schema"]["revision"], 1);
+    assert_eq!(json_output["sequence"], 1);
+    assert_eq!(json_output["storage"]["format"], 6);
+    assert_eq!(json_output["identity_preserved"], true);
+
+    let missing = dir.0.join("missing.redb");
+    let missing_output = run(&[
+        "compact",
+        "--db",
+        missing.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(missing_output.status.code(), Some(2));
+    assert_eq!(json(&missing_output)["error"]["code"], "E_CONFIG");
+    assert!(!missing.exists());
+
+    let owner = Engine::open_redb(&database).unwrap();
+    let busy = run(&[
+        "compact",
+        "--db",
+        database.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(busy.status.code(), Some(4));
+    assert_eq!(json(&busy)["error"]["code"], "E_BUSY");
+    drop(owner);
+
+    let maintenance_database = dir.0.join("maintenance.redb");
+    {
+        let mut engine = Engine::open_redb(&maintenance_database).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "type Item =\n  id int\ntable items Item\n  key id\ninsert items { id = 1 }"
+                )
+                .ok
+        );
+        let migration =
+            MigrationFile::parse("migration m0001_label\n  add field Item.label text = \"\"\n")
+                .unwrap();
+        engine.advance_migrations(&[migration], 1).unwrap();
+    }
+    let maintenance = run(&[
+        "compact",
+        "--db",
+        maintenance_database.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert_eq!(maintenance.status.code(), Some(3));
+    assert_eq!(
+        json(&maintenance)["error"]["code"],
+        "E_MAINTENANCE_REQUIRED"
+    );
 }
 
 #[test]
