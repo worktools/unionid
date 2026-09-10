@@ -89,6 +89,7 @@ unionid migration new add_task_priority
 unionid migration diff --db app.redb --schema schema.uid --name add_task_priority
 unionid migration plan --db app.redb
 unionid migration apply --db app.redb
+unionid migration advance --db app.redb --max-steps 1
 unionid migration status --db app.redb
 unionid migration abort --db app.redb
 ```
@@ -105,11 +106,13 @@ migration m0002_add_task_priority
 
 `apply` 创建不存在的 redb 文件并逐文件推进。进程退出或确定的读错误会保留最后一个 durable checkpoint；使用同一文件再次运行 `apply` 会核对数据库身份、source/target schema、migration ID/parent/checksum 和 executor version，再从 checkpoint 后继续。任一身份不一致返回 `E_MAINTENANCE_CONFLICT`，不会覆盖 shadow 数据。转换、类型或约束错误会自动进入 abort cleanup；管理员也可以显式执行 `migration abort` 丢弃未切换的目标 generation。generation ID 单调分配，abort 后不会复用。
 
-嵌入式调用方可使用 `Engine::apply_migrations_until` 设置 deadline。timeout 或内部 cancellation 在批次边界返回 `E_TIMEOUT`／`E_CANCELLED` 并保留 Building checkpoint，不会被当作确定的数据错误自动清理。
+需要把长 migration 放入运维循环时，使用 `migration advance --max-steps N`。一个 step 对应一个已经成功提交的 generation start、row batch checkpoint、validation、cutover 或 reclaim batch；命令绝不会提交超过 N 个 step。JSON 输出是 `MigrationProgress`，包含本次 `committed_steps`、`complete`、本次切换的 migration，以及完整 `MigrationStatus`。使用完全相同的目录重复调用，直到 `complete = true`。因此进程调度、重启与故障注入可以依赖提交边界，不需要猜测毫秒耗时。嵌入式调用方使用 `Engine::advance_migrations(files, max_steps)` 获得相同语义；零 step 返回 `E_LIMIT`，非 format-6 redb 返回 `E_CONFIG`。
+
+`Engine::apply_migrations_until` 仍用于 deadline。cutover 前的 timeout 或内部 cancellation 在批次边界返回 `E_TIMEOUT`／`E_CANCELLED`，并保留 Building checkpoint，不会被当作确定的数据错误自动清理。cutover 已提交后，deadline 若在 cleanup 期间到达，调用会保留 Reclaimable manifest；再次 `apply` 或 `advance` 会先完成旧 generation 的 cleanup。普通 `apply` 仍一次推进到完成。
 
 `status` 展示完整已应用记录、待应用 ID，以及可选的 `maintenance`：phase、source/target generation、已读／已写 row 数、index entry 数、逻辑字节、更新时间和允许的下一步。`.storage` 与 version 1 introspection 返回同一维护信息。Building、Ready 或 Aborting 期间，旧 active generation 的查询和只读打开继续工作，普通 DDL/DML、receipt prune、storage upgrade 和另一条 migration 返回 `E_MAINTENANCE_REQUIRED`。Reclaimable 表示 cutover 已完成，只剩旧 generation 清理，不阻止普通写入。维护事务的 commit 若返回不确定结果，当前 Engine 禁止继续读写并要求重开，通过 `migration status` 判断是继续、清理还是已经切换。
 
-`plan`、`apply`、`status` 和 `abort` 都支持 `--format json`，可供脚本稳定解析。`abort` 是写操作，只适用于 redb format 6；只读实例返回 `E_READ_ONLY`。Building/Ready/Aborting 时它放弃并清理 target；Reclaimable 时只完成旧 source 的回收，已经切换的 migration 不会回滚。没有 maintenance 时执行 abort 是成功的幂等 no-op。
+`plan`、`apply`、`advance`、`status` 和 `abort` 都支持 `--format json`，可供脚本稳定解析。`abort` 是写操作，只适用于 redb format 6；只读实例返回 `E_READ_ONLY`。Building/Ready/Aborting 时它放弃并清理 target；Reclaimable 时只完成旧 source 的回收，已经切换的 migration 不会回滚。没有 maintenance 时执行 abort 是成功的幂等 no-op。
 
 已应用文件不可修改，也不能从目录删除。CRLF 与 LF 具有相同 checksum，其他注释、格式和内容变化都会被拒绝。文件名排序必须与 parent 链一致，重复 ID、缺少 parent、分叉或 ledger 与当前 schema hash 不一致都会返回 `E_MIGRATION` 或 `E_STORAGE`。ledger 非空后，普通 `run`、本地 CLI 或 TCP 不能直接执行 schema 变更；应用必须经过 runner，数据读写仍可照常使用。
 

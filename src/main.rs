@@ -217,6 +217,17 @@ enum MigrationCommand {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Commit a deterministic bounded number of format-6 migration steps.
+    Advance {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, default_value = "migrations")]
+        dir: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        max_steps: usize,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
     /// Show applied and pending migrations.
     Status {
         #[arg(long)]
@@ -399,6 +410,7 @@ impl Args {
                 command:
                     MigrationCommand::Plan { format, .. }
                     | MigrationCommand::Apply { format, .. }
+                    | MigrationCommand::Advance { format, .. }
                     | MigrationCommand::Status { format, .. }
                     | MigrationCommand::Abort { format, .. }
                     | MigrationCommand::Diff { format, .. },
@@ -609,6 +621,12 @@ fn run(args: Args) -> Result<(), String> {
             MigrationCommand::Apply { db, dir, format } => {
                 cli::migration_apply(db, dir, matches!(format, Format::Json))
             }
+            MigrationCommand::Advance {
+                db,
+                dir,
+                max_steps,
+                format,
+            } => cli::migration_advance(db, dir, max_steps, matches!(format, Format::Json)),
             MigrationCommand::Status { db, dir, format } => {
                 cli::migration_status(db, dir, matches!(format, Format::Json))
             }
