@@ -129,6 +129,35 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
     Ok(())
 }
 
+pub fn compact_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(), String> {
+    let report = Engine::compact_redb(path).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "redb compaction completed ({})\nbefore bytes {}\nafter bytes {}\nreclaimed bytes {}\nschema revision {}\nschema hash {}\nsequence {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance codecs {}/{}/{}/{}/{}/{}",
+            if report.changed { "changed" } else { "no-op" },
+            report.before_bytes,
+            report.after_bytes,
+            report.reclaimed_bytes,
+            report.schema.revision,
+            report.schema.hash,
+            report.sequence,
+            report.storage.format,
+            report.storage.catalog_codec,
+            report.storage.value_codec,
+            report.storage.index_key_codec,
+            report.storage.migration_codec,
+            report.storage.receipt_codec,
+            report.storage.maintenance_codec,
+        );
+    }
+    Ok(())
+}
+
 pub fn upgrade_redb(
     path: impl Into<std::path::PathBuf>,
     target: u32,

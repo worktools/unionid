@@ -33,6 +33,22 @@ unionid doctor --db app.redb --format json
 
 `doctor --db` 要求路径已经存在且是文件。为避免 redb 的打开恢复改变原文件，它只读取一个权限受限的临时字节副本；不会创建、修复、升级或锁定请求的数据库，退出时删除副本。应对静止数据库或一致备份运行它；若源文件在复制时仍有写入，诊断结果不应作为一致快照。需要证明原文件自身可完整打开时使用 `check --db`。
 
+## 离线文件压缩 / Offline file compaction
+
+先停止持有数据库的 server 或本地进程，并创建、验证逻辑备份。确认 `migration status` 没有 unfinished maintenance 后运行：
+
+```bash
+unionid backup --db app.redb --output before-compact.backup.json
+unionid compact --db app.redb
+unionid compact --db app.redb --format json
+```
+
+`compact` 对现有 redb 文件执行原地物理空间回收，并自动完成压缩前后完整检查和身份比较。plain 输出包含 changed/no-op、压缩前后与回收字节、schema、sequence、storage format 和 codecs；JSON 使用 version 1 `StorageCompaction`。命令本身就是执行授权，不再要求交互确认。数据库仍被占用时返回 `E_BUSY`，存在 migration generation 时返回 `E_MAINTENANCE_REQUIRED`，不存在的路径返回 `E_CONFIG` 且不会创建文件。
+
+该操作同步遍历完整数据多次，耗时随数据库增长，并需要 redb 搬页和同步提交所需的维护窗口与磁盘余量。generation reclaim 只删除旧逻辑 key，不保证文件缩小；`compact` 才处理底层页面。原生压缩开始内部提交后不能安全取消。若 Ctrl-C、进程退出、I/O 错误或 `E_STORAGE_REOPEN_REQUIRED` 使结果不确定，应重新打开并运行 `unionid check --db app.redb`，不能只凭文件变小判断成功。首版仅提供本地离线 CLI，不通过 TCP、HTTP、query language 或 ConcurrentEngine 暴露。
+
+Stop the server or other local owner first, retain a verified logical backup, and resolve every unfinished migration before running `compact`. The command compacts the existing redb file in place, performs complete checks and identity comparison before and after native compaction, and returns exact byte counts plus schema and storage identity. It may scan the full database several times and requires a maintenance window and disk headroom. Generation reclamation removes obsolete logical keys; physical compaction is the separate step that can reduce the file. After interruption or an uncertain storage result, reopen the database and run `check`; file-size reduction alone is not proof of success.
+
 ## JSON 错误与退出码
 
 支持 `--format json` 的非查询命令统一返回 version 1 错误 envelope，且只写 stdout：
