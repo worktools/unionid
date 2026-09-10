@@ -38,6 +38,8 @@ fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
 
 #[test]
 fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
+    const EXPECTED_FIRST_BATCH_ROWS: u64 = 1_024;
+
     let dir = TempDir::new();
     let database = dir.0.join("bounded-migration.redb");
     let migrations = dir.0.join("migrations");
@@ -62,6 +64,26 @@ fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
     let response = engine.execute(&source);
     assert!(response.ok, "{}", response.message);
     drop(engine);
+
+    let invalid = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "advance",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--max-steps",
+            "0",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    assert!(invalid.stderr.is_empty());
+    let invalid: serde_json::Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(invalid["error"]["code"], "E_LIMIT");
 
     let advance = |max_steps: &str| {
         let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -92,7 +114,7 @@ fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
     assert!(!first.complete);
     let building = first.status.maintenance.unwrap();
     assert_eq!(building.phase, MigrationMaintenancePhase::Building);
-    assert_eq!(building.source_rows_seen, 1_024);
+    assert_eq!(building.source_rows_seen, EXPECTED_FIRST_BATCH_ROWS);
 
     let second = advance("1");
     assert_eq!(second.committed_steps, 1);

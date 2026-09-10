@@ -2031,7 +2031,7 @@ impl Engine {
                         Ok(batch) => batch,
                         Err(error) => {
                             let error = migration_file_error(file, error);
-                            self.abort_after_deterministic_maintenance_failure();
+                            self.abort_after_deterministic_maintenance_failure(budget);
                             return Err(error);
                         }
                     };
@@ -2047,7 +2047,7 @@ impl Engine {
                             budget.record_commit();
                         }
                         Err(error) => {
-                            self.abort_after_nonrecoverable_maintenance_failure(&error);
+                            self.abort_after_nonrecoverable_maintenance_failure(&error, budget);
                             return Err(error);
                         }
                     }
@@ -2072,7 +2072,7 @@ impl Engine {
                     next
                 }
                 Err(error) => {
-                    self.abort_after_nonrecoverable_maintenance_failure(&error);
+                    self.abort_after_nonrecoverable_maintenance_failure(&error, budget);
                     return Err(error);
                 }
             };
@@ -2193,8 +2193,11 @@ impl Engine {
         }
     }
 
-    fn abort_after_deterministic_maintenance_failure(&mut self) {
-        if self.write_failed {
+    fn abort_after_deterministic_maintenance_failure(
+        &mut self,
+        budget: &mut MaintenanceStepBudget,
+    ) {
+        if self.write_failed || budget.exhausted() {
             return;
         }
         let Some(_) = self.durable.as_mut() else {
@@ -2206,7 +2209,8 @@ impl Engine {
             .expect("durable backend was checked")
             .begin_maintenance_abort();
         match begin {
-            Ok(_) => {}
+            Ok(Some(_)) => budget.record_commit(),
+            Ok(None) => return,
             Err(CommitFailure::Definite(_)) => return,
             Err(CommitFailure::Uncertain(_)) => {
                 self.durable = None;
@@ -2216,14 +2220,22 @@ impl Engine {
             }
         };
         loop {
+            if budget.exhausted() {
+                return;
+            }
             let result = self
                 .durable
                 .as_mut()
                 .expect("abort cleanup keeps the durable backend")
                 .reclaim_maintenance_step();
             match result {
-                Ok(true) | Err(CommitFailure::Definite(_)) => break,
-                Ok(false) => {}
+                Ok(complete) => {
+                    budget.record_commit();
+                    if complete {
+                        break;
+                    }
+                }
+                Err(CommitFailure::Definite(_)) => break,
                 Err(CommitFailure::Uncertain(_)) => {
                     self.durable = None;
                     self.write_failed = true;
@@ -2234,7 +2246,11 @@ impl Engine {
         }
     }
 
-    fn abort_after_nonrecoverable_maintenance_failure(&mut self, error: &Error) {
+    fn abort_after_nonrecoverable_maintenance_failure(
+        &mut self,
+        error: &Error,
+        budget: &mut MaintenanceStepBudget,
+    ) {
         if matches!(
             error.code.as_str(),
             "E_MAINTENANCE_CONFLICT"
@@ -2247,7 +2263,7 @@ impl Engine {
         ) {
             return;
         }
-        self.abort_after_deterministic_maintenance_failure();
+        self.abort_after_deterministic_maintenance_failure(budget);
     }
 
     fn commit_candidate(
@@ -2696,7 +2712,7 @@ fn migration_maintenance(info: MaintenanceInfo) -> MigrationMaintenance {
         ),
         MaintenanceState::Reclaimable => (
             MigrationMaintenancePhase::Reclaimable,
-            vec!["advance".to_owned(), "apply".to_owned()],
+            vec!["advance".to_owned(), "apply".to_owned(), "abort".to_owned()],
         ),
     };
     MigrationMaintenance {

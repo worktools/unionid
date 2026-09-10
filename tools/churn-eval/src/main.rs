@@ -18,6 +18,7 @@ type AnyResult<T> = Result<T, Box<dyn Error>>;
 const MIN_ROWS: usize = 12;
 const MAX_ROWS: usize = 1_000_000;
 const MAX_ROUNDS: usize = 10_000;
+const MAINTENANCE_BATCH_ROWS: usize = 1_024;
 
 const SCHEMA: &str = r#"type Tree =
   Leaf text
@@ -405,7 +406,7 @@ fn apply_interrupted_first_migration(
     if build.progress.committed_steps != 2
         || build.progress.complete
         || building.phase != MigrationMaintenancePhase::Building
-        || building.source_rows_seen != u64::try_from(expected_rows.min(1_024))?
+        || building.source_rows_seen != u64::try_from(expected_rows.min(MAINTENANCE_BATCH_ROWS))?
     {
         return Err("build child did not stop at the deterministic checkpoint".into());
     }
@@ -418,7 +419,7 @@ fn apply_interrupted_first_migration(
     }
     close_engine(engine);
 
-    let source_batches = expected_rows.div_ceil(1_024);
+    let source_batches = expected_rows.div_ceil(MAINTENANCE_BATCH_ROWS);
     let cutover_steps = source_batches.saturating_sub(1).saturating_add(2);
     let cutover = run_child_advance(database_path, files.len(), cutover_steps)?;
     let reclaimable = cutover
@@ -453,7 +454,7 @@ fn apply_interrupted_first_migration(
     if reclaim.progress.committed_steps != 1 {
         return Err("reclaim child did not commit exactly one bounded step".into());
     }
-    if expected_rows > 1_024
+    if expected_rows > MAINTENANCE_BATCH_ROWS
         && (reclaim.progress.complete
             || reclaim
                 .progress

@@ -410,6 +410,7 @@ impl Args {
                 command:
                     MigrationCommand::Plan { format, .. }
                     | MigrationCommand::Apply { format, .. }
+                    | MigrationCommand::Advance { format, .. }
                     | MigrationCommand::Status { format, .. }
                     | MigrationCommand::Abort { format, .. }
                     | MigrationCommand::Diff { format, .. },
