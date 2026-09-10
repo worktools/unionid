@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--target")
     parser.add_argument("--expect-version")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args()
 
     cargo = (ROOT / "Cargo.toml").read_text()
@@ -87,6 +88,10 @@ def main():
     release_notes = ROOT / "docs" / f"RELEASE-v{version}.md"
     if not release_notes.is_file():
         raise RuntimeError(f"version-specific release notes not found: {release_notes}")
+    source_commit = command("git", "rev-parse", "HEAD").lower()
+    source_dirty = bool(command("git", "status", "--short", "--untracked-files=normal"))
+    if source_dirty and not args.allow_dirty:
+        raise RuntimeError("release packaging requires a clean Git worktree")
     host = next(
         line.split(":", 1)[1].strip()
         for line in command("rustc", "-vV").splitlines()
@@ -142,6 +147,8 @@ def main():
         "release_contract_schema": contract["contract_schema"],
         "release_notes": f"docs/{release_notes.name}",
         "minimum_rust_version": minimum_rust,
+        "source_commit": source_commit,
+        "source_dirty": source_dirty,
         "target": target,
         "rust_toolchain": command("rustc", "--version"),
         "redb": redb,

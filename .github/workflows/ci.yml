@@ -6,10 +6,18 @@ jobs:
   rust:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            expected-target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            expected-target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Build the exact candidate recorded in the acceptance report. Pull
+          # request workflows otherwise check out GitHub's synthetic merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
@@ -43,3 +51,21 @@ jobs:
           digest="$(python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(next(pathlib.Path(sys.argv[1]).glob("*.tar.gz")).read_bytes()).hexdigest())' "${RUNNER_TEMP}/unionid-dist")"
           echo "sha256=${digest}" >> "${GITHUB_OUTPUT}"
       - run: python3 scripts/verify-release.py --dist "${RUNNER_TEMP}/unionid-dist" --expected-sha256 "${{ steps.release-digest.outputs.sha256 }}"
+      - name: Record release-candidate acceptance
+        shell: bash
+        run: |
+          python3 scripts/record-release-acceptance.py \
+            --dist "${RUNNER_TEMP}/unionid-dist" \
+            --expected-sha256 "${{ steps.release-digest.outputs.sha256 }}" \
+            --expected-target "${{ matrix.expected-target }}" \
+            --candidate "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --runner-os "${{ runner.os }}" \
+            --runner-arch "${{ runner.arch }}" \
+            --output "${RUNNER_TEMP}/unionid-v0.2.0-acceptance.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: unionid-v0.2.0-acceptance-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/unionid-v0.2.0-acceptance.json
+          if-no-files-found: error
+          retention-days: 90
