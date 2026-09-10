@@ -5,4 +5,5 @@
 /tools/workload-eval/target
 /tools/service-load-eval/target
 /tools/concurrency-eval/target
+/tools/churn-eval/target
 /dist
