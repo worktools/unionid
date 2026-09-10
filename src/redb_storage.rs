@@ -1226,6 +1226,9 @@ impl RedbStore {
     }
 
     pub(crate) fn maintenance_info(&self) -> Result<Option<MaintenanceInfo>> {
+        if self.committed.layout.format < PRODUCTION_STORAGE_FORMAT_VERSION {
+            return Ok(None);
+        }
         let transaction = self
             .database
             .begin_read()

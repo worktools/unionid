@@ -1,12 +1,12 @@
 # unionid 路线图
 
-规划日期：2026-09-09。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
+规划日期：2026-09-10。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[结构化查询语法 RFC](rfc/0005-structured-prql-query-syntax.md)收敛 PRQL 风格的 delimiter、field set、match expression 与 group inner pipeline；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
-v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0–M4 作为已完成历史保留。[M5 总览 #111](https://github.com/worktools/unionid/issues/111) 的核心范围也已完成。M6 的增量 mutation、typed ordered composite index、range/order/page seek 和 10k/100k 复验已合并；后续工作聚焦 [M7 总览 #177](https://github.com/worktools/unionid/issues/177) 的有界常驻状态与可恢复维护。#118 与 #120 保留为由真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
+v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release；M0–M7 均已完成并关闭。`main` 上 M5–M7 的生产边界、增量执行和可恢复维护尚未作为新版本发布，当前工作聚焦 [M8 总览 #202](https://github.com/worktools/unionid/issues/202)：先验证真实 v0.1 数据升级，再冻结和验收 v0.2。#118、#120 与 #192 保留为真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
 
 用户已明确语言方向：类型定义与查询都采用 PRQL 风格，不使用没有意义的语句末尾分号；花括号、圆括号、方括号和逗号在能明确结构、层级或 precedence 时正常使用。本轮草案采用 `field type`、`option text`／`list text`、结构化声明与换行 pipeline；具体布局和语句边界由 #2／#8 验证，不沿用 TypeScript 风格的密集字段注解或逐行 `|>`。
 
@@ -22,6 +22,7 @@ v0.1.0 已通过 GitHub Actions 发布 crate、原生包和 GitHub Release，M0�
 | [M5 · 生产边界与应用体验](https://github.com/worktools/unionid/milestone/6) | 只读边界、幂等写入、游标分页、生产标量、并发读快照与 CLI 诊断 | 核心风险有显式协议和故障测试，应用无需依赖隐式约定 |
 | [M6 · 增量执行与有序访问](https://github.com/worktools/unionid/milestone/7) | 增量 mutation 候选状态、typed ordered composite index、range/page seek 与容量复验 | 小写集工作量不随完整数据库复制增长，常见有序读取有可验证的有界访问路径 |
 | [M7 · 有界常驻状态与可恢复维护](https://github.com/worktools/unionid/milestone/8) | storage phase 证据、按需 typed row access、generation migration 与容量复验 | bounded read 不加载全表，维护失败只暴露完整旧/新 generation |
+| [M8 · v0.2 兼容收口与发布](https://github.com/worktools/unionid/milestone/9) | 真实 v0.1 升级、版本契约、双平台候选与发布 | v0.2 可升级、可校验，crate/CLI/协议/格式/文档版本一致 |
 
 P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力；P2 为后续语言探索。里程碑不填写未经验证的工期承诺。
 
@@ -136,15 +137,25 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 | Issue | 任务 | 优先级 | 前置依赖 |
 | --- | --- | --- | --- |
-| [#177](https://github.com/worktools/unionid/issues/177) | [路线图] M7 总览与阶段验收 | P0 | M6 容量证据 |
+| [#177](https://github.com/worktools/unionid/issues/177) | [路线图] M7 总览与阶段验收 | 已完成 | M6 容量证据 |
 | [#178](https://github.com/worktools/unionid/issues/178) | [质量] 分段观测 open 与 full-rebuild migration | 已合并 | [#166](https://github.com/worktools/unionid/issues/166) |
 | [#179](https://github.com/worktools/unionid/issues/179) | [设计] 冻结 bounded resident state 与 maintenance generation | 已合并 | [RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md)、[#178](https://github.com/worktools/unionid/issues/178) |
 | [#181](https://github.com/worktools/unionid/issues/181) | [核心] 统一 typed row source 与 committed view | 已合并 | [#179](https://github.com/worktools/unionid/issues/179) |
 | [#182](https://github.com/worktools/unionid/issues/182) | [存储] Legacy0 有界 redb read 与 row cache | 已合并 | [#181](https://github.com/worktools/unionid/issues/181) |
 | [#183](https://github.com/worktools/unionid/issues/183) | [执行] 有界 full pipeline、check 与 backup | 已合并 | [#182](https://github.com/worktools/unionid/issues/182) |
 | [#184](https://github.com/worktools/unionid/issues/184) | [存储] format-6 generation envelope 与升级 | 已合并 | [#195](https://github.com/worktools/unionid/pull/195) |
-| [#185](https://github.com/worktools/unionid/issues/185) | [迁移] 可恢复 shadow generation 与原子 cutover | P0 | [#183](https://github.com/worktools/unionid/issues/183)、[#184](https://github.com/worktools/unionid/issues/184) |
-| [#186](https://github.com/worktools/unionid/issues/186) | [质量] M7 接口旅程与容量复验 | P1 | [#182](https://github.com/worktools/unionid/issues/182)–[#185](https://github.com/worktools/unionid/issues/185) |
+| [#185](https://github.com/worktools/unionid/issues/185) | [迁移] 可恢复 shadow generation 与原子 cutover | 已完成 | [#183](https://github.com/worktools/unionid/issues/183)、[#184](https://github.com/worktools/unionid/issues/184) |
+| [#186](https://github.com/worktools/unionid/issues/186) | [质量] M7 接口旅程与容量复验 | 已完成 | [#182](https://github.com/worktools/unionid/issues/182)–[#185](https://github.com/worktools/unionid/issues/185) |
+
+### M8 · v0.2 兼容收口与发布
+
+| Issue | 任务 | 优先级 | 前置依赖 |
+| --- | --- | --- | --- |
+| [#202](https://github.com/worktools/unionid/issues/202) | [路线图] M8 总览与阶段验收 | P0 | M7 完成 |
+| [#198](https://github.com/worktools/unionid/issues/198) | [兼容] 真实 v0.1 数据升级到 format 6 | P0 | 无；首个实现切片 |
+| [#199](https://github.com/worktools/unionid/issues/199) | [发布] 冻结 v0.2 版本契约与用户文档 | P0 | [#198](https://github.com/worktools/unionid/issues/198) |
+| [#200](https://github.com/worktools/unionid/issues/200) | [质量] v0.2 双平台产物与接口旅程 | P0 | [#199](https://github.com/worktools/unionid/issues/199) |
+| [#201](https://github.com/worktools/unionid/issues/201) | [发布] 公开 v0.2.0 crate 与原生产物 | P0 | [#200](https://github.com/worktools/unionid/issues/200)；具体候选需明确授权 |
 
 ### 独立 P2 探索
 
@@ -160,7 +171,7 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 当前执行顺序
 
-任务 #162／RFC 0008 与 #163/#169 已完成增量 DML。#164/#170 与 #171 已冻结并实现全部有限 ADT 的 typed total order；#172/#174 实现复合索引格式与升级，#173/#175 实现 equality-prefix range、index order 与 page seek，#166/#176 保存并核验 M6 的 10k/100k 原始样本。#178/#180 已完成 open/full rebuild 分阶段观测，#179/[RFC 0010](rfc/0010-bounded-resident-state-and-maintenance-generations.md) 据此冻结 M7 架构。#181/#188 建立共享 source seam，#182/#189 实现 format-5 Legacy0 bounded open、durable cursor、MVCC committed view 与 32 MiB cache，#183/#190 完成 bounded full pipeline/check/backup，#184 接入 format-6 generation envelope，#185 实现 resumable migration。#186 以真实接口矩阵和 10k/100k open/query/write/check/shadow-migration 原始样本完成 M7 复验，见 [验收记录](benchmarks/m7-acceptance-2026-09-10.md)。
+M0–M7 已完成。#186 以真实接口矩阵和 10k/100k open/query/write/check/shadow-migration 原始样本完成 M7 复验，见 [验收记录](benchmarks/m7-acceptance-2026-09-10.md)。当前按 #202 的 #198 → #199 → #200 → #201 推进：先用公开 v0.1.0 真实数据证明升级兼容，再冻结 0.2.0 版本和文档、验收双平台候选，最后只在具体候选获得明确授权后公开发布。
 
 ## 维护约定
 

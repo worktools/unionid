@@ -39,6 +39,7 @@
 - redb 提交错误按边界区分：transaction commit 前的确定失败回滚候选状态并保留句柄，commit 调用返回错误时标记结果不确定、关闭句柄并阻止后续写入。可注入 backend 单元测试验证两条 Engine 状态路径；真实子进程测试分别在未提交多表 transaction 与成功 Engine commit 后直接退出并重开。
 - macOS/Linux 子进程通过 OS `RLIMIT_FSIZE` 强制真实 redb 文件增长失败；Engine 按失败点返回确定中止或结果不确定，父进程重开并验证 typed row、索引、schema、ledger 与完整性只处于完整旧／新状态。
 - `tools/recovery-eval` 在独立进程测量完整 ADT 工作集的 open/check 与 peak RSS；本机三次中位数为 10k 行 66/78 ms、52.67/81.48 MiB，100k 行 653/741 ms、459.28/745.84 MiB。CI 在 macOS/Linux 跑 100 行 smoke，完整环境与容量解释见恢复 benchmark 记录。
+- 公开 v0.1.0 ARM64 产物生成的 format-1 redb 与 logical-backup 夹具固定在 `tests/fixtures/v0.1.0`，并记录 release/archive/fixture SHA-256。跨版本测试只升级临时副本，验证 cursor identity 兼容归一、显式 4→5→6、schema/ledger/typed rows、索引、mutation、protocol v1/v2 和双向 backup/restore；该旅程发现并修复了旧库缺少 format-6 maintenance table 时 upgrade/status 错误访问的问题。
 - `tests/release_scenarios.rs` 从隔离临时目录驱动真实 CLI 子进程，覆盖任务条件状态转换、深层命名 ADT 配置迁移和 session key 生命周期；每条链路均跨重启执行 migration、check、backup/restore，并比较 schema identity、ledger、typed rows 与 explain。场景暴露并修复了 migration transform 递归展开嵌套命名 record、导致 `old.retry` 丢失类型身份的问题。
 - `tools/workload-eval` 使用新数据库副本和 release 子进程保留原始样本，分别测量 open、primary/secondary lookup、full scan、复合 range/order、前后向 page seek、条件 update、upsert、100-row batch 与深层 migration；每个 query 先断言结构化访问计划，每个子进程在计时外运行完整性检查。M6 实测中，10k/100k 单行 write p95 都约 10 ms，100k 有序访问保持微秒级；但完整 open p95 约 5.6 s，深层 migration p95 约 49.9 s、peak RSS 约 1.44 GiB。方法和完整样本见 [M6 工作负载记录](benchmarks/workload-2026-09-09.md)。
 - `check --db` 调用 redb `check_integrity`，再重新加载并验证 unionid 逻辑状态；无效数据库文件、未知 codec 版本、索引不一致和跨进程占用都有结构化诊断。
