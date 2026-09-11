@@ -251,6 +251,14 @@ fn redb_compaction_survives_child_process_exit_and_reopens_equivalently() {
         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         let _ = child.kill();
         child.wait().unwrap();
+        // A child that finished compaction before the kill records its outcome.
+        // A child killed mid-operation records nothing, which is equally valid.
+        if let Ok(outcome) = std::fs::read_to_string(&result) {
+            assert!(
+                outcome.starts_with("ok changed=") || outcome == "error E_STORAGE_REOPEN_REQUIRED",
+                "delay {delay_ms}ms: unexpected child outcome '{outcome}'"
+            );
+        }
 
         let mut reopened = Engine::open_redb(&path).unwrap();
         assert!(reopened.check_integrity().unwrap().backend_clean);
