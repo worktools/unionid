@@ -49,6 +49,19 @@ unionid compact --db app.redb --format json
 
 Stop the server or other local owner first, retain a verified logical backup, and resolve every unfinished migration before running `compact`. The command compacts the existing redb file in place, performs complete checks and identity comparison before and after native compaction, and returns exact byte counts plus schema and storage identity. It has no interactive confirmation branch; the explicit command is the authorization. An occupied database returns `E_BUSY`, unfinished migration maintenance returns `E_MAINTENANCE_REQUIRED`, and a missing path returns `E_CONFIG` without creating a file. `after_bytes` is the durable size obtained by reopening after native compact to persist redb's region layout, and `changed` is true only when the file actually got smaller, so rerunning on the same file returns a stable `changed=false` and `reclaimed_bytes=0`. See the [compaction evidence](benchmarks/compaction-2026-09-11.md) (100k about 744.84 to 219.18 MiB). It may scan the full database several times and requires a maintenance window and disk headroom. Generation reclamation removes obsolete logical keys; physical compaction is the separate step that can reduce the file. After interruption or an uncertain storage result, reopen the database and run `check`; file-size reduction alone is not proof of success.
 
+## Schema 与 Rust 绑定 / Schema and Rust bindings
+
+`schema check --file <schema.uid>` 校验声明式 schema 并输出规范形式，`schema print --db <db.redb>` 输出数据库内保存的 schema。`schema rust` 从 schema 文件或已有数据库生成 Rust `struct`/`enum` 绑定，类型映射与递归 boxing 规则见 [RFC 0012](rfc/0012-schema-rust-bindings.md)：
+
+```bash
+unionid schema rust --file schema.uid
+unionid schema rust --db app.redb --output src/schema.rs
+```
+
+生成结果只依赖 `serde` 与 `unionid::scalars`，字段名中的 Rust 关键字加 `_` 后缀；schema 文件仍只允许 type/table/index 声明，完整脚本会返回 `E_SCHEMA`。
+
+`schema check --file <schema.uid>` validates a declarative schema and prints its normalized form, and `schema print --db <db.redb>` prints the schema stored in a database. `schema rust` generates Rust `struct`/`enum` bindings from a schema file or an existing database; type mapping and recursion boxing follow RFC 0012. The output depends only on `serde` and `unionid::scalars`, Rust keyword field names get a `_` suffix, and schema files still accept only type/table/index declarations (a full script returns `E_SCHEMA`).
+
 ## JSON 错误与退出码
 
 支持 `--format json` 的非查询命令统一返回 version 1 错误 envelope，且只写 stdout：

@@ -288,6 +288,18 @@ enum SchemaCommand {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Generate Rust type bindings from a schema file or database.
+    Rust {
+        /// Schema file to read.
+        #[arg(long, conflicts_with = "db")]
+        file: Option<PathBuf>,
+        /// Existing redb database whose stored schema is used.
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Write the generated bindings to this path instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn source(query: Option<String>, file: Option<PathBuf>) -> Result<Option<String>, String> {
@@ -690,6 +702,9 @@ fn run(args: Args) -> Result<(), String> {
             }
             SchemaCommand::Print { db, format } => {
                 cli::schema_print(db, matches!(format, Format::Json))
+            }
+            SchemaCommand::Rust { file, db, output } => {
+                cli::schema_rust(file.as_deref(), db, output.as_deref())
             }
         },
         Command::Backup { db, output, format } => {
