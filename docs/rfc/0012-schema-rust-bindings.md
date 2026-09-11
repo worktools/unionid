@@ -27,7 +27,7 @@
 - sum → `pub enum`：unit variant、单位置负载 `Variant(T)`、record 负载 `Variant { .. }`、多位置负载 `Variant(A, B)`。
 - 直接自递归（如 `Neg Expr`）在 Rust 需要间接层，生成 `Box<T>`；经 `list` 的递归由 `Vec` 已经间接，不再 box。
 - 标量映射：`int→i64`、`float→f64`、`bool→bool`、`text→String`、`uuid/date/timestamp/duration/decimal/bytes → unionid::scalars::*`。
-- Rust 关键字字段名加 `_` 后缀；未声明的匿名 record/enum 类型报 `E_SCHEMA`，要求先命名。
+- Rust 关键字字段名加 `_` 后缀，同时保留 `#[serde(rename = "原名")]`，使 typed 序列化仍使用 schema 名称；转义后与另一个标识符冲突（如 `match` 与 `match_`）时返回 `E_SCHEMA`；未声明的匿名 record/enum 类型报 `E_SCHEMA`，要求先命名。
 - schema 文件仍只允许 type/table/index 声明；完整脚本不作为 codegen 输入。
 
 ### 4. 验证
@@ -65,7 +65,7 @@ Codegen first because it needs no crate-structure change, is testable without ma
 - sum -> `pub enum`: unit, single positional `Variant(T)`, record `Variant { .. }`, and multi-positional `Variant(A, B)`.
 - Direct self-recursion (e.g. `Neg Expr`) needs indirection in Rust and becomes `Box<T>`; recursion through `list` is already indirected by `Vec` and is not boxed.
 - Scalars: `int->i64`, `float->f64`, `bool->bool`, `text->String`, `uuid/date/timestamp/duration/decimal/bytes -> unionid::scalars::*`.
-- Rust keyword field names get a `_` suffix; undeclared anonymous record/enum types return `E_SCHEMA` and must be named.
+- Rust keyword field names get a `_` suffix plus `#[serde(rename = "original")]` so typed serialization keeps the schema name; a collision after escaping (for example `match` and `match_`) returns `E_SCHEMA`; undeclared anonymous record/enum types return `E_SCHEMA` and must be named.
 - Schema files still accept only type/table/index declarations; full scripts are not codegen input.
 
 ### 4. Validation

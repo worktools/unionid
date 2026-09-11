@@ -44,6 +44,7 @@ type Ids = (int, text)
 type Event = {
   id uuid,
   at timestamp,
+  on date,
   took duration,
   amount decimal 12 2,
   blob bytes,
@@ -68,6 +69,7 @@ table events Event
     for scalar in [
         "unionid::scalars::Uuid",
         "unionid::scalars::Timestamp",
+        "unionid::scalars::Date",
         "unionid::scalars::Duration",
         "unionid::scalars::Decimal",
         "unionid::scalars::Bytes",
@@ -83,7 +85,13 @@ type T = {
   async int,
   trait text,
   match bool,
+  gen int,
 }
+
+type State =
+  | Waiting {
+    match bool,
+  }
 
 table t T
   key async
@@ -92,6 +100,27 @@ table t T
     assert!(generated.contains("pub async_: i64,"));
     assert!(generated.contains("pub trait_: String,"));
     assert!(generated.contains("pub match_: bool,"));
+    assert!(generated.contains("pub gen_: i64,"));
+    // Escaped names must keep the original schema name for serde.
+    assert!(generated.contains("#[serde(rename = \"async\")]"));
+    assert!(generated.contains("#[serde(rename = \"match\")]"));
+    assert!(generated.contains("#[serde(rename = \"gen\")]"));
+}
+
+#[test]
+fn rejects_identifier_collisions_after_escaping() {
+    let source = "\
+type T = {
+  match int,
+  match_ int,
+}
+
+table t T
+  key match
+";
+    let error = codegen::rust(source).unwrap_err();
+    assert_eq!(error.code, "E_SCHEMA");
+    assert!(error.message.contains("collides"));
 }
 
 #[test]
