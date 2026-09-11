@@ -330,6 +330,36 @@ pub fn schema_print(db: impl Into<PathBuf>, json: bool) -> Result<(), String> {
     print_schema_check(&checked, json)
 }
 
+pub fn schema_rust(
+    file: Option<&Path>,
+    db: Option<PathBuf>,
+    output: Option<&Path>,
+) -> Result<(), String> {
+    let source = match (file, db) {
+        (Some(path), None) => read_source(
+            std::fs::File::open(path)
+                .map_err(|error| format!("open '{}': {error}", path.display()))?,
+        )?,
+        (None, Some(db)) => {
+            require_existing_database(&db)?;
+            Engine::open_redb(db)
+                .map_err(|error| error.to_string())?
+                .schema()
+        }
+        _ => return Err("provide exactly one of --file or --db".into()),
+    };
+    let generated = crate::codegen::rust(&source).map_err(|error| error.to_string())?;
+    match output {
+        Some(destination) => {
+            std::fs::write(destination, generated)
+                .map_err(|error| format!("write '{}': {error}", destination.display()))?;
+            println!("wrote {}", destination.display());
+        }
+        None => print!("{generated}"),
+    }
+    Ok(())
+}
+
 pub fn migration_diff(
     db: impl Into<PathBuf>,
     schema_path: impl AsRef<Path>,
