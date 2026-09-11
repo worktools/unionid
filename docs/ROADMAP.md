@@ -174,11 +174,11 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 | Issue | 任务 | 优先级 | 推进依据 |
 | --- | --- | --- | --- |
-| [#230](https://github.com/worktools/unionid/issues/230) | [存储] 安全的离线文件压缩总览 | P1 | #229 观察到 reclaim 后的 redb 文件高水位；独立推进，不反向阻塞 M9 证据验收 |
+| [#230](https://github.com/worktools/unionid/issues/230) | [存储] 安全的离线文件压缩总览 | 已完成 | RFC 0011 与 #232–#235；native compact 重开固化 durable 大小并稳定 no-op，10k/100k 证据见 [compaction-2026-09-11](benchmarks/compaction-2026-09-11.md) |
 | [#232](https://github.com/worktools/unionid/issues/232) | [设计] 冻结 redb 原生 compaction 的离线契约 | 已完成 | [RFC 0011](rfc/0011-offline-redb-compaction.md)；#230 的首个切片 |
 | [#233](https://github.com/worktools/unionid/issues/233) | [存储] 实现保留身份的 redb 原生 compaction | 已完成 | #232；`Engine::compact_storage` 与完整身份验证 |
-| [#234](https://github.com/worktools/unionid/issues/234) | [体验] 增加 compact CLI 与机器可读报告 | P1 | #233 |
-| [#235](https://github.com/worktools/unionid/issues/235) | [质量] 验证中断恢复与 10k/100k 空间收益 | P1 | #234 |
+| [#234](https://github.com/worktools/unionid/issues/234) | [体验] 增加 compact CLI 与机器可读报告 | 已完成 | #233；`compact --db --format` 与 version 1 report |
+| [#235](https://github.com/worktools/unionid/issues/235) | [质量] 验证中断恢复与 10k/100k 空间收益 | 已完成 | #234；故障注入/中断恢复测试、`tools/compaction-eval` 与 [10k/100k 证据](benchmarks/compaction-2026-09-11.md) |
 
 ### 独立 P2 探索
 
@@ -187,6 +187,49 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#118](https://github.com/worktools/unionid/issues/118) | [语言] 用户泛型与互递归 ADT | 出现真实 schema 复用需求并能定义有限性、身份和 codec 预算 |
 | [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | 至少两个真实调用方需要共享同一参数化 typed pipeline |
 | [#192](https://github.com/worktools/unionid/issues/192) | [集成] 宿主语言 typed 数据适配 | 真实调用方证明现有 versioned protocol 或 Rust API 无法满足，并列出具体 API 缺口 |
+
+## 版本里程碑（v0.3.0 起）
+
+M0–M9 以阶段组织；从 `v0.3.0` 起改用版本号里程碑，聚焦“把一个原生 ADT 数据库用于中等复杂业务”时最常遇到的采用障碍。优先级沿用 P0（采纳门槛）／P1（重要能力）／P2（探索），不预设工期。计划状态以 GitHub milestone 为准。
+
+### v0.3.0 · 应用集成与关联读
+
+| Issue | 任务 | 优先级 |
+| --- | --- | --- |
+| [#240](https://github.com/worktools/unionid/issues/240) | [集成] 从 schema 生成并校验 Rust 类型 | P0 |
+| [#241](https://github.com/worktools/unionid/issues/241) | [查询] 最小关联读：索引 lookup join 与批量主键取回 | P0 |
+| [#242](https://github.com/worktools/unionid/issues/242) | [集成] 官方异步执行与 typed 客户端 SDK | P0 |
+| [#243](https://github.com/worktools/unionid/issues/243) | [迁移] 降低迁移成本：影响估算、限速回填与离线演练 | P1 |
+
+### v0.4.0 · 查询与类型表达力
+
+| Issue | 任务 | 优先级 |
+| --- | --- | --- |
+| [#244](https://github.com/worktools/unionid/issues/244) | [查询] 子查询、IN/EXISTS 与集合运算 | P1 |
+| [#245](https://github.com/worktools/unionid/issues/245) | [查询] 聚合扩展与基础窗口 | P1 |
+| [#246](https://github.com/worktools/unionid/issues/246) | [类型] 开放 record 与 map/json 逃生通道 | P1 |
+| [#247](https://github.com/worktools/unionid/issues/247) | [类型] decimal 乘除/avg/舍入与 calendar 算术 | P1 |
+| [#248](https://github.com/worktools/unionid/issues/248) | [索引] 部分索引与表达式索引 | P2 |
+| [#118](https://github.com/worktools/unionid/issues/118) | [类型] 用户泛型与互递归 ADT | P2 |
+| [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | P2 |
+
+### v0.5.0 · 可观测、备份与运维
+
+| Issue | 任务 | 优先级 |
+| --- | --- | --- |
+| [#249](https://github.com/worktools/unionid/issues/249) | [质量] 可观测性：metrics、tracing、slow query 与 explain analyze | P1 |
+| [#250](https://github.com/worktools/unionid/issues/250) | [存储] 增量/物理备份与 compact no-op 短路 | P1 |
+| [#251](https://github.com/worktools/unionid/issues/251) | [服务] 认证与 TLS：内置或官方网关指南 | P1 |
+
+### v1.0 · 生产规模化探索
+
+| Issue | 任务 | 优先级 |
+| --- | --- | --- |
+| [#252](https://github.com/worktools/unionid/issues/252) | [设计] 多写者、复制与高可用边界评估 | P2 |
+| [#253](https://github.com/worktools/unionid/issues/253) | [设计] CDC、订阅与物化视图评估 | P2 |
+| [#254](https://github.com/worktools/unionid/issues/254) | [设计] 超过 10 万行的规模架构评估 | P2 |
+
+这组版本里程碑来自一次“传统数据库背景 + Rust 重度 ADT + 中等复杂业务”的引入评估：核心能力（ADT schema、typed 读写、migration、稳定分页、幂等回执）已经可用，采纳障碍集中在 Schema/类型双份维护、缺少关联读、异步/客户端集成偏薄、迁移成本、查询表达力与生产运维。`#192` 继续作为真实需求触发的宿主语言适配探索。
 
 ## M5 收口状态
 

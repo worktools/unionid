@@ -2504,9 +2504,12 @@ impl Engine {
     /// it fail with `E_BUSY`. Native redb storage errors have an uncertain
     /// result and close this Engine's durable handle until it is reopened.
     /// It synchronously performs two complete integrity checks and two
-    /// streaming row-identity scans. Run it as offline maintenance; there is no
-    /// deadline or cancellation boundary because native redb compaction cannot
-    /// be safely interrupted once its internal commits begin.
+    /// streaming row-identity scans. After native compaction it reopens the
+    /// database so redb's region repair happens inside this maintenance
+    /// operation; the reported byte counts are the durable post-reopen sizes.
+    /// Run it as offline maintenance; there is no deadline or cancellation
+    /// boundary because native redb compaction cannot be safely interrupted
+    /// once its internal commits begin.
     pub fn compact_storage(&mut self) -> Result<StorageCompaction> {
         if self.write_failed || self.read_reopen_required {
             return Err(Error::new(
@@ -3046,7 +3049,7 @@ fn attach_structured_page(statements: &mut [LocatedStatement], page: PageSpec) -
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct FailOnce {
         uncertain: Option<bool>,
@@ -3056,8 +3059,30 @@ mod tests {
         committed: Arc<AtomicBool>,
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CompactFault {
+        Uncertain,
+        Definite,
+        PostCheck,
+        ViewRebuild,
+    }
+
     struct FailCompaction {
         database: Database,
+        fault: CompactFault,
+        integrity_calls: AtomicUsize,
+        view_calls: AtomicUsize,
+    }
+
+    impl FailCompaction {
+        fn new(database: Database, fault: CompactFault) -> Self {
+            Self {
+                database,
+                fault,
+                integrity_calls: AtomicUsize::new(0),
+                view_calls: AtomicUsize::new(0),
+            }
+        }
     }
 
     impl DurableBackend for FailOnce {
@@ -3188,6 +3213,13 @@ mod tests {
         }
 
         fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
+            let call = self.integrity_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fault == CompactFault::PostCheck && call >= 1 {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "injected post-compaction check failure",
+                ));
+            }
             Ok((
                 true,
                 self.database.clone(),
@@ -3197,10 +3229,21 @@ mod tests {
         }
 
         fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
-            Err(CommitFailure::Uncertain(Error::new(
-                "E_STORAGE",
-                "injected compact failure",
-            )))
+            match self.fault {
+                CompactFault::Uncertain => Err(CommitFailure::Uncertain(Error::new(
+                    "E_STORAGE",
+                    "injected compact failure",
+                ))),
+                CompactFault::Definite => Err(CommitFailure::Definite(Error::new(
+                    "E_BUSY",
+                    "injected compact rejection",
+                ))),
+                CompactFault::PostCheck | CompactFault::ViewRebuild => Ok(RedbCompaction {
+                    changed: true,
+                    before_bytes: 2_000,
+                    after_bytes: 1_000,
+                }),
+            }
         }
 
         fn supports_production_scalars(&self) -> bool {
@@ -3218,6 +3261,19 @@ mod tests {
                 maintenance_codec: 1,
                 backup_codec: 4,
             }
+        }
+
+        fn committed_view(&self, _: &Database) -> Result<(Arc<Database>, Arc<dyn TypedRowSource>)> {
+            let call = self.view_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fault == CompactFault::ViewRebuild && call >= 1 {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "injected committed-view rebuild failure",
+                ));
+            }
+            let database = Arc::new(self.database.clone());
+            let source: Arc<dyn TypedRowSource> = database.clone();
+            Ok((database, source))
         }
 
         fn upgrade(
@@ -3475,8 +3531,9 @@ mod tests {
         assert!(continued.rows[0]["id"].cmp_eq(&crate::Value::Int(2)));
 
         let no_op = engine.compact_storage().unwrap();
-        assert!(!no_op.changed);
-        assert_eq!(no_op.before_bytes, no_op.after_bytes);
+        assert_eq!(no_op.version, 1);
+        assert!(no_op.identity_preserved);
+        assert_eq!(no_op.schema, before_schema);
 
         drop(engine);
         let _ = std::fs::remove_file(path);
@@ -3516,13 +3573,87 @@ mod tests {
         let database = Database::default();
         let mut engine = Engine {
             committed: Arc::new(CommittedView::memory(database.clone(), ReceiptMap::new())),
-            durable: Some(Box::new(FailCompaction { database })),
+            durable: Some(Box::new(FailCompaction::new(
+                database,
+                CompactFault::Uncertain,
+            ))),
             storage_mode: StorageMode::Redb,
             ..Engine::default()
         };
 
         let error = engine.compact_storage().unwrap_err();
         assert_eq!(error.code, "E_STORAGE_REOPEN_REQUIRED");
+        assert!(engine.write_failed);
+        assert!(engine.read_reopen_required);
+        assert!(engine.durable.is_none());
+        assert_eq!(
+            engine.execute("from missing").error.unwrap().code,
+            "E_STORAGE_REOPEN_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn definite_compaction_failure_restores_the_read_view() {
+        let database = Database::default();
+        let mut engine = Engine {
+            committed: Arc::new(CommittedView::memory(database.clone(), ReceiptMap::new())),
+            durable: Some(Box::new(FailCompaction::new(
+                database,
+                CompactFault::Definite,
+            ))),
+            storage_mode: StorageMode::Redb,
+            ..Engine::default()
+        };
+
+        let error = engine.compact_storage().unwrap_err();
+        assert_eq!(error.code, "E_BUSY");
+        assert!(!engine.write_failed);
+        assert!(!engine.read_reopen_required);
+        assert!(engine.durable.is_some());
+        assert!(!engine.execute("from missing").ok);
+    }
+
+    #[test]
+    fn post_compaction_check_failure_requires_reopen() {
+        let database = Database::default();
+        let mut engine = Engine {
+            committed: Arc::new(CommittedView::memory(database.clone(), ReceiptMap::new())),
+            durable: Some(Box::new(FailCompaction::new(
+                database,
+                CompactFault::PostCheck,
+            ))),
+            storage_mode: StorageMode::Redb,
+            ..Engine::default()
+        };
+
+        let error = engine.compact_storage().unwrap_err();
+        assert_eq!(error.code, "E_STORAGE_REOPEN_REQUIRED");
+        assert!(error.message.contains("integrity check failed"));
+        assert!(engine.write_failed);
+        assert!(engine.read_reopen_required);
+        assert!(engine.durable.is_none());
+        assert_eq!(
+            engine.execute("from missing").error.unwrap().code,
+            "E_STORAGE_REOPEN_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn post_compaction_view_rebuild_failure_requires_reopen() {
+        let database = Database::default();
+        let mut engine = Engine {
+            committed: Arc::new(CommittedView::memory(database.clone(), ReceiptMap::new())),
+            durable: Some(Box::new(FailCompaction::new(
+                database,
+                CompactFault::ViewRebuild,
+            ))),
+            storage_mode: StorageMode::Redb,
+            ..Engine::default()
+        };
+
+        let error = engine.compact_storage().unwrap_err();
+        assert_eq!(error.code, "E_STORAGE_REOPEN_REQUIRED");
+        assert!(error.message.contains("read view could not be created"));
         assert!(engine.write_failed);
         assert!(engine.read_reopen_required);
         assert!(engine.durable.is_none());

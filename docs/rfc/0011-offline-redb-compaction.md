@@ -59,7 +59,7 @@ unionid compact --db app.redb --format json
 }
 ```
 
-`changed` 在 redb 搬移了页或最终文件大小改变时为 true。`reclaimed_bytes` 使用 `before_bytes - after_bytes` 的饱和值；实现不能假设每次都能缩小，也不能因 `changed = false` 把成功当作错误。report 不包含路径、业务值、receipt key、database instance ID 或 cursor secret。
+`changed` 只在 durable 文件实际变小时为 true。`reclaimed_bytes` 使用 `before_bytes - after_bytes` 的饱和值；实现不能假设每次都能缩小，也不能因 `changed = false` 把成功当作错误。report 不包含路径、业务值、receipt key、database instance ID 或 cursor secret。`after_bytes` 是重开后（即用户下次打开时）的 durable 大小，而不是 native compact 返回瞬间的临时长度；实现通过在 compact 后、post-check 前重开数据库达成，详见第 8 节。
 
 ### 4. 前置条件与状态机
 
@@ -108,6 +108,12 @@ CLI 沿用非查询 JSON error envelope 和 storage exit class。错误不打印
 
 完成 #230 需要证明压缩后完整 check、typed query、indexed query、cursor、idempotent replay、migration status 和 logical backup 均与压缩前一致。文件缩小幅度是观测结果，不是固定比例或 SLA。
 
+### 8. 实现补充：durable 大小与 reopen
+
+redb 的 `Database::compact()` 返回时文件长度小于其持久化 region 布局。此后只要在同一句柄上执行 `check_integrity`、读事务或普通打开/关闭，下一次 `Database::open` 就会运行 repair，并把文件向上取整到一个 region 边界。若直接以 compact 返回瞬间的长度作为 `after_bytes`，用户下次打开看到的文件会更大，且每次全新 compact 都会再次搬页并报告一个不会持久化的缩小，无法得到稳定 no-op。
+
+因此实现按以下顺序执行：native compact → 释放旧句柄并重开同一路径（触发 repair）→ post-check → 发布新的 committed view。这样 repair 发生在同一次维护操作内部，`after_bytes` 等于重开后的 durable 大小；由于 redb 可能把文件向上取整到 region 边界，`changed` 只在文件实际变小时为 true，durable 大小不变即返回 `changed=false`、`reclaimed_bytes=0`。重开仍要求独占，失败按不确定错误处理并要求重开检查。reopen/repair 会完整遍历文件，所以 no-op 也可能有秒级成本，不能当作廉价轮询。
+
 ## English Description
 
 ### 1. Problem and evidence
@@ -126,7 +132,7 @@ Native in-place compaction follows redb's allocator and page rules, preserves ev
 
 `unionid compact --db app.redb [--format json]` operates only on an existing writable redb database. The explicit command is sufficient authorization and has no interactive confirmation. Plain and version-1 JSON output report whether pages or file size changed, before/after/reclaimed bytes, schema identity, sequence, storage/codec versions, and `identity_preserved`. Reports omit paths, business values, receipt keys, database instance IDs, and cursor secrets.
 
-`changed` is true when redb relocates pages or final file size changes. `reclaimed_bytes` is saturating `before_bytes - after_bytes`. A successful no-op is valid. File reduction is an observation rather than a guaranteed ratio.
+`changed` is true only when the durable file actually got smaller. `reclaimed_bytes` is saturating `before_bytes - after_bytes`. A successful no-op is valid. `after_bytes` is the durable size seen on the next open, not the transient length at which native compact returned; the implementation reopens the database after compact and before the post-check, as described in section 8. File reduction is an observation rather than a guaranteed ratio.
 
 ### 4. Lifecycle
 
@@ -153,3 +159,9 @@ A post-check or committed-view rebuild failure uses the same reopen-required res
 Implementation is split into the core RedbStore/Engine operation, CLI/report/docs, and fault/capacity evidence. Tests cover no-op compaction, real shrink after reclamation, owner/read-snapshot/maintenance rejection, preservation of cursors, receipts, RowIds, ledger, schema and indexes, process exit during compaction, repair/reopen, and logical backup. Stable-host 10k/100k observations retain before/after bytes, time, and peak RSS without SLA claims. Ordinary PRs run bounded Ubuntu checks; macOS remains release-only.
 
 #230 is complete only when post-compaction checks, typed and indexed queries, cursor continuation, idempotent replay, migration status, and logical backup all match pre-compaction behavior.
+
+### 8. Implementation addendum: durable size and reopen
+
+redb's `Database::compact()` returns while the file is shorter than its persisted region layout. As soon as `check_integrity`, a read transaction, or an ordinary open/close follows on the same handle, the next `Database::open` runs repair and rounds the file up to a region boundary. Reporting the transient length at compact return would make the file look larger on the next open and would report a non-durable reduction on every fresh compact, preventing a stable no-op.
+
+The implementation therefore runs: native compact -> release the old handle and reopen the same path (triggering repair) -> post-check -> publish the new committed view. Repair happens inside the same maintenance operation, and `after_bytes` equals the durable post-reopen size. Because redb may round the file up to a region boundary, `changed` is true only when the file actually got smaller; an unchanged durable size yields `changed=false` and `reclaimed_bytes=0`. Reopen still requires exclusive access and is treated as an uncertain, reopen-required failure if it cannot complete. Reopen/repair traverses the whole file, so even a no-op can cost seconds and is not cheap polling.
