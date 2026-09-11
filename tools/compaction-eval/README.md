@@ -2,7 +2,7 @@
 
 ## 中文说明
 
-该独立工具对一个已存在的 format-6 redb 数据库执行一次 `Engine::compact_storage`，并在独立子进程中测量压缩前后文件字节、回收字节、open/compact/full-check 耗时和进程 peak RSS。它不生成业务数据，也不自动运行 compact；输入应由 `tools/churn-eval` 等生成器准备，或复制自真实数据库。评测会原地修改数据库，因此对需要保留的证据应先复制副本。
+该独立工具对一个已存在的 format-6 redb 数据库执行一次 `Engine::compact_storage`，并在独立子进程中测量压缩前后文件字节、回收字节、open/compact/full-check 耗时和进程 peak RSS。它不生成业务数据，只对给定数据库执行一次 compact；输入应由 `tools/churn-eval` 等生成器准备，或复制自真实数据库。评测会原地修改数据库，因此对需要保留的证据应先复制副本。
 
 ```bash
 cp /tmp/unionid-churn-evidence-10k.redb /tmp/compact-10k.redb
@@ -16,7 +16,7 @@ cargo run --release --locked --manifest-path tools/compaction-eval/Cargo.toml --
 
 ## English Description
 
-This standalone tool runs one `Engine::compact_storage` against an existing format-6 redb database and, in a separate child process, measures before/after/uncompacted file bytes, reclaimed bytes, open/compact/full-check timings, and process peak RSS. It neither generates business data nor compacts automatically; prepare the input with `tools/churn-eval` or copy it from a real database. The measurement mutates the file in place, so copy any input whose original form must be retained.
+This standalone tool runs one `Engine::compact_storage` against an existing format-6 redb database and, in a separate child process, measures before/after/uncompacted file bytes, reclaimed bytes, open/compact/full-check timings, and process peak RSS. It does not generate business data; it only compacts the given database once. Prepare the input with `tools/churn-eval` or copy it from a real database. The measurement mutates the file in place, so copy any input whose original form must be retained.
 
 ```bash
 cp /tmp/unionid-churn-evidence-10k.redb /tmp/compact-10k.redb

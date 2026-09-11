@@ -33,7 +33,7 @@ tools/compaction-eval/target/release/unionid-compaction-eval \
 | 文件缩小 | 52.4% | 70.6% |
 | 逻辑行大小（churn） | 5.22 MiB | 52.27 MiB |
 | 压缩后 logical / file | 23.9% | 23.9% |
-| open / compact / check | 12.5 µs / 1.12 s / 0.29 s | 25.1 µs / 9.77 s / 2.93 s |
+| open / compact / check | 15.77 ms / 1.12 s / 0.29 s | 5.70 ms / 9.77 s / 2.93 s |
 | 进程 peak RSS | 38.0 MiB | 281.4 MiB |
 | 第二次运行 `changed` | false | false |
 | 第二次运行 `reclaimed_bytes` | 0 | 0 |
@@ -72,7 +72,7 @@ Each input is a copy of the churn 10k/100k result so the original churn evidence
 | File reduction | 52.4% | 70.6% |
 | Logical row bytes (churn) | 5.22 MiB | 52.27 MiB |
 | Logical / file after | 23.9% | 23.9% |
-| open / compact / check | 12.5 µs / 1.12 s / 0.29 s | 25.1 µs / 9.77 s / 2.93 s |
+| open / compact / check | 15.77 ms / 1.12 s / 0.29 s | 5.70 ms / 9.77 s / 2.93 s |
 | Process peak RSS | 38.0 MiB | 281.4 MiB |
 | Second run `changed` | false | false |
 | Second run `reclaimed_bytes` | 0 | 0 |
