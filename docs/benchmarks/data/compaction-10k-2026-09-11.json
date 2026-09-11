@@ -1,0 +1,51 @@
+{
+  "noop": {
+    "after_bytes": 22933504,
+    "after_rows": 10006,
+    "before_bytes": 22933504,
+    "before_rows": 10006,
+    "changed": false,
+    "check_micros": 291071,
+    "compact_micros": 756734,
+    "database_path": "/tmp/unionid-fix-10k.redb",
+    "durable_bytes": 22933504,
+    "environment": {
+      "architecture": "aarch64",
+      "logical_cpus": 8,
+      "os": "macos",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)"
+    },
+    "identity_preserved": true,
+    "open_micros": 4943,
+    "peak_rss_bytes": 29310976,
+    "reclaimed_bytes": 0,
+    "rows": 10006,
+    "schema_hash": "sha256:7555e4fe04584c1da4c905b98464600eaa2b9a6d2ed7b0604a5d5f7d5a1b34f0",
+    "schema_revision": 4
+  },
+  "shrink": {
+    "after_bytes": 22933504,
+    "after_rows": 10006,
+    "before_bytes": 48214016,
+    "before_rows": 10006,
+    "changed": true,
+    "check_micros": 290482,
+    "compact_micros": 1115226,
+    "database_path": "/tmp/unionid-fix-10k.redb",
+    "durable_bytes": 22933504,
+    "environment": {
+      "architecture": "aarch64",
+      "logical_cpus": 8,
+      "os": "macos",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)"
+    },
+    "identity_preserved": true,
+    "open_micros": 15769,
+    "peak_rss_bytes": 39829504,
+    "reclaimed_bytes": 25280512,
+    "rows": 10006,
+    "schema_hash": "sha256:7555e4fe04584c1da4c905b98464600eaa2b9a6d2ed7b0604a5d5f7d5a1b34f0",
+    "schema_revision": 4
+  },
+  "workload": "churn-2026-09-10 dataset compacted in place"
+}

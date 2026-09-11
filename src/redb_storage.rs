@@ -1194,7 +1194,7 @@ impl RedbStore {
                 ))
             })?
             .len();
-        let relocated = self.database.compact().map_err(|error| match error {
+        self.database.compact().map_err(|error| match error {
             RedbCompactionError::PersistentSavepointExists
             | RedbCompactionError::EphemeralSavepointExists
             | RedbCompactionError::TransactionInProgress => CommitFailure::Definite(Error::new(
@@ -1210,6 +1210,51 @@ impl RedbStore {
                 error,
             )),
         })?;
+        // Native compaction returns before redb has persisted a region-consistent
+        // layout. Reopen the same path so the repair that the next open would
+        // otherwise run happens inside this maintenance operation, then read the
+        // settled file size. redb may round the file up to its region boundary,
+        // so only an actually smaller file counts as changed; a run that leaves
+        // the durable size unchanged is a valid no-op.
+        let after_bytes = self.reopen_after_compaction()?;
+        Ok(RedbCompaction {
+            changed: before_bytes > after_bytes,
+            before_bytes,
+            after_bytes,
+        })
+    }
+
+    fn reopen_after_compaction(&mut self) -> std::result::Result<u64, CommitFailure> {
+        let placeholder = RedbDatabase::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .map_err(|error| {
+                CommitFailure::Uncertain(storage_error(
+                    "create compaction reopen placeholder",
+                    error,
+                ))
+            })?;
+        let compacted = std::mem::replace(&mut self.database, placeholder);
+        drop(compacted);
+        let compacted_bytes = std::fs::metadata(&self.path)
+            .map_err(|error| {
+                CommitFailure::Uncertain(Error::new(
+                    "E_IO",
+                    format!("stat database before compaction reopen: {error}"),
+                ))
+            })?
+            .len();
+        if compacted_bytes == 0 {
+            return Err(CommitFailure::Uncertain(Error::new(
+                "E_STORAGE",
+                "database disappeared during compaction; reopen and run an integrity check",
+            )));
+        }
+        self.database = RedbDatabase::create(&self.path).map_err(|error| {
+            CommitFailure::Uncertain(storage_error(
+                "reopen redb database after compaction",
+                error,
+            ))
+        })?;
         let after_bytes = std::fs::metadata(&self.path)
             .map_err(|error| {
                 CommitFailure::Uncertain(Error::new(
@@ -1218,11 +1263,13 @@ impl RedbStore {
                 ))
             })?
             .len();
-        Ok(RedbCompaction {
-            changed: relocated || before_bytes != after_bytes,
-            before_bytes,
-            after_bytes,
-        })
+        if after_bytes == 0 {
+            return Err(CommitFailure::Uncertain(Error::new(
+                "E_STORAGE",
+                "database disappeared during compaction; reopen and run an integrity check",
+            )));
+        }
+        Ok(after_bytes)
     }
 
     pub(crate) fn committed_view(
