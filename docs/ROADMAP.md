@@ -174,11 +174,11 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 | Issue | 任务 | 优先级 | 推进依据 |
 | --- | --- | --- | --- |
-| [#230](https://github.com/worktools/unionid/issues/230) | [存储] 安全的离线文件压缩总览 | P1 | #229 观察到 reclaim 后的 redb 文件高水位；独立推进，不反向阻塞 M9 证据验收 |
+| [#230](https://github.com/worktools/unionid/issues/230) | [存储] 安全的离线文件压缩总览 | 已完成 | RFC 0011 与 #232–#235；native compact 重开固化 durable 大小并稳定 no-op，10k/100k 证据见 [compaction-2026-09-11](benchmarks/compaction-2026-09-11.md) |
 | [#232](https://github.com/worktools/unionid/issues/232) | [设计] 冻结 redb 原生 compaction 的离线契约 | 已完成 | [RFC 0011](rfc/0011-offline-redb-compaction.md)；#230 的首个切片 |
 | [#233](https://github.com/worktools/unionid/issues/233) | [存储] 实现保留身份的 redb 原生 compaction | 已完成 | #232；`Engine::compact_storage` 与完整身份验证 |
-| [#234](https://github.com/worktools/unionid/issues/234) | [体验] 增加 compact CLI 与机器可读报告 | P1 | #233 |
-| [#235](https://github.com/worktools/unionid/issues/235) | [质量] 验证中断恢复与 10k/100k 空间收益 | P1 | #234 |
+| [#234](https://github.com/worktools/unionid/issues/234) | [体验] 增加 compact CLI 与机器可读报告 | 已完成 | #233；`compact --db --format` 与 version 1 report |
+| [#235](https://github.com/worktools/unionid/issues/235) | [质量] 验证中断恢复与 10k/100k 空间收益 | 已完成 | #234；故障注入/中断恢复测试、`tools/compaction-eval` 与 [10k/100k 证据](benchmarks/compaction-2026-09-11.md) |
 
 ### 独立 P2 探索
 

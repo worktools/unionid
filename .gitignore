@@ -6,4 +6,5 @@
 /tools/service-load-eval/target
 /tools/concurrency-eval/target
 /tools/churn-eval/target
+/tools/compaction-eval/target
 /dist
