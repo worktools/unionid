@@ -943,6 +943,36 @@ fn compare_tables(
                 "the primary key changed; upsert behavior must be reviewed",
             );
         }
+        compare_unique_constraints(&table.indexes, &next.indexes, &path, report);
+    }
+}
+
+fn compare_unique_constraints(
+    baseline: &[IndexDescription],
+    candidate: &[IndexDescription],
+    table_path: &str,
+    report: &mut EvolutionReport,
+) {
+    let baseline = baseline
+        .iter()
+        .map(|index| (index.id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    for index in candidate.iter().filter(|index| index.unique) {
+        match baseline.get(index.id.as_str()) {
+            None => report.client_write.add(
+                CompatibilityLevel::Incompatible,
+                "unique_index_added",
+                format!("{table_path}.index#{}", index.id),
+                "a new unique constraint can reject writes accepted by the baseline",
+            ),
+            Some(previous) if !previous.unique => report.client_write.add(
+                CompatibilityLevel::Incompatible,
+                "unique_index_tightened",
+                format!("{table_path}.index#{}", index.id),
+                "an ordinary index became unique and can reject writes accepted by the baseline",
+            ),
+            _ => {}
+        }
     }
 }
 

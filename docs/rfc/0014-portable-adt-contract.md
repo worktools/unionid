@@ -52,6 +52,8 @@ schema revision 以及类型、字段、变体、表和索引 ID 使用十进制
 
 已有字段移除默认值后，可能省略该字段的旧写入客户端变为 incompatible；更改默认值仍可接受旧 payload，但省略值会得到不同的规范结果，因此标记为 conditional 语义变化。
 
+新增 unique index 或将保留 ID 的普通 index 收紧为 unique 不改变已经通过 migration 校验的存量数据，但旧客户端可能继续写入重复值，因此 `client_write` 为 incompatible。普通 index 的增删、方向和 component-only 变化不改变值的接受契约。
+
 该方法名要求调用方保证两个快照来自同一 catalog lineage。独立数据库即使源码相同也不能用偶然相同的数字 ID 推断持久身份。#264 会在此描述上增加查询参数、结果、cardinality 和 query digest，再把 schema 级 conditional 结论收窄为具体静态查询结论。
 
 ### 5. 边界
@@ -85,6 +87,8 @@ Unknown variants fail with `E_TYPE`. Version 1 has no implicit `Unknown`, conver
 `SchemaDescription::compare_same_catalog` independently reports `existing_data`, `query`, `client_read`, and `client_write` as `compatible`, `conditional`, or `incompatible`, with stable codes, ID paths, and explanations. A defaulted field preserves existing values and old writes but may change complete-row query/read shapes. A new variant preserves old values and writes while exhaustive matches and old readers become conditional. ID-preserving renames keep durable meaning but break name-based queries and host representations. Removal or value-shape changes are incompatible.
 
 Removing a retained field default makes old writers that omit it incompatible. Changing the default keeps their payload acceptable but reports a conditional semantic change because omission now normalizes to a different value.
+
+Adding a unique index or tightening an ID-retained ordinary index to unique leaves migration-validated existing data intact, but makes `client_write` incompatible because an old writer may still submit duplicates. Ordinary index additions/removals, directions, and component-only changes do not change value acceptance.
 
 The method requires an explicit same-lineage assertion through its API name. Independently created catalogs cannot infer shared durable identity from coincidentally equal numeric IDs. #264 will add parameter, result, cardinality, and query-digest descriptions, narrowing schema-level conditional findings for concrete static queries.
 

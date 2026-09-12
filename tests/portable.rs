@@ -18,6 +18,7 @@ struct Vector {
     type_name: String,
     value: WireValue,
     expected_ok: bool,
+    expected_value: Option<WireValue>,
     error_code: Option<String>,
 }
 
@@ -140,25 +141,15 @@ fn rust_reference_implementation_runs_common_portable_vectors() {
         );
         if let Some(code) = vector.error_code {
             assert_eq!(result.unwrap_err().code, code, "vector '{}'", vector.name);
-        } else if vector.name == "nested_some_none" {
-            let WireValue::Named { value, .. } = result.unwrap() else {
-                panic!("named type identity must be restored")
-            };
-            let WireValue::Option { value: Some(inner) } = *value else {
-                panic!("outer option must remain Some")
-            };
-            assert!(matches!(*inner, WireValue::Option { value: None }));
-        } else if vector.name == "defaulted_empty_collection" {
-            let WireValue::Named { value, .. } = result.unwrap() else {
-                panic!("named type identity must be restored")
-            };
-            let WireValue::Record { fields } = *value else {
-                panic!("Envelope must normalize to a record")
-            };
-            assert!(matches!(
-                fields.get("tags"),
-                Some(WireValue::List { items }) if items.is_empty()
-            ));
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                vector
+                    .expected_value
+                    .expect("successful vectors must define expected_value"),
+                "complete normalized value for vector '{}'",
+                vector.name
+            );
         }
     }
 }
@@ -223,6 +214,7 @@ fn cli_describes_schema_files_and_live_databases() {
         let mut engine = Engine::open_redb(&db).unwrap();
         assert!(engine.execute(source).ok);
     }
+    let database_before = std::fs::read(&db).unwrap();
     let destination = dir.0.join("contract.json");
     let db_output = Command::new(env!("CARGO_BIN_EXE_unionid"))
         .args([
@@ -240,6 +232,7 @@ fn cli_describes_schema_files_and_live_databases() {
         serde_json::from_slice(&std::fs::read(destination).unwrap()).unwrap();
     assert_eq!(from_file.types, from_db.types);
     assert_eq!(from_file.tables, from_db.tables);
+    assert_eq!(std::fs::read(db).unwrap(), database_before);
 }
 
 #[test]
@@ -410,5 +403,46 @@ fn evolution_reports_default_changes_for_old_writers() {
             .findings
             .iter()
             .any(|finding| finding.code == "field_default_removed")
+    );
+}
+
+#[test]
+fn evolution_reports_new_and_tightened_unique_constraints_for_old_writers() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "type Account = {id int, email text, handle text}\ntable accounts Account\n  key id\ncreate index accounts (email)",
+            )
+            .ok
+    );
+    let baseline = engine.portable_contract().unwrap().into_description();
+
+    let mut tightened = baseline.clone();
+    tightened.tables[0].indexes[0].unique = true;
+    tightened.schema.hash = format!("sha256:{}", "1".repeat(64));
+    tightened.validate().unwrap();
+    let report = baseline.compare_same_catalog(&tightened).unwrap();
+    assert_eq!(report.existing_data.level, CompatibilityLevel::Compatible);
+    assert_eq!(report.client_write.level, CompatibilityLevel::Incompatible);
+    assert!(
+        report
+            .client_write
+            .findings
+            .iter()
+            .any(|finding| finding.code == "unique_index_tightened")
+    );
+
+    assert!(engine.execute("create unique index accounts (handle)").ok);
+    let candidate = engine.portable_contract().unwrap().into_description();
+    let report = baseline.compare_same_catalog(&candidate).unwrap();
+    assert_eq!(report.existing_data.level, CompatibilityLevel::Compatible);
+    assert_eq!(report.client_write.level, CompatibilityLevel::Incompatible);
+    assert!(
+        report
+            .client_write
+            .findings
+            .iter()
+            .any(|finding| finding.code == "unique_index_added")
     );
 }

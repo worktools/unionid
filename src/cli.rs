@@ -376,7 +376,8 @@ pub fn schema_describe(
         }
         (None, Some(db)) => {
             require_existing_database(&db)?;
-            Engine::open_redb_read_only(db)
+            let copy = PrivateDatabaseCopy::create(&db, "schema-description")?;
+            Engine::open_redb_read_only(copy.path())
                 .map_err(|error| error.to_string())?
                 .portable_contract()
                 .map_err(|error| error.to_string())?
@@ -738,6 +739,54 @@ fn require_existing_database(path: &Path) -> Result<(), String> {
             "database '{}' does not exist; apply migrations to create it",
             path.display()
         ))
+    }
+}
+
+/// A byte-for-byte database copy for observational commands that must not let
+/// redb recovery bookkeeping touch the requested path.
+struct PrivateDatabaseCopy(PathBuf);
+
+impl PrivateDatabaseCopy {
+    fn create(source: &Path, purpose: &str) -> Result<Self, String> {
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce)
+            .map_err(|error| format!("E_IO: generate private database copy name: {error}"))?;
+        let nonce = nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-{purpose}-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let mut input = std::fs::File::open(source)
+            .map_err(|error| format!("E_IO: open database for private copy: {error}"))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options
+            .open(&path)
+            .map_err(|error| format!("E_IO: create private database copy: {error}"))?;
+        if let Err(error) = std::io::copy(&mut input, &mut output) {
+            let _ = std::fs::remove_file(&path);
+            return Err(format!("E_IO: copy database for observation: {error}"));
+        }
+        drop(output);
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateDatabaseCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 

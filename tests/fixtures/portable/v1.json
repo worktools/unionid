@@ -6,31 +6,36 @@
       "name": "nested_none",
       "type_name": "Nested",
       "value": {"type": "option", "value": null},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "1", "value": {"type": "option", "value": null}}
     },
     {
       "name": "nested_some_none",
       "type_name": "Nested",
       "value": {"type": "option", "value": {"type": "option", "value": null}},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "1", "value": {"type": "option", "value": {"type": "option", "value": null}}}
     },
     {
       "name": "nested_some_some",
       "type_name": "Nested",
       "value": {"type": "option", "value": {"type": "option", "value": {"type": "int", "value": "7"}}},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "1", "value": {"type": "option", "value": {"type": "option", "value": {"type": "int", "value": "7"}}}}
     },
     {
       "name": "i64_min",
       "type_name": "Wide",
       "value": {"type": "int", "value": "-9223372036854775808"},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "2", "value": {"type": "int", "value": "-9223372036854775808"}}
     },
     {
       "name": "i64_max",
       "type_name": "Wide",
       "value": {"type": "int", "value": "9223372036854775807"},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "2", "value": {"type": "int", "value": "9223372036854775807"}}
     },
     {
       "name": "i64_overflow",
@@ -43,31 +48,36 @@
       "name": "decimal_exact",
       "type_name": "Money",
       "value": {"type": "decimal", "coefficient": "-12345678901234567890123456789", "scale": 9},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "3", "value": {"type": "decimal", "coefficient": "-12345678901234567890123456789", "scale": 9}}
     },
     {
       "name": "temporal_units",
       "type_name": "Moment",
       "value": {"type": "record", "fields": {"on": {"type": "date", "value": "2024-02-29"}, "at": {"type": "timestamp", "value": "1969-12-31T23:59:59.999999Z"}, "elapsed": {"type": "duration", "microseconds": "-1"}}},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "7", "value": {"type": "record", "fields": {"at": {"type": "timestamp", "value": "1969-12-31T23:59:59.999999Z"}, "elapsed": {"type": "duration", "microseconds": "-1"}, "on": {"type": "date", "value": "2024-02-29"}}}}
     },
     {
       "name": "bytes",
       "type_name": "Blob",
       "value": {"type": "bytes", "base64url": "AAH_"},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "8", "value": {"type": "bytes", "base64url": "AAH_"}}
     },
     {
       "name": "positional_payload",
       "type_name": "Payload",
       "value": {"type": "variant", "name": "Positional", "variant_id": "0", "args": [{"type": "int", "value": "4"}, {"type": "text", "value": "four"}]},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "14", "value": {"type": "variant", "name": "Positional", "variant_id": "10", "args": [{"type": "int", "value": "4"}, {"type": "text", "value": "four"}]}}
     },
     {
       "name": "record_payload",
       "type_name": "Payload",
       "value": {"type": "variant", "name": "Named", "variant_id": "0", "args": [{"type": "record", "fields": {"id": {"type": "uuid", "value": "00000000-0000-0000-0000-000000000000"}, "data": {"type": "bytes", "base64url": ""}}}]},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "14", "value": {"type": "variant", "name": "Named", "variant_id": "13", "args": [{"type": "record", "fields": {"data": {"type": "bytes", "base64url": ""}, "id": {"type": "uuid", "value": "00000000-0000-0000-0000-000000000000"}}}]}}
     },
     {
       "name": "unknown_variant",
@@ -80,13 +90,15 @@
       "name": "bounded_recursion",
       "type_name": "Node",
       "value": {"type": "variant", "name": "Next", "variant_id": "0", "args": [{"type": "record", "fields": {"value": {"type": "int", "value": "1"}, "next": {"type": "option", "value": {"type": "variant", "name": "End", "variant_id": "0", "args": []}}}}]},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "19", "value": {"type": "variant", "name": "Next", "variant_id": "18", "args": [{"type": "record", "fields": {"next": {"type": "option", "value": {"type": "named", "type_id": "19", "value": {"type": "variant", "name": "End", "variant_id": "15", "args": []}}}, "value": {"type": "int", "value": "1"}}}]}}
     },
     {
       "name": "defaulted_empty_collection",
       "type_name": "Envelope",
       "value": {"type": "record", "fields": {"nested": {"type": "option", "value": null}, "payload": {"type": "variant", "name": "Empty", "variant_id": "0", "args": []}, "node": {"type": "variant", "name": "End", "variant_id": "0", "args": []}}},
-      "expected_ok": true
+      "expected_ok": true,
+      "expected_value": {"type": "named", "type_id": "24", "value": {"type": "record", "fields": {"nested": {"type": "named", "type_id": "1", "value": {"type": "option", "value": null}}, "node": {"type": "named", "type_id": "19", "value": {"type": "variant", "name": "End", "variant_id": "15", "args": []}}, "payload": {"type": "named", "type_id": "14", "value": {"type": "variant", "name": "Empty", "variant_id": "9", "args": []}}, "tags": {"type": "list", "items": []}}}}
     },
     {
       "name": "missing_required_key",
