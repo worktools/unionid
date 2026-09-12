@@ -496,6 +496,11 @@ fn assert_task_after(response: &QueryResponse) {
             .starts_with("Claimed")
     );
     assert!(
+        response.rows[0]["title"].cmp_eq(&Value::Option(Some(Box::new(Value::Text(
+            "compile release".into()
+        )))))
+    );
+    assert!(
         response.rows[1]["title"].cmp_eq(&Value::Option(Some(Box::new(Value::Text(
             "publish notes".into()
         )))))

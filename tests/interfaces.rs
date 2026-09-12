@@ -1894,6 +1894,7 @@ fn migration_rehearse_applies_to_a_copy_and_leaves_the_source_untouched() {
             > 0
     );
     assert!(report["check_profile"]["working_peak_bytes"].is_number());
+    assert_eq!(report["check_profile"]["bounded"], true);
     assert!(copy.exists(), "an explicit --copy path must be kept");
     assert!(
         std::fs::read(&database).unwrap() == source_before,
