@@ -283,3 +283,66 @@ fn build_rejects_mutually_recursive_types() {
     assert_eq!(error.code, "E_SCHEMA");
     assert!(error.message.contains("recursive"), "{}", error.message);
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE", rename_all_fields = "camelCase")]
+enum RenamedState {
+    InProgress {
+        attempt_count: i64,
+    },
+    #[serde(rename = "FINISHED")]
+    Done {
+        result_text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
+#[serde(rename_all = "camelCase")]
+#[unionid(table = "renamed_jobs", key = "job_id")]
+struct RenamedJob {
+    job_id: i64,
+    display_name: String,
+    #[serde(rename = "externalCode")]
+    external_code: String,
+    current_state: RenamedState,
+}
+
+#[test]
+fn serde_renames_define_the_schema_and_primary_key_names() {
+    let source = SchemaBuilder::new()
+        .add::<RenamedState>()
+        .unwrap()
+        .add::<RenamedJob>()
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        source.contains("IN_PROGRESS {attemptCount int}"),
+        "{source}"
+    );
+    assert!(source.contains("FINISHED {resultText text}"), "{source}");
+    assert!(source.contains("jobId int"), "{source}");
+    assert!(source.contains("displayName text"), "{source}");
+    assert!(source.contains("externalCode text"), "{source}");
+    assert!(source.contains("currentState RenamedState"), "{source}");
+    assert!(source.contains("key jobId"), "{source}");
+
+    let row = RenamedJob {
+        job_id: 7,
+        display_name: "serde-aligned".into(),
+        external_code: "ext-7".into(),
+        current_state: RenamedState::InProgress { attempt_count: 2 },
+    };
+    let mut engine = Engine::memory();
+    let response = engine.execute(&source);
+    assert!(response.ok, "{}\n{source}", response.message);
+    let insert = engine
+        .prepare("insert renamed_jobs $row\nreturning")
+        .unwrap();
+    let response = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([("row".into(), Value::from_serde(&row).unwrap())]),
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.typed_rows::<RenamedJob>().unwrap(), [row]);
+}

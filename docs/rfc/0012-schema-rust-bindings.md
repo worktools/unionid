@@ -53,6 +53,23 @@
 
 方向取舍：schema → Rust 与 Rust → schema 并存，但**每个项目只选一个单一来源**，另一端用生成器保持同步；不做双向自动合并。
 
+### 7. serde 表示保真（#263 首个切片）
+
+`UnionidSchema` 生成的 schema 必须与 `Value::from_serde` 和 `typed_rows` 实际看到的名称、形状一致。derive 读取会改变数据名称或形状的 serde 属性，并采用以下边界：
+
+| serde 属性 | 当前规则 |
+| --- | --- |
+| field/variant `rename` | 支持；serialize/deserialize 分别指定时必须相同 |
+| struct/enum `rename_all` | 识别 serde 的八种规则，但转换结果必须是合法 unionid identifier，variant 还必须以大写字母开头；不满足时在编译期拒绝 |
+| enum `rename_all_fields`、struct variant `rename_all` | 支持；variant 规则优先于 enum 规则 |
+| container `rename`、field `alias/default` 等不改变写出形状的属性 | 不改变 unionid type identity 或 schema 字段；由 serde 自身处理 |
+| `tag/content/untagged/transparent` | 拒绝，因为它们把默认 externally-tagged sum 或 record 改成另一种值形状 |
+| `flatten/skip/skip_serializing_if/serialize_with/deserialize_with/with` 等 | 拒绝，因为 schema 无法从字段类型推导实际写出形状或字段是否存在 |
+
+`#[unionid(key = "...")]` 仍写 Rust 字段名；生成表声明时自动换成该字段的 serde 名称。应用不需要在同一 Rust 类型里重复 schema 字段名。
+
+这一切片只保证已列出的 serde 表示一致性。`i32/f32` 的单向扩大映射、decimal 精度/scale 的宿主约束、命名 scalar/tuple 的 Rust newtype 策略仍由 [#263](https://github.com/worktools/unionid/issues/263) 后续切片决定，不能称为完整的双向无损映射。
+
 ## English Description
 
 ### 1. Problem
@@ -101,3 +118,20 @@ Codegen first because it needs no crate-structure change, is testable without ma
 - The crate stays decoupled from core `unionid` (no dependency from `unionid` to `unionid-derive`); applications depend on both, keeping `unionid`'s crates.io release contract unchanged. The release workflow verifies and publishes `unionid-derive`.
 
 Direction tradeoff: schema -> Rust and Rust -> schema coexist, but each project picks exactly one single source and keeps the other side generated; no bidirectional auto-merge.
+
+### 7. serde representation fidelity (first #263 slice)
+
+Schemas emitted by `UnionidSchema` must match the names and shapes observed by `Value::from_serde` and `typed_rows`. The derive inspects serde attributes that change data names or shapes:
+
+| serde attribute | Current rule |
+| --- | --- |
+| field/variant `rename` | Supported; separate serialize/deserialize names must be equal |
+| struct/enum `rename_all` | All eight serde rules are recognized, but the result must be a valid unionid identifier and variants must start uppercase; violations are rejected at compile time |
+| enum `rename_all_fields`, struct-variant `rename_all` | Supported; the variant rule overrides the enum rule |
+| container `rename`, field `alias/default`, and other attributes that do not change the serialized shape | Do not change unionid type identity or schema fields and remain handled by serde |
+| `tag/content/untagged/transparent` | Rejected because they replace the default externally-tagged sum or record representation |
+| `flatten/skip/skip_serializing_if/serialize_with/deserialize_with/with`, etc. | Rejected because the field type no longer determines the emitted shape or presence |
+
+`#[unionid(key = "...")]` continues to name the Rust field. The table declaration automatically uses that field's serde name, avoiding a duplicate schema name in the Rust type.
+
+This slice only guarantees the listed serde representations. Directional `i32/f32` widening, host enforcement of decimal precision/scale, and Rust newtypes for named scalar/tuple declarations remain follow-ups in [#263](https://github.com/worktools/unionid/issues/263); they are not yet a complete lossless bidirectional mapping.
