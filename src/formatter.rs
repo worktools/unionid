@@ -431,6 +431,14 @@ fn stage_text(output: &mut String, stage: &Stage, depth: usize) {
             &derive.expression,
         ),
         Stage::DeriveMatch(derive) => derive_match(output, derive, depth),
+        Stage::Lookup(lookup) => line(
+            output,
+            depth,
+            &format!(
+                "lookup {} from {} on {} == {} take {}",
+                lookup.name, lookup.table, lookup.target_key, lookup.source_key, lookup.limit
+            ),
+        ),
         Stage::Aggregate(aggregate) => aggregate_text(output, aggregate, depth),
         Stage::Select(fields) => {
             let fields = if fields.len() == 1 {

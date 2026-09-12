@@ -1333,6 +1333,17 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                     .collect::<Vec<_>>()
                     .join(" -> ")
             );
+            for lookup in &plan.lookups {
+                println!(
+                    "lookup | {} = {} where {} == {} via {} (at most {} row(s) per driver)",
+                    lookup.output,
+                    lookup.table,
+                    lookup.target_key,
+                    lookup.source_key,
+                    lookup.index,
+                    lookup.per_row_limit
+                );
+            }
             println!(
                 "result | {}",
                 plan.result_schema
@@ -1412,6 +1423,7 @@ fn query_stage_name(stage: &QueryStageKind) -> &'static str {
         QueryStageKind::FilterMatch => "filter_match",
         QueryStageKind::Derive => "derive",
         QueryStageKind::DeriveMatch => "derive_match",
+        QueryStageKind::Lookup => "lookup",
         QueryStageKind::Aggregate => "aggregate",
         QueryStageKind::Select => "select",
         QueryStageKind::Sort => "sort",

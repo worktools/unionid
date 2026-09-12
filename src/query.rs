@@ -3,6 +3,7 @@ use crate::model::{Column, ScalarType, Value};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_INDEX_COMPONENTS: usize = 16;
+pub const MAX_LOOKUP_MATCHES: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexComponent {
@@ -245,11 +246,23 @@ pub enum Stage {
     FilterMatch(MatchPredicate),
     Derive(DeriveExpression),
     DeriveMatch(DeriveMatch),
+    Lookup(Lookup),
     Aggregate(Aggregate),
     Select(Vec<String>),
     Sort(Vec<SortKey>),
     Take { offset: usize, limit: usize },
     Page(PageSpec),
+}
+
+#[derive(Debug, Clone)]
+pub struct Lookup {
+    pub name: String,
+    pub table: String,
+    pub target_key: String,
+    pub source_key: String,
+    pub limit: usize,
+    pub output_type: Option<ScalarType>,
+    pub index: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

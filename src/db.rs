@@ -38,6 +38,7 @@ pub const MAX_GROUPS: usize = 100_000;
 pub const MAX_AGGREGATE_OUTPUTS: usize = 256;
 pub const MAX_AGGREGATE_CELLS: usize = 1_000_000;
 pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_LOOKUP_DRIVERS: usize = 10_000;
 
 struct PlannedAccess {
     plan: QueryAccessPlan,
@@ -888,6 +889,7 @@ pub enum QueryStageKind {
     FilterMatch,
     Derive,
     DeriveMatch,
+    Lookup,
     Aggregate,
     Select,
     Sort,
@@ -901,12 +903,25 @@ pub struct QueryPlanStage {
     pub kind: QueryStageKind,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LookupPlan {
+    pub stage: usize,
+    pub output: String,
+    pub table: String,
+    pub target_key: String,
+    pub source_key: String,
+    pub index: String,
+    pub per_row_limit: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryPlan {
     pub table: String,
     pub access: QueryAccessPlan,
     pub stages: Vec<QueryPlanStage>,
     pub result_schema: Vec<ResponseColumn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lookups: Vec<LookupPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PagePlan>,
 }
@@ -2963,6 +2978,7 @@ impl Database {
                 Stage::Let(_)
                 | Stage::Derive(_)
                 | Stage::DeriveMatch(_)
+                | Stage::Lookup(_)
                 | Stage::Aggregate(_)
                 | Stage::Select(_) => {
                     return Err(Error::new(
@@ -3167,6 +3183,7 @@ impl Database {
                 Stage::Let(_)
                 | Stage::Derive(_)
                 | Stage::DeriveMatch(_)
+                | Stage::Lookup(_)
                 | Stage::Aggregate(_)
                 | Stage::Select(_) => unreachable!("mutation target stages were bound"),
             }
@@ -3409,6 +3426,10 @@ impl Database {
                     let column = crate::matching::bind_derive(&self.catalog, &schema, derive)?;
                     replace_or_append_column(&mut schema, column);
                 }
+                Stage::Lookup(lookup) => {
+                    let column = self.bind_lookup(&schema, lookup)?;
+                    schema.push(column);
+                }
                 Stage::Aggregate(aggregate) => {
                     for assignment in &mut aggregate.assignments {
                         if let Some(input) = &mut assignment.input {
@@ -3447,6 +3468,74 @@ impl Database {
         }
         self.prepare_page(pipeline)?;
         Ok(schema)
+    }
+
+    fn bind_lookup(&self, schema: &[Column], lookup: &mut crate::query::Lookup) -> Result<Column> {
+        if schema.iter().any(|column| column.name == lookup.name) {
+            return Err(Error::new(
+                "E_FIELD",
+                format!("lookup output '{}' already exists", lookup.name),
+            ));
+        }
+        let source_type = self.catalog.field_type(schema, &lookup.source_key)?.clone();
+        let target = self.table(&lookup.table)?;
+        let target_type = self
+            .catalog
+            .field_type(&target.schema, &lookup.target_key)?
+            .clone();
+        if !crate::expression::same_type(&source_type, &target_type) {
+            return Err(Error::new(
+                "E_TYPE",
+                format!(
+                    "lookup keys '{}' and '{}.{}' have different types ({} and {})",
+                    lookup.source_key,
+                    lookup.table,
+                    lookup.target_key,
+                    self.catalog.describe(&source_type),
+                    self.catalog.describe(&target_type)
+                ),
+            ));
+        }
+        let definition = self
+            .index_definitions
+            .get(&lookup.table)
+            .into_iter()
+            .flat_map(|definitions| definitions.values())
+            .filter(|definition| {
+                definition
+                    .effective_components()
+                    .first()
+                    .is_some_and(|component| component.column == lookup.target_key)
+            })
+            .min_by_key(|definition| (definition.effective_components().len(), definition.id))
+            .ok_or_else(|| {
+                Error::new(
+                    "E_RELATION_KEY",
+                    format!(
+                        "lookup target '{}.{}' must be the first field of an index",
+                        lookup.table, lookup.target_key
+                    ),
+                )
+            })?;
+        let components = definition.effective_components();
+        let index = if components.len() == 1 && !components[0].descending {
+            format!("{}.{}", lookup.table, components[0].column)
+        } else {
+            format!("{} ({})", lookup.table, definition.display_shape())
+        };
+        let row_type = target
+            .row_type
+            .map(ScalarType::Ref)
+            .unwrap_or_else(|| ScalarType::Record(target.schema.clone()));
+        let output_type = ScalarType::List(Box::new(row_type));
+        lookup.output_type = Some(output_type.clone());
+        lookup.index = Some(index);
+        Ok(Column {
+            name: lookup.name.clone(),
+            ty: output_type,
+            default: None,
+            id: 0,
+        })
     }
 
     /// Bind a statement far enough to know every type exposed by its response.
@@ -3707,13 +3796,31 @@ impl Database {
         if page_positions.is_empty() {
             return Ok(None);
         }
-        if page_positions.len() != 1 || page_positions[0] + 1 != pipeline.stages.len() {
+        if page_positions.len() != 1 {
             return Err(Error::new(
                 "E_PAGE_SHAPE",
-                "page must be the single final pipeline stage",
+                "a query may contain only one page stage",
             ));
         }
         let page_position = page_positions[0];
+        if pipeline.stages[..page_position]
+            .iter()
+            .any(|stage| matches!(stage, Stage::Lookup(_)))
+        {
+            return Err(Error::new(
+                "E_PAGE_SHAPE",
+                "lookup must follow page in a paginated query",
+            ));
+        }
+        if pipeline.stages[page_position + 1..]
+            .iter()
+            .any(|stage| !matches!(stage, Stage::Lookup(_) | Stage::Select(_)))
+        {
+            return Err(Error::new(
+                "E_PAGE_SHAPE",
+                "only lookup and select may follow page",
+            ));
+        }
         let Stage::Page(spec) = &pipeline.stages[page_position] else {
             unreachable!()
         };
@@ -4100,12 +4207,35 @@ impl Database {
                     Stage::FilterMatch(_) => QueryStageKind::FilterMatch,
                     Stage::Derive(_) => QueryStageKind::Derive,
                     Stage::DeriveMatch(_) => QueryStageKind::DeriveMatch,
+                    Stage::Lookup(_) => QueryStageKind::Lookup,
                     Stage::Aggregate(_) => QueryStageKind::Aggregate,
                     Stage::Select(_) => QueryStageKind::Select,
                     Stage::Sort(_) => QueryStageKind::Sort,
                     Stage::Take { .. } => QueryStageKind::Take,
                     Stage::Page(_) => QueryStageKind::Page,
                 },
+            })
+            .collect();
+        let lookups = pipeline
+            .stages
+            .iter()
+            .enumerate()
+            .filter_map(|(position, stage)| {
+                let Stage::Lookup(lookup) = stage else {
+                    return None;
+                };
+                Some(LookupPlan {
+                    stage: position + 1,
+                    output: lookup.name.clone(),
+                    table: lookup.table.clone(),
+                    target_key: lookup.target_key.clone(),
+                    source_key: lookup.source_key.clone(),
+                    index: lookup
+                        .index
+                        .clone()
+                        .expect("lookup index was bound while preparing the pipeline"),
+                    per_row_limit: lookup.limit,
+                })
             })
             .collect();
         let mut response = QueryResponse::ok_message("query plan");
@@ -4137,6 +4267,7 @@ impl Database {
             access,
             stages,
             result_schema,
+            lookups,
             page,
         });
         Ok(response)
@@ -4485,6 +4616,7 @@ impl Database {
                     }
                     Stage::Filter(_)
                     | Stage::FilterMatch(_)
+                    | Stage::Lookup(_)
                     | Stage::Aggregate(_)
                     | Stage::Sort(_) => {
                         can_bound = false;
@@ -4643,7 +4775,7 @@ impl Database {
             .iter()
             .enumerate()
             .position(|(position, stage)| match stage {
-                Stage::Aggregate(_) | Stage::Page(_) => true,
+                Stage::Lookup(_) | Stage::Aggregate(_) | Stage::Page(_) => true,
                 Stage::Sort(_) => access.ordered_sort != Some(position),
                 Stage::Select(_) => {
                     prepared_page.is_some() && final_sort.is_some_and(|sort| position > sort)
@@ -4865,6 +4997,9 @@ impl Database {
                         row.insert(derive.name.clone(), value);
                     }
                 }
+                Stage::Lookup(lookup) => {
+                    self.apply_lookup(source, &mut rows, &lookup, control, &mut observation)?;
+                }
                 Stage::Aggregate(aggregate) => {
                     rows = self.aggregate_rows(rows, &aggregate, control)?;
                 }
@@ -4942,6 +5077,92 @@ impl Database {
             page: page_info,
             execution: Some(observation),
         })
+    }
+
+    fn apply_lookup(
+        &self,
+        source: &dyn TypedRowSource,
+        rows: &mut [BTreeMap<String, Value>],
+        lookup: &crate::query::Lookup,
+        control: Option<&ExecutionControl>,
+        observation: &mut ExecutionObservation,
+    ) -> Result<()> {
+        if rows.len() > MAX_LOOKUP_DRIVERS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "lookup has {} driver rows; limit is {MAX_LOOKUP_DRIVERS}; add filter, take, or page before lookup",
+                    rows.len()
+                ),
+            ));
+        }
+        for (position, row) in rows.iter_mut().enumerate() {
+            check_deadline_periodically(control, position)?;
+            let key = row_field(row, &lookup.source_key)
+                .ok_or_else(|| {
+                    Error::new(
+                        "E_FIELD",
+                        format!(
+                            "missing lookup source field '{}' during execution",
+                            lookup.source_key
+                        ),
+                    )
+                })?
+                .clone();
+            let target = Pipeline {
+                from: lookup.table.clone(),
+                stages: vec![
+                    Stage::Filter(crate::query::BoolExpression::Compare {
+                        left: crate::query::ScalarExpression::Reference(lookup.target_key.clone()),
+                        op: CmpOp::Eq,
+                        right: crate::query::ScalarExpression::Literal(key),
+                        operand_type: None,
+                    }),
+                    // All candidates have the same lookup key. Declaring that
+                    // order lets the index reader stop at limit + 1 while the
+                    // ordinary target query still performs all type checks.
+                    Stage::Sort(vec![SortKey {
+                        column: lookup.target_key.clone(),
+                        descending: false,
+                        ty: None,
+                    }]),
+                    Stage::Take {
+                        offset: 0,
+                        limit: lookup.limit.saturating_add(1),
+                    },
+                ],
+            };
+            let response = self.query_from(source, target, control)?;
+            if let Some(nested) = response.execution {
+                observation.index_entries_examined = observation
+                    .index_entries_examined
+                    .saturating_add(nested.index_entries_examined);
+                observation.rows_decoded =
+                    observation.rows_decoded.saturating_add(nested.rows_decoded);
+                observation.row_cache_hits = observation
+                    .row_cache_hits
+                    .saturating_add(nested.row_cache_hits);
+                observation.row_cache_misses = observation
+                    .row_cache_misses
+                    .saturating_add(nested.row_cache_misses);
+                observation.batches = observation.batches.saturating_add(nested.batches);
+                observation.observe_working_bytes(nested.working_peak_bytes);
+            }
+            if response.rows.len() > lookup.limit {
+                return Err(Error::new(
+                    "E_RELATION_LIMIT",
+                    format!(
+                        "lookup '{}' matched more than {} rows for one driver row",
+                        lookup.name, lookup.limit
+                    ),
+                ));
+            }
+            row.insert(
+                lookup.name.clone(),
+                Value::List(response.rows.into_iter().map(Value::Record).collect()),
+            );
+        }
+        Ok(())
     }
 
     fn apply_streaming_prefix(
@@ -5023,7 +5244,7 @@ impl Database {
                     state.emitted = state.emitted.saturating_add(1);
                     exhausted |= state.emitted == *limit;
                 }
-                Stage::Aggregate(_) | Stage::Page(_) => {
+                Stage::Lookup(_) | Stage::Aggregate(_) | Stage::Page(_) => {
                     unreachable!("blocking stages are excluded from the streaming prefix")
                 }
             }
@@ -6299,7 +6520,10 @@ fn index_sort_match(
         .iter()
         .filter(|key| !fixed.contains(key.column.as_str()))
         .collect::<Vec<_>>();
-    if keys.is_empty() || keys.len() > components.len().saturating_sub(equality_components) {
+    if keys.is_empty() {
+        return Some((position, false));
+    }
+    if keys.len() > components.len().saturating_sub(equality_components) {
         return None;
     }
     let remaining = &components[equality_components..equality_components + keys.len()];

@@ -170,7 +170,34 @@ type Session =
 
 功能开关可以把规则声明为 list of sum，例如 `User text | Group text | Percentage int`。按 key 读取整个 typed flag 很合适；固定规则值可用 `contains`，元素 predicate 可用 `any/all`，需要按不同 constructor 提取 payload 的复杂规则求值仍更适合在应用代码完成。
 
-## 6. 有限树、原因链与规则 AST
+## 6. 订单与明细的有界关联读取
+
+小型业务常把订单主体与持续增加的明细分表保存。把明细永久复制进 Order 会放大更新；把关联结果扁平化又会丢失应用中的 `OrderWithLines {order, lines: Vec<Line>}` 形状。
+
+```text
+type Order = {id int, customer text}
+type Line = {id int, order_id int, sku text, quantity int}
+
+table orders Order
+  key id
+table order_lines Line
+  key id
+create index order_lines (order_id)
+```
+
+列表页先稳定分页 driver，再把每个订单的明细装成 typed list：
+
+```text
+from orders
+sort id
+page 100
+lookup lines from order_lines on order_id == id take 100
+select {id, customer, lines}
+```
+
+每个订单仍只出现一次；没有明细时 `lines = []`。`take 100` 是强制逐订单上限，出现第 101 行会返回 `E_RELATION_LIMIT`，促使应用修正 schema 或选择更窄的读取，而不会返回看似完整的截断数据。目标 key 必须有索引，`explain.lookups` 会列出实际索引和上限。相同机制适合任务/事件、文档/修订等少量关联；多层图遍历或大规模报表仍不属于这个数据库的目标。
+
+## 7. 有限树、原因链与规则 AST
 
 固定层数的嵌套 record 无法表达目录、评论树或规则表达式。把节点拆成父子表会引入 join 和跨行一致性，而这些小型结构通常随所属对象整行读取和原子替换。直接自递归 named ADT 保留 constructor 约束：
 
@@ -193,7 +220,7 @@ table documents Document
 
 这些值没有对象身份、共享节点或循环边，并受 64 层值预算约束。当前查询可以在源码中写出已知深度的 pattern，不提供任意深度遍历、递归函数或 subtree 路径索引；需要频繁跨节点查询的任意图仍应拆表或交给应用代码。类型有效性、codec、migration 与 backup 规则见 [RFC 0001](rfc/0001-finite-recursive-adts.md)。
 
-## 7. 生产标量：身份、时间、金额与 binary
+## 8. 生产标量：身份、时间、金额与 binary
 
 现有场景用 `text` 表示 ID/hash、用 `int` 表示时间/金额，能验证 ADT 查询，却会把格式、单位与精度留给应用。生产 schema 需要在不削弱命名 ADT 的前提下把这些物理语义带到索引和协议边界。以下 schema 中的六类生产标量均为当前可执行语法：
 
@@ -236,6 +263,7 @@ table payments Payment
 | UUID、时间、定点数与 binary | 六类生产标量已接通语言、Rust、wire、redb、backup、cursor、索引和 migration；duration/decimal 精确算术已实现 | 乘除、avg、rounding 与 calendar arithmetic 按 RFC deferred | #115/#137–#140，M5 P1 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | option helper/元素谓词可继续扩展 | #10/#22/#36/#91 |
 | 批量写入 typed row list | `insert many` 与 `upsert many` 已实现默认值、嵌套 ADT、输入内主键去重、整批主键／unique index 验证、稳定 RowId/returning/action 顺序和 memory/redb/TCP 原子提交 | 流式导入单独设计 | #89/#97，P1 核心 |
+| 小型一对多关联读 | `lookup` 已实现索引前置、相同快照、typed list、逐行/driver/内存预算、稳定分页与 explain | 通用扁平 join、图遍历和 mutation lookup 延后 | #241，M10 P0 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match/sort/take target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 多写者／skip-locked 不在当前单写模型内 | #15/#83/#85/#87 |
 | count/sum/min/max 与分组 | 已实现 typed 空输入、命名数值、完整 ADT key、后续 stage 与有界资源 | distinct aggregate、window 和用户定义 aggregate 延后 | #60，P0 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |
@@ -248,7 +276,7 @@ table payments Payment
 3. 所有字段、pattern、函数和参数在扫描前绑定；空表不会掩盖错误。schema revision 改变时 plan 重新绑定。
 4. 没有 sort 就没有跨请求顺序承诺；分页查询以唯一键结束排序。offset range 适合小工作集，大页或频繁翻页后续增加显式 cursor，而不是暗中改变 `take`。
 5. 时间、随机数、网络和文件不是查询表达式的隐含副作用。当前时间由参数传入；外部 I/O 留在应用层。
-6. 核心版本不以 join、window、递归查询函数和高阶泛型换取表面覆盖率。有限自递归 ADT 只表示整行拥有的有限树；若一个场景主要依赖大规模关联、任意图遍历、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
+6. 核心版本只提供索引驱动、基数保持且显式有界的 lookup，不以通用扁平 join、window、递归查询函数和高阶泛型换取表面覆盖率。有限自递归 ADT 只表示整行拥有的有限树；若一个场景主要依赖大规模关联、任意图遍历、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
 
 实现顺序按用户可完成的工作流安排：#34–#36 与 #59–#61 已补齐列表读取、ADT 表达式、普通派生、基础汇总和查询局部纯函数；#11 已收口查询核心，#16 已补齐共享索引访问计划与 explain。#74 用任务队列、嵌套配置和 session/cache 走通持久重启、migration 与 backup/restore，#75、#70 和 #76 已收敛工作负载、日常体验与安装发布；#81 从 #25 中切出有限自递归 ADT，先补树形核心模型，再依据真实反馈决定互递归与泛型。
 

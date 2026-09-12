@@ -12,6 +12,36 @@ struct User {
     note: String,
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Line {
+    id: i64,
+    order_id: i64,
+    sku: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct OrderWithLines {
+    id: i64,
+    customer: String,
+    lines: Vec<Line>,
+}
+
+const LOOKUP_SCHEMA: &str = r#"
+type Order = {id int, customer text}
+type Line = {id int, order_id int, sku text}
+table orders Order
+  key id
+table order_lines Line
+  key id
+create index order_lines (order_id)
+insert orders {id = 1, customer = "Ada"}
+insert orders {id = 2, customer = "Grace"}
+insert orders {id = 3, customer = "Linus"}
+insert order_lines {id = 10, order_id = 1, sku = "A"}
+insert order_lines {id = 11, order_id = 1, sku = "B"}
+insert order_lines {id = 12, order_id = 2, sku = "C"}
+"#;
+
 const SCHEMA: &str = "\
 type User = {
   id int,
@@ -177,4 +207,182 @@ fn fetch_by_key_rejects_identifiers_that_could_inject_statements() {
     let rows = engine.execute("from users");
     assert!(rows.ok, "{}", rows.message);
     assert_eq!(rows.rows.len(), 3);
+}
+
+#[test]
+fn lookup_builds_typed_nested_lists_and_preserves_driver_rows() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(LOOKUP_SCHEMA).ok);
+    let response = engine.execute(
+        "from orders\nsort id\nlookup lines from order_lines on order_id == id take 3\nselect {id, customer, lines}",
+    );
+    assert!(response.ok, "{}", response.message);
+    for row in &response.rows {
+        let Value::Int(order_id) = row["id"] else {
+            panic!("order id must be an int")
+        };
+        let manual = engine.execute(&format!(
+            "from order_lines | filter order_id == {order_id} | take 3"
+        ));
+        assert!(manual.ok, "{}", manual.message);
+        assert_eq!(
+            serde_json::to_value(&row["lines"]).unwrap(),
+            serde_json::to_value(Value::List(
+                manual.rows.into_iter().map(Value::Record).collect()
+            ))
+            .unwrap()
+        );
+    }
+    let rows = response.typed_rows::<OrderWithLines>().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0].lines.iter().map(|line| line.id).collect::<Vec<_>>(),
+        [10, 11]
+    );
+    assert_eq!(
+        rows[1].lines.iter().map(|line| line.id).collect::<Vec<_>>(),
+        [12]
+    );
+    assert!(rows[2].lines.is_empty());
+}
+
+#[test]
+fn lookup_after_page_is_stable_bounded_and_visible_in_explain() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(LOOKUP_SCHEMA).ok);
+    let query = "from orders\nsort id\npage 2\nlookup lines from order_lines on order_id == id take 3\nselect {id, customer, lines}";
+    let first = engine.execute(query);
+    assert!(first.ok, "{}", first.message);
+    assert_eq!(
+        first
+            .typed_rows::<OrderWithLines>()
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let cursor = first.page.unwrap().next_cursor.unwrap();
+    let second = engine.execute(&format!(
+        "from orders\nsort id\npage 2 after {}\nlookup lines from order_lines on order_id == id take 3\nselect {{id, customer, lines}}",
+        serde_json::to_string(&cursor).unwrap()
+    ));
+    assert!(second.ok, "{}", second.message);
+    assert_eq!(
+        second
+            .typed_rows::<OrderWithLines>()
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        [3]
+    );
+
+    let explained = engine.execute(&format!("explain\n  {}", query.replace('\n', "\n  ")));
+    assert!(explained.ok, "{}", explained.message);
+    let plan = explained.plan.unwrap();
+    assert_eq!(plan.lookups.len(), 1);
+    assert_eq!(plan.lookups[0].index, "order_lines.order_id");
+    assert_eq!(plan.lookups[0].per_row_limit, 3);
+}
+
+#[test]
+fn lookup_rejects_unindexed_mismatched_and_over_limit_relations() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(LOOKUP_SCHEMA).ok);
+    let unindexed =
+        engine.execute("from orders | lookup lines from order_lines on sku == customer take 3");
+    assert_eq!(unindexed.error.unwrap().code, "E_RELATION_KEY");
+
+    assert!(engine.execute("create index order_lines (sku)").ok);
+    let mismatched =
+        engine.execute("from orders | lookup lines from order_lines on sku == id take 3");
+    assert_eq!(mismatched.error.unwrap().code, "E_TYPE");
+
+    assert!(
+        engine
+            .execute("insert order_lines {id = 13, order_id = 1, sku = \"D\"}")
+            .ok
+    );
+    let overflow = engine.execute(
+        "from orders | filter id == 1 | lookup lines from order_lines on order_id == id take 2",
+    );
+    assert_eq!(overflow.error.unwrap().code, "E_RELATION_LIMIT");
+}
+
+#[test]
+fn lookup_formatter_is_idempotent() {
+    let source = "from orders | sort id | page 20 | lookup lines from order_lines on order_id == id take 100 | select {id, lines}";
+    let formatted = unionid::format_source(source).unwrap();
+    assert_eq!(unionid::format_source(&formatted).unwrap(), formatted);
+    assert!(formatted.contains("lookup lines from order_lines on order_id == id take 100"));
+}
+
+#[test]
+fn lookup_reads_nested_rows_after_redb_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("lookup.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let setup = engine.execute(LOOKUP_SCHEMA);
+        assert!(setup.ok, "{}", setup.message);
+    }
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let response = engine.execute(
+        "from orders | filter id == 1 | lookup lines from order_lines on order_id == id take 3",
+    );
+    assert!(response.ok, "{}", response.message);
+    let rows = response.typed_rows::<OrderWithLines>().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].lines.iter().map(|line| line.id).collect::<Vec<_>>(),
+        [10, 11]
+    );
+}
+
+#[test]
+fn paged_lookup_keeps_a_ten_thousand_row_driver_bounded() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "type Order = {id int, customer text}\n\
+                 type Line = {id int, order_id int}\n\
+                 table orders Order\n  key id\n\
+                 table order_lines Line\n  key id\n\
+                 create index order_lines (order_id)"
+            )
+            .ok
+    );
+    let values = Value::List(
+        (0..10_000)
+            .map(|id| {
+                Value::Record(std::collections::BTreeMap::from([
+                    ("id".into(), Value::Int(id)),
+                    ("customer".into(), Value::Text(format!("c{id}"))),
+                ]))
+            })
+            .collect(),
+    );
+    let inserted = engine.execute_with_params(
+        "insert many orders $rows",
+        std::collections::BTreeMap::from([("rows".into(), values)]),
+    );
+    assert!(inserted.ok, "{}", inserted.message);
+
+    let response = engine.execute(
+        "from orders\nsort id\npage 25\nlookup lines from order_lines on order_id == id take 10",
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 25);
+    assert!(response.rows.iter().all(|row| matches!(
+        row.get("lines"),
+        Some(Value::List(values)) if values.is_empty()
+    )));
+    let observation = response.execution.unwrap();
+    assert!(observation.rows_decoded <= 26, "{observation:?}");
+    assert!(
+        observation.working_peak_bytes < 1024 * 1024,
+        "{observation:?}"
+    );
 }

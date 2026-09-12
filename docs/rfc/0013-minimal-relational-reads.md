@@ -1,6 +1,6 @@
 # RFC 0013：最小关联读 / minimal relational reads
 
-- 状态 / Status: accepted, first slice implemented
+- 状态 / Status: accepted, batch fetch and bounded lookup implemented
 - 日期 / Date: 2026-09-12
 - 跟踪 / Tracking: [#241](https://github.com/worktools/unionid/issues/241)
 
@@ -33,19 +33,33 @@ let typed = engine.typed_fetch_by_key::<User>("users", "id", &[Value::Int(1)])?;
 - **错误**：绑定类型不匹配、表/列不存在沿用现有 `E_TYPE`/`E_TABLE`/`E_FIELD`；调用方通过 `typed_fetch_by_key` 解码时沿用 `Value::to_serde` 的错误路径。
 - **只读**：不改变单请求原子语义，不写任何状态。
 
-### 4. 后续：有界 lookup join stage
+### 4. 第二个切片：有界 lookup stage
 
-在批量取回稳定后，增加查询语言层的关联读，任选其一或组合：
+查询语言用基数保持的嵌套展开表达一对多关联：
 
-- `join` stage：单侧驱动行 + 另一侧主键/唯一索引点查，明确 join 方向、结果基数上限、去重规则与 sort/page 唯一性要求；只允许索引驱动，禁止 hash join 与全表笛卡尔积。
-- 引用字段在 `select`/`returning` 中展开为嵌套 record（PostgREST/GraphQL 风格），底层仍是有界点查。
+```text
+from orders
+sort id
+page 100
+lookup lines from order_lines on order_id == id take 100
+select {id, customer, lines}
+```
 
-两者都必须：可 explain、受 working/result/内存预算约束、参与稳定 cursor 分页的主键收尾规则、不引入 null（缺失用 `option` 语义）。
+`on` 左侧是目标表字段，右侧是当前 driver row 字段。每个输入行恰好产生一个输出行，并新增 `lines: list Line`；目标没有匹配时为 `[]`。这让结果保持 product type，并避免引入 SQL 式扁平重复行和 `null`。
+
+- **索引前置条件**：目标字段必须是主键、二级索引或复合索引的第一项，否则在扫描前返回 `E_RELATION_KEY`。
+- **类型**：两侧 key 必须是完全相同的类型；输出字段不能覆盖已有字段。错误分别使用 `E_TYPE` 和 `E_FIELD`。
+- **显式上限**：`take` 必填且范围为 1..=1000。执行器读取至多 `take + 1` 个目标行；超限返回 `E_RELATION_LIMIT`，不会静默截断。
+- **重复与顺序**：每个目标 RowId 最多出现一次，不做基于值的去重。首版嵌套 list 使用目标索引的稳定 traversal 顺序：单字段索引按 RowId，复合索引按剩余 component 再按 RowId；语法暂不接受目标侧自定义 sort。
+- **driver 上限**：单个 lookup 最多处理 10,000 个输入行，并继续服从通用 working bytes、结果行和 deadline 预算。
+- **一致性**：driver 与全部目标读取使用同一个 `TypedRowSource` 快照。嵌套 lookup 可逐层组合，但每层独立执行上述预算。
+- **分页**：分页查询必须写成 `sort -> page -> lookup -> select`；`lookup` 不得位于 `page` 之前，`page` 之后只允许 `lookup` 与 `select`。cursor 仍由 driver 的唯一 sort tuple 决定，并绑定完整规范查询。
+- **执行计划**：`explain` 的 `lookups` 列表公开 stage、两侧字段、目标索引与逐行上限；driver 的 `access` 仍只描述主查询访问路径。
 
 ### 5. 非目标
 
 - 不做分布式、hash join、多写者或跨请求事务。
-- 首个切片不改变查询语言语法；join stage 的语法与类型规则在后续 RFC/issue 中单独冻结。
+- 不提供会改变 driver 基数的扁平 inner/left/right/full join，也不在 mutation target 或 returning 内执行 lookup。
 - 不承诺任意图遍历或大规模关联；主要依赖关联与 OLAP 的场景仍应选择 SQLite/DuckDB/PostgreSQL。
 
 ## English Description
@@ -77,17 +91,31 @@ let typed = engine.typed_fetch_by_key::<User>("users", "id", &[Value::Int(1)])?;
 - **Errors**: binding/type/table/field errors reuse `E_TYPE`/`E_TABLE`/`E_FIELD`; typed decode reuses the `Value::to_serde` error path.
 - **Read-only**: request atomicity is unchanged and no state is written.
 
-### 4. Follow-up: bounded lookup-join stage
+### 4. Second slice: bounded lookup stage
 
-Once batch fetch is stable, add a query-language relational read, one or both of:
+The query language represents one-to-many reads as cardinality-preserving nested expansion:
 
-- a `join` stage: driving rows on one side plus PK/unique-index point lookups on the other, with explicit direction, cardinality caps, dedup rules, and stable sort/page ordering; index-driven only, no hash join or full cartesian product.
-- reference fields expanded into nested records in `select`/`returning` (PostgREST/GraphQL style), still built on bounded point lookups.
+```text
+from orders
+sort id
+page 100
+lookup lines from order_lines on order_id == id take 100
+select {id, customer, lines}
+```
 
-Both must be explainable, bound by working/result/memory budgets, compatible with the stable-cursor primary-key ordering rule, and avoid null (missing uses `option` semantics).
+The left side of `on` is a target-table field and the right side is a field on the current driver row. Every input row produces exactly one output row with a new `lines: list Line` field; no match produces `[]`. The result remains a product type without SQL-style flattened duplicates or `null`.
+
+- **Index precondition**: the target field must be a primary key, secondary index, or the first component of a composite index; otherwise binding returns `E_RELATION_KEY` before scanning.
+- **Types**: both keys must have exactly the same type, and the output field may not replace an existing field. Errors use `E_TYPE` and `E_FIELD` respectively.
+- **Explicit bound**: `take` is required and must be in 1..=1000. Execution reads at most `take + 1` target rows; overflow returns `E_RELATION_LIMIT` instead of truncating.
+- **Duplicates and order**: each target RowId appears at most once; equal row values are not deduplicated. The first version uses stable target-index traversal order: RowId for a single-component index, or the remaining components followed by RowId for a composite index. Target-side custom sort is not yet part of the syntax.
+- **Driver bound**: one lookup processes at most 10,000 input rows and remains subject to the general working-byte, result-row, and deadline budgets.
+- **Consistency**: the driver and all target reads use the same `TypedRowSource` snapshot. Nested lookup stages compose, with each layer enforcing the same budgets.
+- **Pagination**: paginated queries use `sort -> page -> lookup -> select`. Lookup cannot precede page, and only lookup/select may follow page. The cursor remains defined by the driver's unique sort tuple and binds the complete canonical query.
+- **Plan**: `explain.lookups` exposes each stage, both fields, the target index, and the per-row limit. The driver's `access` continues to describe only the main query path.
 
 ### 5. Non-goals
 
 - No distribution, hash joins, multi-writer, or cross-request transactions.
-- The first slice does not change query-language syntax; the join stage's syntax and type rules are frozen in a later RFC/issue.
+- No flattened inner/left/right/full join that changes driver cardinality, and no lookup in mutation targets or returning.
 - No arbitrary graph traversal or large-scale joins; workloads dominated by relational or OLAP queries should still choose SQLite/DuckDB/PostgreSQL.
