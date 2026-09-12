@@ -1,0 +1,3 @@
+migration m0002_query_binding_evolution
+  add variant State.Complete
+  add field Task.priority int = 0

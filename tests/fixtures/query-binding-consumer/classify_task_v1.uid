@@ -1,0 +1,8 @@
+from tasks
+filter id == $id
+derive status =
+  match state
+    Pending => "pending"
+    Running {attempt} => "running"
+select {id, status}
+take 1
