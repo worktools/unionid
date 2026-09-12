@@ -1,16 +1,19 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 use unionid::scalars::{Bytes, Date, Decimal, Duration, Timestamp, Uuid};
-use unionid::{Engine, SchemaBuilder};
+use unionid::{Engine, SchemaBuilder, Value};
 use unionid_derive::UnionidSchema;
 
-#[derive(UnionidSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
 struct Contact {
     email: String,
     nickname: Option<String>,
 }
 
-#[derive(UnionidSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
 enum State {
     Pending,
     Running { worker: String, attempt: i64 },
@@ -18,7 +21,7 @@ enum State {
     Done(String, String),
 }
 
-#[derive(UnionidSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
 #[unionid(table = "tasks", key = "id")]
 struct Task {
     id: i64,
@@ -140,4 +143,38 @@ fn add_rejects_conflicting_names() {
             .add::<first::User>()
             .is_ok()
     );
+}
+
+#[test]
+fn inserts_and_reads_derived_values() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(&schema()).ok, "schema must execute");
+
+    let task = Task {
+        id: 1,
+        title: "ship".into(),
+        owner: Contact {
+            email: "a@example.com".into(),
+            nickname: Some("A".into()),
+        },
+        tags: vec!["x".into(), "y".into()],
+        state: State::Running {
+            worker: "w".into(),
+            attempt: 2,
+        },
+        parent: None,
+    };
+    let insert = engine.prepare("insert tasks $row\nreturning").unwrap();
+    let response = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([("row".into(), Value::from_serde(&task).unwrap())]),
+    );
+    assert!(response.ok, "{}", response.message);
+    let rows = response.typed_rows::<Task>().unwrap();
+    assert_eq!(rows.as_slice(), std::slice::from_ref(&task));
+
+    let read = engine.prepare("from tasks | filter id == 1").unwrap();
+    let response = engine.execute_prepared(&read, BTreeMap::new());
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.typed_rows::<Task>().unwrap(), [task]);
 }
