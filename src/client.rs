@@ -8,8 +8,22 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+#[cfg(any(feature = "asynchronous", feature = "http-client"))]
+use serde::de::DeserializeOwned;
+
+use crate::SchemaInfo;
+use crate::db::ResponseColumn;
 use crate::error::{Error, Result};
+#[cfg(any(feature = "asynchronous", feature = "http-client"))]
+use crate::protocol::decode_typed_row;
 use crate::protocol::{Request, Response};
+#[cfg(any(feature = "asynchronous", feature = "http-client"))]
+use crate::stream::{self as stream_protocol, Frame};
+
+#[cfg(feature = "asynchronous")]
+pub mod asynchronous;
+#[cfg(feature = "asynchronous")]
+pub use asynchronous::{AsyncTcpClient, AsyncTcpStream};
 
 #[cfg(feature = "http-client")]
 pub mod http;
@@ -17,6 +31,235 @@ pub mod http;
 /// Maximum accepted response line, matching the server response budget.
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One typed event after a stream's accepted handshake.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedStreamEvent<T> {
+    Schema {
+        columns: Vec<ResponseColumn>,
+        schema: SchemaInfo,
+    },
+    Row {
+        sequence: String,
+        row: T,
+    },
+    Complete {
+        row_count: String,
+        encoded_bytes: String,
+        warnings: Vec<String>,
+    },
+    Error {
+        emitted_rows: String,
+        error: Error,
+    },
+}
+
+#[cfg(any(feature = "asynchronous", feature = "http-client"))]
+pub(crate) struct StreamValidator {
+    request_id: String,
+    operation_id: String,
+    protocol_version: u32,
+    schema_seen: bool,
+    terminal: bool,
+    row_count: usize,
+}
+
+#[cfg(any(feature = "asynchronous", feature = "http-client"))]
+impl StreamValidator {
+    pub(crate) fn accepted(request: &Request, operation_id: String, frame: &Frame) -> Result<Self> {
+        validate_frame_identity(frame, &request.request_id, &operation_id)?;
+        if !matches!(frame, Frame::Accepted { .. }) {
+            return Err(Error::new(
+                "E_PROTOCOL",
+                "stream must begin with an accepted frame",
+            ));
+        }
+        Ok(Self {
+            request_id: request.request_id.clone(),
+            operation_id,
+            protocol_version: request.version,
+            schema_seen: false,
+            terminal: false,
+            row_count: 0,
+        })
+    }
+
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(crate) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub(crate) fn terminal(&self) -> bool {
+        self.terminal
+    }
+
+    pub(crate) fn validate_next(&mut self, frame: &Frame) -> Result<()> {
+        validate_frame_identity(frame, &self.request_id, &self.operation_id)?;
+        match frame {
+            Frame::Accepted { .. } => {
+                return Err(Error::new(
+                    "E_PROTOCOL",
+                    "stream sent accepted more than once",
+                ));
+            }
+            Frame::Schema { .. } if self.schema_seen => {
+                return Err(Error::new(
+                    "E_PROTOCOL",
+                    "stream sent schema more than once",
+                ));
+            }
+            Frame::Schema { .. } => self.schema_seen = true,
+            Frame::Row { .. } if !self.schema_seen => {
+                return Err(Error::new("E_PROTOCOL", "stream sent a row before schema"));
+            }
+            Frame::Complete { .. } if !self.schema_seen => {
+                return Err(Error::new("E_PROTOCOL", "stream completed before schema"));
+            }
+            Frame::Row { sequence, .. } => {
+                if sequence != &self.row_count.to_string() {
+                    return Err(Error::new(
+                        "E_PROTOCOL",
+                        "stream row sequence is not contiguous",
+                    ));
+                }
+                self.row_count = self.row_count.checked_add(1).ok_or_else(|| {
+                    Error::new(
+                        "E_STREAM_LIMIT",
+                        "stream row count exceeds the client limit",
+                    )
+                })?;
+            }
+            Frame::Complete { row_count, .. } => {
+                if row_count != &self.row_count.to_string() {
+                    return Err(Error::new(
+                        "E_PROTOCOL",
+                        "stream complete row count does not match emitted rows",
+                    ));
+                }
+                self.terminal = true;
+            }
+            Frame::Error { emitted_rows, .. } => {
+                if emitted_rows != &self.row_count.to_string() {
+                    return Err(Error::new(
+                        "E_PROTOCOL",
+                        "stream error row count does not match emitted rows",
+                    ));
+                }
+                self.terminal = true;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn typed_event<T: DeserializeOwned>(
+        &self,
+        frame: Frame,
+    ) -> Result<TypedStreamEvent<T>> {
+        let event = match frame {
+            Frame::Schema {
+                columns, schema, ..
+            } => TypedStreamEvent::Schema { columns, schema },
+            Frame::Row { sequence, row, .. } => TypedStreamEvent::Row {
+                sequence,
+                row: decode_typed_row(self.protocol_version, &row, self.row_count)?,
+            },
+            Frame::Complete {
+                row_count,
+                encoded_bytes,
+                warnings,
+                ..
+            } => TypedStreamEvent::Complete {
+                row_count,
+                encoded_bytes,
+                warnings,
+            },
+            Frame::Error {
+                emitted_rows,
+                error,
+                ..
+            } => TypedStreamEvent::Error {
+                emitted_rows,
+                error,
+            },
+            Frame::Accepted { .. } => {
+                return Err(Error::new(
+                    "E_PROTOCOL",
+                    "accepted is a handshake rather than a stream event",
+                ));
+            }
+        };
+        Ok(event)
+    }
+}
+
+#[cfg(any(feature = "asynchronous", feature = "http-client"))]
+pub(crate) fn validate_stream_error_response(
+    response: &stream_protocol::ErrorResponse,
+    request_id: &str,
+) -> Result<()> {
+    if response.ok
+        || response.stream_version != stream_protocol::VERSION
+        || response.request_id != request_id
+    {
+        return Err(Error::new(
+            "E_PROTOCOL",
+            "stream error response identity does not match the request",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "asynchronous", feature = "http-client"))]
+pub(crate) fn validate_frame_identity(
+    frame: &Frame,
+    request_id: &str,
+    operation_id: &str,
+) -> Result<()> {
+    let (version, frame_request_id, frame_operation_id) = match frame {
+        Frame::Accepted {
+            stream_version,
+            request_id,
+            operation_id,
+        }
+        | Frame::Schema {
+            stream_version,
+            request_id,
+            operation_id,
+            ..
+        }
+        | Frame::Row {
+            stream_version,
+            request_id,
+            operation_id,
+            ..
+        }
+        | Frame::Complete {
+            stream_version,
+            request_id,
+            operation_id,
+            ..
+        }
+        | Frame::Error {
+            stream_version,
+            request_id,
+            operation_id,
+            ..
+        } => (*stream_version, request_id, operation_id),
+    };
+    if version != stream_protocol::VERSION
+        || frame_request_id != request_id
+        || frame_operation_id != operation_id
+    {
+        return Err(Error::new(
+            "E_PROTOCOL",
+            "stream frame identity does not match the accepted operation",
+        ));
+    }
+    Ok(())
+}
 
 /// A synchronous typed client over the versioned TCP JSON-lines protocol.
 pub struct TcpClient {

@@ -97,7 +97,7 @@ while let Some(event) = stream.next_event::<Todo>().await? {
         TypedStreamEvent::Row { row, .. } => consume(row),
         TypedStreamEvent::Complete { .. } => break,
         TypedStreamEvent::Error { error, .. } => return Err(error),
-        TypedStreamEvent::Schema { .. } => {}
+        TypedStreamEvent::Schema { .. } => {},
     }
 }
 let outcome = client.cancel("cancel-check", operation_id).await?;
@@ -145,7 +145,31 @@ cargo run --example todolist -- /path/to/empty-work-directory
 
 ## 官方客户端与异步适配
 
-Rust 应用可直接使用 `unionid::client::TcpClient` 连接 TCP 服务：`query`/`request` 发送 version 1 请求，`request_retrying` 在携带 `idempotency_key` 时自动重连重试，响应用 `Response::typed_rows` 解码为应用类型。需要自定义 async handler 时启用可选 `asynchronous` feature，用 `unionid::asynchronous::execute_protocol_request` 在 blocking worker 上执行同一 `ConcurrentEngine` 入口并传递 deadline。标准 Axum 数据面可直接启用 `http` feature 和上述 router。两种方式都无需 `Mutex<Engine>` 或自建线程池；`ConcurrentEngine`、`ReadOperation`、`ConcurrencyStats` 等集成类型已在 crate root 导出。
+Rust 应用可直接使用 `unionid::client::TcpClient` 连接 TCP 服务。Tokio 应用启用 `asynchronous` feature 后可使用 cloneable `AsyncTcpClient`；clone 共享一条串行请求连接，stream 使用独立连接，cancel 再使用独立控制连接，因此取消不会被正在读取的 stream 阻塞：
+
+```rust
+use unionid::{AsyncTcpClient, ProtocolRequest, TypedStreamEvent};
+
+let client = AsyncTcpClient::connect("127.0.0.1:9123").await?;
+let request = ProtocolRequest::query("todos", "from todos\nsort id");
+let rows = client.request(&request).await?.typed_rows::<Todo>()?;
+
+let mut stream = client.stream(&request).await?;
+let operation_id = stream.operation_id().to_owned();
+while let Some(event) = stream.next_event::<Todo>().await? {
+    match event {
+        TypedStreamEvent::Schema { .. } => {}
+        TypedStreamEvent::Row { row, .. } => consume(row),
+        TypedStreamEvent::Complete { .. } => break,
+        TypedStreamEvent::Error { error, .. } => return Err(error),
+    }
+}
+let terminal = client.cancel("cancel-check", operation_id).await?;
+```
+
+`AsyncTcpClient` 的单次 request/stream 使用同一个绝对 deadline，等待共享连接、重连、写入和读取都会消耗该预算。传输失败、半响应或超时会丢弃已污染的请求连接；下一次请求重新连接。只有带 `idempotency_key` 的完整请求可用 `request_retrying` 自动重发，防止“服务端已提交、客户端未收到响应”造成重复 effect。page continuation 会清除 mutation key；production scalar 继续要求 protocol v2。HTTP 与 TCP stream 共用 frame identity/order/count validator 和 typed row decoder。
+
+需要自定义 async handler 时，同一 `asynchronous` feature 还提供 `unionid::asynchronous::execute_protocol_request`，在 blocking worker 上执行 `ConcurrentEngine` 并传递 deadline。标准 Axum 数据面可启用 `http` feature 和上述 router。所有方式都无需应用持有 `Mutex<Engine>` 或自建线程池；`ConcurrentEngine`、`ReadOperation`、`ConcurrencyStats` 等集成类型已在 crate root 导出。
 
 ## 生产边界
 
