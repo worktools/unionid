@@ -16,7 +16,7 @@ unionid 已经证明，有限 ADT 可以成为数据库的共同数据模型，�
 
 ### 2. 最新进度及其实际含义
 
-已发布版本为 v0.2.0；以下包含 main 上的后续开发，不能全部视为已发布能力。
+已发布版本仍为 v0.2.0；v0.3.0 的功能范围已完成并进入发布候选冻结，实际公开能力仍以 tag 和 release 为准。
 
 | 方面 | 已验证的进展 | 仍需补齐的边界 |
 | --- | --- | --- |
@@ -167,7 +167,7 @@ Planning update: after user confirmation, #262/#263 target v0.3.0 and #264/#265 
 
 ### Assessment
 
-As of main `b4c6a37` on September 12, 2026, unionid has validated its core technical proposition: finite ADTs can share semantics across schema declarations, typed queries and mutations, indexes, persistence, and migrations. The released version is v0.2.0; recent main additions include both Rust/schema generation directions, indexed batch fetch, migration impact reporting, and offline rehearsal. Batch fetch is not a query-language join, and #241–#243 still have remaining scope.
+As of September 13, 2026, unionid has validated its core technical proposition: finite ADTs can share semantics across schema declarations, typed queries and mutations, indexes, persistence, and migrations. The released version remains v0.2.0, while the completed v0.3.0 feature scope is entering release-candidate freeze. It includes both Rust/schema generation directions, bounded indexed relational reads, official typed Engine/TCP/HTTP journeys, migration impact reporting, offline rehearsal, and throttled checkpoint advancement. Public availability still depends on the tag and release.
 
 Product adoption remains unproven. Repository-owned consumer and recovery tests are valuable engineering evidence, but they do not establish that independent applications are cheaper to build and evolve than with an established database and typed tooling. Existing documentation reports no external users; this assessment found no new evidence to change that conclusion.
 

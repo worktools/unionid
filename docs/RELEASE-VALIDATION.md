@@ -1,4 +1,4 @@
-# v0.2 端到端发布验收
+# v0.3 端到端发布验收
 
 ## 核心正确性场景
 
@@ -6,7 +6,7 @@
 
 | 场景 | 数据与操作 | Schema 演进 | 还原后验证 |
 | --- | --- | --- | --- |
-| 任务队列 | 嵌套任务状态、按主键条件 claim、upsert | `Running` 改名为 `Claimed`，增加默认 priority 与索引 | 类型化状态、主键行数、priority 索引计划 |
+| 任务队列 | 嵌套任务状态、按主键条件 claim、upsert | `Running` 改名为 `Claimed`，增加 `Cancelled`，把 title 转为 option，增加默认 priority 与索引 | 类型化状态与 title、主键行数、priority 索引计划 |
 | 嵌套配置 | `Source` sum 包含命名 `Retry` record，更新远端配置 | 先给 `Retry` 增加深层默认字段，再把 `Remote` 变为带 headers 的 `Http` | 嵌套命名身份、默认值、变体 payload 与重建后的 source 索引 |
 | Session/cache | insert、同 key upsert、delete 和重启 | `Active` 改名为 `Ready`，增加 generation 与索引 | key 生命周期、替换后的字段、generation 索引计划 |
 
@@ -24,7 +24,7 @@ cargo test --locked --test release_scenarios
 
 这些场景验证应用进程边界上的查询、DML、schema/data migration、索引重建、ledger 和 backup/restore 一致性。提交前／后退出、真实文件增长失败及 open/check 成本由 #13/#14 的存储测试和[恢复成本记录](benchmarks/recovery-2026-09-07.md)提供。
 
-它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。当前 1 万／10 万行的 query、write、check 与 shadow migration 数据见 [M7 验收记录](benchmarks/m7-acceptance-2026-09-10.md)；v0.2 双平台候选与包内教程由 [#200](https://github.com/worktools/unionid/issues/200) 做最终验收。
+它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。当前 1 万／10 万行的 query、write、check 与 shadow migration 数据见 [M7 验收记录](benchmarks/m7-acceptance-2026-09-10.md)；v0.3 双平台候选、独立 Rust consumer 与包内教程由 [#268](https://github.com/worktools/unionid/issues/268) 做最终验收。
 
 ## crates.io 与 GitHub Release 发布
 
@@ -34,15 +34,15 @@ cargo test --locked --test release_scenarios
 cargo publish --dry-run --locked --registry crates-io
 ```
 
-所有 Release workflow 运行还会只检查仓库 Actions secret `CARGO_REGISTRY_TOKEN` 是否可见且非空，不打印或使用其内容。随后，`v*` tag 运行在 Ubuntu runner 执行 `cargo publish --locked --registry crates-io`；crate 发布成功后，才汇总 macOS/Linux artifacts 并创建 GitHub Release。tag 版本仍由原生包脚本校验为与 `Cargo.toml` 一致。缺少 token、crate dry-run 或实际发布失败都会阻止 GitHub Release job。
+手动非 tag 候选运行不读取或要求发布凭据。只有 `v*` tag 运行才检查仓库 Actions secret `CARGO_REGISTRY_TOKEN` 是否可见且非空，然后在 Ubuntu runner 依次发布 `unionid-derive` 与 `unionid`；crate 发布成功后，才汇总 macOS/Linux artifacts 并创建 GitHub Release。tag 版本仍由原生包脚本校验为与 `Cargo.toml` 一致。缺少 token、crate dry-run 或实际发布失败都会阻止 GitHub Release job。
 
 参考的 `command-pool` 流程使用 `katyo/publish-crates@v2`。该 action 当前声明 Node 20 runtime，因此 unionid 保留相同的 GitHub Actions + registry token 模型，但在固定 Rust 1.94.0 runner 中直接调用 Cargo，避免重新引入已在 #105 消除的 Node runtime 警告。
 
-## v0.2 候选机器证据
+## v0.3 候选机器证据
 
 CI 矩阵固定核对 Linux `x86_64-unknown-linux-gnu` 与 macOS `aarch64-apple-darwin`。每个 job 只有在 formatter、locked check、严格 Clippy、完整测试、Engine/CLI/TCP 教程、HTTP/stream 示例、评测 smoke、release build 和包外 SHA-256 验证全部成功后，才运行 `scripts/record-release-acceptance.py`。
 
-该脚本重新读取已验证压缩包中的 `RELEASE.json` 与 `release/contract.json`，要求 manifest 的 clean source commit 与实际 GitHub head SHA、预期 target 和源码 contract 一致，然后输出 version 1 JSON。报告保存 runner OS/arch/target、workflow URL、candidate commit、archive/manifest/contract SHA-256、完整 release manifest、逐类通过状态和对应测试／文档证据；不保存数据库内容、secret 或不稳定的墙钟时间。macOS/Linux 报告分别以 GitHub Actions artifact 保留 90 天，workflow URL 与摘要继续写入 issue，正式发布时由 #201 保存最终记录。
+该脚本重新读取已验证压缩包中的 `RELEASE.json` 与 `release/contract.json`，要求 manifest 的 clean source commit 与实际 GitHub head SHA、预期 target 和源码 contract 一致，然后输出 version 1 JSON。报告保存 runner OS/arch/target、workflow URL、candidate commit、archive/manifest/contract SHA-256、完整 release manifest、逐类通过状态和对应测试／文档证据；不保存数据库内容、secret 或不稳定的墙钟时间。macOS/Linux 报告分别以 GitHub Actions artifact 保留 90 天，workflow URL 与摘要继续写入 #268。
 
 ## English Description
 
@@ -50,12 +50,12 @@ CI 矩阵固定核对 Linux `x86_64-unknown-linux-gnu` 与 macOS `aarch64-apple-
 
 The source and restored databases are compared for canonical schema, revision/hash, immutable migration ledger, typed query results, and structured explain access paths. The nested configuration case also prevents migration bindings from erasing the identity of a named record contained inside an outer sum payload.
 
-Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. The [M7 acceptance record](benchmarks/m7-acceptance-2026-09-10.md) retains current 10k/100k query, write, check, and shadow-migration evidence; [#200](https://github.com/worktools/unionid/issues/200) owns final dual-platform candidate and packaged-tutorial acceptance.
+Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. The [M7 acceptance record](benchmarks/m7-acceptance-2026-09-10.md) retains current 10k/100k query, write, check, and shadow-migration evidence; [#268](https://github.com/worktools/unionid/issues/268) owns final dual-platform candidate, independent Rust consumer, and packaged-tutorial acceptance.
 
-Official versions are published only by `.github/workflows/release.yml`; developers do not run `cargo publish` from a workstation. The independent `release/contract.json` freezes software, minimum Rust, redb, version-report schema, storage/backup/codec, protocol, and stream versions. Packaging requires it to match Cargo and the binary, includes the source contract in the archive, and records the full source commit plus clean-worktree status in `RELEASE.json`. Dirty trees require an explicit `--allow-dirty` development override and are always rejected by the formal verifier. Verification compares the packaged contract, manifest, and binary report against the trusted contract outside the package. A manual non-tag run executes `cargo publish --dry-run --locked --registry crates-io` alongside the native artifact checks, then safely checks only that `CARGO_REGISTRY_TOKEN` is visible and non-empty without printing or using its contents. On a `v*` tag, the Ubuntu runner publishes with that secret; only after publication succeeds does the workflow assemble the macOS/Linux assets and create the GitHub Release. Missing credentials or any crate validation/publication failure blocks the GitHub Release job. The GitHub Release body is selected from `docs/RELEASE-${tag}.md`, so a tag cannot silently reuse notes from an older version.
+Official versions are published only by `.github/workflows/release.yml`; developers do not run `cargo publish` from a workstation. The independent `release/contract.json` freezes software, minimum Rust, redb, version-report schema, storage/backup/codec, protocol, and stream versions. Packaging requires it to match Cargo and the binary, includes the source contract in the archive, and records the full source commit plus clean-worktree status in `RELEASE.json`. Dirty trees require an explicit `--allow-dirty` development override and are always rejected by the formal verifier. Verification compares the packaged contract, manifest, and binary report against the trusted contract outside the package. A manual non-tag run executes `cargo publish --dry-run --locked --registry crates-io` alongside the native artifact checks without requiring publication credentials. On a `v*` tag, the workflow verifies `CARGO_REGISTRY_TOKEN`, publishes `unionid-derive` before `unionid`, then assembles the macOS/Linux assets and creates the GitHub Release. Missing credentials or any crate validation/publication failure blocks the GitHub Release job. The GitHub Release body is selected from `docs/RELEASE-${tag}.md`, so a tag cannot silently reuse notes from an older version.
 
 The reference `command-pool` workflow uses `katyo/publish-crates@v2`. Because that action currently declares a Node 20 runtime, unionid preserves its GitHub Actions plus registry-token model but invokes Cargo directly on the pinned Rust 1.94.0 runner, avoiding the runtime warning removed in #105.
 
-For v0.2 candidate evidence, the CI matrix fixes the expected targets to Linux `x86_64-unknown-linux-gnu` and macOS `aarch64-apple-darwin`. A job runs `scripts/record-release-acceptance.py` only after formatting, locked checks, strict Clippy, the full suite, Engine/CLI/TCP tutorial, HTTP/stream example, evaluator smoke runs, release build, and out-of-package SHA-256 verification all succeed.
+For v0.3 candidate evidence, the CI matrix fixes the expected targets to Linux `x86_64-unknown-linux-gnu` and macOS `aarch64-apple-darwin`. A job runs `scripts/record-release-acceptance.py` only after formatting, locked checks, strict Clippy, the full suite, the packaged independent consumer, Engine/CLI/TCP tutorial, HTTP/stream example, evaluator smoke runs, release build, and out-of-package SHA-256 verification all succeed.
 
-The recorder rereads `RELEASE.json` and `release/contract.json` from the verified archive. It requires the manifest's clean source commit to equal the GitHub head SHA, expected target, and trusted source contract, then writes a version-1 JSON report. The report retains runner OS/arch/target, workflow URL, candidate commit, archive/manifest/contract SHA-256 values, the full release manifest, per-area pass results, and test/document evidence. It contains no database values, secrets, or unstable wall-clock timestamp. GitHub retains separate macOS/Linux report artifacts for 90 days; the issue retains workflow links and summaries, and #201 preserves the final publication record.
+The recorder rereads `RELEASE.json` and `release/contract.json` from the verified archive. It requires the manifest's clean source commit to equal the GitHub head SHA, expected target, and trusted source contract, then writes a version-1 JSON report. The report retains runner OS/arch/target, workflow URL, candidate commit, archive/manifest/contract SHA-256 values, the full release manifest, per-area pass results, and test/document evidence. It contains no database values, secrets, or unstable wall-clock timestamp. GitHub retains separate macOS/Linux report artifacts for 90 days, while #268 retains workflow links and summaries.
