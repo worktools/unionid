@@ -69,22 +69,28 @@ fn emit_definition(
             writeln!(output, "}}").unwrap();
         }
         ScalarType::Enum(sum) => emit_enum(output, &definition.name, sum, names)?,
-        ScalarType::Tuple(items) => {
-            let items = items
-                .iter()
-                .map(|item| format_type(item, names))
-                .collect::<Result<Vec<_>>>()?
-                .join(", ");
+        ScalarType::Tuple(_) => {
+            let ty = format_type(&definition.ty, names)?;
             writeln!(output, "/// Named tuple type `{}`.", definition.name).unwrap();
-            writeln!(output, "pub type {name} = ({items});").unwrap();
+            emit_newtype(output, &name, &ty);
         }
         other => {
             let ty = format_type(other, names)?;
             writeln!(output, "/// Named type `{}`.", definition.name).unwrap();
-            writeln!(output, "pub type {name} = {ty};").unwrap();
+            emit_newtype(output, &name, &ty);
         }
     }
     Ok(())
+}
+
+fn emit_newtype(output: &mut String, name: &str, inner: &str) {
+    writeln!(
+        output,
+        "#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]"
+    )
+    .unwrap();
+    writeln!(output, "#[serde(transparent)]").unwrap();
+    writeln!(output, "pub struct {name}(pub {inner});").unwrap();
 }
 
 fn emit_enum(

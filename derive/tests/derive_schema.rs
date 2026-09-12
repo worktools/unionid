@@ -44,6 +44,14 @@ struct Event {
     flags: Vec<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
+#[unionid(table = "priced_items", key = "id")]
+struct PricedItem {
+    id: i64,
+    #[unionid(decimal = "5 2")]
+    amount: Decimal,
+}
+
 fn schema() -> String {
     SchemaBuilder::new()
         .add::<Contact>()
@@ -85,6 +93,42 @@ fn derived_schema_validates_and_round_trips() {
     assert!(rust.contains("pub struct Task {"));
     assert!(rust.contains("pub enum State {"));
     assert!(rust.contains("pub amount: unionid::scalars::Decimal,"));
+}
+
+#[test]
+fn decimal_precision_is_enforced_by_the_schema_boundary() {
+    let source = SchemaBuilder::new()
+        .add::<PricedItem>()
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut engine = Engine::memory();
+    assert!(engine.execute(&source).ok);
+    let insert = engine
+        .prepare("insert priced_items $item\nreturning")
+        .unwrap();
+
+    let accepted = PricedItem {
+        id: 1,
+        amount: Decimal::parse("999.99", 5, 2).unwrap(),
+    };
+    let response = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([("item".into(), Value::from_serde(&accepted).unwrap())]),
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.typed_rows::<PricedItem>().unwrap(), [accepted]);
+
+    let too_wide = PricedItem {
+        id: 2,
+        amount: Decimal::parse("1000.00", 6, 2).unwrap(),
+    };
+    let response = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([("item".into(), Value::from_serde(&too_wide).unwrap())]),
+    );
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "E_DECIMAL_RANGE");
 }
 
 #[test]

@@ -1,9 +1,11 @@
 mod common;
 
+use std::collections::BTreeMap;
 use std::process::Command;
 
 use common::TempDir;
-use unionid::{Engine, codegen};
+use serde::{Deserialize, Serialize};
+use unionid::{Engine, Value, codegen};
 
 #[test]
 fn generates_rust_bindings_for_example_schema() {
@@ -41,6 +43,10 @@ type Contact = {
 
 type Ids = (int, text)
 
+type UserId = text
+
+type OrderId = text
+
 type Event = {
   id uuid,
   at timestamp,
@@ -65,7 +71,12 @@ table events Event
     assert!(generated.contains("Pair(i64, i64)"));
     assert!(generated.contains("pub struct Contact {"));
     assert!(generated.contains("pub nickname: Option<String>,"));
-    assert!(generated.contains("pub type Ids = (i64, String);"));
+    assert!(generated.contains("pub struct Ids(pub (i64, String));"));
+    assert!(generated.contains("pub struct UserId(pub String);"));
+    assert!(generated.contains("pub struct OrderId(pub String);"));
+    assert!(!generated.contains("pub type Ids"));
+    assert!(!generated.contains("pub type UserId"));
+    assert_eq!(generated.matches("#[serde(transparent)]").count(), 3);
     for scalar in [
         "unionid::scalars::Uuid",
         "unionid::scalars::Timestamp",
@@ -76,6 +87,65 @@ table events Event
     ] {
         assert!(generated.contains(scalar), "missing {scalar}");
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct UserId(String);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct OrderId(String);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct Position((i64, i64));
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Assignment {
+    id: i64,
+    user: UserId,
+    order: OrderId,
+    position: Position,
+}
+
+#[test]
+fn generated_newtype_shape_round_trips_nominal_domain_values() {
+    let schema = "\
+type UserId = text
+type OrderId = text
+type Position = (int, int)
+type Assignment = {
+  id int,
+  user UserId,
+  order OrderId,
+  position Position,
+}
+table assignments Assignment
+  key id
+";
+    let generated = codegen::rust(schema).unwrap();
+    assert!(generated.contains("pub struct UserId(pub String);"));
+    assert!(generated.contains("pub struct OrderId(pub String);"));
+    assert!(generated.contains("pub struct Position(pub (i64, i64));"));
+
+    let assignment = Assignment {
+        id: 1,
+        user: UserId("user-1".into()),
+        order: OrderId("order-1".into()),
+        position: Position((4, 9)),
+    };
+    let mut engine = Engine::memory();
+    assert!(engine.execute(schema).ok);
+    let insert = engine
+        .prepare("insert assignments $assignment\nreturning")
+        .unwrap();
+    let response = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([("assignment".into(), Value::from_serde(&assignment).unwrap())]),
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.typed_rows::<Assignment>().unwrap(), [assignment]);
 }
 
 #[test]

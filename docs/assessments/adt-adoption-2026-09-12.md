@@ -4,7 +4,7 @@
 
 ## 中文说明
 
-计划更新：用户确认后，#262/#263 纳入 v0.3.0，#264/#265 纳入 v0.4.0，联合验收分别由 [#268](https://github.com/worktools/unionid/issues/268) 与 [#269](https://github.com/worktools/unionid/issues/269) 跟踪，最新版本分工见[路线图](../ROADMAP.md)。评估完成后 #267 又合并了 TCP/async SDK 首个切片，#242 剩余范围仍开放；下文代码探针保留原基线证据。
+计划更新：用户确认后，#262/#263 纳入 v0.3.0，#264/#265 纳入 v0.4.0，联合验收分别由 [#268](https://github.com/worktools/unionid/issues/268) 与 [#269](https://github.com/worktools/unionid/issues/269) 跟踪，最新版本分工见[路线图](../ROADMAP.md)。评估完成后 #267 合并了 TCP/async SDK 首个切片，#270 修复依赖排序，#271 修复 serde 表示漂移；#242/#263 的剩余范围仍开放。下文代码探针保留原基线证据，不继续当作当前行为描述。
 
 ### 1. 判断：核心技术命题已经得到验证，应用采用的命题仍待验证
 
@@ -57,7 +57,7 @@ unionid 已经证明，有限 ADT 可以成为数据库的共同数据模型，�
 
 直接依据：[SchemaBuilder](../../src/schema.rs)、[derive 实现](../../derive/src/lib.rs)、[Rust codegen](../../src/codegen.rs)。名义类型的数据库内部身份与 serde 边界有意分离；这里的判断是宿主侧没有完整保留领域区别，不是数据库丢失了持久 ID。字段检查和解码错误也说明当前路径是显式失败，而不是这些探针已造成静默坏数据。
 
-依赖排序和 serde 表示漂移应先修正。newtype、数值范围、decimal 精度/scale、模块命名、默认值和索引元数据，需要一个明确的支持契约：可无损映射的直接支持；只能部分映射的声明限制；无法处理的在生成/编译阶段拒绝，避免“生成成功”带来过强预期。
+后续实现已经按这一证据推进：#270 修复依赖排序，#271 对齐或拒绝 serde 表示；#263 第二个切片拒绝无法覆盖数据库完整值域的窄数值 derive，把命名 scalar/tuple 生成为 Rust newtype，并明确 decimal P/S 由 schema 边界检查。模块命名、默认值和索引元数据仍需在后续契约中处理。
 
 #### 4.2 查询结果类型仍是另一份模型
 
@@ -163,7 +163,7 @@ Rust 主导的嵌入式项目可选择 Rust derive 为权威来源；多语言�
 
 ## English Description
 
-Planning update: after user confirmation, #262/#263 target v0.3.0 and #264/#265 target v0.4.0, with joint acceptance in #268 and #269. ROADMAP records current assignments. #267 subsequently delivered the first TCP/async SDK slice while #242 remains open for its remaining scope. The code probes below retain their original baseline.
+Planning update: after user confirmation, #262/#263 target v0.3.0 and #264/#265 target v0.4.0, with joint acceptance in #268 and #269. ROADMAP records current assignments. #267 delivered the first TCP/async SDK slice, #270 fixed dependency ordering, and #271 addressed serde representation drift; #242/#263 retain their remaining scope. The code probes below preserve their original baseline and no longer describe current behavior.
 
 ### Assessment
 
@@ -173,7 +173,7 @@ Product adoption remains unproven. Repository-owned consumer and recovery tests 
 
 ### Observed gaps
 
-An independent temporary Rust consumer reproduced five boundaries through public APIs: SchemaBuilder sorts declarations by name rather than dependency; serde camelCase renaming disagrees with derived field names; adjacently tagged enums serialize differently from the generated sum schema; an i32-derived database field accepts values that cannot decode back into i32; and named scalar types generate Rust aliases that do not preserve domain-ID distinctions. The first three are immediate integration correctness concerns. Numeric ranges and nominal wrappers need an explicit fidelity contract. These probes used synthetic in-memory data, not existing databases or a performance benchmark.
+An independent temporary Rust consumer reproduced five boundaries through public APIs: SchemaBuilder sorted declarations by name rather than dependency; serde camelCase renaming disagreed with derived field names; adjacently tagged enums serialized differently from the generated sum schema; an i32-derived database field accepted values that could not decode back into i32; and named scalar types generated Rust aliases that did not preserve domain-ID distinctions. #270 fixed dependency ordering and #271 aligned or rejected serde representations. The second #263 slice rejects narrow numeric derives, emits named scalar/tuple newtypes, and documents schema-bound decimal P/S enforcement. These probes used synthetic in-memory data, not existing databases or a performance benchmark.
 
 Generated table models also do not establish query-specific parameter and result types. Successful data migration does not prove compatibility with previously built clients or exhaustive queries. ADT shape validity does not enforce business transitions or foreign-key integrity. Throttling maintenance may lower resource pressure while extending the write-blocking interval.
 
