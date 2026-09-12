@@ -287,9 +287,13 @@ fn build_rejects_mutually_recursive_types() {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE", rename_all_fields = "camelCase")]
 enum RenamedState {
-    InProgress { attempt_count: i64 },
+    InProgress {
+        attempt_count: i64,
+    },
     #[serde(rename = "FINISHED")]
-    Done { result_text: String },
+    Done {
+        result_text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
@@ -312,7 +316,10 @@ fn serde_renames_define_the_schema_and_primary_key_names() {
         .unwrap()
         .build()
         .unwrap();
-    assert!(source.contains("IN_PROGRESS {attemptCount int}"), "{source}");
+    assert!(
+        source.contains("IN_PROGRESS {attemptCount int}"),
+        "{source}"
+    );
     assert!(source.contains("FINISHED {resultText text}"), "{source}");
     assert!(source.contains("jobId int"), "{source}");
     assert!(source.contains("displayName text"), "{source}");

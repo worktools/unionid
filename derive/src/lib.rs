@@ -12,8 +12,8 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, Data, DeriveInput, Expr, Fields, GenericArgument, Lit, LitStr, Meta,
-    PathArguments, Token, Type,
+    Attribute, Data, DeriveInput, Expr, Fields, GenericArgument, Lit, LitStr, Meta, PathArguments,
+    Token, Type,
 };
 use syn::{parse_macro_input, spanned::Spanned};
 
@@ -404,30 +404,34 @@ fn serde_metas(attrs: &[Attribute]) -> syn::Result<Vec<Meta>> {
                 "serde attributes must use #[serde(...)]",
             ));
         };
-        metas.extend(
-            list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?,
-        );
+        metas.extend(list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?);
     }
     Ok(metas)
 }
 
 fn serde_rename(meta: &Meta) -> syn::Result<String> {
     match meta {
-        Meta::NameValue(value) => lit_string(&value.value, "serde rename") ,
+        Meta::NameValue(value) => lit_string(&value.value, "serde rename"),
         Meta::List(list) => {
             let pairs = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
             let mut serialize = None;
             let mut deserialize = None;
             for pair in pairs {
                 let Meta::NameValue(value) = pair else {
-                    return Err(syn::Error::new(pair.span(), "expected serialize = \"...\" or deserialize = \"...\""));
+                    return Err(syn::Error::new(
+                        pair.span(),
+                        "expected serialize = \"...\" or deserialize = \"...\"",
+                    ));
                 };
                 if value.path.is_ident("serialize") {
                     serialize = Some(lit_string(&value.value, "serde serialize rename")?);
                 } else if value.path.is_ident("deserialize") {
                     deserialize = Some(lit_string(&value.value, "serde deserialize rename")?);
                 } else {
-                    return Err(syn::Error::new(value.path.span(), "expected serialize or deserialize"));
+                    return Err(syn::Error::new(
+                        value.path.span(),
+                        "expected serialize or deserialize",
+                    ));
                 }
             }
             match (serialize, deserialize) {
@@ -464,9 +468,15 @@ fn lit_string(expression: &Expr, context: &str) -> syn::Result<String> {
     match expression {
         Expr::Lit(value) => match &value.lit {
             Lit::Str(value) => Ok(value.value()),
-            _ => Err(syn::Error::new(value.span(), format!("{context} must be a string"))),
+            _ => Err(syn::Error::new(
+                value.span(),
+                format!("{context} must be a string"),
+            )),
         },
-        _ => Err(syn::Error::new(expression.span(), format!("{context} must be a string"))),
+        _ => Err(syn::Error::new(
+            expression.span(),
+            format!("{context} must be a string"),
+        )),
     }
 }
 
@@ -528,11 +538,10 @@ fn insert_schema_name(
 }
 
 fn unsupported_serde_shape(meta: &Meta) -> syn::Error {
-    let name = meta
-        .path()
-        .segments
-        .last()
-        .map_or_else(|| "attribute".to_owned(), |segment| segment.ident.to_string());
+    let name = meta.path().segments.last().map_or_else(
+        || "attribute".to_owned(),
+        |segment| segment.ident.to_string(),
+    );
     syn::Error::new(
         meta.span(),
         format!("serde {name} changes the value shape and is not supported by UnionidSchema"),
@@ -556,9 +565,7 @@ impl RenameRule {
                 }
                 output
             }
-            Self::ScreamingSnake => {
-                Self::Snake.apply_to_variant(variant).to_ascii_uppercase()
-            }
+            Self::ScreamingSnake => Self::Snake.apply_to_variant(variant).to_ascii_uppercase(),
             Self::Kebab => Self::Snake.apply_to_variant(variant).replace('_', "-"),
             Self::ScreamingKebab => Self::ScreamingSnake
                 .apply_to_variant(variant)
@@ -600,7 +607,6 @@ fn lowercase_first(value: &str) -> String {
     };
     first.to_ascii_lowercase().to_string() + chars.as_str()
 }
-
 
 fn named_fields<'a>(
     fields: &'a Fields,
@@ -865,23 +871,22 @@ mod tests {
         .unwrap_err();
         assert!(asymmetric.to_string().contains("same serde rename"));
 
-        let invalid = expand_str("#[serde(rename_all = \"kebab-case\")] struct T { some_value: i64 }")
-            .unwrap_err();
+        let invalid =
+            expand_str("#[serde(rename_all = \"kebab-case\")] struct T { some_value: i64 }")
+                .unwrap_err();
         assert!(invalid.to_string().contains("not a valid unionid field"));
 
         let lowercase_variant =
-            expand_str("#[serde(rename_all = \"snake_case\")] enum T { InProgress }")
-                .unwrap_err();
+            expand_str("#[serde(rename_all = \"snake_case\")] enum T { InProgress }").unwrap_err();
         assert!(
             lowercase_variant
                 .to_string()
                 .contains("not a valid unionid variant")
         );
 
-        let duplicate = expand_str(
-            "struct T { #[serde(rename = \"value\")] first: i64, value: i64 }",
-        )
-        .unwrap_err();
+        let duplicate =
+            expand_str("struct T { #[serde(rename = \"value\")] first: i64, value: i64 }")
+                .unwrap_err();
         assert!(duplicate.to_string().contains("duplicate record field"));
     }
 }
