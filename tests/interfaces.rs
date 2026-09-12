@@ -37,6 +37,27 @@ fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
 }
 
 #[test]
+fn local_cli_prints_value_free_explain_analysis() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--query",
+            "type Item = {id int, secret text}\ntable items Item\n  key id\ninsert items {id = 1, secret = \"do-not-print\"}\nexplain analyze from items | filter id == 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("analysis | "), "{stdout}");
+    assert!(stdout.contains("work | "), "{stdout}");
+    assert!(!stdout.contains("do-not-print"), "{stdout}");
+}
+
+#[test]
 fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
     const EXPECTED_FIRST_BATCH_ROWS: u64 = 1_024;
 

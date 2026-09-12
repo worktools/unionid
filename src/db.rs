@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -995,6 +996,23 @@ pub enum UpsertAction {
     Updated,
 }
 
+/// Value-free measurements from one `explain analyze` execution.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryAnalysis {
+    /// Wall-clock time spent in the pipeline after request parsing and parameter binding.
+    pub execution_micros: u64,
+    /// Number of rows produced by the pipeline before the response discarded them.
+    pub returned_rows: usize,
+    /// Rows loaded for evaluation, including rows served by a durable row cache.
+    pub rows_examined: usize,
+    pub rows_decoded: usize,
+    pub index_entries_examined: usize,
+    pub row_cache_hits: usize,
+    pub row_cache_misses: usize,
+    pub batches: usize,
+    pub working_peak_bytes: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub ok: bool,
@@ -1018,6 +1036,8 @@ pub struct QueryResponse {
     pub plan: Option<QueryPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PageInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<QueryAnalysis>,
     /// Local execution counters. This diagnostic field is intentionally not
     /// part of the JSON/TCP response format.
     #[serde(skip)]
@@ -1081,6 +1101,7 @@ impl QueryResponse {
             upsert_actions: Vec::new(),
             plan: None,
             page: None,
+            analysis: None,
             execution: None,
         }
     }
@@ -1099,6 +1120,7 @@ impl QueryResponse {
             upsert_actions: Vec::new(),
             plan: None,
             page: None,
+            analysis: None,
             execution: None,
         }
     }
@@ -1431,6 +1453,10 @@ impl Database {
                 steps,
             } => self.migrate(&name, steps),
             Statement::Explain(pipeline) => self.explain(pipeline),
+            Statement::ExplainAnalyze(pipeline) => {
+                let source = CandidateRowSource::new(self);
+                self.explain_analyze_from(&source, pipeline, control)
+            }
             Statement::Pipeline(pipeline) => self.query(pipeline, control),
         }
     }
@@ -1443,6 +1469,9 @@ impl Database {
     ) -> Result<QueryResponse> {
         match stmt {
             Statement::Explain(pipeline) => self.explain_from(source, pipeline),
+            Statement::ExplainAnalyze(pipeline) => {
+                self.explain_analyze_from(source, pipeline, control)
+            }
             Statement::Pipeline(pipeline) => self.query_from(source, pipeline, control),
             _ => Err(Error::new(
                 "E_READ_SNAPSHOT",
@@ -3555,7 +3584,9 @@ impl Database {
         statement: &mut Statement,
     ) -> Result<Vec<ScalarType>> {
         let columns = match statement {
-            Statement::Pipeline(pipeline) | Statement::Explain(pipeline) => {
+            Statement::Pipeline(pipeline)
+            | Statement::Explain(pipeline)
+            | Statement::ExplainAnalyze(pipeline) => {
                 return self
                     .prepare_pipeline(pipeline)
                     .map(|columns| columns.into_iter().map(|column| column.ty).collect());
@@ -4299,6 +4330,35 @@ impl Database {
             result_schema,
             lookups,
             page,
+        });
+        Ok(response)
+    }
+
+    fn explain_analyze_from(
+        &self,
+        source: &dyn TypedRowSource,
+        pipeline: Pipeline,
+        control: Option<&ExecutionControl>,
+    ) -> Result<QueryResponse> {
+        // Plan and execute against the same immutable source. The normal query
+        // path remains the single source of truth for cancellation, limits,
+        // row decoding, index access, and working-memory observations.
+        let mut response = self.explain_from(source, pipeline.clone())?;
+        let started = Instant::now();
+        let executed = self.query_from(source, pipeline, control)?;
+        let execution_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        response.message = "query plan and analysis".into();
+        let observation = executed.execution.unwrap_or_default();
+        response.analysis = Some(QueryAnalysis {
+            execution_micros,
+            returned_rows: executed.rows.len(),
+            rows_examined: observation.rows_examined(),
+            rows_decoded: observation.rows_decoded,
+            index_entries_examined: observation.index_entries_examined,
+            row_cache_hits: observation.row_cache_hits,
+            row_cache_misses: observation.row_cache_misses,
+            batches: observation.batches,
+            working_peak_bytes: observation.working_peak_bytes,
         });
         Ok(response)
     }
@@ -5111,6 +5171,7 @@ impl Database {
             upsert_actions: Vec::new(),
             plan: None,
             page: page_info,
+            analysis: None,
             execution: Some(observation),
         })
     }

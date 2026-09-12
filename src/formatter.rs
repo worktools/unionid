@@ -234,6 +234,10 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             line(output, depth, "explain");
             pipeline_text(output, pipeline, depth + 1);
         }
+        Statement::ExplainAnalyze(pipeline) => {
+            line(output, depth, "explain analyze");
+            pipeline_text(output, pipeline, depth + 1);
+        }
         Statement::Pipeline(pipeline) => pipeline_text(output, pipeline, depth),
     }
 }

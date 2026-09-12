@@ -105,9 +105,9 @@ set state = Running {worker = "worker-1", attempt = 1}
 returning {id, state}
 ```
 
-`filter`、`select`、`sort`、`take`、`page`、`derive`、`group`、`aggregate` 和查询局部 `let` 都是可组合 stage。稳定跨请求分页使用 `sort {-priority, id} | page 100`，并通过响应中的 opaque cursor 继续；排序必须以主键收尾。`explain from tasks | filter id == 1` 返回主键／索引访问方式、候选行数、stage 顺序和结果 schema，但不读取结果行。完整语法见 [QUERY.md](docs/QUERY.md)。
+`filter`、`select`、`sort`、`take`、`page`、`derive`、`group`、`aggregate` 和查询局部 `let` 都是可组合 stage。稳定跨请求分页使用 `sort {-priority, id} | page 100`，并通过响应中的 opaque cursor 继续；排序必须以主键收尾。`explain from tasks | filter id == 1` 返回计划且不读取结果行；`explain analyze ...` 在同一读快照上实际执行并返回无业务数据的耗时、读取量与内存统计。完整语法见 [QUERY.md](docs/QUERY.md)。
 
-`filter`, `select`, `sort`, `take`, `page`, `derive`, `group`, `aggregate`, and query-local `let` are composable stages. Stable cross-request traversal uses `sort {-priority, id} | page 100` and resumes with the opaque response cursor; the order must end in the primary key. `explain from tasks | filter id == 1` reports primary-key/index access, candidate rows, stage order, and result schema without reading result rows. See [QUERY.md](docs/QUERY.md) for the complete executable surface.
+`filter`, `select`, `sort`, `take`, `page`, `derive`, `group`, `aggregate`, and query-local `let` are composable stages. Stable cross-request traversal uses `sort {-priority, id} | page 100` and resumes with the opaque response cursor; the order must end in the primary key. `explain from tasks | filter id == 1` reports a plan without reading result rows; `explain analyze ...` executes on the same read snapshot and returns value-free timing, work, and memory observations. See [QUERY.md](docs/QUERY.md) for the complete executable surface.
 
 ## 快速开始 / Quick start
 

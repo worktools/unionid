@@ -14,6 +14,11 @@ pub struct ExecutionObservation {
 }
 
 impl ExecutionObservation {
+    /// Rows loaded for evaluation, whether decoded now or served by the row cache.
+    pub fn rows_examined(&self) -> usize {
+        self.rows_decoded.saturating_add(self.row_cache_hits)
+    }
+
     pub(crate) fn observe_working_bytes(&mut self, bytes: usize) {
         self.working_peak_bytes = self.working_peak_bytes.max(bytes);
     }

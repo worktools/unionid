@@ -91,6 +91,7 @@ pub enum Statement {
         steps: Vec<SchemaMigration>,
     },
     Explain(Pipeline),
+    ExplainAnalyze(Pipeline),
     Pipeline(Pipeline),
 }
 
@@ -212,7 +213,10 @@ pub enum SetValue {
 
 impl Statement {
     pub fn is_mutating(&self) -> bool {
-        !matches!(self, Self::Explain(_) | Self::Pipeline(_))
+        !matches!(
+            self,
+            Self::Explain(_) | Self::ExplainAnalyze(_) | Self::Pipeline(_)
+        )
     }
 
     pub fn changes_schema(&self) -> bool {

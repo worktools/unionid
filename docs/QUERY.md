@@ -48,6 +48,7 @@ take 20
 | 查询局部定义 | `let retryable = attempt -> attempt < 3` | 已实现常量、单/多参数非递归纯函数、有限推断、词法遮蔽与展开预算 | — |
 | 有限自递归 ADT | `type Tree = Leaf text \| Branch {children list Tree}` | 已实现声明、严格值、match coverage、精确索引、持久化与 migration；运行时值仍是有限树 | #81 |
 | 执行计划 | `explain from tasks \| filter id == 1` | 已实现 full scan、主键／二级索引 lookup、候选行估计、stage 顺序与结果 schema | — |
+| 实际执行剖析 | `explain analyze from tasks \| filter id == 1` | 已实现同快照真实执行、结构化耗时／行数／索引／缓存／批次／内存统计，且不返回业务行 | #295 |
 | 更新与删除 | `update table ... set`、`delete table ...` | 已实现 filter/match/sort/take target、typed set、穷尽 match assignment、嵌套 record 路径、typed returning、原子约束与增量持久维护 | #15/#83/#85/#87 |
 | Upsert | `upsert table value` | 已实现按主键 insert/完整 row replace、稳定 RowId、结构化 action、typed returning 与增量持久维护 | #15/#85 |
 | 批量插入 | `insert many table <list>` | 已实现 literal／参数 row list、逐行默认值和 ADT 检查、整批约束、稳定 RowId／returning 顺序与 memory/redb/TCP 原子提交 | #89 |
@@ -79,7 +80,7 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 
 ```text
 query             = "from" table pipeline-stage*
-explain           = "explain" query | "explain" newline indent query dedent
+explain           = "explain" "analyze"? query | "explain" "analyze"? newline indent query dedent
 pipeline-stage    = newline stage | "|" stage
 stage             = local-binding | value-filter | match-filter | derive-expression | derive-match | lookup | aggregate | group-aggregate | select | sort | take | page
 
@@ -307,7 +308,7 @@ from tasks | filter id > 1 | take 1
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
-## Explain 与类型化索引计划
+## Explain、实际剖析与类型化索引计划
 
 `explain` 在相同的 schema、字段、pattern、局部函数和参数绑定规则下准备查询，但不读取、复制或执行数据行：
 
@@ -325,6 +326,24 @@ explain
   select {id, state}
 ```
 
+需要测量真实执行时，在 `explain` 后增加 `analyze`：
+
+```text
+explain analyze
+  from tasks
+  filter id == 1
+  select {id, state}
+```
+
+`explain analyze` 在同一个 immutable read snapshot 上生成 `plan` 并走普通查询执行器。响应仍不包含业务 `rows`、结果 `columns`、page cursor、参数值或 literal；额外的 `analysis` 包含：
+
+- `execution_micros`：完成一次 pipeline 执行的 wall-clock 微秒数，不包含请求解析和参数绑定。
+- `returned_rows`：被分析的 pipeline 实际产生、随后丢弃的结果行数。
+- `rows_examined`：为表达式求值加载的行数，等于本次解码行加 durable row cache 命中行；`rows_decoded` 单独表示本次真正解码的行数。
+- `index_entries_examined`、`row_cache_hits`、`row_cache_misses`、`batches` 与 `working_peak_bytes`：普通执行器在这次运行中记录的其他无值计数。
+
+取消、deadline、行数和工作内存上限与普通查询完全相同；执行失败时直接返回对应错误，不返回不完整的分析对象。计数描述 unionid 执行器可观察到的逻辑工作量，不代表物理磁盘读取或分配器精确 RSS。重复测量可比较计划与工作量，wall-clock 时间仍会受机器负载和缓存状态影响。
+
 成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`，以及最终结果 schema。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
 
 planner 跳过开头的 row-independent `let`，然后只从连续的简单 `field op bound` filter 提取边界；`op` 可以是 `==`、`>`、`>=`、`<` 或 `<=`。复合索引使用从首 component 开始的连续 equality prefix，并在紧邻的下一个 component 上合并至多一组 lower/upper range；range 后或 key gap 后的条件仍作为 residual filter。遇到 compound bool、`filter match`、derive、select、aggregate/group、sort、take 或其他语义边界后停止抽取，也不从 `and`／`or` 内部拆条件。
@@ -335,7 +354,7 @@ planner 跳过开头的 row-independent `let`，然后只从连续的简单 `fie
 
 所有可存储的静态类型都使用与 `cmp_eq` 相同的稳定结构键，包括命名类型、record、tuple、sum、option 和 list。Option 的 `None` 与 sum 的不同 constructor 有不同键，不会按 null 或缺失值混合。索引从 row 派生，insert/update/delete、redb 恢复和 migration 后都会维护或重建；是否存在索引不能改变查询结果。
 
-`estimated_rows` 是当前快照中 B-tree span 的 entry 数：full scan 等于表行数，lookup 等于 posting 长度，range/page seek 等于应用 typed boundary 后的 span。它不扣除 residual filter，也不是基于统计信息的长期基数预测。执行器对可安全下推的 `take/page` 按索引方向逐项读取，只保留足够的通过行；explain 自身不读取或执行数据行。
+`estimated_rows` 是当前快照中 B-tree span 的 entry 数：full scan 等于表行数，lookup 等于 posting 长度，range/page seek 等于应用 typed boundary 后的 span。它不扣除 residual filter，也不是基于统计信息的长期基数预测。执行器对可安全下推的 `take/page` 按索引方向逐项读取，只保留足够的通过行；普通 `explain` 自身不读取或执行数据行，只有显式 `explain analyze` 会执行。
 
 ## 查询局部 let 与纯函数
 
@@ -659,7 +678,7 @@ take 20
 | `E_CURSOR_LIMIT` / `E_CURSOR_CODEC` / `E_CURSOR_INTEGRITY` | cursor 超限、编码无效或 HMAC 验证失败 |
 | `E_CURSOR_DATABASE` / `E_CURSOR_SCHEMA` / `E_CURSOR_QUERY` / `E_CURSOR_STALE` | cursor 的数据库、schema、绑定查询/参数/方向/limit 或 commit sequence 不匹配 |
 
-查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。分页查询另带 `page` 元数据；`explain` 的 `plan.page` 显示 limit、方向、唯一排序 tuple、resume boundary、snapshot sequence、候选行、`limit + 1` 读取预算、cursor 上限，以及 `sorted_scan` 或 `index_seek`。insert/upsert/update/delete 成功响应包含 `affected_rows`；单行 upsert 还包含 `upsert_action`，批量 upsert 包含 `upsert_actions`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。primary/secondary lookup、full scan、复合 range/order、前后向 page seek、写入和 migration 的 M6 实测边界见 [工作负载成本记录](benchmarks/workload-2026-09-09.md)；format-5 bounded open、按需 decode 和 committed-view cache 的 10k/100k 结构证据见 [M7 Legacy0 有界读取记录](benchmarks/bounded-legacy-read-2026-09-09.md)。
+查询成功响应包含 `rows` 和有序的 `columns {name, ty}`，未命中任何行时仍返回推导后的 columns。分页查询另带 `page` 元数据；`explain` 的 `plan.page` 显示 limit、方向、唯一排序 tuple、resume boundary、snapshot sequence、候选行、`limit + 1` 读取预算、cursor 上限，以及 `sorted_scan` 或 `index_seek`。`explain analyze` 另带 value-free `analysis`，但不返回业务 rows/columns/page cursor。insert/upsert/update/delete 成功响应包含 `affected_rows`；单行 upsert 还包含 `upsert_action`，批量 upsert 包含 `upsert_actions`。DML 默认不返回 rows/columns；使用 returning 后按其完整行或字段投影返回 typed columns/rows。primary/secondary lookup、full scan、复合 range/order、前后向 page seek、写入和 migration 的 M6 实测边界见 [工作负载成本记录](benchmarks/workload-2026-09-09.md)；format-5 bounded open、按需 decode 和 committed-view cache 的 10k/100k 结构证据见 [M7 Legacy0 有界读取记录](benchmarks/bounded-legacy-read-2026-09-09.md)。
 
 以下片段是故意失败的反例：
 

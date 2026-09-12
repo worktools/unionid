@@ -156,7 +156,7 @@ fn describe_prepared(engine: &Engine, prepared: &PreparedQuery) -> Result<QueryD
 fn operation(statement: &Statement) -> QueryOperation {
     match statement {
         Statement::Pipeline(_) => QueryOperation::Read,
-        Statement::Explain(_) => QueryOperation::Explain,
+        Statement::Explain(_) | Statement::ExplainAnalyze(_) => QueryOperation::Explain,
         Statement::InsertParameter { .. } => QueryOperation::Insert,
         Statement::InsertManyParameter { .. } => QueryOperation::InsertMany,
         Statement::UpsertParameter { .. } => QueryOperation::Upsert,
@@ -182,7 +182,7 @@ fn result_cardinality(statement: &Statement, has_fields: bool) -> QueryCardinali
         Statement::Update { target, .. } | Statement::Delete { target, .. } => {
             pipeline_cardinality(target)
         }
-        Statement::Explain(_) => QueryCardinality::None,
+        Statement::Explain(_) | Statement::ExplainAnalyze(_) => QueryCardinality::None,
         _ => QueryCardinality::None,
     }
 }

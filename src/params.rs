@@ -118,6 +118,7 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
         }
         Statement::Delete { target, .. }
         | Statement::Explain(target)
+        | Statement::ExplainAnalyze(target)
         | Statement::Pipeline(target) => visit_pipeline(target, visitor),
         Statement::Migration { steps, .. } => {
             for step in steps {
@@ -186,6 +187,7 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
         }
         Statement::Delete { target, .. }
         | Statement::Explain(target)
+        | Statement::ExplainAnalyze(target)
         | Statement::Pipeline(target) => visit_pipeline_mut(target, visitor),
         Statement::Migration { steps, .. } => {
             for step in steps {
