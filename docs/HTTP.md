@@ -66,6 +66,22 @@ let request = ProtocolRequest::query(
 .with_idempotency_key("create-todo-42")?;
 ```
 
+启用 `http-client` feature 可直接使用异步 typed client；它复用连接、限制 response 大小，并检查 response 的 protocol version 与 request ID：
+
+```rust
+use unionid::{HttpClient, PageSpec, ProtocolRequest};
+
+let client = HttpClient::connect("https://database.example.com")?;
+let first_request = ProtocolRequest::query("todos-1", "from todos\nsort id")
+    .with_page(PageSpec::forward(100));
+let first = client.page::<Todo>(&first_request).await?;
+let second = client
+    .next_page::<Todo>(&first_request, &first.page, "todos-2")
+    .await?;
+```
+
+需要代理、自定义 TLS 或认证 header 时，用 `HttpClient::from_client` 传入配置好的 `reqwest::Client`。`request_retrying` 只接受带 `idempotency_key` 的请求；响应可能在服务端提交后丢失，因此重试必须复用完整 query、typed params、schema precondition 和 key。
+
 HTTP response 直接序列化 `unionid::ProtocolResponse`。Rust 客户端可用 `response.typed_rows::<Todo>()?` 读取 query 或 DML `returning`，同时 wire JSON 保留 i64 精度、Option/null 区别、tuple/list 形态和稳定 named/variant ID。
 
 长只读结果可使用 `POST /v1/stream`，body 为 `stream::Request::Query`，响应为 `application/x-ndjson`；`x-unionid-operation-id` 与首个 `accepted` frame 携带同一个 bearer capability。`POST /v1/stream/cancel` 接受 `stream::Request::Cancel`。官方 adapter 在 accepted 已交给 body 后才启动读取，并直接消费 `AcceptedStream::start` 的有界 receiver，不重新编码 row。
