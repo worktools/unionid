@@ -14,6 +14,7 @@ FIXTURE = ROOT / "tests" / "fixtures" / "query-binding-consumer"
 
 
 def main():
+    """Verify generated bindings, drift diagnostics, and v1/v2 execution."""
     with tempfile.TemporaryDirectory(prefix="unionid-query-binding-") as temporary:
         temporary = pathlib.Path(temporary)
         generated = temporary / "find_task.rs"

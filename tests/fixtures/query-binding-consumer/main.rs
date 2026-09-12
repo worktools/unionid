@@ -14,6 +14,7 @@ mod classify_v2 {
     include!(env!("UNIONID_GENERATED_QUERY_V2"));
 }
 
+/// Execute generated v1/v2 query bindings against original and migrated catalogs.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = unionid::Engine::memory();
     let schema = std::fs::read_to_string(std::env::var("UNIONID_SCHEMA")?)?;
