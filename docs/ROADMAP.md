@@ -274,7 +274,7 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 
 ## 当前执行顺序
 
-M0–M9 与 v0.3.0 的功能 issues 已完成。当前由 [#268](https://github.com/worktools/unionid/issues/268) 冻结两个 crate、发布契约、用户文档和独立应用验收；候选提交通过一次完整 Ubuntu/macOS Release workflow 后，再执行 tag 与正式发布。随后按 v0.4.0 的 #265 → #264 → #269 推进可移植 ADT 契约与生成查询接口。
+M0–M9、v0.3.0 与 v0.4.0 的功能 issues 已完成。v0.3.0 候选已通过双平台验收，本地 tag 已准备，正式推送和发布等待最终授权；v0.4.0 由 [#269](https://github.com/worktools/unionid/issues/269) 冻结两个 crate、发布契约、查询生成物、用户文档和独立应用验收，随后运行一次完整 Ubuntu/macOS Release workflow。两个版本的 tag 与公开发布都不能由普通功能 PR 代替。
 
 ## 维护约定
 
