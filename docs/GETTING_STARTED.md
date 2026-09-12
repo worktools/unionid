@@ -3,7 +3,7 @@
 这份教程从空目录开始，用同一组无分号 ADT 脚本完成建库、查询、更新、关闭重开和完整性检查。发布包内含 `bin/unionid` 和 `tutorial/`。解压后先进入包目录并把二进制加入当前 shell 的 PATH：
 
 ```bash
-cd unionid-v0.2.0-<target>
+cd unionid-v0.3.0-<target>
 export PATH="$PWD/bin:$PATH"
 ```
 

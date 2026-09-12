@@ -206,10 +206,10 @@ Fix mapping/generation correctness, then complete SDK, relational-read, migratio
 | --- | --- | --- |
 | [#240](https://github.com/worktools/unionid/issues/240) | Schema ↔ Rust 单一来源 / single-source model generation | 已交付 / Delivered |
 | [#262](https://github.com/worktools/unionid/issues/262) | SchemaBuilder 依赖顺序 / dependency ordering | 已交付 / Delivered |
-| [#263](https://github.com/worktools/unionid/issues/263) | serde、数值与领域身份映射 / representation and identity fidelity | P1 |
-| [#241](https://github.com/worktools/unionid/issues/241) | 批量取回与有界 lookup join / batch fetch and bounded lookup join | P0 |
-| [#242](https://github.com/worktools/unionid/issues/242) | 官方 async/typed SDK / official async and typed SDK | P0 |
-| [#243](https://github.com/worktools/unionid/issues/243) | 迁移影响、预演与剩余维护体验 / migration impacts, rehearsal and maintenance UX | P1 |
+| [#263](https://github.com/worktools/unionid/issues/263) | serde、数值与领域身份映射 / representation and identity fidelity | 已交付 / Delivered |
+| [#241](https://github.com/worktools/unionid/issues/241) | 批量取回与有界 lookup join / batch fetch and bounded lookup join | 已交付 / Delivered |
+| [#242](https://github.com/worktools/unionid/issues/242) | 官方 async/typed SDK / official async and typed SDK | 已交付 / Delivered |
+| [#243](https://github.com/worktools/unionid/issues/243) | 迁移影响、预演与剩余维护体验 / migration impacts, rehearsal and maintenance UX | 已交付 / Delivered |
 | [#268](https://github.com/worktools/unionid/issues/268) | 独立 Rust 应用、版本冻结与发布验收 / application and release acceptance | P0 |
 
 ### v0.4.0 · 类型化查询与 ADT 互通 / Typed queries and ADT interoperability
@@ -271,7 +271,7 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 
 ## 当前执行顺序
 
-M0–M8 已完成。#186 以真实接口矩阵和 10k/100k open/query/write/check/shadow-migration 原始样本完成 M7 复验，见 [验收记录](benchmarks/m7-acceptance-2026-09-10.md)；#198–#202 完成版本契约、双平台候选验收与 `v0.2.0` GitHub Actions 发布。M9 的应用旅程与[混合服务负载](benchmarks/service-load-2026-09-10.md)已经保留证据；#209/#229 的[长期 churn 记录](benchmarks/churn-2026-09-10.md)补齐固定 10k/100k 写入、三代 migration、中断恢复与 reclaim 后文件高水位。阶段状态仍以 [M9 #210](https://github.com/worktools/unionid/issues/210) 为准，不扩展旧版本兼容矩阵。
+M0–M9 与 v0.3.0 的功能 issues 已完成。当前由 [#268](https://github.com/worktools/unionid/issues/268) 冻结两个 crate、发布契约、用户文档和独立应用验收；候选提交通过一次完整 Ubuntu/macOS Release workflow 后，再执行 tag 与正式发布。随后按 v0.4.0 的 #265 → #264 → #269 推进可移植 ADT 契约与生成查询接口。
 
 ## 维护约定
 

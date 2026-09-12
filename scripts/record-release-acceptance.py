@@ -23,7 +23,7 @@ def read_json_member(archive, name):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Record one platform's v0.2 release acceptance")
+    parser = argparse.ArgumentParser(description="Record one platform's release acceptance")
     parser.add_argument("--dist", required=True, type=pathlib.Path)
     parser.add_argument("--expected-sha256", required=True)
     parser.add_argument("--expected-target", required=True)
@@ -93,6 +93,7 @@ def main():
             {"name": "strict_clippy", "status": "passed"},
             {"name": "full_test_suite", "status": "passed"},
             {"name": "rust_engine_local_cli_tcp_adt", "status": "passed"},
+            {"name": "packaged_independent_rust_consumer", "status": "passed"},
             {"name": "http_protocol_stream_adt", "status": "passed"},
             {"name": "upgrade_migration_recovery_read_only", "status": "passed"},
             {"name": "idempotency_cursor_cancel_limits", "status": "passed"},
@@ -100,10 +101,16 @@ def main():
         ],
         "evidence": {
             "rust_engine_local_cli_tcp_adt": "tests/getting_started.rs",
+            "packaged_independent_rust_consumer": (
+                "tests/current-consumer and scripts/verify-current-consumer.py"
+            ),
             "http_protocol_stream_adt": "examples/todolist.rs and tests/interfaces.rs",
             "upgrade_migration_recovery_read_only": "tests/released_v010_upgrade.rs, tests/migration.rs, tests/storage.rs, tests/backup.rs, and tests/interfaces.rs",
             "idempotency_cursor_cancel_limits": "tests/protocol.rs, tests/pagination.rs, tests/concurrency.rs, and tests/interfaces.rs",
-            "capacity_and_known_limits": "docs/benchmarks/m7-acceptance-2026-09-10.md and docs/RELEASE-v0.2.0.md",
+            "capacity_and_known_limits": (
+                "docs/benchmarks/m7-acceptance-2026-09-10.md and "
+                f"docs/RELEASE-v{release['version']}.md"
+            ),
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
