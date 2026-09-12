@@ -1,6 +1,6 @@
 # RFC 0015：静态查询描述契约 / static query description contract
 
-- 状态 / Status: accepted, Rust binding slice implemented
+- 状态 / Status: accepted, implemented and evolution-tested
 - 日期 / Date: 2026-09-13
 - 跟踪 / Tracking: [#264](https://github.com/worktools/unionid/issues/264)
 - 依赖 / Dependency: [RFC 0014](0014-portable-adt-contract.md)
@@ -53,7 +53,7 @@ digest 对 formatter 的 canonical source 计算，因此等价空格和换行�
 
 生成函数保存 schema revision/hash、canonical query source 和 digest。它在 runtime prepare 前核对 Engine schema identity；随后仍使用 `PreparedQuery` 完成绑定与执行检查。匿名 product/sum 结果递归生成局部 Rust struct/enum，命名 ADT 继续引用同文件生成的 schema 类型。
 
-后续只剩 generated drift 和两版 schema/query/client 演进场景。服务器命名查询、用户泛型和第二执行器不作为前置。
+generated drift 和两版 schema/query/client 演进验收见[静态查询绑定演进验收](../assessments/query-binding-evolution-2026-09-13.md)。服务器命名查询、用户泛型和第二执行器不属于本 RFC。
 
 ## English Description
 
@@ -81,4 +81,4 @@ Generated code must still call `prepare` on the target `Engine`. `PreparedQuery`
 
 Generated functions retain the schema revision/hash, canonical query source, and digest. They check the Engine schema identity before runtime prepare, which continues to enforce binding and execution invariants. Anonymous product/sum shapes recursively generate local Rust structs/enums, while named ADTs refer to schema types generated in the same file.
 
-Generated-drift CI and two-version schema/query/client evolution remain. Server-side named queries, user generics, and a second executor are not prerequisites.
+Generated-drift CI and the two-version schema/query/client evolution matrix are recorded in the [static query binding evolution acceptance](../assessments/query-binding-evolution-2026-09-13.md). Server-side named queries, user generics, and a second executor are outside this RFC.
