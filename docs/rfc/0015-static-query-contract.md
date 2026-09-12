@@ -1,6 +1,6 @@
 # RFC 0015：静态查询描述契约 / static query description contract
 
-- 状态 / Status: accepted, description slice implemented
+- 状态 / Status: accepted, Rust binding slice implemented
 - 日期 / Date: 2026-09-13
 - 跟踪 / Tracking: [#264](https://github.com/worktools/unionid/issues/264)
 - 依赖 / Dependency: [RFC 0014](0014-portable-adt-contract.md)
@@ -11,7 +11,7 @@
 
 schema codegen 只能生成存储模型。`select`、`derive`、`aggregate`、`lookup` 和 mutation `returning` 都能产生不同于表 row 的类型；应用若手工同步参数 map 和结果 DTO，会把查询错误推迟到运行时。
 
-version 1 query description 使用现有 `syntax` parser、`Database::prepare_pipeline`、expression/match binder 和参数统一过程。它不重新解释查询，也不读取数据。输入是一个声明式 schema 和一个静态查询文件；一个文件必须恰好包含一个 `PreparedQuery` 支持的 operation，使文件名可以稳定映射到一个生成函数。
+version 1 query description 使用现有 `syntax` parser、`Database::prepare_pipeline`、expression/match binder 和参数统一过程。它不重新解释查询，也不读取数据。catalog 输入可以是权威声明式 schema，或现有 redb live catalog 的私有副本；后者保留 migration 建立的稳定 ID 和真实 revision/hash。另一个输入是静态查询文件；一个文件必须恰好包含一个 `PreparedQuery` 支持的 operation，使文件名可以稳定映射到一个生成函数。
 
 ### 2. 描述结构
 
@@ -47,9 +47,13 @@ digest 对 formatter 的 canonical source 计算，因此等价空格和换行�
 
 生成代码仍须在目标 `Engine` 上调用 `prepare`。`PreparedQuery` 绑定精确 schema revision/hash，执行前不匹配就返回 `E_SCHEMA_CHANGED`；编译成功不代表可以连接任意同名 schema。查询描述不授权 mutation、不修改 schema，也不替代 protocol、幂等 key 或服务鉴权。
 
-### 5. 后续切片
+### 5. Rust 绑定
 
-下一切片从 schema + query 文件生成 Rust 参数类型、结果类型和调用函数，按 cardinality 解码，并在独立 consumer crate 编译执行。之后加入生成漂移检查和两版 schema/query/client 演进场景。服务器命名查询、用户泛型和第二执行器不作为前置。
+`unionid query rust --schema <schema.uid> --file <query.uid>` 从同一描述生成完整 Rust 文件；经过 migration 的现有数据库使用 `--db <db.redb>` 取得真实 catalog identity。输出包含 schema ADT、查询参数 struct、结果 row 和 Engine 调用函数。文件名默认映射为函数名，也可用 `--name` 固定公开名称。函数按字段调用 `Value::from_serde`，并根据 cardinality 解码为 `T`、`Option<T>` 或 `Vec<T>`；有 returning 的 mutation 使用包含 typed rows 与 affected rows 的 output struct，无 returning 的 mutation 返回 affected rows。
+
+生成函数保存 schema revision/hash、canonical query source 和 digest。它在 runtime prepare 前核对 Engine schema identity；随后仍使用 `PreparedQuery` 完成绑定与执行检查。匿名 product/sum 结果递归生成局部 Rust struct/enum，命名 ADT 继续引用同文件生成的 schema 类型。
+
+后续只剩 generated drift 和两版 schema/query/client 演进场景。服务器命名查询、用户泛型和第二执行器不作为前置。
 
 ## English Description
 
@@ -57,7 +61,7 @@ digest 对 formatter 的 canonical source 计算，因此等价空格和换行�
 
 Schema code generation only covers stored models. `select`, `derive`, `aggregate`, `lookup`, and mutation `returning` can all produce different shapes, while hand-maintained parameter maps and result DTOs defer drift to runtime.
 
-The version-1 query description uses the existing syntax parser, pipeline preparation, expression/match binders, and parameter unification. It neither reinterprets the language nor reads data. Inputs are one declaration-only schema and one static query file. Each file contains exactly one operation supported by `PreparedQuery`, allowing its file name to map to one generated function.
+The version-1 query description uses the existing syntax parser, pipeline preparation, expression/match binders, and parameter unification. It neither reinterprets the language nor reads data. The catalog input may be an authoritative declaration-only schema or a private copy of a live redb catalog; the latter retains migration-established stable IDs and the actual revision/hash. The other input is one static query file. Each file contains exactly one operation supported by `PreparedQuery`, allowing its file name to map to one generated function.
 
 ### 2. Contract
 
@@ -73,4 +77,8 @@ The digest covers formatter-canonical source, so equivalent layout is stable whi
 
 Generated code must still call `prepare` on the target `Engine`. `PreparedQuery` binds the exact schema revision/hash and returns `E_SCHEMA_CHANGED` before execution when they differ. Successful compilation is not permission to connect to an arbitrary same-named schema. The description neither authorizes mutations nor replaces protocol, idempotency, or service authorization.
 
-The next slice generates Rust parameter/result types and call functions from schema plus query files, decodes according to cardinality, and compiles/runs them in an independent consumer crate. Generated-drift CI and two-version schema/query/client evolution follow. Server-side named queries, user generics, and a second executor are not prerequisites.
+`unionid query rust --schema <schema.uid> --file <query.uid>` generates a complete Rust file from the same description; an existing migrated database uses `--db <db.redb>` to retain its real catalog identity. Output contains schema ADTs, a query parameter struct, a result row, and an Engine call function. The file stem maps to the function name by default, with `--name` providing a stable explicit name. Each parameter is converted through `Value::from_serde`; cardinality decodes rows as `T`, `Option<T>`, or `Vec<T>`. Mutations with returning produce an output containing typed rows and affected rows, while mutations without returning produce the affected-row count.
+
+Generated functions retain the schema revision/hash, canonical query source, and digest. They check the Engine schema identity before runtime prepare, which continues to enforce binding and execution invariants. Anonymous product/sum shapes recursively generate local Rust structs/enums, while named ADTs refer to schema types generated in the same file.
+
+Generated-drift CI and two-version schema/query/client evolution remain. Server-side named queries, user generics, and a second executor are not prerequisites.

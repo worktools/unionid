@@ -4,7 +4,7 @@
 
 本页描述 **当前版本可以执行** 的查询与 pipeline DML 语法，是查询行为的规范入口。第一次使用可先运行[五分钟教程](GETTING_STARTED.md)中的持久查询、更新和重开链路。类型、表和 insert/upsert 见 [LANGUAGE.md](LANGUAGE.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)；尚未实现的表达式与 runner 提案见 [DESIGN.md](DESIGN.md)。设计草案中的代码不能当作当前命令执行。
 
-需要从静态查询文件生成客户端绑定时，可先用 `query describe --schema <schema.uid> --file <query.uid>` 离线取得参数、结果和 cardinality 契约；完整定义见 [RFC 0015](rfc/0015-static-query-contract.md)。该命令直接复用本页语法的 parser 和 binder，不维护另一套查询推断规则。
+需要从静态查询文件生成客户端绑定时，可先用 `query describe --schema <schema.uid> --file <query.uid>` 离线取得参数、结果和 cardinality 契约，再用 `query rust` 生成可调用代码。长期 migration 的数据库可将 `--schema` 换成 `--db <db.redb>`，保留 live catalog 的稳定 ID 与真实 revision/hash；完整定义见 [RFC 0015](rfc/0015-static-query-contract.md)。这些命令直接复用本页语法的 parser 和 binder，不维护另一套查询推断规则。
 
 unionid 的查询从表开始，按书写顺序经过一组 transform：
 

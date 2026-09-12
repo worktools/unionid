@@ -338,10 +338,28 @@ enum SchemaCommand {
 enum QueryCommand {
     /// Bind one query against a schema and emit its versioned contract.
     Describe {
+        #[arg(long, conflicts_with = "db")]
+        schema: Option<PathBuf>,
+        /// Existing redb database whose exact live catalog is used.
         #[arg(long)]
-        schema: PathBuf,
+        db: Option<PathBuf>,
         #[arg(long)]
         file: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Generate Rust parameter, result, and Engine call bindings for one query.
+    Rust {
+        #[arg(long, conflicts_with = "db")]
+        schema: Option<PathBuf>,
+        /// Existing redb database whose exact live catalog is used.
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long)]
+        file: PathBuf,
+        /// Public Rust function name; defaults to the query file stem.
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -772,9 +790,23 @@ fn run(args: Args) -> Result<(), String> {
         Command::Query { command } => match command {
             QueryCommand::Describe {
                 schema,
+                db,
                 file,
                 output,
-            } => cli::query_describe(&schema, &file, output.as_deref()),
+            } => cli::query_describe(schema.as_deref(), db, &file, output.as_deref()),
+            QueryCommand::Rust {
+                schema,
+                db,
+                file,
+                name,
+                output,
+            } => cli::query_rust(
+                schema.as_deref(),
+                db,
+                &file,
+                name.as_deref(),
+                output.as_deref(),
+            ),
         },
         Command::Backup { db, output, format } => {
             cli::backup_create(db, output, matches!(format, Format::Json))
