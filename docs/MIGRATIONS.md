@@ -112,7 +112,9 @@ migration m0002_add_task_priority
 
 `status` 展示完整已应用记录、待应用 ID，以及可选的 `maintenance`：phase、source/target generation、已读／已写 row 数、index entry 数、逻辑字节、更新时间和允许的下一步。`.storage` 与 version 1 introspection 返回同一维护信息。Building、Ready 或 Aborting 期间，旧 active generation 的查询和只读打开继续工作，普通 DDL/DML、receipt prune、storage upgrade 和另一条 migration 返回 `E_MAINTENANCE_REQUIRED`。Reclaimable 表示 cutover 已完成，只剩旧 generation 清理，不阻止普通写入。维护事务的 commit 若返回不确定结果，当前 Engine 禁止继续读写并要求重开，通过 `migration status` 判断是继续、清理还是已经切换。
 
-`plan`、`apply`、`advance`、`status` 和 `abort` 都支持 `--format json`，可供脚本稳定解析。`abort` 是写操作，只适用于 redb format 6；只读实例返回 `E_READ_ONLY`。Building/Ready/Aborting 时它放弃并清理 target；Reclaimable 时只完成旧 source 的回收，已经切换的 migration 不会回滚。没有 maintenance 时执行 abort 是成功的幂等 no-op。
+`plan`、`apply`、`advance`、`status`、`rehearse` 和 `abort` 都支持 `--format json`，可供脚本稳定解析。`abort` 是写操作，只适用于 redb format 6；只读实例返回 `E_READ_ONLY`。Building/Ready/Aborting 时它放弃并清理 target；Reclaimable 时只完成旧 source 的回收，已经切换的 migration 不会回滚。没有 maintenance 时执行 abort 是成功的幂等 no-op。
+
+`migration rehearse --db app.redb --dir migrations [--copy path]` 先把源库复制到临时路径（或 `--copy` 指定的路径），在副本上执行 apply 与完整 check，并输出源／目标 revision、applied/skipped、耗时与文件字节；源库保持不变。停机后先在副本上演练，确认 conversion、unique、index 键错误与耗时，再对生产库执行。
 
 已应用文件不可修改，也不能从目录删除。CRLF 与 LF 具有相同 checksum，其他注释、格式和内容变化都会被拒绝。文件名排序必须与 parent 链一致，重复 ID、缺少 parent、分叉或 ledger 与当前 schema hash 不一致都会返回 `E_MIGRATION` 或 `E_STORAGE`。ledger 非空后，普通 `run`、本地 CLI 或 TCP 不能直接执行 schema 变更；应用必须经过 runner，数据读写仍可照常使用。
 
