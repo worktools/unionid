@@ -82,7 +82,9 @@ def main():
             cwd=ROOT,
             check=True,
         )
-        for source in ["schema.uid", "migrate_v2.uid"]:
+        # Seed under v1 before the migration so the consumer can verify the
+        # new field's default on an existing row as well as on new input.
+        for source in ["schema.uid", "seed_v1.uid", "migrate_v2.uid"]:
             subprocess.run(
                 [
                     "cargo",
@@ -103,6 +105,7 @@ def main():
                 stdout=subprocess.DEVNULL,
                 check=True,
             )
+        stale_output = temporary / "stale.rs"
         stale_match = subprocess.run(
             [
                 "cargo",
@@ -118,14 +121,18 @@ def main():
                 "--file",
                 str(FIXTURE / "classify_task_v1.uid"),
                 "--output",
-                str(temporary / "stale.rs"),
+                str(stale_output),
             ],
             cwd=ROOT,
             capture_output=True,
             text=True,
         )
         stale_diagnostic = stale_match.stdout + stale_match.stderr
-        if stale_match.returncode == 0 or "non-exhaustive" not in stale_diagnostic:
+        if (
+            stale_match.returncode == 0
+            or "non-exhaustive" not in stale_diagnostic
+            or stale_output.exists()
+        ):
             raise RuntimeError(
                 "adding a variant did not reject the stale exhaustive query: "
                 + stale_diagnostic

@@ -56,6 +56,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let evolved_path = std::env::var("UNIONID_EVOLVED_DB")?;
     let mut evolved = unionid::Engine::open_redb(evolved_path)?;
+    let migrated = classify_v2::classify_task_v2(
+        &mut evolved,
+        classify_v2::ClassifyTaskV2Params { id: 6 },
+    )?
+    .ok_or("v2 generated query did not return the migrated v1 row")?;
+    assert_eq!(migrated.status, "running");
+    assert_eq!(migrated.priority, 0);
     let inserted = evolved.execute(
         "insert tasks {id = 8, title = \"done\", state = Complete, priority = 3}",
     );

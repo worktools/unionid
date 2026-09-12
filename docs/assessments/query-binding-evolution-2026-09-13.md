@@ -16,7 +16,7 @@ v1 声明 `State = Pending | Running {attempt int}` 和包含 `id/title/state` �
 | --- | --- |
 | v1 schema + v1 生成代码 | 独立 crate 编译，写入 `Running` 后返回原生 typed row，成功 |
 | v2 catalog + v1 查询源码重新生成 | binder 在生成阶段返回 non-exhaustive match，不产生代码 |
-| v2 catalog + v2 查询源码 | 从 live redb 私有副本保留 revision/hash 和稳定 ID，独立 crate 编译并读取 `Complete` 与 `priority = 3` |
+| v2 catalog + v2 查询源码 | 从 live redb 私有副本保留 revision/hash 和稳定 ID；独立 crate 先读取 migration 补默认值的旧行 `priority = 0`，再读取新 `Complete` 行的 `priority = 3` |
 | v1 已生成函数 + v2 Engine | prepare 前返回 `E_SCHEMA_CHANGED` |
 | v1 → v2 projection | query digest 与生成文件 SHA-256 同时变化，CI drift gate 失败，要求显式 review |
 
@@ -36,7 +36,7 @@ Version 1 declares `State = Pending | Running {attempt int}` and a `Task` with `
 | --- | --- |
 | v1 schema + v1 generated code | An independent crate compiles and returns a native typed row after inserting `Running` |
 | v2 catalog + regenerated v1 query source | The binder reports a non-exhaustive match during generation and emits no code |
-| v2 catalog + v2 query source | Generation from a private live-redb copy retains revision/hash and stable IDs; the independent crate reads `Complete` and `priority = 3` |
+| v2 catalog + v2 query source | Generation from a private live-redb copy retains revision/hash and stable IDs; the independent crate first reads a migrated v1 row with defaulted `priority = 0`, then a new `Complete` row with `priority = 3` |
 | previously generated v1 call + v2 Engine | The call returns `E_SCHEMA_CHANGED` before prepare |
 | v1 → v2 projection | Both the query digest and generated-file SHA-256 change; the CI drift gate requires explicit review |
 
