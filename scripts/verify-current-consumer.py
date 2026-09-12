@@ -14,6 +14,7 @@ CONSUMER_SOURCES = ROOT / "tests" / "current-consumer"
 
 
 def main():
+    """Package unionid and exercise its public API from an isolated Rust crate."""
     parser = argparse.ArgumentParser(
         description="Build and run an independent consumer against the packaged unionid crate"
     )
@@ -33,6 +34,19 @@ def main():
     package = ROOT / "target" / "package" / f"unionid-{version}.crate"
     if not package.is_file():
         raise RuntimeError(f"packaged crate not found: {package}")
+
+    # The temporary consumer resolves only packages already pinned by the root
+    # lockfile. Prime a fresh runner once, then keep the independent build
+    # offline so it cannot silently substitute a registry copy of unionid.
+    cached = subprocess.run(
+        ["cargo", "fetch", "--locked", "--offline"],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if cached.returncode != 0:
+        subprocess.run(["cargo", "fetch", "--locked"], cwd=ROOT, check=True)
 
     with tempfile.TemporaryDirectory(prefix="unionid-current-consumer-") as temporary:
         temporary = pathlib.Path(temporary)
