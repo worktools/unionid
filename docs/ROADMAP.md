@@ -4,6 +4,8 @@
 
 总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
 
+[2026-09-12 ADT 与语言互通评估](assessments/adt-adoption-2026-09-12.md)记录当前实现、独立消费探针、业界对照及采用建议；它是评估快照，不替代 issues 的实时范围与完成状态。 / The dated assessment records implementation evidence, consumer probes, industry comparisons, and adoption proposals; issues remain the source of current scope and status.
+
 [当前语言](LANGUAGE.md)和[查询参考](QUERY.md)描述可执行范围；[结构化查询语法 RFC](rfc/0005-structured-prql-query-syntax.md)收敛 PRQL 风格的 delimiter、field set、match expression 与 group inner pipeline；[实际场景与覆盖矩阵](SCENARIOS.md)用任务队列、配置、事件、同步和 key/value 工作流检验查询实用性；[生产标量 RFC](rfc/0004-production-scalars.md)冻结 UUID、时间、decimal、bytes 与格式升级边界；[Schema 身份与演进契约](SCHEMA.md)定义稳定 ID、revision/hash 和兼容规则；[redb 持久模式](STORAGE.md)记录事务入口与格式边界；[设计草案](DESIGN.md)说明完整目标和取舍；[原型审计](PROTOTYPE-AUDIT.md)保留早期原型的验证结果与问题证据。
 
 `v0.2.0` 已通过 GitHub Actions 发布 crate、macOS/Linux 原生包和 GitHub Release；M0–M8 均已完成并关闭。当前没有外部使用者，[M9 #210](https://github.com/worktools/unionid/issues/210) 直接以 format 6、protocol v2 和当前 Rust API 为基线补齐应用旅程与运行证据，不再为旧数据库或旧客户端增加兼容工作；已有 v0.1 fixture 只保留为历史回归证据，不约束新设计。#118、#120 与 #192 保留为真实需求触发的独立 P2 探索；join、window 和分布式不属于当前版本范围。
