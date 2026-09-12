@@ -66,10 +66,9 @@ pub fn rust_query_bundle(schema_source: &str, queries: &[(String, String)]) -> R
     let mut descriptions = queries
         .iter()
         .map(|(name, source)| {
-            Ok((
-                name.as_str(),
-                crate::query_contract::describe(schema_source, source)?,
-            ))
+            let description = crate::query_contract::describe(schema_source, source)
+                .map_err(|error| query_bundle_error(name, error))?;
+            Ok((name.as_str(), description))
         })
         .collect::<Result<Vec<_>>>()?;
     descriptions.sort_by(|left, right| left.0.cmp(right.0));
@@ -83,10 +82,20 @@ pub fn rust_query_bundle_for_engine(
 ) -> Result<String> {
     let mut descriptions = queries
         .iter()
-        .map(|(name, source)| Ok((name.as_str(), engine.describe_query(source)?)))
+        .map(|(name, source)| {
+            let description = engine
+                .describe_query(source)
+                .map_err(|error| query_bundle_error(name, error))?;
+            Ok((name.as_str(), description))
+        })
         .collect::<Result<Vec<_>>>()?;
     descriptions.sort_by(|left, right| left.0.cmp(right.0));
     render_rust_query_bundle(&engine.schema(), &descriptions)
+}
+
+fn query_bundle_error(name: &str, mut error: Error) -> Error {
+    error.message = format!("query '{name}': {}", error.message);
+    error
 }
 
 fn render_rust_query(

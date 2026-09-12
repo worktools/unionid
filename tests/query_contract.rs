@@ -400,6 +400,7 @@ fn cli_generates_a_deterministic_query_directory_bundle_without_partial_failures
         .output()
         .unwrap();
     assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("query 'create!':"));
     assert_eq!(
         std::fs::read_to_string(output).unwrap(),
         "keep this complete output"
