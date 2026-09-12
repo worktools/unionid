@@ -156,7 +156,7 @@ cargo run --example parameters
 
 TCP 客户端可直接构造 <code>ProtocolRequest</code> 并调用 <code>cli::send_request</code>。<code>WireValue</code> 与 <code>Value</code> 之间提供无损转换；网络 codec、redb 的版本化 binary value codec 和内部 Rust enum 布局彼此独立。连接、执行与响应限制以及优雅关闭行为见[服务运行边界](SERVICE.md)。
 
-HTTP/TCP Rust adapter 还可使用 `Request::query`、`Request::with_serde_param`、`Request::with_page`、`Response::typed_rows` 和 `Response::typed_page`，避免应用代码手工拆装 `WireValue` 或 cursor。`server::execute_protocol_request` 是使用内置 25 秒预算的统一执行入口；`execute_protocol_request_until` 接受 adapter 计算的绝对 deadline。两者都不启动 listener，也不规定认证、TLS、路由或部署策略。
+HTTP/TCP Rust adapter 还可使用 `Request::query`、`Request::with_serde_param`、`Request::with_page`、`Response::typed_rows` 和 `Response::typed_page`，避免应用代码手工拆装 `WireValue` 或 cursor。同步 TCP 使用 `TcpClient`；启用 `asynchronous` feature 后，`AsyncTcpClient` 提供共享连接、typed page、独立 stream/cancel 连接、绝对 deadline 和带幂等 key 的重连；启用 `http-client` 后，`HttpClient` 提供对应的 HTTP API。`server::execute_protocol_request` 是使用内置 25 秒预算的统一执行入口；`execute_protocol_request_until` 接受 adapter 计算的绝对 deadline。两者都不启动 listener，也不规定认证、TLS、路由或部署策略。
 
 完整 `Response` 与 bounded page 保持兼容；另有独立 stream protocol version 1。TCP 发送一行 query envelope，HTTP 示例向 `POST /v1/stream` 发送同一结构：
 

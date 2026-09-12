@@ -4,11 +4,13 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 
-use super::{MAX_RESPONSE_BYTES, validate_response};
-use crate::SchemaInfo;
-use crate::db::{PageInfo, ResponseColumn, TypedPage};
+pub use super::TypedStreamEvent;
+use super::{
+    MAX_RESPONSE_BYTES, StreamValidator, validate_response, validate_stream_error_response,
+};
+use crate::db::{PageInfo, TypedPage};
 use crate::error::{Error, Result};
-use crate::protocol::{Request, Response, decode_typed_row};
+use crate::protocol::{Request, Response};
 use crate::stream::{self as stream_protocol, CancelResponse, Frame};
 
 /// Versioned request/response endpoint used by [`HttpClient`].
@@ -29,39 +31,12 @@ pub struct HttpClient {
     timeout: Duration,
 }
 
-/// One typed event after the stream's accepted handshake.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypedStreamEvent<T> {
-    Schema {
-        columns: Vec<ResponseColumn>,
-        schema: SchemaInfo,
-    },
-    Row {
-        sequence: String,
-        row: T,
-    },
-    Complete {
-        row_count: String,
-        encoded_bytes: String,
-        warnings: Vec<String>,
-    },
-    Error {
-        emitted_rows: String,
-        error: Error,
-    },
-}
-
 /// A bounded NDJSON response whose accepted capability has been validated.
 pub struct HttpStream {
     response: reqwest::Response,
-    request_id: String,
-    operation_id: String,
-    protocol_version: u32,
+    validator: Option<StreamValidator>,
     buffered: Vec<u8>,
     emitted_bytes: usize,
-    schema_seen: bool,
-    terminal: bool,
-    row_index: usize,
 }
 
 impl HttpClient {
@@ -291,7 +266,7 @@ impl HttpClient {
             let encoded = read_bounded(response, MAX_RESPONSE_BYTES).await?;
             if let Ok(response) = serde_json::from_slice::<stream_protocol::ErrorResponse>(&encoded)
             {
-                validate_error_response(&response, &request.request_id)?;
+                validate_stream_error_response(&response, &request.request_id)?;
                 return Err(response.error);
             }
             return Err(Error::new(
@@ -301,26 +276,16 @@ impl HttpClient {
         };
         let mut output = HttpStream {
             response,
-            request_id: request.request_id.clone(),
-            operation_id,
-            protocol_version: request.version,
+            validator: None,
             buffered: Vec::new(),
             emitted_bytes: 0,
-            schema_seen: false,
-            terminal: false,
-            row_index: 0,
         };
         let accepted = output
             .read_frame()
             .await?
             .ok_or_else(|| Error::new("E_PROTOCOL", "stream ended before the accepted frame"))?;
-        match accepted {
-            Frame::Accepted { .. } => Ok(output),
-            _ => Err(Error::new(
-                "E_PROTOCOL",
-                "stream must begin with an accepted frame",
-            )),
-        }
+        output.validator = Some(StreamValidator::accepted(request, operation_id, &accepted)?);
+        Ok(output)
     }
 
     /// Cancel a stream using its server-issued bearer capability.
@@ -363,7 +328,7 @@ impl HttpClient {
             return Ok(response);
         }
         if let Ok(response) = serde_json::from_slice::<stream_protocol::ErrorResponse>(&encoded) {
-            validate_error_response(&response, &request_id)?;
+            validate_stream_error_response(&response, &request_id)?;
             return Err(response.error);
         }
         Err(Error::new(
@@ -392,17 +357,17 @@ impl HttpClient {
 impl HttpStream {
     /// Return the request identity copied into every stream frame.
     pub fn request_id(&self) -> &str {
-        &self.request_id
+        self.validator().request_id()
     }
 
     /// Return the server-issued bearer capability used for cancellation.
     pub fn operation_id(&self) -> &str {
-        &self.operation_id
+        self.validator().operation_id()
     }
 
     /// Read and validate the next raw protocol frame.
     pub async fn next_frame(&mut self) -> Result<Option<Frame>> {
-        if self.terminal {
+        if self.validator().terminal() {
             return Ok(None);
         }
         let Some(frame) = self.read_frame().await? else {
@@ -411,60 +376,8 @@ impl HttpStream {
                 "stream closed before a complete or error frame",
             ));
         };
-        match &frame {
-            Frame::Accepted { .. } => {
-                return Err(Error::new(
-                    "E_PROTOCOL",
-                    "stream sent accepted more than once",
-                ));
-            }
-            Frame::Schema { .. } if self.schema_seen => {
-                return Err(Error::new(
-                    "E_PROTOCOL",
-                    "stream sent schema more than once",
-                ));
-            }
-            Frame::Schema { .. } => self.schema_seen = true,
-            Frame::Row { .. } if !self.schema_seen => {
-                return Err(Error::new("E_PROTOCOL", "stream sent a row before schema"));
-            }
-            Frame::Complete { .. } if !self.schema_seen => {
-                return Err(Error::new("E_PROTOCOL", "stream completed before schema"));
-            }
-            Frame::Row { sequence, .. } => {
-                if sequence != &self.row_index.to_string() {
-                    return Err(Error::new(
-                        "E_PROTOCOL",
-                        "stream row sequence is not contiguous",
-                    ));
-                }
-                self.row_index = self.row_index.checked_add(1).ok_or_else(|| {
-                    Error::new(
-                        "E_STREAM_LIMIT",
-                        "stream row count exceeds the client limit",
-                    )
-                })?;
-            }
-            Frame::Complete { row_count, .. } => {
-                if row_count != &self.row_index.to_string() {
-                    return Err(Error::new(
-                        "E_PROTOCOL",
-                        "stream complete row count does not match emitted rows",
-                    ));
-                }
-                self.terminal = true;
-            }
-            Frame::Error { emitted_rows, .. } => {
-                if emitted_rows != &self.row_index.to_string() {
-                    return Err(Error::new(
-                        "E_PROTOCOL",
-                        "stream error row count does not match emitted rows",
-                    ));
-                }
-                self.terminal = true;
-            }
-        }
-        if self.terminal && !self.buffered.is_empty() {
+        self.validator_mut().validate_next(&frame)?;
+        if self.validator().terminal() && !self.buffered.is_empty() {
             return Err(Error::new(
                 "E_PROTOCOL",
                 "stream included data after its terminal frame",
@@ -478,35 +391,19 @@ impl HttpStream {
         let Some(frame) = self.next_frame().await? else {
             return Ok(None);
         };
-        let event = match frame {
-            Frame::Schema {
-                columns, schema, ..
-            } => TypedStreamEvent::Schema { columns, schema },
-            Frame::Row { sequence, row, .. } => TypedStreamEvent::Row {
-                sequence,
-                row: decode_typed_row(self.protocol_version, &row, self.row_index)?,
-            },
-            Frame::Complete {
-                row_count,
-                encoded_bytes,
-                warnings,
-                ..
-            } => TypedStreamEvent::Complete {
-                row_count,
-                encoded_bytes,
-                warnings,
-            },
-            Frame::Error {
-                emitted_rows,
-                error,
-                ..
-            } => TypedStreamEvent::Error {
-                emitted_rows,
-                error,
-            },
-            Frame::Accepted { .. } => unreachable!("next_frame rejects repeated accepted frames"),
-        };
-        Ok(Some(event))
+        Ok(Some(self.validator().typed_event(frame)?))
+    }
+
+    fn validator(&self) -> &StreamValidator {
+        self.validator
+            .as_ref()
+            .expect("HttpStream is returned only after an accepted frame")
+    }
+
+    fn validator_mut(&mut self) -> &mut StreamValidator {
+        self.validator
+            .as_mut()
+            .expect("HttpStream is returned only after an accepted frame")
     }
 
     async fn read_frame(&mut self) -> Result<Option<Frame>> {
@@ -523,7 +420,13 @@ impl HttpStream {
                 let frame: Frame = serde_json::from_slice(&line).map_err(|error| {
                     Error::new("E_PROTOCOL", format!("decode stream frame: {error}"))
                 })?;
-                validate_frame_identity(&frame, &self.request_id, &self.operation_id)?;
+                if let Some(validator) = &self.validator {
+                    super::validate_frame_identity(
+                        &frame,
+                        validator.request_id(),
+                        validator.operation_id(),
+                    )?;
+                }
                 return Ok(Some(frame));
             }
             if self.buffered.len() >= stream_protocol::MAX_FRAME_BYTES {
@@ -556,66 +459,6 @@ impl HttpStream {
             self.buffered.extend_from_slice(&chunk);
         }
     }
-}
-
-fn validate_error_response(
-    response: &stream_protocol::ErrorResponse,
-    request_id: &str,
-) -> Result<()> {
-    if response.ok
-        || response.stream_version != stream_protocol::VERSION
-        || response.request_id != request_id
-    {
-        return Err(Error::new(
-            "E_PROTOCOL",
-            "stream error response identity does not match the request",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_frame_identity(frame: &Frame, request_id: &str, operation_id: &str) -> Result<()> {
-    let (version, frame_request_id, frame_operation_id) = match frame {
-        Frame::Accepted {
-            stream_version,
-            request_id,
-            operation_id,
-        }
-        | Frame::Schema {
-            stream_version,
-            request_id,
-            operation_id,
-            ..
-        }
-        | Frame::Row {
-            stream_version,
-            request_id,
-            operation_id,
-            ..
-        }
-        | Frame::Complete {
-            stream_version,
-            request_id,
-            operation_id,
-            ..
-        }
-        | Frame::Error {
-            stream_version,
-            request_id,
-            operation_id,
-            ..
-        } => (*stream_version, request_id, operation_id),
-    };
-    if version != stream_protocol::VERSION
-        || frame_request_id != request_id
-        || frame_operation_id != operation_id
-    {
-        return Err(Error::new(
-            "E_PROTOCOL",
-            "stream frame identity does not match the accepted operation",
-        ));
-    }
-    Ok(())
 }
 
 fn require_success(response: &reqwest::Response, operation: &str) -> Result<()> {

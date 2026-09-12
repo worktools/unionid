@@ -209,11 +209,11 @@ The query language also supports bounded one-to-many expansion: `lookup lines fr
 
 可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、typed cursor 分页、真实客户端断开、丢响应后的幂等重试、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
 
-远程调用可用 `unionid::client::TcpClient`（`request`/`request_retrying` 加 `typed_rows`）。启用 `http-client` feature 后，异步 `HttpClient` 提供连接池、typed page 续读、逐行解码的 typed NDJSON stream、显式 cancel，以及带幂等 key 的丢响应重试。异步框架可启用 `asynchronous` feature 调用同一 blocking 入口；`http` feature 的 `unionid::asynchronous::http::router` 直接提供 versioned query、NDJSON stream 和 cancel 路由，应用无需复制 worker 或流桥接。`ConcurrentEngine` 等集成类型已在 crate root 导出。
+远程调用可用同步 `TcpClient`；启用 `asynchronous` feature 后，cloneable `AsyncTcpClient` 复用 TCP 连接，并提供 typed page、独立 NDJSON stream/cancel、绝对 deadline 和带幂等 key 的丢响应重连。启用 `http-client` feature 后，异步 `HttpClient` 提供对应的连接池、typed page、stream/cancel 和安全重试体验。异步框架也可用同一 `asynchronous` feature 调用 blocking Engine 入口；`http` feature 的 `unionid::asynchronous::http::router` 提供 versioned query、NDJSON stream 和 cancel 路由。`ConcurrentEngine` 等集成类型已在 crate root 导出。
 
 See runnable code in [`parameters.rs`](examples/parameters.rs). The complete HTTP/Axum todolist validates ADTs, typed cursor pages, a real client disconnect, idempotent retry after a lost response, migrations, restart, integrity checking, backup, and restore through the same version 1 data protocol; see [HTTP.md](docs/HTTP.md).
 
-Remote calls can use `unionid::client::TcpClient` (`request`/`request_retrying` plus `typed_rows`). With the `http-client` feature, async `HttpClient` adds connection pooling, typed page continuation, row-by-row typed NDJSON streams, explicit cancellation, and lost-response retries guarded by idempotency keys. Async frameworks can enable `asynchronous` for the shared blocking entry point; the `http` feature supplies versioned query, NDJSON stream, and cancellation routes through `unionid::asynchronous::http::router`. Integration types such as `ConcurrentEngine` are re-exported at the crate root.
+Remote calls can use the synchronous `TcpClient`. With the `asynchronous` feature, cloneable `AsyncTcpClient` reuses its TCP connection and adds typed pages, dedicated NDJSON stream/cancel connections, absolute deadlines, and idempotency-key guarded reconnect after a lost response. The `http-client` feature supplies the corresponding pooled HTTP typed page, stream/cancel, and safe retry experience. Async frameworks can also use `asynchronous` for the shared blocking Engine entry point, while `http` supplies versioned query, NDJSON stream, and cancellation routes. Integration types such as `ConcurrentEngine` are re-exported at the crate root.
 
 ## 当前边界 / Current boundaries
 

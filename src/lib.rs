@@ -40,8 +40,10 @@ pub mod wal;
 
 pub use backup::BackupInfo;
 #[cfg(feature = "http-client")]
-pub use client::http::{HttpClient, HttpStream, TypedStreamEvent};
-pub use client::{MAX_RESPONSE_BYTES, TcpClient};
+pub use client::http::{HttpClient, HttpStream};
+#[cfg(feature = "asynchronous")]
+pub use client::{AsyncTcpClient, AsyncTcpStream};
+pub use client::{MAX_RESPONSE_BYTES, TcpClient, TypedStreamEvent};
 pub use db::{
     IndexRangePlan, IndexTraversal, LookupPlan, PageAccessKind, PageInfo, PageOrder, PagePlan,
     QueryAccessKind, QueryAccessPlan, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind,
