@@ -1,0 +1,12 @@
+type State =
+  Pending
+  | Running {attempt int}
+
+type Task = {
+  id int,
+  title text,
+  state State,
+}
+
+table tasks Task
+  key id

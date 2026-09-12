@@ -399,17 +399,35 @@ pub fn schema_describe(
     Ok(())
 }
 
-pub fn query_describe(schema: &Path, query: &Path, output: Option<&Path>) -> Result<(), String> {
-    let schema_source = read_source(
-        std::fs::File::open(schema)
-            .map_err(|error| format!("open '{}': {error}", schema.display()))?,
-    )?;
+pub fn query_describe(
+    schema: Option<&Path>,
+    db: Option<PathBuf>,
+    query: &Path,
+    output: Option<&Path>,
+) -> Result<(), String> {
     let query_source = read_source(
         std::fs::File::open(query)
             .map_err(|error| format!("open '{}': {error}", query.display()))?,
     )?;
-    let description = crate::query_contract::describe(&schema_source, &query_source)
-        .map_err(|error| error.to_string())?;
+    let description = match (schema, db) {
+        (Some(schema), None) => {
+            let schema_source = read_source(
+                std::fs::File::open(schema)
+                    .map_err(|error| format!("open '{}': {error}", schema.display()))?,
+            )?;
+            crate::query_contract::describe(&schema_source, &query_source)
+                .map_err(|error| error.to_string())?
+        }
+        (None, Some(db)) => {
+            require_existing_database(&db)?;
+            let copy = PrivateDatabaseCopy::create(&db, "query-description")?;
+            Engine::open_redb_read_only(copy.path())
+                .map_err(|error| error.to_string())?
+                .describe_query(&query_source)
+                .map_err(|error| error.to_string())?
+        }
+        _ => return Err("provide exactly one of --schema or --db".into()),
+    };
     let mut encoded =
         serde_json::to_string_pretty(&description).map_err(|error| error.to_string())?;
     encoded.push('\n');
@@ -420,6 +438,55 @@ pub fn query_describe(schema: &Path, query: &Path, output: Option<&Path>) -> Res
             println!("wrote {}", destination.display());
         }
         None => print!("{encoded}"),
+    }
+    Ok(())
+}
+
+pub fn query_rust(
+    schema: Option<&Path>,
+    db: Option<PathBuf>,
+    query: &Path,
+    name: Option<&str>,
+    output: Option<&Path>,
+) -> Result<(), String> {
+    let query_source = read_source(
+        std::fs::File::open(query)
+            .map_err(|error| format!("open '{}': {error}", query.display()))?,
+    )?;
+    let inferred_name = query
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("query path '{}' has no UTF-8 file stem", query.display()))?;
+    let generated = match (schema, db) {
+        (Some(schema), None) => {
+            let schema_source = read_source(
+                std::fs::File::open(schema)
+                    .map_err(|error| format!("open '{}': {error}", schema.display()))?,
+            )?;
+            crate::codegen::rust_query(&schema_source, &query_source, name.unwrap_or(inferred_name))
+                .map_err(|error| error.to_string())?
+        }
+        (None, Some(db)) => {
+            require_existing_database(&db)?;
+            let copy = PrivateDatabaseCopy::create(&db, "query-rust")?;
+            let engine =
+                Engine::open_redb_read_only(copy.path()).map_err(|error| error.to_string())?;
+            crate::codegen::rust_query_for_engine(
+                &engine,
+                &query_source,
+                name.unwrap_or(inferred_name),
+            )
+            .map_err(|error| error.to_string())?
+        }
+        _ => return Err("provide exactly one of --schema or --db".into()),
+    };
+    match output {
+        Some(destination) => {
+            std::fs::write(destination, generated)
+                .map_err(|error| format!("write '{}': {error}", destination.display()))?;
+            println!("wrote {}", destination.display());
+        }
+        None => print!("{generated}"),
     }
     Ok(())
 }

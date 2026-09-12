@@ -214,9 +214,9 @@ Fix mapping/generation correctness, then complete SDK, relational-read, migratio
 
 ### v0.4.0 · 类型化查询与 ADT 互通 / Typed queries and ADT interoperability
 
-[Milestone 12](https://github.com/worktools/unionid/milestone/12)；#265 的 version 1 描述、运行时 validator、通用向量与四方向 schema 演进报告已完成基础切片；#264 的静态查询参数/结果/cardinality/digest 描述已进入实现，随后生成 Rust 调用绑定并联合验证。#120 服务器命名查询与 #118 泛型不是前置。
+[Milestone 12](https://github.com/worktools/unionid/milestone/12)；#265 的 version 1 描述、运行时 validator、通用向量与四方向 schema 演进报告已完成基础切片；#264 已完成静态查询描述，并已实现 Rust 参数、结果和 Engine 调用生成与独立 consumer 验证，下一步补生成漂移和两版 schema/query/client 演进验收。#120 服务器命名查询与 #118 泛型不是前置。
 
-The #265 version-1 description, runtime validator, common vectors, and four-direction schema evolution foundation is implemented. #264 static-query parameter/result/cardinality/digest descriptions are in progress, followed by generated Rust calls and joint validation. Neither server-side named queries nor user generics is a prerequisite.
+The #265 version-1 description, runtime validator, common vectors, and four-direction schema evolution foundation is implemented. #264 now has static-query descriptions plus generated Rust parameters, results, Engine calls, and an independent consumer check. Generated drift and two-version schema/query/client evolution acceptance follow. Neither server-side named queries nor user generics is a prerequisite.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |

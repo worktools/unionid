@@ -9,6 +9,8 @@ use std::fmt::Write;
 
 use crate::error::{Error, Result};
 use crate::model::{Column, EnumType, ScalarType, TypeDefinition};
+use crate::portable::TypeShape;
+use crate::query_contract::{QueryCardinality, QueryDescription, QueryOperation};
 
 const RUST_KEYWORDS: &[&str] = &[
     "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate",
@@ -33,6 +35,459 @@ pub fn rust(source: &str) -> Result<String> {
         output.push('\n');
     }
     Ok(output)
+}
+
+/// Generate a complete Rust module for one statically bound query.
+///
+/// The output includes the schema model types, a parameter type, a typed result
+/// row when the operation returns rows, and an Engine call function. `name` is
+/// used as the public Rust function name and should normally be the query file
+/// stem.
+pub fn rust_query(schema_source: &str, query_source: &str, name: &str) -> Result<String> {
+    let description = crate::query_contract::describe(schema_source, query_source)?;
+    render_rust_query(schema_source, &description, name)
+}
+
+/// Generate one query binding against the exact live catalog of `engine`.
+///
+/// This preserves migration-established stable IDs and schema revision/hash,
+/// which cannot be reconstructed by parsing normalized declaration text.
+pub fn rust_query_for_engine(
+    engine: &crate::Engine,
+    query_source: &str,
+    name: &str,
+) -> Result<String> {
+    let description = engine.describe_query(query_source)?;
+    render_rust_query(&engine.schema(), &description, name)
+}
+
+fn render_rust_query(
+    schema_source: &str,
+    description: &QueryDescription,
+    name: &str,
+) -> Result<String> {
+    let function_name = rust_value_name(name)?;
+    let type_prefix = rust_type_name(name)?;
+    let mut output = rust(schema_source)?;
+    writeln!(
+        output,
+        "// Static query binding generated from schema revision {} ({}) and query {}.",
+        description.schema.revision, description.schema.hash, description.query_digest
+    )
+    .unwrap();
+
+    let mut helpers = String::new();
+    let params_name = format!("{type_prefix}Params");
+    emit_query_params(&mut output, &mut helpers, &params_name, description)?;
+    let row_name = if description.result.fields.is_empty()
+        || description.result.cardinality == QueryCardinality::None
+    {
+        None
+    } else {
+        let name = format!("{type_prefix}Row");
+        emit_query_row(&mut output, &mut helpers, &name, description)?;
+        Some(name)
+    };
+    output.push_str(&helpers);
+    emit_query_call(
+        &mut output,
+        &function_name,
+        &type_prefix,
+        &params_name,
+        row_name.as_deref(),
+        description,
+    )?;
+    Ok(output)
+}
+
+fn emit_query_params(
+    output: &mut String,
+    helpers: &mut String,
+    name: &str,
+    description: &QueryDescription,
+) -> Result<()> {
+    if description.parameters.is_empty() {
+        writeln!(
+            output,
+            "#[derive(Debug, Clone, Copy, Default, PartialEq)]\npub struct {name};\n"
+        )
+        .unwrap();
+        return Ok(());
+    }
+    writeln!(
+        output,
+        "#[derive(Debug, Clone, PartialEq)]\npub struct {name} {{"
+    )
+    .unwrap();
+    let mut seen = BTreeSet::new();
+    for parameter in &description.parameters {
+        let field = unique_query_field(&mut seen, &parameter.name, "query parameter")?;
+        let nested = format!("{name}{}", type_component(&parameter.name)?);
+        let ty = format_shape(&parameter.shape, &nested, helpers)?;
+        writeln!(output, "    pub {field}: {ty},").unwrap();
+    }
+    writeln!(output, "}}\n").unwrap();
+    Ok(())
+}
+
+fn emit_query_row(
+    output: &mut String,
+    helpers: &mut String,
+    name: &str,
+    description: &QueryDescription,
+) -> Result<()> {
+    writeln!(
+        output,
+        "#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]\npub struct {name} {{"
+    )
+    .unwrap();
+    let mut seen = BTreeSet::new();
+    for result in &description.result.fields {
+        let field = unique_query_field(&mut seen, &result.name, "query result field")?;
+        let nested = format!("{name}{}", type_component(&result.name)?);
+        let ty = format_shape(&result.shape, &nested, helpers)?;
+        if field != result.name {
+            writeln!(output, "    #[serde(rename = {:?})]", result.name).unwrap();
+        }
+        writeln!(output, "    pub {field}: {ty},").unwrap();
+    }
+    writeln!(output, "}}\n").unwrap();
+    Ok(())
+}
+
+fn format_shape(shape: &TypeShape, suggested: &str, helpers: &mut String) -> Result<String> {
+    Ok(match shape {
+        TypeShape::Int { .. } => "i64".into(),
+        TypeShape::Float { .. } => "f64".into(),
+        TypeShape::Bool => "bool".into(),
+        TypeShape::Text { .. } => "String".into(),
+        TypeShape::Uuid { .. } => "unionid::scalars::Uuid".into(),
+        TypeShape::Date { .. } => "unionid::scalars::Date".into(),
+        TypeShape::Timestamp { .. } => "unionid::scalars::Timestamp".into(),
+        TypeShape::Duration { .. } => "unionid::scalars::Duration".into(),
+        TypeShape::Decimal { .. } => "unionid::scalars::Decimal".into(),
+        TypeShape::Bytes { .. } => "unionid::scalars::Bytes".into(),
+        TypeShape::Ref { name, .. } => ident(name),
+        TypeShape::Option { item } => {
+            format!("Option<{}>", format_shape(item, suggested, helpers)?)
+        }
+        TypeShape::List { item, .. } => {
+            format!("Vec<{}>", format_shape(item, suggested, helpers)?)
+        }
+        TypeShape::Tuple { items } => {
+            let mut rendered = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    format_shape(item, &format!("{suggested}Item{}", index + 1), helpers)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if rendered.len() == 1 {
+                format!("({},)", rendered.remove(0))
+            } else {
+                format!("({})", rendered.join(", "))
+            }
+        }
+        TypeShape::Record { fields } => {
+            emit_shape_record(helpers, suggested, fields)?;
+            suggested.into()
+        }
+        TypeShape::Sum { variants } => {
+            emit_shape_sum(helpers, suggested, variants)?;
+            suggested.into()
+        }
+    })
+}
+
+fn emit_shape_record(
+    output: &mut String,
+    name: &str,
+    fields: &[crate::portable::FieldDescription],
+) -> Result<()> {
+    let mut body = String::new();
+    writeln!(
+        body,
+        "#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]\npub struct {name} {{"
+    )
+    .unwrap();
+    let mut seen = BTreeSet::new();
+    for field in fields {
+        let rust_field = unique_name(&mut seen, &field.name, "generated record field")?;
+        let nested = format!("{name}{}", type_component(&field.name)?);
+        let ty = format_shape(&field.shape, &nested, output)?;
+        if escaped(&field.name) {
+            writeln!(body, "    #[serde(rename = {:?})]", field.name).unwrap();
+        }
+        writeln!(body, "    pub {rust_field}: {ty},").unwrap();
+    }
+    writeln!(body, "}}\n").unwrap();
+    output.push_str(&body);
+    Ok(())
+}
+
+fn emit_shape_sum(
+    output: &mut String,
+    name: &str,
+    variants: &[crate::portable::VariantDescription],
+) -> Result<()> {
+    let mut body = String::new();
+    writeln!(
+        body,
+        "#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]\npub enum {name} {{"
+    )
+    .unwrap();
+    let mut seen = BTreeSet::new();
+    for variant in variants {
+        let rust_variant = unique_name(&mut seen, &variant.name, "generated sum variant")?;
+        if escaped(&variant.name) {
+            writeln!(body, "    #[serde(rename = {:?})]", variant.name).unwrap();
+        }
+        if variant.payload.is_empty() {
+            writeln!(body, "    {rust_variant},").unwrap();
+        } else if let [TypeShape::Record { fields }] = variant.payload.as_slice() {
+            writeln!(body, "    {rust_variant} {{").unwrap();
+            let mut field_seen = BTreeSet::new();
+            for field in fields {
+                let rust_field =
+                    unique_name(&mut field_seen, &field.name, "generated sum record field")?;
+                let nested = format!("{name}{rust_variant}{}", type_component(&field.name)?);
+                let ty = format_shape(&field.shape, &nested, output)?;
+                if escaped(&field.name) {
+                    writeln!(body, "        #[serde(rename = {:?})]", field.name).unwrap();
+                }
+                writeln!(body, "        {rust_field}: {ty},").unwrap();
+            }
+            writeln!(body, "    }},").unwrap();
+        } else {
+            let payload = variant
+                .payload
+                .iter()
+                .enumerate()
+                .map(|(index, shape)| {
+                    format_shape(
+                        shape,
+                        &format!("{name}{rust_variant}Item{}", index + 1),
+                        output,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join(", ");
+            writeln!(body, "    {rust_variant}({payload}),").unwrap();
+        }
+    }
+    writeln!(body, "}}\n").unwrap();
+    output.push_str(&body);
+    Ok(())
+}
+
+fn emit_query_call(
+    output: &mut String,
+    function: &str,
+    prefix: &str,
+    params: &str,
+    row: Option<&str>,
+    description: &QueryDescription,
+) -> Result<()> {
+    let constant = screaming_name(function);
+    writeln!(
+        output,
+        "pub const {constant}_SOURCE: &str = {:?};",
+        description.canonical_source
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "pub const {constant}_SCHEMA_REVISION: u64 = {};",
+        description.schema.revision
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "pub const {constant}_SCHEMA_HASH: &str = {:?};",
+        description.schema.hash
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "pub const {constant}_DIGEST: &str = {:?};\n",
+        description.query_digest
+    )
+    .unwrap();
+
+    let rows_type = row.map(|row| cardinality_type(row, description.result.cardinality));
+    let return_type = match (
+        description.operation,
+        rows_type.as_deref(),
+        description.result.affected_rows,
+    ) {
+        (QueryOperation::Explain, _, _) => "unionid::QueryResponse".to_string(),
+        (_, Some(rows), true) => {
+            let result = format!("{prefix}Output");
+            writeln!(output, "#[derive(Debug, Clone, PartialEq)]\npub struct {result} {{\n    pub rows: {rows},\n    pub affected_rows: usize,\n}}\n").unwrap();
+            result
+        }
+        (_, Some(rows), false) => rows.to_string(),
+        (_, None, true) => "usize".to_string(),
+        _ => "()".to_string(),
+    };
+    writeln!(
+        output,
+        "pub fn {function}(\n    engine: &mut unionid::Engine,\n    params: {params},\n) -> unionid::Result<{return_type}> {{"
+    )
+    .unwrap();
+    writeln!(output, "    let actual_schema = engine.schema_info();").unwrap();
+    if description.parameters.is_empty() {
+        writeln!(output, "    let _ = params;").unwrap();
+    }
+    writeln!(output, "    if actual_schema.revision != {constant}_SCHEMA_REVISION\n        || actual_schema.hash != {constant}_SCHEMA_HASH\n    {{").unwrap();
+    writeln!(output, "        return Err(unionid::Error::new(\n            \"E_SCHEMA_CHANGED\",\n            format!(\n                \"generated query expects schema revision {{}} hash {{}}, got revision {{}} hash {{}}\",\n                {constant}_SCHEMA_REVISION,\n                {constant}_SCHEMA_HASH,\n                actual_schema.revision,\n                actual_schema.hash\n            ),\n        ));\n    }}").unwrap();
+    writeln!(
+        output,
+        "    let prepared = engine.prepare({constant}_SOURCE)?;"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "    let mut bindings = std::collections::BTreeMap::new();"
+    )
+    .unwrap();
+    for parameter in &description.parameters {
+        let field = query_field_ident(&parameter.name)?;
+        writeln!(
+            output,
+            "    bindings.insert(\n        {:?}.to_string(),\n        unionid::Value::from_serde(&params.{field})?,\n    );",
+            parameter.name
+        )
+        .unwrap();
+    }
+    writeln!(
+        output,
+        "    let response = engine.execute_prepared(&prepared, bindings);"
+    )
+    .unwrap();
+    writeln!(output, "    if !response.ok {{\n        return Err(response\n            .error\n            .clone()\n            .unwrap_or_else(|| unionid::Error::new(\"E_QUERY\", response.message.clone())));\n    }}").unwrap();
+    if description.operation == QueryOperation::Explain {
+        writeln!(output, "    Ok(response)\n}}\n").unwrap();
+        return Ok(());
+    }
+    if let Some(row) = row {
+        writeln!(output, "    let rows = response.typed_rows::<{row}>()?;").unwrap();
+        emit_cardinality_decode(output, description.result.cardinality);
+    }
+    if description.result.affected_rows {
+        writeln!(output, "    let affected_rows = response.affected_rows.ok_or_else(|| {{\n        unionid::Error::new(\"E_QUERY_RESPONSE\", \"successful mutation omitted affected_rows\")\n    }})?;").unwrap();
+    }
+    match (row, description.result.affected_rows) {
+        (Some(_), true) => writeln!(output, "    Ok({prefix}Output {{ rows, affected_rows }})"),
+        (Some(_), false) => writeln!(output, "    Ok(rows)"),
+        (None, true) => writeln!(output, "    Ok(affected_rows)"),
+        (None, false) => writeln!(output, "    Ok(())"),
+    }
+    .unwrap();
+    writeln!(output, "}}\n").unwrap();
+    Ok(())
+}
+
+fn cardinality_type(row: &str, cardinality: QueryCardinality) -> String {
+    match cardinality {
+        QueryCardinality::None => "()".into(),
+        QueryCardinality::ExactlyOne => row.into(),
+        QueryCardinality::AtMostOne => format!("Option<{row}>"),
+        QueryCardinality::Many => format!("Vec<{row}>"),
+    }
+}
+
+fn emit_cardinality_decode(output: &mut String, cardinality: QueryCardinality) {
+    match cardinality {
+        QueryCardinality::ExactlyOne => output.push_str("    let mut rows = rows;\n    if rows.len() != 1 {\n        return Err(unionid::Error::new(\"E_QUERY_CARDINALITY\", format!(\"expected exactly one row, got {}\", rows.len())));\n    }\n    let rows = rows.pop().expect(\"length checked\");\n"),
+        QueryCardinality::AtMostOne => output.push_str("    let mut rows = rows;\n    if rows.len() > 1 {\n        return Err(unionid::Error::new(\"E_QUERY_CARDINALITY\", format!(\"expected at most one row, got {}\", rows.len())));\n    }\n    let rows = rows.pop();\n"),
+        QueryCardinality::Many => {}
+        QueryCardinality::None => unreachable!("row fields cannot have none cardinality"),
+    }
+}
+
+fn rust_value_name(name: &str) -> Result<String> {
+    let mut rendered = String::new();
+    for character in name.chars() {
+        let character = if character.is_ascii_alphanumeric() || character == '_' {
+            character.to_ascii_lowercase()
+        } else {
+            '_'
+        };
+        if rendered.is_empty() && character.is_ascii_digit() {
+            rendered.push_str("query_");
+        }
+        rendered.push(character);
+    }
+    while rendered.contains("__") {
+        rendered = rendered.replace("__", "_");
+    }
+    let rendered = rendered.trim_matches('_').to_string();
+    if rendered.is_empty() {
+        return Err(Error::new("E_QUERY_BINDING", "query binding name is empty"));
+    }
+    Ok(ident(&rendered))
+}
+
+fn query_field_ident(name: &str) -> Result<String> {
+    let mut generated = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            generated.push(character);
+        } else {
+            generated.push('_');
+        }
+    }
+    if generated.is_empty() {
+        return Err(Error::new(
+            "E_QUERY_BINDING",
+            "query field name cannot generate an empty Rust identifier",
+        ));
+    }
+    if generated.starts_with(|character: char| character.is_ascii_digit()) {
+        generated.insert(0, '_');
+    }
+    Ok(ident(&generated))
+}
+
+fn unique_query_field(seen: &mut BTreeSet<String>, original: &str, kind: &str) -> Result<String> {
+    let generated = query_field_ident(original)?;
+    if !seen.insert(generated.clone()) {
+        return Err(Error::new(
+            "E_QUERY_BINDING",
+            format!("{kind} '{original}' collides with another name in generated Rust"),
+        ));
+    }
+    Ok(generated)
+}
+
+fn rust_type_name(name: &str) -> Result<String> {
+    let mut rendered = String::new();
+    for part in name.split(|character: char| !character.is_ascii_alphanumeric()) {
+        if part.is_empty() {
+            continue;
+        }
+        let mut characters = part.chars();
+        if let Some(first) = characters.next() {
+            rendered.push(first.to_ascii_uppercase());
+            rendered.extend(characters);
+        }
+    }
+    if rendered.is_empty() {
+        return Err(Error::new("E_QUERY_BINDING", "query binding name is empty"));
+    }
+    if rendered.starts_with(|character: char| character.is_ascii_digit()) {
+        rendered.insert_str(0, "Query");
+    }
+    Ok(rendered)
+}
+
+fn type_component(name: &str) -> Result<String> {
+    rust_type_name(name)
+}
+
+fn screaming_name(name: &str) -> String {
+    name.trim_end_matches('_').to_ascii_uppercase()
 }
 
 fn id_names(catalog: &crate::model::Catalog) -> BTreeMap<u64, String> {

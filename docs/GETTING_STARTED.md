@@ -117,6 +117,17 @@ Rust API、本地 CLI 和 TCP 在同一 schema 下返回相同的 typed rows、�
 
 若 Rust 类型是 schema 的单一来源，可同时依赖 `unionid` 与 `unionid-derive`，为 struct/enum 派生 `UnionidSchema`，再用 `SchemaBuilder` 产生可执行 schema。`#[unionid(table = "jobs", key = "id")]` 声明表；字段上的 `default = "0"`、`index` 和 `unique` 分别声明数据库默认值、单字段索引和唯一索引。`build()` 会检查依赖顺序和完整 schema，避免把错误推迟到服务启动。默认值只允许 insert 省略字段；读取和 `typed_rows` 使用的 Rust row 仍包含完整字段。详细支持矩阵见 [Rust schema bindings RFC](rfc/0012-schema-rust-bindings.md)。
 
+若 schema 与查询文件是单一来源，可生成包含 ADT、参数、结果和调用函数的 Rust 文件：
+
+```bash
+unionid query rust \
+  --schema schema.uid \
+  --file queries/find_task.uid \
+  --output generated/find_task.rs
+```
+
+应用通过生成的 `FindTaskParams` 调用 `find_task(&mut engine, params)`，无需手工构造 `Value` 或结果 DTO。返回类型根据查询保证为 row、`Option<row>` 或 `Vec<row>`；运行时 schema 漂移明确返回 `E_SCHEMA_CHANGED`。详细契约见 [静态查询 RFC](rfc/0015-static-query-contract.md)。
+
 冷热分离的 Rust 持久化示例见 [应用数据边界](APPLICATION_DATA.md)：摘要与 ADT 正文原子写入，摘要有界读取，正文按需获取并携带实际版本。
 
 ## 自动验证整段教程
@@ -138,5 +149,7 @@ The four files under `tutorial/` form one executable five-minute journey. Start 
 The TCP commands above execute the same files through `unionid cli --addr`. The Rust example calls `Engine::open_redb` with those same sources. `tutorial/validate.py` runs both paths from an empty directory and compares their typed rows, columns, and schema identity.
 
 When Rust types are the schema source of truth, depend on both `unionid` and `unionid-derive`, derive `UnionidSchema` for structs and enums, and assemble an executable schema with `SchemaBuilder`. `#[unionid(table = "jobs", key = "id")]` declares a table; field-level `default = "0"`, `index`, and `unique` declare database defaults and single-field indexes. `build()` checks dependency order and validates the complete schema before startup. Defaults allow insert input to omit a field, while rows returned through `typed_rows` remain complete. See the [Rust schema bindings RFC](rfc/0012-schema-rust-bindings.md) for the support matrix.
+
+When schema and query files are the source of truth, `unionid query rust --schema schema.uid --file queries/find_task.uid --output generated/find_task.rs` emits ADTs, parameters, result rows, and an Engine call. Applications pass the generated `FindTaskParams` to `find_task(&mut engine, params)` without assembling `Value` maps or result DTOs. The return type follows the query cardinality, and runtime schema drift fails with `E_SCHEMA_CHANGED`. See the [static query RFC](rfc/0015-static-query-contract.md).
 
 For atomic summary/content writes and on-demand versioned ADT reads, see the Rust example in [Application data boundaries](APPLICATION_DATA.md).

@@ -211,3 +211,166 @@ fn prepared_execution_still_rejects_a_different_runtime_schema() {
     );
     assert_eq!(response.error.unwrap().code, "E_SCHEMA_CHANGED");
 }
+
+#[test]
+fn generates_typed_rust_params_rows_and_cardinality_calls() {
+    let generated = unionid::codegen::rust_query(
+        SCHEMA,
+        "from tasks\nfilter id == $id\nselect {id, state}\ntake 1",
+        "find_task",
+    )
+    .unwrap();
+    assert!(generated.contains("pub struct FindTaskParams {"));
+    assert!(generated.contains("pub id: i64,"));
+    assert!(generated.contains("pub struct FindTaskRow {"));
+    assert!(generated.contains("pub state: State,"));
+    assert!(generated.contains("pub fn find_task("));
+    assert!(generated.contains("params: FindTaskParams,"));
+    assert!(generated.contains(") -> unionid::Result<Option<FindTaskRow>>"));
+    assert!(generated.contains("FIND_TASK_SCHEMA_REVISION"));
+    assert!(generated.contains("E_SCHEMA_CHANGED"));
+    assert!(generated.contains("Value::from_serde(&params.id)"));
+
+    let mutation = unionid::codegen::rust_query(
+        SCHEMA,
+        "insert tasks $task\nreturning {id, state}",
+        "create_task",
+    )
+    .unwrap();
+    assert!(mutation.contains("pub task: Task,"));
+    assert!(mutation.contains("pub struct CreateTaskOutput {"));
+    assert!(mutation.contains("pub rows: CreateTaskRow,"));
+    assert!(mutation.contains("pub affected_rows: usize,"));
+}
+
+#[test]
+fn cli_generates_rust_query_file_with_an_inferred_or_explicit_name() {
+    let dir = TempDir::new();
+    let schema = dir.0.join("schema.uid");
+    let query = dir.0.join("find-task.uid");
+    let output = dir.0.join("find_task.rs");
+    std::fs::write(&schema, SCHEMA).unwrap();
+    std::fs::write(&query, "from tasks | filter id == $id | take 1").unwrap();
+
+    let command = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "query",
+            "rust",
+            "--schema",
+            schema.to_str().unwrap(),
+            "--file",
+            query.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        command.status.success(),
+        "{}",
+        String::from_utf8_lossy(&command.stderr)
+    );
+    let generated = std::fs::read_to_string(&output).unwrap();
+    assert!(generated.contains("pub struct FindTaskParams"));
+    assert!(generated.contains("pub fn find_task("));
+
+    let explicit = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "query",
+            "rust",
+            "--schema",
+            schema.to_str().unwrap(),
+            "--file",
+            query.to_str().unwrap(),
+            "--name",
+            "lookup_task",
+        ])
+        .output()
+        .unwrap();
+    assert!(explicit.status.success());
+    assert!(
+        String::from_utf8(explicit.stdout)
+            .unwrap()
+            .contains("pub fn lookup_task(")
+    );
+}
+
+#[test]
+fn generated_result_fields_escape_nested_paths_for_serde() {
+    let schema = r#"type Endpoint = {host text, port int}
+type Config = {id int, endpoint Endpoint}
+table configs Config
+  key id"#;
+    let generated = unionid::codegen::rust_query(
+        schema,
+        "from configs | select {endpoint.host, endpoint.port}",
+        "list_endpoints",
+    )
+    .unwrap();
+    assert!(generated.contains("#[serde(rename = \"endpoint.host\")]"));
+    assert!(generated.contains("pub endpoint_host: String,"));
+    assert!(generated.contains("#[serde(rename = \"endpoint.port\")]"));
+    assert!(generated.contains("pub endpoint_port: i64,"));
+}
+
+#[test]
+fn generated_zero_row_queries_have_a_unit_result() {
+    let generated =
+        unionid::codegen::rust_query(SCHEMA, "from tasks | take 0", "no_tasks").unwrap();
+    assert!(generated.contains("params: NoTasksParams,"));
+    assert!(generated.contains(") -> unionid::Result<()>"));
+    assert!(generated.contains("let _ = params;"));
+    assert!(!generated.contains("typed_rows::<NoTasksRow>"));
+}
+
+#[test]
+fn database_generation_preserves_the_live_migration_identity() {
+    let dir = TempDir::new();
+    let database = dir.0.join("app.redb");
+    let expected = {
+        let mut engine = Engine::open_redb(&database).unwrap();
+        assert!(engine.execute(SCHEMA).ok);
+        assert!(engine.execute("type Extra = text").ok);
+        let expected = engine.schema_info();
+        let generated = unionid::codegen::rust_query_for_engine(
+            &engine,
+            "from tasks | filter id == $id | take 1",
+            "find_task",
+        )
+        .unwrap();
+        assert!(generated.contains(&format!("SCHEMA_REVISION: u64 = {};", expected.revision)));
+        assert!(generated.contains(&expected.hash));
+        expected
+    };
+    let query = dir.0.join("find_task.uid");
+    let rust_output = dir.0.join("find_task.rs");
+    let json_output = dir.0.join("find_task.json");
+    std::fs::write(&query, "from tasks | filter id == $id | take 1").unwrap();
+
+    for (subcommand, output) in [("rust", &rust_output), ("describe", &json_output)] {
+        let command = Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args([
+                "query",
+                subcommand,
+                "--db",
+                database.to_str().unwrap(),
+                "--file",
+                query.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            command.status.success(),
+            "{}",
+            String::from_utf8_lossy(&command.stderr)
+        );
+    }
+    let generated = std::fs::read_to_string(rust_output).unwrap();
+    assert!(generated.contains(&format!("SCHEMA_REVISION: u64 = {};", expected.revision)));
+    assert!(generated.contains(&expected.hash));
+    let described: QueryDescription =
+        serde_json::from_slice(&std::fs::read(json_output).unwrap()).unwrap();
+    assert_eq!(described.schema, expected.into());
+}
