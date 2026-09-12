@@ -11,6 +11,9 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::protocol::{Request, Response};
 
+#[cfg(feature = "http-client")]
+pub mod http;
+
 /// Maximum accepted response line, matching the server response budget.
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,8 +78,9 @@ impl TcpClient {
                 format!("response exceeds {MAX_RESPONSE_BYTES} bytes"),
             ));
         }
-        serde_json::from_slice(&line)
-            .map_err(|error| Error::new("E_PROTOCOL", format!("decode response: {error}")))
+        let response = serde_json::from_slice(&line)
+            .map_err(|error| Error::new("E_PROTOCOL", format!("decode response: {error}")))?;
+        validate_response(request, response)
     }
 
     /// Reconnect and resend a request after a transport failure. Automatic
@@ -109,4 +113,26 @@ impl TcpClient {
         }
         Err(last.expect("attempts >= 1 records an error"))
     }
+}
+
+pub(crate) fn validate_response(request: &Request, response: Response) -> Result<Response> {
+    if response.request_id != request.request_id {
+        return Err(Error::new(
+            "E_PROTOCOL",
+            format!(
+                "response request_id '{}' does not match request '{}'",
+                response.request_id, request.request_id
+            ),
+        ));
+    }
+    if response.version != request.version {
+        return Err(Error::new(
+            "E_PROTOCOL_VERSION",
+            format!(
+                "response version {} does not match request version {}",
+                response.version, request.version
+            ),
+        ));
+    }
+    Ok(response)
 }

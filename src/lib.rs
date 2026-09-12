@@ -39,6 +39,8 @@ pub mod syntax;
 pub mod wal;
 
 pub use backup::BackupInfo;
+#[cfg(feature = "http-client")]
+pub use client::http::HttpClient;
 pub use client::{MAX_RESPONSE_BYTES, TcpClient};
 pub use db::{
     IndexRangePlan, IndexTraversal, LookupPlan, PageAccessKind, PageInfo, PageOrder, PagePlan,
