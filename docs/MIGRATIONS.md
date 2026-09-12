@@ -89,7 +89,7 @@ unionid migration new add_task_priority
 unionid migration diff --db app.redb --schema schema.uid --name add_task_priority
 unionid migration plan --db app.redb
 unionid migration apply --db app.redb
-unionid migration advance --db app.redb --max-steps 1
+unionid migration advance --db app.redb --max-steps 8 --step-delay-ms 250
 unionid migration status --db app.redb
 unionid migration abort --db app.redb
 ```
@@ -106,7 +106,9 @@ migration m0002_add_task_priority
 
 `apply` 创建不存在的 redb 文件并逐文件推进。进程退出或确定的读错误会保留最后一个 durable checkpoint；使用同一文件再次运行 `apply` 会核对数据库身份、source/target schema、migration ID/parent/checksum 和 executor version，再从 checkpoint 后继续。任一身份不一致返回 `E_MAINTENANCE_CONFLICT`，不会覆盖 shadow 数据。转换、类型或约束错误会自动进入 abort cleanup；管理员也可以显式执行 `migration abort` 丢弃未切换的目标 generation。generation ID 单调分配，abort 后不会复用。
 
-需要把长 migration 放入运维循环时，使用 `migration advance --max-steps N`。一个 step 对应一个已经成功提交的 generation start、row batch checkpoint、validation、cutover 或 reclaim batch；命令绝不会提交超过 N 个 step。JSON 输出是 `MigrationProgress`，包含本次 `committed_steps`、`complete`、本次切换的 migration，以及完整 `MigrationStatus`。使用完全相同的目录重复调用，直到 `complete = true`。因此进程调度、重启与故障注入可以依赖提交边界，不需要猜测毫秒耗时。嵌入式调用方使用 `Engine::advance_migrations(files, max_steps)` 获得相同语义；零 step 返回 `E_LIMIT`，非 format-6 redb 返回 `E_CONFIG`。
+需要把长 migration 放入运维循环时，使用 `migration advance --max-steps N`。一个 step 对应一个已经成功提交的 generation start、row batch checkpoint、validation、cutover 或 reclaim batch；命令绝不会提交超过 N 个 step。`--step-delay-ms M` 可在相邻提交之间暂停，控制持续 I/O/CPU 压力；上限为 60 秒，首个 step 不等待，最后一个 step 后也不等待。延迟会延长 maintenance 写阻塞窗口，不改变每个 checkpoint、cutover 或恢复边界，也不承诺吞吐率。
+
+JSON 输出仍是 `MigrationProgress`，包含本次 `committed_steps`、`complete`、本次切换的 migration，以及完整 `MigrationStatus`。进程可在任一已提交 step 后终止，并用完全相同的目录继续调用，直到 `complete = true`。因此调度、人工暂停、重启与故障注入可以依赖提交边界，不需要猜测事务进度。嵌入式调用方使用 `Engine::advance_migrations(files, max_steps)` 获得相同的无延迟语义；应用需要限速时可每次推进一个 step 并自行调度。零 step 返回 `E_LIMIT`，非 format-6 redb 返回 `E_CONFIG`。
 
 `Engine::apply_migrations_until` 仍用于 deadline。cutover 前的 timeout 或内部 cancellation 在批次边界返回 `E_TIMEOUT`／`E_CANCELLED`，并保留 Building checkpoint，不会被当作确定的数据错误自动清理。cutover 已提交后，deadline 若在 cleanup 期间到达，调用会保留 Reclaimable manifest；再次 `apply` 或 `advance` 会先完成旧 generation 的 cleanup。普通 `apply` 仍一次推进到完成。
 
@@ -114,7 +116,9 @@ migration m0002_add_task_priority
 
 `plan`、`apply`、`advance`、`status`、`rehearse` 和 `abort` 都支持 `--format json`，可供脚本稳定解析。`abort` 是写操作，只适用于 redb format 6；只读实例返回 `E_READ_ONLY`。Building/Ready/Aborting 时它放弃并清理 target；Reclaimable 时只完成旧 source 的回收，已经切换的 migration 不会回滚。没有 maintenance 时执行 abort 是成功的幂等 no-op。
 
-`migration rehearse --db app.redb --dir migrations [--copy path]` 先把源库复制到临时路径（或 `--copy` 指定的路径），在副本上执行 apply 与完整 check，并输出源／目标 revision、applied/skipped、耗时与文件字节；源库保持不变。停机后先在副本上演练，确认 conversion、unique、index 键错误与耗时，再对生产库执行。
+`migration rehearse --db app.redb --dir migrations [--copy path]` 先把源库复制到临时路径（或 `--copy` 指定的路径），在副本上执行 apply 与完整 check，并输出源／目标 revision、applied/skipped、总耗时、文件字节、最后一个 shadow migration 的分阶段耗时／行数／索引数／逻辑字节，以及完整检查的 bounded working-state 峰值；源库保持不变。JSON 报告 `schema_version = 2`，`migration_profile` 在没有实际执行 shadow migration 时为 `null`。
+
+这些字段是本次副本运行的实测观察，不是未来运行的 SLA。`migration_profile.logical_bytes` 表示目标 generation 的逻辑体积，`check_profile.working_peak_bytes` 只表示完整检查器的有界工作状态；两者都不是整个进程的 peak RSS，也不是 redb 物理写入字节。需要操作系统级峰值时使用 release evaluator。停机前应在具有相同 value 宽度和索引的生产数据副本上演练，确认 conversion、unique、index 键错误、耗时和磁盘增长，再规划生产窗口。
 
 已应用文件不可修改，也不能从目录删除。CRLF 与 LF 具有相同 checksum，其他注释、格式和内容变化都会被拒绝。文件名排序必须与 parent 链一致，重复 ID、缺少 parent、分叉或 ledger 与当前 schema hash 不一致都会返回 `E_MIGRATION` 或 `E_STORAGE`。ledger 非空后，普通 `run`、本地 CLI 或 TCP 不能直接执行 schema 变更；应用必须经过 runner，数据读写仍可照常使用。
 

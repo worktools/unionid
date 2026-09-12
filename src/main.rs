@@ -238,6 +238,9 @@ enum MigrationCommand {
         dir: PathBuf,
         #[arg(long, default_value_t = 1)]
         max_steps: usize,
+        /// Pause between committed steps to reduce sustained migration pressure.
+        #[arg(long, default_value_t = 0, value_name = "MILLISECONDS")]
+        step_delay_ms: u64,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -671,8 +674,15 @@ fn run(args: Args) -> Result<(), String> {
                 db,
                 dir,
                 max_steps,
+                step_delay_ms,
                 format,
-            } => cli::migration_advance(db, dir, max_steps, matches!(format, Format::Json)),
+            } => cli::migration_advance(
+                db,
+                dir,
+                max_steps,
+                step_delay_ms,
+                matches!(format, Format::Json),
+            ),
             MigrationCommand::Status { db, dir, format } => {
                 cli::migration_status(db, dir, matches!(format, Format::Json))
             }

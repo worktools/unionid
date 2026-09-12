@@ -520,13 +520,45 @@ pub fn migration_advance(
     db: impl Into<PathBuf>,
     directory: impl AsRef<Path>,
     max_steps: usize,
+    step_delay_ms: u64,
     json: bool,
 ) -> Result<(), String> {
+    const MAX_STEP_DELAY_MS: u64 = 60_000;
+    if step_delay_ms > MAX_STEP_DELAY_MS {
+        return Err(format!(
+            "E_LIMIT: migration step delay cannot exceed {MAX_STEP_DELAY_MS} milliseconds"
+        ));
+    }
     let files = load_directory(directory).map_err(|error| error.to_string())?;
     let mut engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
-    let result = engine
-        .advance_migrations(&files, max_steps)
+    if step_delay_ms == 0 {
+        let result = engine
+            .advance_migrations(&files, max_steps)
+            .map_err(|error| error.to_string())?;
+        return print_migration_progress(&result, json);
+    }
+    let mut result = engine
+        .advance_migrations(&files, max_steps.min(1))
         .map_err(|error| error.to_string())?;
+    let mut committed_steps = result.committed_steps;
+    let skipped = result.skipped.clone();
+    let mut applied = result.applied.clone();
+    while committed_steps < max_steps && !result.complete {
+        if result.committed_steps == 0 {
+            break;
+        }
+        if step_delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(step_delay_ms));
+        }
+        result = engine
+            .advance_migrations(&files, 1)
+            .map_err(|error| error.to_string())?;
+        committed_steps = committed_steps.saturating_add(result.committed_steps);
+        applied.extend(result.applied.iter().cloned());
+    }
+    result.committed_steps = committed_steps;
+    result.applied = applied;
+    result.skipped = skipped;
     print_migration_progress(&result, json)
 }
 
@@ -555,6 +587,8 @@ pub struct MigrationRehearsal {
     pub applied: Vec<String>,
     pub skipped: Vec<String>,
     pub elapsed_micros: u128,
+    pub migration_profile: Option<crate::MigrationProfile>,
+    pub check_profile: crate::StorageCheckProfile,
     pub checked: bool,
 }
 
@@ -589,11 +623,12 @@ pub fn migration_rehearse(
         let applied = engine
             .apply_migrations(&files)
             .map_err(|error| error.to_string())?;
+        let migration_profile = engine.last_migration_profile();
         let integrity = engine
             .check_integrity()
             .map_err(|error| error.to_string())?;
         Ok(MigrationRehearsal {
-            schema_version: 1,
+            schema_version: 2,
             source_bytes,
             copy_bytes: std::fs::metadata(&copy_path)
                 .map_err(|error| error.to_string())?
@@ -603,6 +638,8 @@ pub fn migration_rehearse(
             applied: applied.applied,
             skipped: applied.skipped,
             elapsed_micros: started.elapsed().as_micros(),
+            migration_profile,
+            check_profile: integrity.profile,
             checked: integrity.backend_clean,
         })
     })();
@@ -618,7 +655,7 @@ pub fn migration_rehearse(
         return Ok(());
     }
     println!(
-        "rehearsal schema {} -> {}\n{} applied, {} skipped\nelapsed {} ms\nsource {} bytes, copy {} bytes\nchecked {}",
+        "rehearsal schema {} -> {}\n{} applied, {} skipped\nelapsed {} ms\nsource {} bytes, copy {} bytes\ncheck working peak {} bytes\nchecked {}",
         report.source_schema.revision,
         report.schema.revision,
         report.applied.len(),
@@ -626,8 +663,23 @@ pub fn migration_rehearse(
         report.elapsed_micros / 1_000,
         report.source_bytes,
         report.copy_bytes,
+        report.check_profile.working_peak_bytes,
         report.checked
     );
+    if let Some(profile) = report.migration_profile {
+        println!(
+            "migration rows {}/{} index entries {} logical bytes {}\nphases prepare/build/validate/cutover/reclaim {}/{}/{}/{}/{} us",
+            profile.source_rows_seen,
+            profile.target_rows_written,
+            profile.index_entries_written,
+            profile.logical_bytes,
+            profile.prepare_micros,
+            profile.build_micros,
+            profile.validate_micros,
+            profile.cutover_micros,
+            profile.reclaim_micros
+        );
+    }
     Ok(())
 }
 
