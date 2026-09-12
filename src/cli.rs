@@ -621,6 +621,15 @@ fn print_migration_plan(plan: &MigrationPlan, json: bool) -> Result<(), String> 
         for operation in &migration.operations {
             println!("  {operation}");
         }
+        for impact in &migration.impacts {
+            println!("  impacts type {}", impact.type_name);
+            for table in &impact.tables {
+                println!(
+                    "    table {} ({} rows, {} indexes)",
+                    table.table, table.rows, table.indexes
+                );
+            }
+        }
     }
     Ok(())
 }

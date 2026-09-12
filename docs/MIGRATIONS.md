@@ -102,7 +102,7 @@ migration m0002_add_task_priority
   add field Task.priority int = 0
 ```
 
-`plan` 验证 migration 链、schema 操作和目标 schema，并输出每个文件的 checksum、前后 revision/hash、操作列表与破坏性标记；它不修改数据库，数据库文件不存在时只在内存中按空库规划。format 6 的 plan 不扫描 durable rows，因此依赖既有值的 conversion、unique constraint 和 index 键错误会在 `apply` 构建 shadow generation 时报告。
+`plan` 验证 migration 链、schema 操作和目标 schema，并输出每个文件的 checksum、前后 revision/hash、操作列表与破坏性标记；它不修改数据库，数据库文件不存在时只在内存中按空库规划。每个待执行文件还报告受影响的类型与表：对签名发生变化的类型列出引用它的表及当前行数、索引数（`impacts`），供估算维护范围。format 6 的 plan 不扫描 durable rows，因此依赖既有值的 conversion、unique constraint 和 index 键错误会在 `apply` 构建 shadow generation 时报告。
 
 `apply` 创建不存在的 redb 文件并逐文件推进。进程退出或确定的读错误会保留最后一个 durable checkpoint；使用同一文件再次运行 `apply` 会核对数据库身份、source/target schema、migration ID/parent/checksum 和 executor version，再从 checkpoint 后继续。任一身份不一致返回 `E_MAINTENANCE_CONFLICT`，不会覆盖 shadow 数据。转换、类型或约束错误会自动进入 abort cleanup；管理员也可以显式执行 `migration abort` 丢弃未切换的目标 generation。generation ID 单调分配，abort 后不会复用。
 

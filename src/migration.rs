@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::db::SchemaInfo;
 use crate::error::{Error, Result};
 use crate::query::SchemaMigration;
+use crate::schema::SchemaDiffImpact;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationEntry {
@@ -46,6 +47,9 @@ pub struct MigrationPlanItem {
     pub after: SchemaInfo,
     pub operations: Vec<String>,
     pub destructive: bool,
+    /// Tables and rows affected by types whose signature this migration changes.
+    #[serde(default)]
+    pub impacts: Vec<SchemaDiffImpact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

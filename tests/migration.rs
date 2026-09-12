@@ -752,3 +752,38 @@ fn migrations_add_rename_and_drop_composite_index_shapes() {
     );
     assert!(!engine.schema().contains("-rank"));
 }
+
+#[test]
+fn migration_plan_reports_affected_rows_and_indexes() {
+    let mut engine = Engine::memory();
+    let initial = MigrationFile::parse(
+        "migration m0001_initial\n  add type Task =\n    id int\n    title text\n  add table tasks Task key id\n  add index tasks.title\n",
+    )
+    .unwrap();
+    engine
+        .apply_migrations(std::slice::from_ref(&initial))
+        .unwrap();
+    for id in 1..=3 {
+        assert!(
+            engine
+                .execute(&format!("insert tasks {{ id = {id}, title = \"t{id}\" }}"))
+                .ok
+        );
+    }
+    let add_field = MigrationFile::parse(
+        "migration m0002_note\n  parent m0001_initial\n  add field Task.note text = \"\"\n",
+    )
+    .unwrap();
+    let plan = engine.plan_migrations(&[initial, add_field]).unwrap();
+    assert_eq!(plan.applied_count, 1);
+    let pending = &plan.pending[0];
+    assert_eq!(pending.id, "m0002_note");
+    assert_eq!(pending.impacts.len(), 1);
+    assert_eq!(pending.impacts[0].type_name, "Task");
+    assert_eq!(pending.impacts[0].tables.len(), 1);
+    assert_eq!(pending.impacts[0].tables[0].table, "tasks");
+    assert_eq!(pending.impacts[0].tables[0].rows, 3);
+    assert_eq!(pending.impacts[0].tables[0].indexes, 2);
+    // Planning must not mutate the database.
+    assert_eq!(engine.migration_history().len(), 1);
+}

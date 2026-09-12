@@ -695,8 +695,47 @@ fn table_type_name<'a>(database: &'a Database, table: &Table) -> Option<&'a str>
         .map(|definition| definition.name.as_str())
 }
 
-fn type_signature(catalog: &Catalog, ty: &ScalarType) -> String {
+pub(crate) fn type_signature(catalog: &Catalog, ty: &ScalarType) -> String {
     catalog.describe(ty)
+}
+
+/// Per-type table/row/index impact for types whose signature changed between
+/// `before` and `after`, using `current` for live row and index counts.
+pub(crate) fn changed_type_impacts(
+    current: &Database,
+    before: &Database,
+    after: &Database,
+) -> Vec<SchemaDiffImpact> {
+    let mut impacts = Vec::new();
+    for (name, before_definition) in &before.catalog.types {
+        let changed = after
+            .catalog
+            .types
+            .get(name)
+            .is_none_or(|after_definition| {
+                type_signature(&before.catalog, &before_definition.ty)
+                    != type_signature(&after.catalog, &after_definition.ty)
+            });
+        if !changed {
+            continue;
+        }
+        let tables = current
+            .schema_type_impact(name)
+            .into_iter()
+            .map(|(table, rows, indexes)| SchemaDiffTableImpact {
+                table,
+                rows,
+                indexes,
+            })
+            .collect::<Vec<_>>();
+        if !tables.is_empty() {
+            impacts.push(SchemaDiffImpact {
+                type_name: name.clone(),
+                tables,
+            });
+        }
+    }
+    impacts
 }
 
 fn variant_signature(catalog: &Catalog, variant: &crate::model::EnumVariantDef) -> String {
