@@ -1,0 +1,10 @@
+from tasks
+derive title_size = length title
+derive state_label =
+  match state
+    Queued {..} => "queued"
+    Running {..} => "running"
+    Failed {..} => "failed"
+    Done => "done"
+sort id
+select {id, title_size, state_label}

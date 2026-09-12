@@ -214,15 +214,17 @@ Fix mapping/generation correctness, then complete SDK, relational-read, migratio
 
 ### v0.4.0 · 类型化查询与 ADT 互通 / Typed queries and ADT interoperability
 
-[Milestone 12](https://github.com/worktools/unionid/milestone/12)；#265 的 version 1 描述、运行时 validator、通用向量与四方向 schema 演进报告已完成；#264 的静态查询描述、Rust 参数/结果/调用生成、独立 consumer、生成漂移和两版演进矩阵已交付。#287 继续把逐文件生成收敛为共享一份 schema ADT 的多查询 bundle，再推进 #269 的完整应用与配对验收。#120 服务器命名查询与 #118 泛型不是前置。
+[Milestone 12](https://github.com/worktools/unionid/milestone/12)；#265 的可移植契约、#264 的静态查询描述/生成和 #287 的共享模型 bundle 已交付。#289 进一步以真实 redb、六类查询、精确标量、嵌套 option 和两版 migration 完成仓库维护的独立应用验收；下一步执行 #290 的 SQLite + SQLx 配对记录，再由 #269 收口发布。#120 服务器命名查询与 #118 泛型不是前置。
 
-The #265 version-1 description, runtime validator, common vectors, and four-direction schema evolution contract is complete. #264 delivers static-query descriptions, generated Rust parameters/results/calls, an independent consumer, drift checks, and a two-version evolution matrix. #287 now replaces per-file model duplication with a multi-query bundle sharing one schema ADT model before the full #269 application and paired acceptance. Neither server-side named queries nor user generics is a prerequisite.
+The #265 portable contract, #264 static query description/generation, and #287 shared-model bundle are delivered. #289 adds a repository-owned independent application over real redb, six query forms, exact scalars, nested options, and two-version migration. Next, #290 produces the SQLite + SQLx paired record before #269 closes the release. Neither server-side named queries nor user generics is a prerequisite.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
 | [#265](https://github.com/worktools/unionid/issues/265) | 可移植 ADT 与客户端演进契约 / portable ADT and client evolution contracts | 已交付 / Delivered |
 | [#264](https://github.com/worktools/unionid/issues/264) | 查询文件生成参数、结果和调用函数 / generated query arguments, results and functions | 已交付 / Delivered |
-| [#287](https://github.com/worktools/unionid/issues/287) | 共享模型的多查询 Rust bundle / shared-model multi-query Rust bundle | P0 |
+| [#287](https://github.com/worktools/unionid/issues/287) | 共享模型的多查询 Rust bundle / shared-model multi-query Rust bundle | 已交付 / Delivered |
+| [#289](https://github.com/worktools/unionid/issues/289) | 独立类型化应用完整查询旅程 / independent typed application query journey | 已交付 / Delivered |
+| [#290](https://github.com/worktools/unionid/issues/290) | SQLite + SQLx 配对接入与演进记录 / paired integration and evolution record | P0 |
 | [#269](https://github.com/worktools/unionid/issues/269) | 应用演进、采用成本与发布验收 / application evolution, adoption cost and release acceptance | P0 |
 
 本版本要求契约与 Rust 参考向量；具体第二语言适配仍由 #192 在调用方准备好后另排版本，不能把规范交付或仓库示例称为外部采用。/ Contracts and Rust reference vectors are required. Schedule a concrete #192 second-language adapter only for a ready caller; specifications and repository examples do not establish external adoption.

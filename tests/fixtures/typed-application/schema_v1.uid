@@ -1,0 +1,31 @@
+type State =
+  Queued {scheduled_at timestamp}
+  | Running {attempt int}
+  | Failed {message text, retry_at option timestamp}
+  | Done
+
+type Task = {
+  id int,
+  title text,
+  state State,
+  note option (option text),
+  price decimal 18 2,
+  created_at timestamp,
+  due_on date,
+  wait duration,
+  payload bytes,
+}
+
+type Event = {
+  id int,
+  task_id int,
+  label text,
+}
+
+table tasks Task
+  key id
+
+table events Event
+  key id
+
+create index events (task_id)

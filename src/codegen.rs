@@ -446,11 +446,19 @@ fn emit_query_call(
         "    let prepared = engine.prepare({constant}_SOURCE)?;"
     )
     .unwrap();
-    writeln!(
-        output,
-        "    let mut bindings = std::collections::BTreeMap::new();"
-    )
-    .unwrap();
+    if description.parameters.is_empty() {
+        writeln!(
+            output,
+            "    let bindings = std::collections::BTreeMap::new();"
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            output,
+            "    let mut bindings = std::collections::BTreeMap::new();"
+        )
+        .unwrap();
+    }
     for parameter in &description.parameters {
         let field = query_field_ident(&parameter.name)?;
         writeln!(

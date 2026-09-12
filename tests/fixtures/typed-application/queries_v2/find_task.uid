@@ -1,0 +1,4 @@
+from tasks
+filter id == $id
+select {id, title, state, note, price, created_at, due_on, wait, payload, priority}
+take 1

@@ -1,0 +1,6 @@
+from tasks
+aggregate {
+  tasks = count,
+  total = sum price,
+  earliest = min created_at,
+}

@@ -1,0 +1,5 @@
+from tasks
+sort id
+take 10
+lookup events from events on task_id == id take 5
+select {id, title, state, events}
