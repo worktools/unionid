@@ -34,7 +34,7 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --features asynchronous -- -D warnings
           cargo test --locked
-          cargo test --locked --features asynchronous --test asynchronous
+          cargo test --locked --features asynchronous --test asynchronous --test async_client
       - name: Check standalone evaluation tools
         shell: bash
         run: |

@@ -198,9 +198,9 @@ M0–M9 retain completed-stage evidence. The latest published release is `v0.2.0
 
 ### v0.3.0 · 可靠 Rust 接入与应用闭环 / Reliable Rust integration and application workflows
 
-[Milestone 11](https://github.com/worktools/unionid/milestone/11)；先修生成/映射正确性，再完成 SDK、关联读、migration 与独立应用验收。#240 的生成能力已交付；#267 已交付首个 TCP 客户端与 async 切片，#242 的剩余范围继续验收。
+[Milestone 11](https://github.com/worktools/unionid/milestone/11)；先修生成/映射正确性，再完成 SDK、关联读、migration 与独立应用验收。#240 的生成能力已交付；#267/#277/#278 已交付同步 TCP、HTTP 与异步 TCP typed client，#242 由打包后的独立消费者覆盖 Engine/TCP/HTTP 完整旅程。
 
-Fix mapping/generation correctness, then complete SDK, relational-read, migration and independent-application acceptance. Generation in #240 is delivered; #267 delivers the first TCP/async slice, while the rest of #242 remains independent.
+Fix mapping/generation correctness, then complete SDK, relational-read, migration, and independent-application acceptance. Generation in #240 is delivered. #267/#277/#278 deliver the synchronous TCP, HTTP, and asynchronous TCP typed clients, while #242 is covered by a packaged independent consumer across Engine, TCP, and HTTP.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
