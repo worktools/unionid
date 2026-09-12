@@ -2,7 +2,11 @@ mod common;
 
 use common::TempDir;
 use serde::{Deserialize, Serialize};
-use unionid::{Engine, Value};
+use unionid::{
+    Engine, Value,
+    db::Database,
+    query::{Lookup, Pipeline, Stage, Statement},
+};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct User {
@@ -284,6 +288,20 @@ fn lookup_after_page_is_stable_bounded_and_visible_in_explain() {
     assert_eq!(plan.lookups.len(), 1);
     assert_eq!(plan.lookups[0].index, "order_lines.order_id");
     assert_eq!(plan.lookups[0].per_row_limit, 3);
+
+    let selected_before_lookup = engine.execute(
+        "from orders\nsort id\npage 2\nselect {id, customer}\nlookup lines from order_lines on order_id == id take 3",
+    );
+    assert!(
+        selected_before_lookup.ok,
+        "{}",
+        selected_before_lookup.message
+    );
+    let selected_rows = selected_before_lookup
+        .typed_rows::<OrderWithLines>()
+        .unwrap();
+    assert_eq!(selected_rows.len(), 2);
+    assert_eq!(selected_rows[0].lines.len(), 2);
 }
 
 #[test]
@@ -316,6 +334,35 @@ fn lookup_formatter_is_idempotent() {
     let formatted = unionid::format_source(source).unwrap();
     assert_eq!(unionid::format_source(&formatted).unwrap(), formatted);
     assert!(formatted.contains("lookup lines from order_lines on order_id == id take 100"));
+}
+
+#[test]
+fn direct_lookup_ast_cannot_bypass_the_match_limit() {
+    let mut database = Database::default();
+    for statement in unionid::syntax::parse(
+        "type Order = {id int}\ntype Line = {id int, order_id int}\ntable orders Order\n  key id\ntable order_lines Line\n  key id\ncreate index order_lines (order_id)",
+    )
+    .unwrap()
+    {
+        database.execute(statement.statement).unwrap();
+    }
+    for limit in [0, usize::MAX] {
+        let error = database
+            .execute(Statement::Pipeline(Pipeline {
+                from: "orders".into(),
+                stages: vec![Stage::Lookup(Lookup {
+                    name: "lines".into(),
+                    table: "order_lines".into(),
+                    target_key: "order_id".into(),
+                    source_key: "id".into(),
+                    limit,
+                    output_type: None,
+                    index: None,
+                })],
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, "E_LIMIT");
+    }
 }
 
 #[test]

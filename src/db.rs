@@ -3471,6 +3471,15 @@ impl Database {
     }
 
     fn bind_lookup(&self, schema: &[Column], lookup: &mut crate::query::Lookup) -> Result<Column> {
+        if !(1..=crate::query::MAX_LOOKUP_MATCHES).contains(&lookup.limit) {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "lookup take must be between 1 and {}",
+                    crate::query::MAX_LOOKUP_MATCHES
+                ),
+            ));
+        }
         if schema.iter().any(|column| column.name == lookup.name) {
             return Err(Error::new(
                 "E_FIELD",
@@ -4927,6 +4936,7 @@ impl Database {
         observation.observe_working_bytes(check_materialized_rows(&rows, control)?);
         let mut deferred_selects = Vec::new();
         let mut page_info = None;
+        let mut page_applied = false;
         for (stage_position, stage) in pipeline
             .stages
             .into_iter()
@@ -5005,6 +5015,7 @@ impl Database {
                 }
                 Stage::Select(columns) => {
                     if prepared_page.is_some()
+                        && !page_applied
                         && final_sort.is_some_and(|sort| stage_position > sort)
                     {
                         deferred_selects.push(columns);
@@ -5030,6 +5041,10 @@ impl Database {
                         let (rows, info) = self.apply_page(rows, page, control)?;
                         (rows, Some(info))
                     };
+                    page_applied = true;
+                    for columns in std::mem::take(&mut deferred_selects) {
+                        rows = project_rows(rows, &columns);
+                    }
                 }
             }
             observation.observe_working_bytes(check_materialized_rows(&rows, control)?);
@@ -5096,8 +5111,10 @@ impl Database {
                 ),
             ));
         }
+        let mut working_bytes = check_materialized_rows(rows, control)?;
         for (position, row) in rows.iter_mut().enumerate() {
             check_deadline_periodically(control, position)?;
+            let previous_row_bytes = materialized_row_size(row)?;
             let key = row_field(row, &lookup.source_key)
                 .ok_or_else(|| {
                     Error::new(
@@ -5161,6 +5178,12 @@ impl Database {
                 lookup.name.clone(),
                 Value::List(response.rows.into_iter().map(Value::Record).collect()),
             );
+            working_bytes = check_streaming_row_bytes(
+                row,
+                working_bytes.saturating_sub(previous_row_bytes),
+                control,
+            )?;
+            observation.observe_working_bytes(working_bytes);
         }
         Ok(())
     }
