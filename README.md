@@ -199,9 +199,13 @@ Version 1 mutation 请求可通过 `with_idempotency_key` 获得跨 TCP/HTTP 重
 
 关联读可用 `Engine::fetch_by_key` / `typed_fetch_by_key` 按主键或已索引列批量取回，结果与输入键等长同序、缺失键为 `None`，并基于一次一致快照；每个键在运行时校验唯一性，未索引键或非唯一命中分别返回 `E_RELATION_KEY` / `E_RELATION_NOT_UNIQUE`。设计见 [RFC 0013](docs/rfc/0013-minimal-relational-reads.md)。
 
+查询语言也支持有界的一对多展开：`lookup lines from order_lines on order_id == id take 100` 为每个 driver row 增加 typed `list Line`，缺失关联为 `[]`。目标 key 必须有索引，逐行上限必须显式给出；分页时把 lookup 放在 `page` 后面，先限制 driver rows 再组装嵌套 ADT。
+
 Version-1 mutation requests can use `with_idempotency_key` for exactly-once effects across TCP/HTTP retries, with first-commit or replay metadata in the response. Receipts never expire automatically; inspect and explicitly prune a bounded preview with `unionid receipts status/prune`.
 
 Batched relational reads use `Engine::fetch_by_key` / `typed_fetch_by_key` against a primary key or an indexed column: results match the input keys in length and order, missing keys are `None`, and the call runs over one consistent snapshot. Each key is validated for uniqueness at runtime; a non-indexed key or a non-unique match returns `E_RELATION_KEY` or `E_RELATION_NOT_UNIQUE`. See [RFC 0013](docs/rfc/0013-minimal-relational-reads.md).
+
+The query language also supports bounded one-to-many expansion: `lookup lines from order_lines on order_id == id take 100` adds a typed `list Line` to each driver row, with `[]` for no match. The target key must be indexed and the per-row bound is explicit. In paginated queries, lookup follows `page`, so driver rows are bounded before nested ADTs are assembled.
 
 可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、typed cursor 分页、真实客户端断开、丢响应后的幂等重试、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
 
@@ -213,9 +217,9 @@ Remote calls can use `unionid::client::TcpClient` (`request`/`request_retrying` 
 
 ## 当前边界 / Current boundaries
 
-v0.2.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。format-5 Legacy0 和 format-6 active generation 的普通 open、indexed/page read、融合 full pipeline、完整 check 与 logical backup 使用有界 row source。最新 100k M7 复验中 open p95 为 12.02 ms、主键查询 p95 为 24 µs、完整 check 为 1.54 s／96.33 MiB；完整 shadow migration p95 为 16.51 s／427.98 MiB，仍应按维护操作安排。详见 [M7 验收记录](docs/benchmarks/m7-acceptance-2026-09-10.md)。当前不提供内置认证、TLS、join、window 或分布式执行。
+v0.2.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。format-5 Legacy0 和 format-6 active generation 的普通 open、indexed/page read、融合 full pipeline、完整 check 与 logical backup 使用有界 row source。最新 100k M7 复验中 open p95 为 12.02 ms、主键查询 p95 为 24 µs、完整 check 为 1.54 s／96.33 MiB；完整 shadow migration p95 为 16.51 s／427.98 MiB，仍应按维护操作安排。详见 [M7 验收记录](docs/benchmarks/m7-acceptance-2026-09-10.md)。当前不提供内置认证、TLS、通用扁平 join、window 或分布式执行。
 
-v0.2.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound rather than the routine target. Ordinary format-5 Legacy0 and format-6 active-generation open, indexed/page reads, fused full pipelines, explicit checks, and logical backups use bounded row sources. In the final 100k M7 run, open p95 was 12.02 ms, primary-key query p95 was 24 µs, and full check took 1.54 seconds and 96.33 MiB. Complete shadow-migration p95 was 16.51 seconds with 427.98 MiB peak RSS, so it remains a planned maintenance operation. See the [M7 acceptance record](docs/benchmarks/m7-acceptance-2026-09-10.md). Built-in authentication, TLS, joins, windows, and distributed execution are currently out of scope.
+v0.2.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound rather than the routine target. Ordinary format-5 Legacy0 and format-6 active-generation open, indexed/page reads, fused full pipelines, explicit checks, and logical backups use bounded row sources. In the final 100k M7 run, open p95 was 12.02 ms, primary-key query p95 was 24 µs, and full check took 1.54 seconds and 96.33 MiB. Complete shadow-migration p95 was 16.51 seconds with 427.98 MiB peak RSS, so it remains a planned maintenance operation. See the [M7 acceptance record](docs/benchmarks/m7-acceptance-2026-09-10.md). Built-in authentication, TLS, general flattened joins, windows, and distributed execution are currently out of scope.
 
 ## 文档 / Documentation
 

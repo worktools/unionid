@@ -332,7 +332,10 @@ fn page_shape_order_and_tampering_fail_with_stable_codes() {
         ("from tasks | sort priority | page 2", "E_PAGE_ORDER"),
         ("from tasks | sort id | page 0", "E_PAGE_SHAPE"),
         ("from tasks | sort id | take 2 | page 2", "E_PAGE_SHAPE"),
-        ("from tasks | sort id | page 2 | select id", "E_PAGE_SHAPE"),
+        (
+            "from tasks | sort id | page 2 | filter id > 1",
+            "E_PAGE_SHAPE",
+        ),
     ] {
         let response = engine.execute(query);
         assert_eq!(response.error.unwrap().code, code, "{query}");

@@ -36,6 +36,7 @@ take 20
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | — |
 | 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
 | 稳定分页 | `page 100` / `page 100 after "u1..."` | 已实现有界 keyset page、正反向 opaque cursor、sequence-pinned 一致性 | #114/#131 |
+| 有界关联展开 | `lookup lines from order_lines on order_id == id take 100` | 已实现索引驱动、一致快照、嵌套 typed list 与显式逐行基数上限 | #241 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` / `upsert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91/#97 |
 | ADT 派生列 | `derive x = match field {...}` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
@@ -78,7 +79,7 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 query             = "from" table pipeline-stage*
 explain           = "explain" query | "explain" newline indent query dedent
 pipeline-stage    = newline stage | "|" stage
-stage             = local-binding | value-filter | match-filter | derive-expression | derive-match | aggregate | group-aggregate | select | sort | take | page
+stage             = local-binding | value-filter | match-filter | derive-expression | derive-match | lookup | aggregate | group-aggregate | select | sort | take | page
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
@@ -99,6 +100,7 @@ match-arm         = arm-pattern "=>" bool-expression
 derive-match      = "derive" identifier "=" nested-match-expression
 derive-expression = "derive" (derived-field | "{" derived-field ("," derived-field)* ","? "}")
 derived-field     = identifier "=" (nested-bool-expression | match-expression)
+lookup            = "lookup" identifier "from" table "on" field-path "==" field-path "take" positive-integer
 aggregate         = "aggregate" "{" aggregate-field ("," aggregate-field)* ","? "}"
 group-aggregate   = "group" group-fields "(" aggregate ")"
 group-fields      = field-path | "{" field-path ("," field-path)* ","? "}"
@@ -293,12 +295,13 @@ from tasks | filter id > 1 | take 1
 | `filter (match ... {...})` | 不变 | 每行按其 sum/option constructor 执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
 | `derive` | 追加或替换有静态类型的字段 | 每行求值一次 scalar 或 bool expression，行数与顺序不变 | 仍推导结果类型并检查完整表达式 |
 | `derive name = match source {...}` | 追加或替换有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
+| `lookup` | 追加目标表 row type 的 `list` 字段 | 按索引为每个 driver row 读取有界关联行；driver 行数与顺序不变 | 仍检查表、字段、索引、类型和上限 |
 | `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/sum 为类型化零；min/max 为 None |
 | `group ... (aggregate {...})` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
 | `sort` | 不变 | 单列或多列词典序；全部键相同的次序不承诺 | 返回空结果但仍检查全部键 |
 | `take` | 不变 | 保留前 N 行，或一基闭区间内的行；无 sort 时位置不稳定 | 返回空结果但仍检查范围 |
-| `page` | 不变 | 按唯一 sort tuple 返回有界页和 opaque cursor；必须是最后一个 stage | 返回空页且不产生新 cursor |
+| `page` | 不变 | 按唯一 sort tuple 返回有界页和 opaque cursor；之后只允许 lookup/select | 返回空页且不产生新 cursor |
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
@@ -320,7 +323,7 @@ explain
   select {id, state}
 ```
 
-成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表，以及最终结果 schema。访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
+成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`，以及最终结果 schema。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
 
 planner 跳过开头的 row-independent `let`，然后只从连续的简单 `field op bound` filter 提取边界；`op` 可以是 `==`、`>`、`>=`、`<` 或 `<=`。复合索引使用从首 component 开始的连续 equality prefix，并在紧邻的下一个 component 上合并至多一组 lower/upper range；range 后或 key gap 后的条件仍作为 residual filter。遇到 compound bool、`filter match`、derive、select、aggregate/group、sort、take 或其他语义边界后停止抽取，也不从 `and`／`or` 内部拆条件。
 
@@ -573,9 +576,27 @@ page 100
 
 `take N` 接受非负整数并保留前 N 行，`take 0` 返回空行但仍保留当前结果 schema。`take start..end` 使用一基闭区间，因此 `take 11..20` 跳过前 10 行并最多返回 10 行；尾部越界返回剩余行。start 必须至少为 1，end 不能小于 start。范围总是相对于该 stage 收到的当前结果。
 
+### 有界 lookup 关联展开
+
+`lookup` 把目标表中匹配的完整 typed row 装进当前行的 list 字段，适合订单/明细、任务/事件等小型一对多读取：
+
+```text
+from orders
+sort id
+page 100
+lookup lines from order_lines on order_id == id take 100
+select {id, customer, lines}
+```
+
+`on` 左侧 `order_id` 属于目标表 `order_lines`，右侧 `id` 属于当前 pipeline schema。两侧必须是同一个静态类型，目标字段必须是主键、二级索引或复合索引的第一项。`lines` 不能覆盖现有字段，其类型为 `list Line`；匿名 record 表则得到对应匿名 record list。每个 driver row 保留一次，目标无匹配时是 `[]`，不会产生 null 或扁平重复行。每个目标 RowId 在 list 中最多出现一次，相同 value 的不同行不会被去重。首版 list 使用目标索引的稳定 traversal 顺序：单字段索引按 RowId，复合索引按剩余 component 后接 RowId；当前语法不接受目标侧自定义 sort。
+
+末尾 `take` 是逐个 driver row 的强制基数上限，取值 1..=1000。执行器最多读取 `take + 1` 个匹配；多出一行就返回 `E_RELATION_LIMIT`，不静默丢数据。一个 lookup stage 最多接收 10,000 个 driver rows，并继续受 working bytes、结果行、deadline 与相同 committed snapshot 约束。多个 lookup 可按顺序嵌套组合；如果前一层 list 还要做任意深度遍历，应在应用的 typed ADT 上处理。
+
+稳定分页时 lookup 必须放在 page 后面，让引擎先取出有界 driver page，再读取关联；page 后只允许 lookup 和 select。非分页查询应先用 indexed filter 或 take 限制 driver。`explain` 的 `lookups` 可确认目标索引和逐行预算。lookup 不能用于 update/delete target，也不是 SQL 的 inner/left/right/full join。
+
 ### 有界 keyset page
 
-`page N` 开始正向遍历，N 必须在 1..=1000。查询必须有显式 `sort`，最后一个排序键必须是源表主键；绑定器根据 schema 证明完整 tuple 唯一，不根据当前样本数据猜测。`page` 必须是最后一个 stage，最终 sort 后只允许 `select` 和 `page`，因此可以投影掉排序字段而不把主键暴露给客户端。首版不与 `take`、`aggregate`、`group` 或 mutation target 混用。
+`page N` 开始正向遍历，N 必须在 1..=1000。查询必须有显式 `sort`，最后一个排序键必须是源表主键；绑定器根据 schema 证明完整 tuple 唯一，不根据当前样本数据猜测。最终 sort 与 page 之间只允许 `select`，page 后只允许上述有界 lookup 和 `select`，因此可以投影掉排序字段而不把主键暴露给客户端。page 不与 `take`、`aggregate`、`group` 或 mutation target 混用。
 
 成功响应的 `page` 包含 `limit`、`direction`、十进制 string `snapshot_sequence`、`has_more` 以及可用的 `next_cursor`／`previous_cursor`。继续向后读取时使用：
 
@@ -631,6 +652,7 @@ take 20
 | `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |
+| `E_RELATION_KEY` / `E_RELATION_LIMIT` | lookup 目标字段没有可用索引，或某个 driver row 的匹配数超过显式 take |
 | `E_PAGE_SHAPE` / `E_PAGE_ORDER` | page 位置、limit、组合不合法，或排序既没有以主键收尾，也没有覆盖 equality-fixed prefix 后的完整 unique-index suffix |
 | `E_CURSOR_LIMIT` / `E_CURSOR_CODEC` / `E_CURSOR_INTEGRITY` | cursor 超限、编码无效或 HMAC 验证失败 |
 | `E_CURSOR_DATABASE` / `E_CURSOR_SCHEMA` / `E_CURSOR_QUERY` / `E_CURSOR_STALE` | cursor 的数据库、schema、绑定查询/参数/方向/limit 或 commit sequence 不匹配 |

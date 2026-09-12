@@ -8,8 +8,8 @@ use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
     Aggregate, AggregateAssignment, AggregateFunction, ArithmeticOp, BoolExpression, CmpOp,
-    DeriveExpression, DeriveMatch, LocalBinding, LocalParameter, LocatedStatement, MatchArm,
-    MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
+    DeriveExpression, DeriveMatch, LocalBinding, LocalParameter, LocatedStatement, Lookup,
+    MatchArm, MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
     MatchValueField, MatchValuePayload, MigrationTransform, PageDirection, PageSpec, Pipeline,
     Returning, ScalarExpression, SchemaMigration, SetAssignment, SetValue, SortKey, Stage,
     Statement,
@@ -1667,6 +1667,8 @@ impl Parser {
                 continue;
             } else if self.word("aggregate") {
                 Stage::Aggregate(self.aggregate(Vec::new())?)
+            } else if self.word("lookup") {
+                self.lookup_stage()?
             } else if self.word("group") {
                 self.bump();
                 let group_by = self.path_list("group", "group field")?;
@@ -1729,7 +1731,7 @@ impl Parser {
             } else {
                 if piped {
                     return Err(self.error(
-                        "expected let / filter / derive / aggregate / group / select / sort / take / page after '|'",
+                        "expected let / filter / derive / lookup / aggregate / group / select / sort / take / page after '|'",
                     ));
                 }
                 break;
@@ -1737,6 +1739,47 @@ impl Parser {
             stages.push(stage);
         }
         Ok(Statement::Pipeline(Pipeline { from, stages }))
+    }
+
+    fn lookup_stage(&mut self) -> Result<Stage> {
+        self.expect_word("lookup")?;
+        let name = self.identifier()?;
+        self.expect_word("from")?;
+        let table = self.identifier()?;
+        self.expect_word("on")?;
+        let target_key = self.path()?;
+        self.expect(Kind::Op("==".into()))?;
+        let source_key = self.path()?;
+        self.expect_word("take")?;
+        let token = self.bump();
+        let Kind::Number(number) = token.kind else {
+            return Err(syntax(
+                "lookup take expects a positive row count",
+                token.span,
+            ));
+        };
+        let limit = number
+            .replace('_', "")
+            .parse::<usize>()
+            .map_err(|_| syntax("invalid lookup row count", token.span))?;
+        if !(1..=crate::query::MAX_LOOKUP_MATCHES).contains(&limit) {
+            return Err(syntax(
+                format!(
+                    "lookup take must be between 1 and {}",
+                    crate::query::MAX_LOOKUP_MATCHES
+                ),
+                token.span,
+            ));
+        }
+        Ok(Stage::Lookup(Lookup {
+            name,
+            table,
+            target_key,
+            source_key,
+            limit,
+            output_type: None,
+            index: None,
+        }))
     }
 
     // Surface field sets lower directly to the existing sequential derive IR.
@@ -1780,6 +1823,7 @@ impl Parser {
             "filter",
             "let",
             "derive",
+            "lookup",
             "aggregate",
             "group",
             "select",
