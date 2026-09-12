@@ -151,3 +151,30 @@ fn fetch_by_key_works_on_a_durable_database() {
     assert_eq!(id_of(&rows[0]), Some(2));
     assert!(rows[1].is_none());
 }
+
+#[test]
+fn fetch_by_key_rejects_identifiers_that_could_inject_statements() {
+    let mut engine = engine();
+    for (table, column) in [
+        ("users\nupdate users | set note = \"x\"", "id"),
+        ("users", "id\nupdate users | set note = \"x\""),
+        ("users", "id; drop table users"),
+        ("users", "id || true"),
+        ("", "id"),
+        ("users", "id.bad path"),
+    ] {
+        let error = engine
+            .fetch_by_key(table, column, &[Value::Int(1)])
+            .unwrap_err();
+        assert!(
+            matches!(error.code.as_str(), "E_TABLE" | "E_FIELD"),
+            "{table:?}.{column:?} -> {} {}",
+            error.code,
+            error.message
+        );
+    }
+    // No injected statement may have run.
+    let rows = engine.execute("from users");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 3);
+}

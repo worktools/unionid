@@ -1390,6 +1390,18 @@ impl Engine {
         key_column: &str,
         keys: &[crate::Value],
     ) -> Result<Vec<Option<std::collections::BTreeMap<String, crate::Value>>>> {
+        if !is_identifier_path(table) {
+            return Err(Error::new(
+                "E_TABLE",
+                format!("fetch_by_key requires a plain table name, got '{table}'"),
+            ));
+        }
+        if !is_identifier_path(key_column) {
+            return Err(Error::new(
+                "E_FIELD",
+                format!("fetch_by_key requires a plain key column, got '{key_column}'"),
+            ));
+        }
         if keys.len() > Self::MAX_BATCH_KEYS {
             return Err(Error::new(
                 "E_LIMIT",
@@ -3137,6 +3149,17 @@ fn attach_structured_page(statements: &mut [LocatedStatement], page: PageSpec) -
     }
     pipeline.stages.push(Stage::Page(page));
     Ok(())
+}
+
+/// Accept only a plain dotted identifier path so interpolated table and column
+/// names cannot introduce additional statements or syntax.
+fn is_identifier_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|segment| {
+            let mut chars = segment.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
 }
 
 #[cfg(test)]
