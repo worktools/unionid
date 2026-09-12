@@ -5,11 +5,18 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 
 use super::{MAX_RESPONSE_BYTES, validate_response};
-use crate::db::{PageInfo, TypedPage};
+use crate::SchemaInfo;
+use crate::db::{PageInfo, ResponseColumn, TypedPage};
 use crate::error::{Error, Result};
-use crate::protocol::{Request, Response};
+use crate::protocol::{Request, Response, decode_typed_row};
+use crate::stream::{self as stream_protocol, CancelResponse, Frame};
 
+/// Versioned request/response endpoint used by [`HttpClient`].
 pub const QUERY_PATH: &str = "/v1/query";
+/// Versioned NDJSON read endpoint used by [`HttpClient::stream`].
+pub const STREAM_PATH: &str = "/v1/stream";
+/// Versioned cancellation endpoint used by [`HttpClient::cancel`].
+pub const CANCEL_PATH: &str = "/v1/stream/cancel";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An asynchronous typed client with pooled HTTP connections.
@@ -17,7 +24,44 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct HttpClient {
     client: reqwest::Client,
     query_url: reqwest::Url,
+    stream_url: reqwest::Url,
+    cancel_url: reqwest::Url,
     timeout: Duration,
+}
+
+/// One typed event after the stream's accepted handshake.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedStreamEvent<T> {
+    Schema {
+        columns: Vec<ResponseColumn>,
+        schema: SchemaInfo,
+    },
+    Row {
+        sequence: String,
+        row: T,
+    },
+    Complete {
+        row_count: String,
+        encoded_bytes: String,
+        warnings: Vec<String>,
+    },
+    Error {
+        emitted_rows: String,
+        error: Error,
+    },
+}
+
+/// A bounded NDJSON response whose accepted capability has been validated.
+pub struct HttpStream {
+    response: reqwest::Response,
+    request_id: String,
+    operation_id: String,
+    protocol_version: u32,
+    buffered: Vec<u8>,
+    emitted_bytes: usize,
+    schema_seen: bool,
+    terminal: bool,
+    row_index: usize,
 }
 
 impl HttpClient {
@@ -85,9 +129,15 @@ impl HttpClient {
         query_url.set_path(QUERY_PATH);
         query_url.set_query(None);
         query_url.set_fragment(None);
+        let mut stream_url = query_url.clone();
+        stream_url.set_path(STREAM_PATH);
+        let mut cancel_url = query_url.clone();
+        cancel_url.set_path(CANCEL_PATH);
         Ok(Self {
             client,
             query_url,
+            stream_url,
+            cancel_url,
             timeout,
         })
     }
@@ -213,6 +263,115 @@ impl HttpClient {
             .await
     }
 
+    /// Start a read-only NDJSON stream and validate its accepted handshake.
+    pub async fn stream(&self, request: &Request) -> Result<HttpStream> {
+        let command = stream_protocol::Request::Query {
+            stream_version: stream_protocol::VERSION,
+            request: request.clone(),
+        };
+        let encoded = serde_json::to_vec(&command)
+            .map_err(|error| Error::new("E_PROTOCOL", format!("encode stream request: {error}")))?;
+        let response = self
+            .client
+            .post(self.stream_url.clone())
+            .timeout(self.timeout)
+            .header("content-type", "application/json")
+            .body(encoded)
+            .send()
+            .await
+            .map_err(|failure| AttemptFailure::transport(failure).error)?;
+        require_success(&response, "HTTP stream")?;
+        let operation_id = response
+            .headers()
+            .get("x-unionid-operation-id")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let Some(operation_id) = operation_id else {
+            let encoded = read_bounded(response, MAX_RESPONSE_BYTES).await?;
+            if let Ok(response) = serde_json::from_slice::<stream_protocol::ErrorResponse>(&encoded)
+            {
+                validate_error_response(&response, &request.request_id)?;
+                return Err(response.error);
+            }
+            return Err(Error::new(
+                "E_PROTOCOL",
+                "stream response has no operation capability",
+            ));
+        };
+        let mut output = HttpStream {
+            response,
+            request_id: request.request_id.clone(),
+            operation_id,
+            protocol_version: request.version,
+            buffered: Vec::new(),
+            emitted_bytes: 0,
+            schema_seen: false,
+            terminal: false,
+            row_index: 0,
+        };
+        let accepted = output
+            .read_frame()
+            .await?
+            .ok_or_else(|| Error::new("E_PROTOCOL", "stream ended before the accepted frame"))?;
+        match accepted {
+            Frame::Accepted { .. } => Ok(output),
+            _ => Err(Error::new(
+                "E_PROTOCOL",
+                "stream must begin with an accepted frame",
+            )),
+        }
+    }
+
+    /// Cancel a stream using its server-issued bearer capability.
+    pub async fn cancel(
+        &self,
+        request_id: impl Into<String>,
+        operation_id: impl Into<String>,
+    ) -> Result<CancelResponse> {
+        let request_id = request_id.into();
+        let operation_id = operation_id.into();
+        let command = stream_protocol::Request::Cancel {
+            stream_version: stream_protocol::VERSION,
+            request_id: request_id.clone(),
+            operation_id: operation_id.clone(),
+        };
+        let encoded = serde_json::to_vec(&command)
+            .map_err(|error| Error::new("E_PROTOCOL", format!("encode cancel request: {error}")))?;
+        let response = self
+            .client
+            .post(self.cancel_url.clone())
+            .timeout(self.timeout)
+            .header("content-type", "application/json")
+            .body(encoded)
+            .send()
+            .await
+            .map_err(|failure| AttemptFailure::transport(failure).error)?;
+        require_success(&response, "HTTP cancel")?;
+        let encoded = read_bounded(response, MAX_RESPONSE_BYTES).await?;
+        if let Ok(response) = serde_json::from_slice::<CancelResponse>(&encoded) {
+            if !response.ok
+                || response.stream_version != stream_protocol::VERSION
+                || response.request_id != request_id
+                || response.operation_id != operation_id
+            {
+                return Err(Error::new(
+                    "E_PROTOCOL",
+                    "cancel response identity does not match the request",
+                ));
+            }
+            return Ok(response);
+        }
+        if let Ok(response) = serde_json::from_slice::<stream_protocol::ErrorResponse>(&encoded) {
+            validate_error_response(&response, &request_id)?;
+            return Err(response.error);
+        }
+        Err(Error::new(
+            "E_PROTOCOL",
+            "decode HTTP cancel response failed",
+        ))
+    }
+
     async fn continue_page<T: DeserializeOwned>(
         &self,
         request: &Request,
@@ -228,6 +387,273 @@ impl HttpClient {
         request.idempotency_key = None;
         self.page(&request).await.map(Some)
     }
+}
+
+impl HttpStream {
+    /// Return the request identity copied into every stream frame.
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    /// Return the server-issued bearer capability used for cancellation.
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    /// Read and validate the next raw protocol frame.
+    pub async fn next_frame(&mut self) -> Result<Option<Frame>> {
+        if self.terminal {
+            return Ok(None);
+        }
+        let Some(frame) = self.read_frame().await? else {
+            return Err(Error::new(
+                "E_IO",
+                "stream closed before a complete or error frame",
+            ));
+        };
+        match &frame {
+            Frame::Accepted { .. } => {
+                return Err(Error::new(
+                    "E_PROTOCOL",
+                    "stream sent accepted more than once",
+                ));
+            }
+            Frame::Schema { .. } if self.schema_seen => {
+                return Err(Error::new(
+                    "E_PROTOCOL",
+                    "stream sent schema more than once",
+                ));
+            }
+            Frame::Schema { .. } => self.schema_seen = true,
+            Frame::Row { .. } if !self.schema_seen => {
+                return Err(Error::new("E_PROTOCOL", "stream sent a row before schema"));
+            }
+            Frame::Complete { .. } if !self.schema_seen => {
+                return Err(Error::new("E_PROTOCOL", "stream completed before schema"));
+            }
+            Frame::Row { sequence, .. } => {
+                if sequence != &self.row_index.to_string() {
+                    return Err(Error::new(
+                        "E_PROTOCOL",
+                        "stream row sequence is not contiguous",
+                    ));
+                }
+                self.row_index = self.row_index.checked_add(1).ok_or_else(|| {
+                    Error::new(
+                        "E_STREAM_LIMIT",
+                        "stream row count exceeds the client limit",
+                    )
+                })?;
+            }
+            Frame::Complete { row_count, .. } => {
+                if row_count != &self.row_index.to_string() {
+                    return Err(Error::new(
+                        "E_PROTOCOL",
+                        "stream complete row count does not match emitted rows",
+                    ));
+                }
+                self.terminal = true;
+            }
+            Frame::Error { emitted_rows, .. } => {
+                if emitted_rows != &self.row_index.to_string() {
+                    return Err(Error::new(
+                        "E_PROTOCOL",
+                        "stream error row count does not match emitted rows",
+                    ));
+                }
+                self.terminal = true;
+            }
+        }
+        if self.terminal && !self.buffered.is_empty() {
+            return Err(Error::new(
+                "E_PROTOCOL",
+                "stream included data after its terminal frame",
+            ));
+        }
+        Ok(Some(frame))
+    }
+
+    /// Read the next event and decode row frames into an application type.
+    pub async fn next_event<T: DeserializeOwned>(&mut self) -> Result<Option<TypedStreamEvent<T>>> {
+        let Some(frame) = self.next_frame().await? else {
+            return Ok(None);
+        };
+        let event = match frame {
+            Frame::Schema {
+                columns, schema, ..
+            } => TypedStreamEvent::Schema { columns, schema },
+            Frame::Row { sequence, row, .. } => TypedStreamEvent::Row {
+                sequence,
+                row: decode_typed_row(self.protocol_version, &row, self.row_index)?,
+            },
+            Frame::Complete {
+                row_count,
+                encoded_bytes,
+                warnings,
+                ..
+            } => TypedStreamEvent::Complete {
+                row_count,
+                encoded_bytes,
+                warnings,
+            },
+            Frame::Error {
+                emitted_rows,
+                error,
+                ..
+            } => TypedStreamEvent::Error {
+                emitted_rows,
+                error,
+            },
+            Frame::Accepted { .. } => unreachable!("next_frame rejects repeated accepted frames"),
+        };
+        Ok(Some(event))
+    }
+
+    async fn read_frame(&mut self) -> Result<Option<Frame>> {
+        loop {
+            if let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
+                if newline.saturating_add(1) > stream_protocol::MAX_FRAME_BYTES {
+                    return Err(Error::new(
+                        "E_STREAM_LIMIT",
+                        "stream frame exceeds the byte limit",
+                    ));
+                }
+                let mut line = self.buffered.drain(..=newline).collect::<Vec<_>>();
+                line.pop();
+                let frame: Frame = serde_json::from_slice(&line).map_err(|error| {
+                    Error::new("E_PROTOCOL", format!("decode stream frame: {error}"))
+                })?;
+                validate_frame_identity(&frame, &self.request_id, &self.operation_id)?;
+                return Ok(Some(frame));
+            }
+            if self.buffered.len() >= stream_protocol::MAX_FRAME_BYTES {
+                return Err(Error::new(
+                    "E_STREAM_LIMIT",
+                    "stream frame exceeds the byte limit",
+                ));
+            }
+            let Some(chunk) = self
+                .response
+                .chunk()
+                .await
+                .map_err(|failure| AttemptFailure::transport(failure).error)?
+            else {
+                if self.buffered.is_empty() {
+                    return Ok(None);
+                }
+                return Err(Error::new(
+                    "E_IO",
+                    "stream closed before a complete frame line",
+                ));
+            };
+            self.emitted_bytes = self.emitted_bytes.saturating_add(chunk.len());
+            if self.emitted_bytes > stream_protocol::MAX_EMITTED_BYTES {
+                return Err(Error::new(
+                    "E_STREAM_LIMIT",
+                    "stream exceeds the total byte limit",
+                ));
+            }
+            self.buffered.extend_from_slice(&chunk);
+        }
+    }
+}
+
+fn validate_error_response(
+    response: &stream_protocol::ErrorResponse,
+    request_id: &str,
+) -> Result<()> {
+    if response.ok
+        || response.stream_version != stream_protocol::VERSION
+        || response.request_id != request_id
+    {
+        return Err(Error::new(
+            "E_PROTOCOL",
+            "stream error response identity does not match the request",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_frame_identity(frame: &Frame, request_id: &str, operation_id: &str) -> Result<()> {
+    let (version, frame_request_id, frame_operation_id) = match frame {
+        Frame::Accepted {
+            stream_version,
+            request_id,
+            operation_id,
+        }
+        | Frame::Schema {
+            stream_version,
+            request_id,
+            operation_id,
+            ..
+        }
+        | Frame::Row {
+            stream_version,
+            request_id,
+            operation_id,
+            ..
+        }
+        | Frame::Complete {
+            stream_version,
+            request_id,
+            operation_id,
+            ..
+        }
+        | Frame::Error {
+            stream_version,
+            request_id,
+            operation_id,
+            ..
+        } => (*stream_version, request_id, operation_id),
+    };
+    if version != stream_protocol::VERSION
+        || frame_request_id != request_id
+        || frame_operation_id != operation_id
+    {
+        return Err(Error::new(
+            "E_PROTOCOL",
+            "stream frame identity does not match the accepted operation",
+        ));
+    }
+    Ok(())
+}
+
+fn require_success(response: &reqwest::Response, operation: &str) -> Result<()> {
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "E_HTTP_STATUS",
+            format!("{operation} returned status {}", response.status()),
+        ))
+    }
+}
+
+async fn read_bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(Error::new(
+            "E_LIMIT",
+            format!("HTTP response exceeds {limit} bytes"),
+        ));
+    }
+    let mut encoded = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|failure| AttemptFailure::transport(failure).error)?
+    {
+        if encoded.len().saturating_add(chunk.len()) > limit {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!("HTTP response exceeds {limit} bytes"),
+            ));
+        }
+        encoded.extend_from_slice(&chunk);
+    }
+    Ok(encoded)
 }
 
 fn is_loopback_origin(url: &reqwest::Url) -> bool {

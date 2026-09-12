@@ -84,7 +84,26 @@ let second = client
 
 HTTP response 直接序列化 `unionid::ProtocolResponse`。Rust 客户端可用 `response.typed_rows::<Todo>()?` 读取 query 或 DML `returning`，同时 wire JSON 保留 i64 精度、Option/null 区别、tuple/list 形态和稳定 named/variant ID。
 
-长只读结果可使用 `POST /v1/stream`，body 为 `stream::Request::Query`，响应为 `application/x-ndjson`；`x-unionid-operation-id` 与首个 `accepted` frame 携带同一个 bearer capability。`POST /v1/stream/cancel` 接受 `stream::Request::Cancel`。官方 adapter 在 accepted 已交给 body 后才启动读取，并直接消费 `AcceptedStream::start` 的有界 receiver，不重新编码 row。
+长只读结果可直接通过 typed client 逐行解码。`stream` 会消费并验证首个 `accepted` frame；后续只有收到 `Complete` 才表示结果完整。`Error` 事件包含错误和已经发出的行数，此前的行必须视为 partial：
+
+```rust
+use unionid::{HttpClient, ProtocolRequest, TypedStreamEvent};
+
+let request = ProtocolRequest::query("todos-stream", "from todos\nsort id");
+let mut stream = client.stream(&request).await?;
+let operation_id = stream.operation_id().to_owned();
+while let Some(event) = stream.next_event::<Todo>().await? {
+    match event {
+        TypedStreamEvent::Row { row, .. } => consume(row),
+        TypedStreamEvent::Complete { .. } => break,
+        TypedStreamEvent::Error { error, .. } => return Err(error),
+        TypedStreamEvent::Schema { .. } => {}
+    }
+}
+let outcome = client.cancel("cancel-check", operation_id).await?;
+```
+
+底层 `POST /v1/stream` body 为 `stream::Request::Query`，响应为 `application/x-ndjson`；`x-unionid-operation-id` 与首个 `accepted` frame 携带同一个 bearer capability。`POST /v1/stream/cancel` 接受 `stream::Request::Cancel`。官方 adapter 在 accepted 已交给 body 后才启动读取，并直接消费 `AcceptedStream::start` 的有界 receiver，不重新编码 row。客户端校验每个 frame 的 version、request ID、operation capability、顺序以及单帧和总字节上限；流不提供隐式重试或续传。
 
 分页同样不拼接查询文本。第一页使用 `PageSpec::forward`，`typed_page` 解码应用类型并保留续页信息：
 
