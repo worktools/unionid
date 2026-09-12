@@ -7,7 +7,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::control::ExecutionControl;
-use crate::db::{Database, DurableCatalogEntry, LogicalWriteSet, QueryResponse, QueryRowSink};
+use crate::db::{
+    Database, DurableCatalogEntry, LogicalWriteSet, QueryAccessKind, QueryResponse, QueryRowSink,
+};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyReceipt,
@@ -471,6 +473,9 @@ struct PendingIdempotency<'a> {
 }
 
 impl Engine {
+    /// Upper bound on keys passed to [`Engine::fetch_by_key`].
+    pub const MAX_BATCH_KEYS: usize = 10_000;
+
     pub fn current_storage_versions() -> StorageVersions {
         crate::redb_storage::production_versions()
     }
@@ -1369,6 +1374,95 @@ impl Engine {
     ) -> QueryResponse {
         let control = ExecutionControl::deadline(deadline);
         self.execute_prepared_with_deadline(prepared, parameters, Some(&control))
+    }
+
+    /// Fetch at most one row per key from an indexed key column over a single
+    /// committed snapshot. Results are aligned with `keys`, using `None` for a
+    /// missing key.
+    ///
+    /// `key_column` must be a primary key or an indexed column. A key that
+    /// matches more than one row returns `E_RELATION_NOT_UNIQUE`, and a key
+    /// column that would require a full scan returns `E_RELATION_KEY`. The
+    /// number of keys is bounded by [`Self::MAX_BATCH_KEYS`].
+    pub fn fetch_by_key(
+        &mut self,
+        table: &str,
+        key_column: &str,
+        keys: &[crate::Value],
+    ) -> Result<Vec<Option<std::collections::BTreeMap<String, crate::Value>>>> {
+        if keys.len() > Self::MAX_BATCH_KEYS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!("fetch_by_key accepts at most {} keys", Self::MAX_BATCH_KEYS),
+            ));
+        }
+        let fetch = self.prepare(&format!(
+            "from {table} | filter {key_column} == $key | take 2"
+        ))?;
+        if let Some(first) = keys.first() {
+            let explain = self.prepare(&format!(
+                "explain from {table} | filter {key_column} == $key"
+            ))?;
+            let plan = self.query(
+                &explain,
+                std::collections::BTreeMap::from([("key".to_string(), first.clone())]),
+            );
+            if !plan.ok {
+                return Err(plan
+                    .error
+                    .unwrap_or_else(|| Error::new("E_QUERY", plan.message)));
+            }
+            let kind = plan.plan.map(|plan| plan.access.kind);
+            if !matches!(
+                kind,
+                Some(QueryAccessKind::PrimaryKeyLookup)
+                    | Some(QueryAccessKind::SecondaryIndexLookup)
+                    | Some(QueryAccessKind::CompositeLookup)
+            ) {
+                return Err(Error::new(
+                    "E_RELATION_KEY",
+                    format!(
+                        "fetch_by_key requires an indexed key column; '{table}.{key_column}' would full scan"
+                    ),
+                ));
+            }
+        }
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            let response = self.query(
+                &fetch,
+                std::collections::BTreeMap::from([("key".to_string(), key.clone())]),
+            );
+            if !response.ok {
+                return Err(response
+                    .error
+                    .unwrap_or_else(|| Error::new("E_QUERY", response.message)));
+            }
+            if response.rows.len() > 1 {
+                return Err(Error::new(
+                    "E_RELATION_NOT_UNIQUE",
+                    format!("key column '{table}.{key_column}' matched more than one row"),
+                ));
+            }
+            results.push(response.rows.into_iter().next());
+        }
+        Ok(results)
+    }
+
+    /// Decode [`Self::fetch_by_key`] rows into an application type with serde.
+    pub fn typed_fetch_by_key<T: serde::de::DeserializeOwned>(
+        &mut self,
+        table: &str,
+        key_column: &str,
+        keys: &[crate::Value],
+    ) -> Result<Vec<Option<T>>> {
+        self.fetch_by_key(table, key_column, keys)?
+            .into_iter()
+            .map(|row| match row {
+                Some(row) => crate::Value::Record(row).to_serde().map(Some),
+                None => Ok(None),
+            })
+            .collect()
     }
 
     fn try_execute_with_params(
