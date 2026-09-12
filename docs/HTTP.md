@@ -2,7 +2,29 @@
 
 unionid 的内置远程服务继续使用轻量 JSON Lines。需要 HTTP、认证、TLS、租户路由或应用 API 的生产服务，应把 version 1 `Request` / `Response` 放入自己的 HTTP 框架，并将请求交给共享的 `server::ConcurrentEngine::execute_protocol_request_until`，同时传入该 HTTP 请求的绝对 deadline。读取会捕获一致 committed snapshot 并在 writer lock 外并发执行；mutation 与 maintenance 仍串行。async handler 应使用 blocking worker，且不要另加一个覆盖完整查询生命周期的 `Mutex<Engine>`。数据库不会因此出现第二套 query parser 或执行语义；边界见 [RFC 0006](rfc/0006-consistent-read-snapshots.md)。
 
-`examples/todolist.rs` 使用 Axum 展示完整 adapter。核心查询 endpoint 是：
+启用 `http` feature 后，官方 Axum adapter 提供核心数据路由：
+
+```rust
+use std::time::Duration;
+use unionid::asynchronous::http::{self, Config};
+use unionid::{ConcurrentEngine, Engine};
+
+let engine = ConcurrentEngine::new(Engine::open_redb("app.redb")?);
+let app = http::router(
+    engine,
+    Config { request_timeout: Duration::from_secs(10) },
+);
+```
+
+`router` 可直接交给 `axum::serve`，也可与应用路由合并。它在 Tokio blocking pool 上调用同一个 `ConcurrentEngine`，并提供以下 versioned endpoint：
+
+- `POST /v1/query`
+- `POST /v1/stream`
+- `POST /v1/stream/cancel`
+
+最小可运行服务见 `cargo run --features http --example http_service -- app.redb`。`examples/todolist.rs` 继续展示包含应用管理路由、migration、restart 与 backup/restore 的完整旅程。
+
+核心查询 endpoint 是：
 
 ```text
 POST /v1/query
@@ -46,7 +68,7 @@ let request = ProtocolRequest::query(
 
 HTTP response 直接序列化 `unionid::ProtocolResponse`。Rust 客户端可用 `response.typed_rows::<Todo>()?` 读取 query 或 DML `returning`，同时 wire JSON 保留 i64 精度、Option/null 区别、tuple/list 形态和稳定 named/variant ID。
 
-长只读结果可使用示例的 `POST /v1/stream`，body 为 `stream::Request::Query`，响应为 `application/x-ndjson`；`x-unionid-operation-id` 与首个 `accepted` frame 携带同一个 bearer capability。`POST /v1/stream/cancel` 接受 `stream::Request::Cancel`。adapter 必须在 accepted 已交给 body 后才启动读取，并直接消费 `AcceptedStream::start` 的有界 receiver，不自行重编码 row。
+长只读结果可使用 `POST /v1/stream`，body 为 `stream::Request::Query`，响应为 `application/x-ndjson`；`x-unionid-operation-id` 与首个 `accepted` frame 携带同一个 bearer capability。`POST /v1/stream/cancel` 接受 `stream::Request::Cancel`。官方 adapter 在 accepted 已交给 body 后才启动读取，并直接消费 `AcceptedStream::start` 的有界 receiver，不重新编码 row。
 
 分页同样不拼接查询文本。第一页使用 `PageSpec::forward`，`typed_page` 解码应用类型并保留续页信息：
 
@@ -88,7 +110,7 @@ cargo run --example todolist -- /path/to/empty-work-directory
 
 ## 官方客户端与异步适配
 
-Rust 应用可直接使用 `unionid::client::TcpClient` 连接 TCP 服务：`query`/`request` 发送 version 1 请求，`request_retrying` 在携带 `idempotency_key` 时自动重连重试，响应用 `Response::typed_rows` 解码为应用类型。需要 async handler 时启用可选 `asynchronous` feature，用 `unionid::asynchronous::execute_protocol_request` 在 blocking worker 上执行同一 `ConcurrentEngine` 入口并传递绝对 deadline，无需 `Mutex<Engine>` 或自建线程池；`ConcurrentEngine`、`ReadOperation`、`ConcurrencyStats` 等集成类型已在 crate root 导出。
+Rust 应用可直接使用 `unionid::client::TcpClient` 连接 TCP 服务：`query`/`request` 发送 version 1 请求，`request_retrying` 在携带 `idempotency_key` 时自动重连重试，响应用 `Response::typed_rows` 解码为应用类型。需要自定义 async handler 时启用可选 `asynchronous` feature，用 `unionid::asynchronous::execute_protocol_request` 在 blocking worker 上执行同一 `ConcurrentEngine` 入口并传递 deadline。标准 Axum 数据面可直接启用 `http` feature 和上述 router。两种方式都无需 `Mutex<Engine>` 或自建线程池；`ConcurrentEngine`、`ReadOperation`、`ConcurrencyStats` 等集成类型已在 crate root 导出。
 
 ## 生产边界
 

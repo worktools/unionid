@@ -12,6 +12,9 @@ use crate::error::{Error, Result};
 use crate::protocol::{Request, Response};
 use crate::server::ConcurrentEngine;
 
+#[cfg(feature = "http")]
+pub mod http;
+
 /// Run a blocking closure on the async runtime's blocking pool.
 pub async fn run<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(operation)
@@ -30,7 +33,9 @@ pub async fn execute_protocol_request(
         revision: 0,
         hash: String::new(),
     });
-    let deadline = Instant::now() + deadline;
+    let deadline = Instant::now()
+        .checked_add(deadline)
+        .unwrap_or_else(Instant::now);
     match run(move || engine.execute_protocol_request_until(request, deadline)).await {
         Ok(response) => response,
         Err(error) => Response::failure(request_id, error, schema),
