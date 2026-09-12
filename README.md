@@ -197,7 +197,11 @@ The wire protocol uses explicit typed values to preserve full `i64` precision, n
 
 Version 1 mutation 请求可通过 `with_idempotency_key` 获得跨 TCP/HTTP 重试的 exactly-once effect；服务端返回首次提交或 replay 元数据。回执不会自动过期，使用 `unionid receipts status/prune` 先预览、再显式有界清理。
 
+关联读可用 `Engine::fetch_by_key` / `typed_fetch_by_key` 按主键或已索引列批量取回，结果与输入键等长同序、缺失键为 `None`，并基于一次一致快照；每个键在运行时校验唯一性，未索引键或非唯一命中分别返回 `E_RELATION_KEY` / `E_RELATION_NOT_UNIQUE`。设计见 [RFC 0013](docs/rfc/0013-minimal-relational-reads.md)。
+
 Version-1 mutation requests can use `with_idempotency_key` for exactly-once effects across TCP/HTTP retries, with first-commit or replay metadata in the response. Receipts never expire automatically; inspect and explicitly prune a bounded preview with `unionid receipts status/prune`.
+
+Batched relational reads use `Engine::fetch_by_key` / `typed_fetch_by_key` against a primary key or an indexed column: results match the input keys in length and order, missing keys are `None`, and the call runs over one consistent snapshot. Each key is validated for uniqueness at runtime; a non-indexed key or a non-unique match returns `E_RELATION_KEY` or `E_RELATION_NOT_UNIQUE`. See [RFC 0013](docs/rfc/0013-minimal-relational-reads.md).
 
 可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、typed cursor 分页、真实客户端断开、丢响应后的幂等重试、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
 
