@@ -43,7 +43,8 @@ jobs:
             tools/workload-eval/Cargo.toml \
             tools/service-load-eval/Cargo.toml \
             tools/churn-eval/Cargo.toml \
-            tools/compaction-eval/Cargo.toml
+            tools/compaction-eval/Cargo.toml \
+            tools/adt-interop-eval/Cargo.toml
           do
             cargo fmt --check --manifest-path "$manifest"
             cargo check --locked --manifest-path "$manifest"
@@ -57,6 +58,7 @@ jobs:
           cargo run --release --locked --manifest-path tools/churn-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-churn" 1100 3 20260910 100
           cp "${RUNNER_TEMP}/unionid-churn.redb" "${RUNNER_TEMP}/unionid-compact.redb"
           cargo run --release --locked --manifest-path tools/compaction-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-compact.redb"
+          python3 scripts/verify-adt-interop-eval.py --rows 100 --samples 1
       - name: Check derive crate
         run: |
           cargo fmt --check --manifest-path derive/Cargo.toml

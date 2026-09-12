@@ -1,0 +1,19 @@
+type State =
+  Queued
+  | Running {attempt int}
+  | Failed {message text, retry_at option timestamp}
+  | Done
+
+type Task = {
+  id int,
+  title text,
+  state State,
+  note option (option text),
+  price decimal 18 2,
+  created_at timestamp,
+}
+
+table tasks Task
+  key id
+
+create index tasks (state)
