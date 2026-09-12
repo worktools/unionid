@@ -19,7 +19,7 @@ unionid doctor --format json
 unionid doctor --db app.redb --format json
 ```
 
-`version` 的 version 1 JSON 形态如下。未来版本可以增加字段，但不会改变或删除当前字段的含义；v0.2 的精确能力值同时固定在包内 [`release/contract.json`](../release/contract.json)：
+`version` 的 version 1 JSON 形态如下。未来版本可以增加字段，但不会改变或删除当前字段的含义；v0.3.0 的精确能力值同时固定在包内 [`release/contract.json`](../release/contract.json)：
 
 ```json
 {"schema_version":1,"software_version":"0.3.0","target":"aarch64-apple-darwin","protocol_versions":[1,2],"stream_protocol_versions":[1],"readable_storage_formats":[1,2,3,4,5,6],"readable_backup_formats":[1,2,3,4],"current_storage":{"format":6,"catalog_codec":4,"value_codec":2,"index_key_codec":3,"migration_codec":1,"receipt_codec":2,"maintenance_codec":1,"backup_codec":4}}

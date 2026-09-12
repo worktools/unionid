@@ -4,7 +4,7 @@
 
 ## 中文说明
 
-计划更新：用户确认后，#262/#263 纳入 v0.3.0，#264/#265 纳入 v0.4.0，联合验收分别由 [#268](https://github.com/worktools/unionid/issues/268) 与 [#269](https://github.com/worktools/unionid/issues/269) 跟踪，最新版本分工见[路线图](../ROADMAP.md)。评估完成后 #267/#277/#278 已交付同步 TCP、HTTP 与异步 TCP typed client，打包后的独立消费者完成 #242 的四入口验收；#270 修复依赖排序，#271 修复 serde 表示漂移，#263 的剩余范围仍开放。下文代码探针保留原基线证据，不继续当作当前行为描述。
+计划更新：用户确认后，#262/#263 纳入 v0.3.0，#264/#265 纳入 v0.4.0，联合验收分别由 [#268](https://github.com/worktools/unionid/issues/268) 与 [#269](https://github.com/worktools/unionid/issues/269) 跟踪，最新版本分工见[路线图](../ROADMAP.md)。评估完成后 #267/#277/#278 已交付同步 TCP、HTTP 与异步 TCP typed client，打包后的独立消费者完成 #242 的四入口验收；#270/#271 及后续切片完成 #263 的依赖顺序、serde、数值、领域身份、默认值和索引映射。下文代码探针保留原基线证据，不继续当作当前行为描述。
 
 ### 1. 判断：核心技术命题已经得到验证，应用采用的命题仍待验证
 
@@ -22,8 +22,8 @@ unionid 已经证明，有限 ADT 可以成为数据库的共同数据模型，�
 | --- | --- | --- |
 | ADT 模型与语言 | 命名 sum/record、option/list/tuple、有限直接自递归；typed match、构造、derive、聚合和 mutation | 用户泛型与互递归仍在 #118；任意对象图、开放记录和动态数据不属于现有闭合模型 |
 | Rust 单一来源 | #256–#258 已实现 schema → Rust 和 Rust derive → schema；#240 已关闭 | 两个方向各有受支持子集；不能据此推导任意 serde 模型或所有数据库约束都可无损互换 |
-| 关联读取 | #259 已实现同一快照下、与输入等长同序的 indexed `fetch_by_key`，缺失用 `None` | #241 仍开放：这是 Rust 批量取回 API；查询语言 lookup join 尚未实现 |
-| 迁移体验 | #260 增加影响报告，#261 增加离线副本预演；已有 checkpoint、原子 cutover 和恢复 | #243 仍开放；限速回填等剩余范围不能因预演落地就标为完成 |
+| 关联读取 | #259 已实现同一快照下、与输入等长同序的 indexed `fetch_by_key`，缺失用 `None`；#241 增加有显式逐行上限的 query `lookup` | 有界嵌套关联已交付；通用扁平 join 仍不属于当前范围 |
+| 迁移体验 | #260 增加影响报告，#261 增加离线副本预演；#243 增加真实应用演进验收和 checkpoint 间节流 | 已交付；节流会延长写阻塞窗口，不表示零停机 |
 | 数据可靠性 | 稳定 schema/field/variant ID、RowId、索引、幂等回执、backup、check、恢复和 compact 有成套验证 | 这些是当前数据库状态的保证，不能代替旧应用二进制与新 schema 的兼容检查 |
 | 服务与 SDK | 同一 Engine 语义接入嵌入式、同步/异步 TCP 和 HTTP；官方 typed client 覆盖分页、重试、取消和 stream，并由打包后的独立消费者验收 | 暂无跨语言 typed client；应用仍需明确处理 schema/cursor 失效 |
 
@@ -142,14 +142,14 @@ Rust 主导的嵌入式项目可选择 Rust derive 为权威来源；多语言�
 
 | 顺序 | 工作 | 与现有计划的关系 | 可验证的完成条件 |
 | --- | --- | --- | --- |
-| A | 修正 SchemaBuilder 依赖输出，明确 derive/serde 支持范围 | #240 的独立质量跟进，不否定已经交付的生成能力 | 更换类型命名与 add 顺序仍可用；不支持的 serde 表示在生成阶段有诊断；使用生成物完成真实写读 |
-| B | 完成 async/typed SDK，并增加静态查询文件绑定 | 继续 #242；查询绑定与 #120 协同，但不要求先实现服务端命名查询 | 应用不用手工构造 Value、结果 DTO 或管理 blocking worker；错字段/分支在生成阶段失败 |
-| C | 用有界关联读与 migration 完成一个中等复杂场景 | 继续 #241、#243 | 引用缺失以 option 表达、索引计划明确；一次新增 variant + 字段变换 + 索引变更完成预演与恢复 |
+| A | 修正 SchemaBuilder 依赖输出，明确 derive/serde 支持范围 | #262/#263 已完成 | 更换类型命名与 add 顺序仍可用；不支持的 serde 表示在生成阶段有诊断；使用生成物完成真实写读 |
+| B | 完成 async/typed SDK，并增加静态查询文件绑定 | #242 已完成官方 typed SDK；静态查询生成由 v0.4 的 #264 跟踪 | 应用不用手工构造 Value、结果 DTO 或管理 blocking worker；错字段/分支在生成阶段失败 |
+| C | 用有界关联读与 migration 完成一个中等复杂场景 | #241/#243 已完成，并由 #268 联合验收 | 引用缺失以 option 表达、索引计划明确；一次新增 variant + 字段变换 + 索引变更完成预演与恢复 |
 | D | 冻结跨语言契约，接入一个真实第二语言调用方 | #192 继续按需求进入；先完成规范与测试向量 | 核心 ADT、极值标量、嵌套 option、错误和两版应用演进逐项一致 |
 
-上述顺序已进入版本计划：先完成 v0.3 接入质量，再完成 v0.4 查询绑定与互通契约。修复现有正确性问题优先于扩张承诺。
+上述 A–C 已作为 v0.3 接入质量完成；下一步由 v0.4 的 #265/#264 完成查询绑定与互通契约。修复现有正确性问题仍优先于扩张承诺。
 
-本次已建立独立跟踪：[#262 依赖顺序](https://github.com/worktools/unionid/issues/262)、[#263 Rust 映射保真](https://github.com/worktools/unionid/issues/263)、[#264 查询文件绑定](https://github.com/worktools/unionid/issues/264)、[#265 可移植契约与客户端演进](https://github.com/worktools/unionid/issues/265)。#262/#263 跟进 v0.3 的现有 Rust 接入质量；#264/#265 已纳入 v0.4.0，由 #269 联合验收。它们不关闭或替代 #241–#243、#118、#120、#192。
+本次已建立独立跟踪：[#262 依赖顺序](https://github.com/worktools/unionid/issues/262)、[#263 Rust 映射保真](https://github.com/worktools/unionid/issues/263)、[#264 查询文件绑定](https://github.com/worktools/unionid/issues/264)、[#265 可移植契约与客户端演进](https://github.com/worktools/unionid/issues/265)。#262/#263 与 #241–#243 已作为 v0.3 接入质量交付；#264/#265 已纳入 v0.4.0，由 #269 联合验收。#118、#120、#192 继续按真实需求独立推进。
 
 泛型/互递归 #118、开放 map/JSON #246、表达式/部分索引 #248 应由具体模型推动。泛型可先评估有限实例化的 `Result<T,E>` 等常见数据模板；typed map 可以先于任意开放对象。只有实际 `filter match` 计划显示出必要性时，再据 #248 增加 variant/payload 的索引策略。子查询、窗口、分布式和 >100k 架构继续保留各自需求门槛。
 
@@ -163,11 +163,11 @@ Rust 主导的嵌入式项目可选择 Rust derive 为权威来源；多语言�
 
 ## English Description
 
-Planning update: after user confirmation, #262/#263 target v0.3.0 and #264/#265 target v0.4.0, with joint acceptance in #268 and #269. ROADMAP records current assignments. #267/#277/#278 delivered the synchronous TCP, HTTP, and asynchronous TCP typed clients, and a packaged independent consumer completes the four-entry-point acceptance for #242. #270 fixed dependency ordering, #271 addressed serde representation drift, and #263 retains its remaining scope. The code probes below preserve their original baseline and no longer describe current behavior.
+Planning update: after user confirmation, #262/#263 target v0.3.0 and #264/#265 target v0.4.0, with joint acceptance in #268 and #269. ROADMAP records current assignments. #267/#277/#278 delivered the synchronous TCP, HTTP, and asynchronous TCP typed clients, and a packaged independent consumer completes the four-entry-point acceptance for #242. #270/#271 and the following slices completed #263 across dependency order, serde, numeric, domain-identity, default, and index mappings. The code probes below preserve their original baseline and no longer describe current behavior.
 
 ### Assessment
 
-As of September 13, 2026, unionid has validated its core technical proposition: finite ADTs can share semantics across schema declarations, typed queries and mutations, indexes, persistence, and migrations. The released version remains v0.2.0, while the completed v0.3.0 feature scope is entering release-candidate freeze. It includes both Rust/schema generation directions, bounded indexed relational reads, official typed Engine/TCP/HTTP journeys, migration impact reporting, offline rehearsal, and throttled checkpoint advancement. Public availability still depends on the tag and release.
+As of September 12, 2026, unionid has validated its core technical proposition: finite ADTs can share semantics across schema declarations, typed queries and mutations, indexes, persistence, and migrations. The released version remains v0.2.0, while the completed v0.3.0 feature scope is entering release-candidate freeze. It includes both Rust/schema generation directions, bounded indexed relational reads, official typed Engine/TCP/HTTP journeys, migration impact reporting, offline rehearsal, and throttled checkpoint advancement. Public availability still depends on the tag and release.
 
 Product adoption remains unproven. Repository-owned consumer and recovery tests are valuable engineering evidence, but they do not establish that independent applications are cheaper to build and evolve than with an established database and typed tooling. Existing documentation reports no external users; this assessment found no new evidence to change that conclusion.
 
@@ -179,12 +179,12 @@ Generated table models also do not establish query-specific parameter and result
 
 ### Direction and validation
 
-Keep the bounded embedded/standalone application-state focus and the redb backend. Prioritize existing mapping correctness, the official SDK in #242, and generated functions from schema plus static query files. Reuse the existing binder and execution semantics. Continue bounded relational reads in #241 and the remaining migration workflow in #243.
+Keep the bounded embedded/standalone application-state focus and the redb backend. The v0.3 work completed mapping correctness, the official SDK in #242, bounded relational reads in #241, and the migration workflow in #243. Next, reuse the existing binder and execution semantics for the portable contract in #265 and generated functions from schema plus static query files in #264.
 
 Official SpacetimeDB, DuckDB, Gel, Convex, SQLx, Irmin, WIT, and Protobuf documentation is linked beside the comparisons above. These projects demonstrate related capabilities, not a measured competitor ranking. The most actionable lessons are generated query contracts, a precise portable value model, and explicit evolution rules. An ADT-supporting database is not unique merely because it can store a sum.
 
 Use one authoritative model source per application, generate the other representations, and expose a versioned description of existing type/query metadata. Preserve options, scalar precision, and domain identities; diagnose unsupported mappings. Keep data, query, client-read, and client-write compatibility separate. Start with Rust and one demand-driven second-language integration under #192 rather than promising many SDKs. This does not reopen historical compatibility commitments.
 
-Follow-ups are tracked in #262 (dependency order), #263 (Rust mapping fidelity), #264 (query-file bindings), and #265 (portable contracts and client evolution). The first two follow existing v0.3 integration quality; the latter two now target v0.4.0 with joint acceptance in #269. Existing issues remain independent.
+The delivered v0.3 integration work is tracked in #262 (dependency order), #263 (Rust mapping fidelity), and #241–#243. #264 (query-file bindings) and #265 (portable contracts and client evolution) target v0.4.0 with joint acceptance in #269. Existing demand-driven issues remain independent.
 
 Validate adoption with a real application and a fair SQLite + SQLx comparison: initial integration steps, manual conversion code, files changed during evolution, when mistakes are detected, and representative latency/memory. New proposals do not automatically become v0.3 release gates. Current implementation status remains in GitHub issues.
