@@ -23,6 +23,7 @@ pub mod model;
 mod ordered_key;
 mod pagination;
 mod params;
+pub mod portable;
 pub mod profile;
 pub mod protocol;
 pub mod query;
@@ -64,6 +65,10 @@ pub use migration::{
     MigrationPlan, MigrationProgress, MigrationStatus,
 };
 pub use model::{RowId, Value};
+pub use portable::{
+    CompatibilityAxis, CompatibilityFinding, CompatibilityLevel, EvolutionReport, PortableContract,
+    PortableSchemaIdentity, SchemaDescription,
+};
 pub use profile::{
     DurableCommitMode, DurableCommitProfile, ExecutionObservation, MigrationProfile,
     StorageCheckProfile, StorageOpenProfile,

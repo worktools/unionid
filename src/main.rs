@@ -315,6 +315,18 @@ enum SchemaCommand {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Emit the versioned portable ADT contract as JSON.
+    Describe {
+        /// Schema file to read.
+        #[arg(long, conflicts_with = "db")]
+        file: Option<PathBuf>,
+        /// Existing redb database whose live catalog is described.
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Write JSON to this path instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn source(query: Option<String>, file: Option<PathBuf>) -> Result<Option<String>, String> {
@@ -734,6 +746,9 @@ fn run(args: Args) -> Result<(), String> {
             }
             SchemaCommand::Rust { file, db, output } => {
                 cli::schema_rust(file.as_deref(), db, output.as_deref())
+            }
+            SchemaCommand::Describe { file, db, output } => {
+                cli::schema_describe(file.as_deref(), db, output.as_deref())
             }
         },
         Command::Backup { db, output, format } => {

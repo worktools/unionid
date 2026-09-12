@@ -361,6 +361,44 @@ pub fn schema_rust(
     Ok(())
 }
 
+pub fn schema_describe(
+    file: Option<&Path>,
+    db: Option<PathBuf>,
+    output: Option<&Path>,
+) -> Result<(), String> {
+    let description = match (file, db) {
+        (Some(path), None) => {
+            let source = read_source(
+                std::fs::File::open(path)
+                    .map_err(|error| format!("open '{}': {error}", path.display()))?,
+            )?;
+            crate::portable::describe(&source).map_err(|error| error.to_string())?
+        }
+        (None, Some(db)) => {
+            require_existing_database(&db)?;
+            let copy = PrivateDatabaseCopy::create(&db, "schema-description")?;
+            Engine::open_redb_read_only(copy.path())
+                .map_err(|error| error.to_string())?
+                .portable_contract()
+                .map_err(|error| error.to_string())?
+                .into_description()
+        }
+        _ => return Err("provide exactly one of --file or --db".into()),
+    };
+    let mut encoded =
+        serde_json::to_string_pretty(&description).map_err(|error| error.to_string())?;
+    encoded.push('\n');
+    match output {
+        Some(destination) => {
+            std::fs::write(destination, encoded)
+                .map_err(|error| format!("write '{}': {error}", destination.display()))?;
+            println!("wrote {}", destination.display());
+        }
+        None => print!("{encoded}"),
+    }
+    Ok(())
+}
+
 pub fn migration_diff(
     db: impl Into<PathBuf>,
     schema_path: impl AsRef<Path>,
@@ -701,6 +739,54 @@ fn require_existing_database(path: &Path) -> Result<(), String> {
             "database '{}' does not exist; apply migrations to create it",
             path.display()
         ))
+    }
+}
+
+/// A byte-for-byte database copy for observational commands that must not let
+/// redb recovery bookkeeping touch the requested path.
+struct PrivateDatabaseCopy(PathBuf);
+
+impl PrivateDatabaseCopy {
+    fn create(source: &Path, purpose: &str) -> Result<Self, String> {
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce)
+            .map_err(|error| format!("E_IO: generate private database copy name: {error}"))?;
+        let nonce = nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let path = std::env::temp_dir().join(format!(
+            "unionid-{purpose}-{}-{nonce}.redb",
+            std::process::id()
+        ));
+        let mut input = std::fs::File::open(source)
+            .map_err(|error| format!("E_IO: open database for private copy: {error}"))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options
+            .open(&path)
+            .map_err(|error| format!("E_IO: create private database copy: {error}"))?;
+        if let Err(error) = std::io::copy(&mut input, &mut output) {
+            let _ = std::fs::remove_file(&path);
+            return Err(format!("E_IO: copy database for observation: {error}"));
+        }
+        drop(output);
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateDatabaseCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 

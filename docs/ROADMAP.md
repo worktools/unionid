@@ -214,9 +214,9 @@ Fix mapping/generation correctness, then complete SDK, relational-read, migratio
 
 ### v0.4.0 · 类型化查询与 ADT 互通 / Typed queries and ADT interoperability
 
-[Milestone 12](https://github.com/worktools/unionid/milestone/12)；先冻结 #265 的描述/映射契约，再实现 #264，最后联合验证。该契约切片的依赖不要求先关闭整个 #265；#120 服务器命名查询与 #118 泛型不是前置。
+[Milestone 12](https://github.com/worktools/unionid/milestone/12)；#265 的 version 1 描述、运行时 validator、通用向量与四方向 schema 演进报告已进入实现，随后在 #264 增加静态查询参数/结果/cardinality 描述并联合验证。#120 服务器命名查询与 #118 泛型不是前置。
 
-Freeze the description/mapping slice of #265, implement #264, then validate jointly. This slice dependency does not require closing all of #265 first, nor delivering server-side named queries or user generics.
+Implement the #265 version-1 description, runtime validator, common vectors, and four-direction schema evolution report; then add static query argument/result/cardinality descriptions in #264 and validate jointly. Neither server-side named queries nor user generics is a prerequisite.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |

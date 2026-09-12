@@ -2943,6 +2943,11 @@ impl Engine {
         self.committed.db.schema_info()
     }
 
+    /// Describe the current catalog and retain its runtime value validator.
+    pub fn portable_contract(&self) -> Result<crate::portable::PortableContract> {
+        crate::portable::PortableContract::from_database(self.committed.db.as_ref())
+    }
+
     pub fn migration_history(&self) -> &[MigrationEntry] {
         self.committed.db.migration_history()
     }
