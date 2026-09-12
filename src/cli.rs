@@ -491,6 +491,106 @@ pub fn query_rust(
     Ok(())
 }
 
+pub fn query_rust_bundle(
+    schema: Option<&Path>,
+    db: Option<PathBuf>,
+    directory: &Path,
+    output: Option<&Path>,
+) -> Result<(), String> {
+    let queries = query_bundle_sources(directory)?;
+    let generated = match (schema, db) {
+        (Some(schema), None) => {
+            let schema_source = read_source(
+                std::fs::File::open(schema)
+                    .map_err(|error| format!("open '{}': {error}", schema.display()))?,
+            )?;
+            crate::codegen::rust_query_bundle(&schema_source, &queries)
+                .map_err(|error| error.to_string())?
+        }
+        (None, Some(db)) => {
+            require_existing_database(&db)?;
+            let copy = PrivateDatabaseCopy::create(&db, "query-rust-bundle")?;
+            let engine =
+                Engine::open_redb_read_only(copy.path()).map_err(|error| error.to_string())?;
+            crate::codegen::rust_query_bundle_for_engine(&engine, &queries)
+                .map_err(|error| error.to_string())?
+        }
+        _ => return Err("provide exactly one of --schema or --db".into()),
+    };
+    match output {
+        Some(destination) => {
+            std::fs::write(destination, generated)
+                .map_err(|error| format!("write '{}': {error}", destination.display()))?;
+            println!("wrote {}", destination.display());
+        }
+        None => print!("{generated}"),
+    }
+    Ok(())
+}
+
+fn query_bundle_sources(directory: &Path) -> Result<Vec<(String, String)>, String> {
+    if !directory.is_dir() {
+        return Err(format!(
+            "query directory '{}' is not a directory",
+            directory.display()
+        ));
+    }
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        queries: &mut Vec<(String, String)>,
+    ) -> Result<(), String> {
+        let mut entries = std::fs::read_dir(directory)
+            .map_err(|error| format!("read query directory '{}': {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read query directory '{}': {error}", directory.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("inspect query path '{}': {error}", path.display()))?;
+            if file_type.is_dir() {
+                visit(root, &path, queries)?;
+                continue;
+            }
+            if !file_type.is_file()
+                || path.extension().and_then(|value| value.to_str()) != Some("uid")
+            {
+                return Err(format!(
+                    "query directory contains non-.uid path '{}'",
+                    path.display()
+                ));
+            }
+            let relative = path
+                .strip_prefix(root)
+                .expect("visited query path is below its root");
+            let mut name_path = relative.to_path_buf();
+            name_path.set_extension("");
+            let name = name_path
+                .to_str()
+                .ok_or_else(|| format!("query path '{}' is not UTF-8", relative.display()))?
+                .replace(std::path::MAIN_SEPARATOR, "_");
+            let source = read_source(
+                std::fs::File::open(&path)
+                    .map_err(|error| format!("open '{}': {error}", path.display()))?,
+            )?;
+            queries.push((name, source));
+        }
+        Ok(())
+    }
+
+    let mut queries = Vec::new();
+    visit(directory, directory, &mut queries)?;
+    if queries.is_empty() {
+        return Err(format!(
+            "query directory '{}' contains no .uid files",
+            directory.display()
+        ));
+    }
+    Ok(queries)
+}
+
 pub fn migration_diff(
     db: impl Into<PathBuf>,
     schema_path: impl AsRef<Path>,

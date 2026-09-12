@@ -1,0 +1,4 @@
+from tasks
+filter id == $id
+select {id, title, state}
+take 1

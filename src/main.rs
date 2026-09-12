@@ -348,17 +348,20 @@ enum QueryCommand {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Generate Rust parameter, result, and Engine call bindings for one query.
+    /// Generate Rust bindings for one query or a directory of queries.
     Rust {
         #[arg(long, conflicts_with = "db")]
         schema: Option<PathBuf>,
         /// Existing redb database whose exact live catalog is used.
         #[arg(long)]
         db: Option<PathBuf>,
-        #[arg(long)]
-        file: PathBuf,
+        #[arg(long, conflicts_with = "dir", required_unless_present = "dir")]
+        file: Option<PathBuf>,
+        /// Recursively generate one shared-model bundle from every `.uid` file.
+        #[arg(long, conflicts_with = "file")]
+        dir: Option<PathBuf>,
         /// Public Rust function name; defaults to the query file stem.
-        #[arg(long)]
+        #[arg(long, requires = "file")]
         name: Option<String>,
         #[arg(long)]
         output: Option<PathBuf>,
@@ -798,15 +801,22 @@ fn run(args: Args) -> Result<(), String> {
                 schema,
                 db,
                 file,
+                dir,
                 name,
                 output,
-            } => cli::query_rust(
-                schema.as_deref(),
-                db,
-                &file,
-                name.as_deref(),
-                output.as_deref(),
-            ),
+            } => match (file.as_deref(), dir.as_deref()) {
+                (Some(file), None) => cli::query_rust(
+                    schema.as_deref(),
+                    db,
+                    file,
+                    name.as_deref(),
+                    output.as_deref(),
+                ),
+                (None, Some(dir)) => {
+                    cli::query_rust_bundle(schema.as_deref(), db, dir, output.as_deref())
+                }
+                _ => Err("provide exactly one of --file or --dir".into()),
+            },
         },
         Command::Backup { db, output, format } => {
             cli::backup_create(db, output, matches!(format, Format::Json))

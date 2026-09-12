@@ -14,6 +14,11 @@ mod classify_v2 {
     include!(env!("UNIONID_GENERATED_QUERY_V2"));
 }
 
+#[allow(dead_code)]
+mod bundle {
+    include!(env!("UNIONID_GENERATED_QUERY_BUNDLE"));
+}
+
 /// Execute generated v1/v2 query bindings against original and migrated catalogs.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = unionid::Engine::memory();
@@ -46,6 +51,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
     .ok_or("v1 generated query did not return the inserted row")?;
     assert_eq!(classified.status, "running");
+
+    let shared_task = bundle::Task {
+        id: 9,
+        title: "shared model".into(),
+        state: bundle::State::Pending,
+    };
+    let bundled_insert = bundle::create_task::create_task(
+        &mut engine,
+        bundle::create_task::CreateTaskParams {
+            task: shared_task.clone(),
+        },
+    )?;
+    assert_eq!(bundled_insert.rows.state, shared_task.state);
+    let bundled_row = bundle::find_task::find_task(
+        &mut engine,
+        bundle::find_task::FindTaskParams { id: shared_task.id },
+    )?
+    .ok_or("bundled query did not return the inserted row")?;
+    assert_eq!(bundled_row.state, shared_task.state);
+    assert_eq!(bundled_row.title, shared_task.title);
 
     let changed = engine.execute("type Extra = text");
     if !changed.ok {
