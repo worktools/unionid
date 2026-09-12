@@ -85,6 +85,26 @@ fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
     let invalid: serde_json::Value = serde_json::from_slice(&invalid.stdout).unwrap();
     assert_eq!(invalid["error"]["code"], "E_LIMIT");
 
+    let excessive_delay = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "advance",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--step-delay-ms",
+            "60001",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!excessive_delay.status.success());
+    let excessive_delay: serde_json::Value =
+        serde_json::from_slice(&excessive_delay.stdout).unwrap();
+    assert_eq!(excessive_delay["error"]["code"], "E_LIMIT");
+
     let advance = |max_steps: &str| {
         let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
             .args([
@@ -96,6 +116,8 @@ fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
                 migrations.to_str().unwrap(),
                 "--max-steps",
                 max_steps,
+                "--step-delay-ms",
+                "1",
                 "--format",
                 "json",
             ])
@@ -1826,6 +1848,10 @@ fn migration_rehearse_applies_to_a_copy_and_leaves_the_source_untouched() {
         "{}",
         String::from_utf8_lossy(&apply.stderr)
     );
+    let mut engine = Engine::open_redb(&database).unwrap();
+    let inserted = engine.execute("insert tasks {id = 1, title = \"not-a-decimal\"}");
+    assert!(inserted.ok, "{}", inserted.message);
+    drop(engine);
     std::fs::write(
         migrations.join("m0002.uid"),
         "migration m0002_note\n  parent m0001_initial\n  add field Task.note text = \"\"\n",
@@ -1855,11 +1881,19 @@ fn migration_rehearse_applies_to_a_copy_and_leaves_the_source_untouched() {
         String::from_utf8_lossy(&rehearse.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&rehearse.stdout).unwrap();
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["applied"], serde_json::json!(["m0002_note"]));
     assert_eq!(report["source_schema"]["revision"], 1);
     assert_eq!(report["schema"]["revision"], 2);
     assert_eq!(report["checked"], true);
+    assert!(report["migration_profile"]["total_micros"].is_number());
+    assert!(
+        report["migration_profile"]["logical_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(report["check_profile"]["working_peak_bytes"].is_number());
     assert!(copy.exists(), "an explicit --copy path must be kept");
     assert!(
         std::fs::read(&database).unwrap() == source_before,
@@ -1881,4 +1915,35 @@ fn migration_rehearse_applies_to_a_copy_and_leaves_the_source_untouched() {
         .unwrap();
     let status: MigrationStatus = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status.pending, vec!["m0002_note".to_string()]);
+    let source_before_failure = std::fs::read(&database).unwrap();
+
+    std::fs::write(
+        migrations.join("m0003.uid"),
+        "migration m0003_decimal_title\n  parent m0002_note\n  change field Task.title to decimal 5 2\n    using old -> decimal_parse old 5 2\n",
+    )
+    .unwrap();
+    let failed_copy = dir.0.join("failed-rehearsal.redb");
+    let failed = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "rehearse",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--copy",
+            failed_copy.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let failed: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert_eq!(failed["error"]["code"], "E_DECIMAL_RANGE");
+    assert_eq!(
+        std::fs::read(&database).unwrap(),
+        source_before_failure,
+        "a failed rehearsal must not touch the source database"
+    );
 }

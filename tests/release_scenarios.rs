@@ -51,6 +51,9 @@ sort id
         upgrade_migration: r#"migration m0002_task_priority
   parent m0001_task_queue
   rename variant TaskState.Running to Claimed
+  add variant TaskState.Cancelled {reason text}
+  change field Task.title to option text
+    using old -> Some old
   add field Task.priority int = 0
   add index tasks.priority
 "#,
@@ -220,6 +223,34 @@ fn verify(scenario: Scenario) {
     assert_eq!(
         plan.target_schema.revision, 2,
         "{} plan target",
+        scenario.name
+    );
+
+    let rehearsal = dir.0.join(format!("{}-rehearsal.redb", scenario.name));
+    let rehearsed: serde_json::Value = run_json(
+        scenario.name,
+        &[
+            "migration",
+            "rehearse",
+            "--db",
+            path(&database),
+            "--dir",
+            path(&migrations),
+            "--copy",
+            path(&rehearsal),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(rehearsed["checked"], true, "{} rehearsal", scenario.name);
+    assert_eq!(
+        rehearsed["source_schema"]["revision"], 1,
+        "{} rehearsal source",
+        scenario.name
+    );
+    assert_eq!(
+        rehearsed["schema"]["revision"], 2,
+        "{} rehearsal target",
         scenario.name
     );
 
@@ -464,7 +495,11 @@ fn assert_task_after(response: &QueryResponse) {
             .source_text()
             .starts_with("Claimed")
     );
-    assert_text(&response.rows[1], "title", "publish notes");
+    assert!(
+        response.rows[1]["title"].cmp_eq(&Value::Option(Some(Box::new(Value::Text(
+            "publish notes".into()
+        )))))
+    );
     assert!(response.rows[1]["state"].source_text().starts_with("Done"));
 }
 
