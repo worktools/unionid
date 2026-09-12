@@ -7,4 +7,5 @@
 /tools/concurrency-eval/target
 /tools/churn-eval/target
 /tools/compaction-eval/target
+/derive/target
 /dist

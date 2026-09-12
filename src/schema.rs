@@ -759,3 +759,66 @@ fn operation_priority(description: &str) -> u8 {
         3
     }
 }
+
+/// A Rust type that can describe its unionid schema declaration.
+///
+/// Derive it with `unionid-derive`:
+///
+/// ```ignore
+/// #[derive(UnionidSchema)]
+/// #[unionid(table = "tasks", key = "id")]
+/// struct Task {
+///     id: i64,
+///     title: String,
+///     tags: Vec<String>,
+/// }
+/// ```
+pub trait UnionidSchema {
+    /// The unionid type name, matching the generated `type` declaration.
+    const UNIONID_TYPE_NAME: &'static str;
+    /// The complete `type Name = ...` declaration.
+    fn unionid_type_ddl() -> String;
+    /// The optional `table ...` declaration for this row type.
+    fn unionid_table_ddl() -> Option<String> {
+        None
+    }
+}
+
+/// Collects derived type and table declarations into one schema script.
+#[derive(Debug, Default, Clone)]
+pub struct SchemaBuilder {
+    types: BTreeMap<String, String>,
+    tables: Vec<String>,
+}
+
+impl SchemaBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one derived type, deduplicating by type name. Types are emitted in
+    /// name order and tables after them, as the schema parser requires.
+    pub fn add<T: UnionidSchema>(mut self) -> Self {
+        self.types
+            .insert(T::UNIONID_TYPE_NAME.to_string(), T::unionid_type_ddl());
+        if let Some(table) = T::unionid_table_ddl()
+            && !self.tables.contains(&table)
+        {
+            self.tables.push(table);
+        }
+        self
+    }
+
+    pub fn build(self) -> String {
+        let mut source = String::new();
+        for declaration in self.types.values() {
+            source.push_str(declaration);
+            source.push('\n');
+        }
+        for table in &self.tables {
+            source.push_str(table);
+            source.push('\n');
+        }
+        source
+    }
+}
