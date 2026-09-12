@@ -1,0 +1,3 @@
+migration m0002_typed_application
+  add variant State.Archived {at timestamp}
+  add field Task.priority int = 0

@@ -1,0 +1,2 @@
+insert events $event
+returning

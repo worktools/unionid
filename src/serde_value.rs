@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use serde::de::DeserializeOwned;
+use serde::de::{
+    self, DeserializeOwned, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess,
+    VariantAccess, Visitor,
+};
 use serde::ser::{
     SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
     SerializeTupleStruct, SerializeTupleVariant,
@@ -18,6 +21,12 @@ impl serde::ser::Error for Error {
     }
 }
 
+impl serde::de::Error for Error {
+    fn custom<T: std::fmt::Display>(message: T) -> Self {
+        Self::new("E_SERDE", message.to_string())
+    }
+}
+
 impl Value {
     /// Encode a Rust serde value while preserving its algebraic shape.
     pub fn from_serde<T: Serialize + ?Sized>(value: &T) -> Result<Self> {
@@ -26,9 +35,14 @@ impl Value {
 
     /// Decode a typed database value into an application serde type.
     pub fn to_serde<T: DeserializeOwned>(&self) -> Result<T> {
-        let json = json_value(self, 0)?;
-        serde_json::from_value(json)
-            .map_err(|error| Error::new("E_SERDE", format!("decode typed value: {error}")))
+        T::deserialize(ValueDeserializer {
+            value: self,
+            depth: 0,
+        })
+        .map_err(|mut error| {
+            error.message = format!("decode typed value: {}", error.message);
+            error
+        })
     }
 }
 
@@ -397,69 +411,324 @@ fn enum_value(variant: &str, args: Vec<Value>) -> Value {
     })
 }
 
-fn json_value(value: &Value, depth: usize) -> Result<serde_json::Value> {
-    if depth >= MAX_DEPTH {
-        return Err(Error::new(
-            "E_LIMIT",
-            format!("serde value depth exceeds {MAX_DEPTH}"),
-        ));
+#[derive(Clone, Copy)]
+struct ValueDeserializer<'a> {
+    value: &'a Value,
+    depth: usize,
+}
+
+impl ValueDeserializer<'_> {
+    fn check(self) -> Result<Self> {
+        if self.depth >= MAX_DEPTH {
+            Err(Error::new(
+                "E_LIMIT",
+                format!("serde value depth exceeds {MAX_DEPTH}"),
+            ))
+        } else {
+            Ok(self)
+        }
     }
-    Ok(match value {
-        Value::Int(value) => serde_json::Value::Number((*value).into()),
-        Value::Float(value) => serde_json::Number::from_f64(*value)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| Error::new("E_SERDE", "cannot decode a non-finite float"))?,
-        Value::Bool(value) => serde_json::Value::Bool(*value),
-        Value::Text(value) => serde_json::Value::String(value.clone()),
-        Value::Uuid(value) => {
-            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+
+    fn child<'a>(self, value: &'a Value) -> ValueDeserializer<'a> {
+        ValueDeserializer {
+            value,
+            depth: self.depth + 1,
         }
-        Value::Date(value) => {
-            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+    }
+}
+
+impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
+    type Error = Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
+        let this = self.check()?;
+        match this.value {
+            Value::Int(value) => visitor.visit_i64(*value),
+            Value::Float(value) => visitor.visit_f64(*value),
+            Value::Bool(value) => visitor.visit_bool(*value),
+            Value::Text(value) => visitor.visit_borrowed_str(value),
+            Value::Null => visitor.visit_unit(),
+            Value::Option(None) => visitor.visit_none(),
+            Value::Named { value, .. } | Value::Option(Some(value)) => {
+                this.child(value).deserialize_any(visitor)
+            }
+            Value::Record(fields) => visitor.visit_map(ValueMapAccess::new(fields, this.depth)),
+            Value::Tuple(items) | Value::List(items) => {
+                visitor.visit_seq(ValueSeqAccess::new(items, this.depth))
+            }
+            Value::Enum(value) => visitor.visit_enum(ValueEnumAccess {
+                value,
+                depth: this.depth,
+            }),
+            Value::Uuid(value) => visitor.visit_string(value.to_string()),
+            Value::Date(value) => visitor.visit_string(value.to_string()),
+            Value::Timestamp(value) => visitor.visit_string(value.to_string()),
+            Value::Duration(value) => visitor.visit_string(value.microseconds().to_string()),
+            Value::Decimal(_) | Value::Bytes(_) => native_scalar_json(this.value)?
+                .into_deserializer()
+                .deserialize_any(visitor)
+                .map_err(de::Error::custom),
         }
-        Value::Timestamp(value) => {
-            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
+        let this = self.check()?;
+        match this.value {
+            Value::Null | Value::Option(None) => visitor.visit_none(),
+            Value::Option(Some(value)) => visitor.visit_some(this.child(value)),
+            Value::Named { value, .. } => this.child(value).deserialize_option(visitor),
+            value => visitor.visit_some(this.child(value)),
         }
-        Value::Duration(value) => {
-            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+    }
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value> {
+        let this = self.check()?;
+        if name.starts_with("unionid::scalar::") {
+            let payload = native_scalar_json(this.value)?;
+            return visitor
+                .visit_newtype_struct(payload.into_deserializer())
+                .map_err(de::Error::custom);
         }
-        Value::Decimal(value) => {
-            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+        match this.value {
+            Value::Named { value, .. } => visitor.visit_newtype_struct(this.child(value)),
+            value => visitor.visit_newtype_struct(this.child(value)),
         }
-        Value::Bytes(value) => {
-            serde_json::to_value(value).map_err(|error| Error::new("E_SERDE", error.to_string()))?
+    }
+
+    fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
+        let this = self.check()?;
+        match this.value {
+            Value::Named { value, .. } => this.child(value).deserialize_seq(visitor),
+            Value::Tuple(items) | Value::List(items) => {
+                visitor.visit_seq(ValueSeqAccess::new(items, this.depth))
+            }
+            _ => Err(Error::new("E_SERDE", "expected tuple or list")),
         }
-        Value::Null | Value::Option(None) => serde_json::Value::Null,
-        Value::Named { value, .. } => json_value(value, depth + 1)?,
-        Value::Option(Some(value)) => json_value(value, depth + 1)?,
-        Value::Record(fields) => serde_json::Value::Object(
-            fields
-                .iter()
-                .map(|(name, value)| Ok((name.clone(), json_value(value, depth + 1)?)))
-                .collect::<Result<_>>()?,
-        ),
-        Value::Tuple(items) | Value::List(items) => serde_json::Value::Array(
-            items
-                .iter()
-                .map(|value| json_value(value, depth + 1))
-                .collect::<Result<_>>()?,
-        ),
-        Value::Enum(value) if value.args.is_empty() => {
-            serde_json::Value::String(value.variant.clone())
+    }
+
+    fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
+        let this = self.check()?;
+        match this.value {
+            Value::Named { value, .. } => this.child(value).deserialize_map(visitor),
+            Value::Record(fields) => visitor.visit_map(ValueMapAccess::new(fields, this.depth)),
+            _ => Err(Error::new("E_SERDE", "expected record")),
         }
-        Value::Enum(value) => {
-            let payload = if value.args.len() == 1 {
-                json_value(&value.args[0], depth + 1)?
-            } else {
-                serde_json::Value::Array(
-                    value
-                        .args
-                        .iter()
-                        .map(|value| json_value(value, depth + 1))
-                        .collect::<Result<_>>()?,
-                )
-            };
-            serde_json::Value::Object([(value.variant.clone(), payload)].into_iter().collect())
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value> {
+        let this = self.check()?;
+        match this.value {
+            Value::Named { value, .. } => this
+                .child(value)
+                .deserialize_enum(_name, _variants, visitor),
+            Value::Enum(value) => visitor.visit_enum(ValueEnumAccess {
+                value,
+                depth: this.depth,
+            }),
+            _ => Err(Error::new("E_SERDE", "expected sum value")),
         }
-    })
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value> {
+        self.deserialize_map(visitor)
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(self, _len: usize, visitor: V) -> Result<V::Value> {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_tuple_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value> {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
+        let this = self.check()?;
+        match this.value {
+            Value::Null => visitor.visit_unit(),
+            Value::Tuple(items) if items.is_empty() => visitor.visit_unit(),
+            Value::Named { value, .. } => this.child(value).deserialize_unit(visitor),
+            _ => Err(Error::new("E_SERDE", "expected unit value")),
+        }
+    }
+
+    fn deserialize_unit_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value> {
+        self.deserialize_unit(visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf
+        identifier ignored_any
+    }
+}
+
+struct ValueSeqAccess<'a> {
+    items: std::slice::Iter<'a, Value>,
+    depth: usize,
+}
+
+impl<'a> ValueSeqAccess<'a> {
+    fn new(items: &'a [Value], depth: usize) -> Self {
+        Self {
+            items: items.iter(),
+            depth,
+        }
+    }
+}
+
+impl<'de> SeqAccess<'de> for ValueSeqAccess<'de> {
+    type Error = Error;
+
+    fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
+        self.items
+            .next()
+            .map(|value| {
+                seed.deserialize(ValueDeserializer {
+                    value,
+                    depth: self.depth + 1,
+                })
+            })
+            .transpose()
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.items.len())
+    }
+}
+
+struct ValueMapAccess<'a> {
+    entries: std::collections::btree_map::Iter<'a, String, Value>,
+    value: Option<&'a Value>,
+    depth: usize,
+}
+
+impl<'a> ValueMapAccess<'a> {
+    fn new(fields: &'a BTreeMap<String, Value>, depth: usize) -> Self {
+        Self {
+            entries: fields.iter(),
+            value: None,
+            depth,
+        }
+    }
+}
+
+impl<'de> MapAccess<'de> for ValueMapAccess<'de> {
+    type Error = Error;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>> {
+        let Some((key, value)) = self.entries.next() else {
+            return Ok(None);
+        };
+        self.value = Some(value);
+        seed.deserialize(key.as_str().into_deserializer()).map(Some)
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value> {
+        let value = self
+            .value
+            .take()
+            .ok_or_else(|| Error::new("E_SERDE", "record value is missing"))?;
+        seed.deserialize(ValueDeserializer {
+            value,
+            depth: self.depth + 1,
+        })
+    }
+}
+
+struct ValueEnumAccess<'a> {
+    value: &'a EnumValue,
+    depth: usize,
+}
+
+impl<'de> EnumAccess<'de> for ValueEnumAccess<'de> {
+    type Error = Error;
+    type Variant = ValueVariantAccess<'de>;
+
+    fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant)> {
+        let variant = seed.deserialize(self.value.variant.as_str().into_deserializer())?;
+        Ok((
+            variant,
+            ValueVariantAccess {
+                args: &self.value.args,
+                depth: self.depth,
+            },
+        ))
+    }
+}
+
+struct ValueVariantAccess<'a> {
+    args: &'a [Value],
+    depth: usize,
+}
+
+impl<'de> VariantAccess<'de> for ValueVariantAccess<'de> {
+    type Error = Error;
+
+    fn unit_variant(self) -> Result<()> {
+        if self.args.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::new("E_SERDE", "unit variant has a payload"))
+        }
+    }
+
+    fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value> {
+        let [value] = self.args else {
+            return Err(Error::new("E_SERDE", "expected one variant payload"));
+        };
+        seed.deserialize(ValueDeserializer {
+            value,
+            depth: self.depth + 1,
+        })
+    }
+
+    fn tuple_variant<V: Visitor<'de>>(self, _len: usize, visitor: V) -> Result<V::Value> {
+        visitor.visit_seq(ValueSeqAccess::new(self.args, self.depth))
+    }
+
+    fn struct_variant<V: Visitor<'de>>(
+        self,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value> {
+        let [Value::Record(fields)] = self.args else {
+            return Err(Error::new("E_SERDE", "expected record variant payload"));
+        };
+        visitor.visit_map(ValueMapAccess::new(fields, self.depth + 1))
+    }
+}
+
+fn native_scalar_json(value: &Value) -> Result<serde_json::Value> {
+    match value {
+        Value::Uuid(value) => serde_json::to_value(value),
+        Value::Date(value) => serde_json::to_value(value),
+        Value::Timestamp(value) => serde_json::to_value(value),
+        Value::Duration(value) => serde_json::to_value(value),
+        Value::Decimal(value) => serde_json::to_value(value),
+        Value::Bytes(value) => serde_json::to_value(value),
+        _ => return Err(Error::new("E_SERDE", "expected native scalar value")),
+    }
+    .map_err(|error| Error::new("E_SERDE", error.to_string()))
 }

@@ -24,6 +24,24 @@ struct Meta {
     tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct NestedOptions {
+    missing: Option<Option<String>>,
+    empty: Option<Option<String>>,
+    present: Option<Option<String>>,
+}
+
+#[test]
+fn serde_value_preserves_each_nested_option_state() {
+    let expected = NestedOptions {
+        missing: None,
+        empty: Some(None),
+        present: Some(Some("value".into())),
+    };
+    let value = Value::from_serde(&expected).unwrap();
+    assert_eq!(value.to_serde::<NestedOptions>().unwrap(), expected);
+}
+
 fn job(id: i64, state: State, checkpoint: Option<(i64, &str)>) -> Job {
     Job {
         id,
