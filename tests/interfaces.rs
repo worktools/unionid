@@ -1796,3 +1796,89 @@ fn tcp_stream_rejects_mutations_before_acceptance() {
         "E_TABLE"
     );
 }
+
+#[test]
+fn migration_rehearse_applies_to_a_copy_and_leaves_the_source_untouched() {
+    let dir = TempDir::new();
+    let database = dir.0.join("source.redb");
+    let migrations = dir.0.join("migrations");
+    std::fs::create_dir(&migrations).unwrap();
+    std::fs::write(
+        migrations.join("m0001.uid"),
+        "migration m0001_initial\n  add type Task =\n    id int\n    title text\n  add table tasks Task key id\n",
+    )
+    .unwrap();
+    let apply = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "apply",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    std::fs::write(
+        migrations.join("m0002.uid"),
+        "migration m0002_note\n  parent m0001_initial\n  add field Task.note text = \"\"\n",
+    )
+    .unwrap();
+
+    let source_before = std::fs::read(&database).unwrap();
+    let copy = dir.0.join("rehearsal.redb");
+    let rehearse = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "rehearse",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--copy",
+            copy.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        rehearse.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rehearse.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&rehearse.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["applied"], serde_json::json!(["m0002_note"]));
+    assert_eq!(report["source_schema"]["revision"], 1);
+    assert_eq!(report["schema"]["revision"], 2);
+    assert_eq!(report["checked"], true);
+    assert!(copy.exists(), "an explicit --copy path must be kept");
+    assert!(
+        std::fs::read(&database).unwrap() == source_before,
+        "rehearsal must not touch the source database"
+    );
+
+    let status = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "migration",
+            "status",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            migrations.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let status: MigrationStatus = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status.pending, vec!["m0002_note".to_string()]);
+}

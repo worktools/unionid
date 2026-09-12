@@ -257,6 +257,18 @@ enum MigrationCommand {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Apply pending migrations against a copy and report cost without touching the source.
+    Rehearse {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, default_value = "migrations")]
+        dir: PathBuf,
+        /// Keep the rehearsal copy at this path instead of a temporary file.
+        #[arg(long)]
+        copy: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
     /// Generate an explicit migration draft from a target schema.
     Diff {
         #[arg(long)]
@@ -443,6 +455,7 @@ impl Args {
                     | MigrationCommand::Advance { format, .. }
                     | MigrationCommand::Status { format, .. }
                     | MigrationCommand::Abort { format, .. }
+                    | MigrationCommand::Rehearse { format, .. }
                     | MigrationCommand::Diff { format, .. },
             } => ErrorOutput {
                 json: matches!(format, Format::Json),
@@ -666,6 +679,12 @@ fn run(args: Args) -> Result<(), String> {
             MigrationCommand::Abort { db, format } => {
                 cli::migration_abort(db, matches!(format, Format::Json))
             }
+            MigrationCommand::Rehearse {
+                db,
+                dir,
+                copy,
+                format,
+            } => cli::migration_rehearse(db, dir, copy, matches!(format, Format::Json)),
             MigrationCommand::Diff {
                 db,
                 schema,

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use rustyline::history::DefaultHistory;
 use rustyline::{CompletionType, Config, Editor, error::ReadlineError};
+use serde::Serialize;
 
 use crate::migration::{
     MigrationAbort, MigrationApply, MigrationPlan, MigrationProgress, MigrationStatus,
@@ -542,6 +543,92 @@ pub fn migration_status(
         .migration_status(&files)
         .map_err(|error| error.to_string())?;
     print_migration_status(&status, json)
+}
+
+#[derive(Serialize)]
+pub struct MigrationRehearsal {
+    pub schema_version: u32,
+    pub source_bytes: u64,
+    pub copy_bytes: u64,
+    pub source_schema: crate::SchemaInfo,
+    pub schema: crate::SchemaInfo,
+    pub applied: Vec<String>,
+    pub skipped: Vec<String>,
+    pub elapsed_micros: u128,
+    pub checked: bool,
+}
+
+pub fn migration_rehearse(
+    db: impl Into<PathBuf>,
+    directory: impl AsRef<Path>,
+    copy: Option<PathBuf>,
+    json: bool,
+) -> Result<(), String> {
+    let source = db.into();
+    require_existing_database(&source)?;
+    let files = load_directory(directory).map_err(|error| error.to_string())?;
+    let source_bytes = std::fs::metadata(&source)
+        .map_err(|error| error.to_string())?
+        .len();
+    let (copy_path, keep) = match copy {
+        Some(path) => (path, true),
+        None => {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let name = format!("unionid-rehearsal-{}-{nonce}.redb", std::process::id());
+            (std::env::temp_dir().join(name), false)
+        }
+    };
+    std::fs::copy(&source, &copy_path).map_err(|error| format!("copy database: {error}"))?;
+    let started = std::time::Instant::now();
+    let outcome = (|| -> Result<MigrationRehearsal, String> {
+        let mut engine = Engine::open_redb(&copy_path).map_err(|error| error.to_string())?;
+        let source_schema = engine.schema_info();
+        let applied = engine
+            .apply_migrations(&files)
+            .map_err(|error| error.to_string())?;
+        let integrity = engine
+            .check_integrity()
+            .map_err(|error| error.to_string())?;
+        Ok(MigrationRehearsal {
+            schema_version: 1,
+            source_bytes,
+            copy_bytes: std::fs::metadata(&copy_path)
+                .map_err(|error| error.to_string())?
+                .len(),
+            source_schema,
+            schema: applied.schema,
+            applied: applied.applied,
+            skipped: applied.skipped,
+            elapsed_micros: started.elapsed().as_micros(),
+            checked: integrity.backend_clean,
+        })
+    })();
+    if !keep {
+        let _ = std::fs::remove_file(&copy_path);
+    }
+    let report = outcome?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+    println!(
+        "rehearsal schema {} -> {}\n{} applied, {} skipped\nelapsed {} ms\nsource {} bytes, copy {} bytes\nchecked {}",
+        report.source_schema.revision,
+        report.schema.revision,
+        report.applied.len(),
+        report.skipped.len(),
+        report.elapsed_micros / 1_000,
+        report.source_bytes,
+        report.copy_bytes,
+        report.checked
+    );
+    Ok(())
 }
 
 pub fn migration_abort(db: impl Into<PathBuf>, json: bool) -> Result<(), String> {
