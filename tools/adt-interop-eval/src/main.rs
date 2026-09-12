@@ -134,10 +134,20 @@ fn evaluate_unionid(path: &Path, rows: usize) -> AnyResult<Report> {
 
     let migration_started = Instant::now();
     require_ok(engine.execute(UNIONID_MIGRATION), "migration")?;
-    let migration_micros = migration_started.elapsed().as_micros();
     let migrated = engine.execute("from tasks\nfilter priority == 0\naggregate\n  rows = count");
-    require_ok(migrated, "migrated read")?;
+    require_ok(migrated.clone(), "migrated read")?;
+    if migrated.rows.len() != 1 || migrated.rows[0]["rows"].source_text() != rows.to_string() {
+        return Err("unionid migration did not default every existing row".into());
+    }
     require_ok(engine.execute(&format!("insert tasks {{id = {rows}, title = \"archived\", state = State.Archived {{at = @2026-09-13T08:00:00Z}}, note = Some None, price = decimal \"10.25\", created_at = @2026-09-13T08:00:00Z, priority = 3}}")), "post-migration insert")?;
+    let archived = engine.execute(&format!(
+        "from tasks\nfilter id == {rows}\nselect {{id, state, priority}}"
+    ));
+    require_ok(archived.clone(), "post-migration projection")?;
+    if archived.rows.len() != 1 || archived.rows[0]["priority"].source_text() != "3" {
+        return Err("unionid projection did not expose the evolved field".into());
+    }
+    let migration_micros = migration_started.elapsed().as_micros();
     drop(engine);
     report(
         "unionid",
@@ -165,16 +175,21 @@ async fn evaluate_sqlite(path: &Path, rows: usize) -> AnyResult<Report> {
     let mut connection = SqliteConnection::connect_with(&options).await?;
     let startup_micros = started.elapsed().as_micros();
 
+    let prepared_rows = (0..rows)
+        .map(|id| {
+            let (tag, attempt) = if id % 2 == 0 {
+                ("Queued", None)
+            } else {
+                ("Running", Some(i64::try_from(id % 4 + 1)?))
+            };
+            Ok((i64::try_from(id)?, format!("task-{id}"), tag, attempt))
+        })
+        .collect::<AnyResult<Vec<_>>>()?;
     let write_started = Instant::now();
     let mut transaction = connection.begin().await?;
-    for id in 0..rows {
-        let (tag, attempt) = if id % 2 == 0 {
-            ("Queued", None)
-        } else {
-            ("Running", Some(i64::try_from(id % 4 + 1)?))
-        };
+    for (id, title, tag, attempt) in prepared_rows {
         sqlx::query("INSERT INTO tasks (id,title,state_tag,state_attempt,state_message,state_retry_at_micros,note_outer_some,note_value,price_cents,created_at_micros) VALUES (?,?,?,?,?,?,?,?,?,?)")
-            .bind(i64::try_from(id)?).bind(format!("task-{id}")).bind(tag).bind(attempt)
+            .bind(id).bind(title).bind(tag).bind(attempt)
             .bind(Option::<String>::None).bind(Option::<i64>::None).bind(1_i64)
             .bind(Option::<String>::None).bind(1025_i64).bind(1_778_400_000_000_000_i64)
             .execute(&mut *transaction).await?;

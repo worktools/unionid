@@ -14,6 +14,7 @@ CREATE TABLE tasks (
   created_at_micros INTEGER NOT NULL,
   CHECK ((state_tag = 'Running') = (state_attempt IS NOT NULL)),
   CHECK ((state_tag = 'Failed') = (state_message IS NOT NULL)),
+  CHECK (state_retry_at_micros IS NULL OR state_tag = 'Failed'),
   CHECK (note_outer_some = 1 OR note_value IS NULL)
 );
 

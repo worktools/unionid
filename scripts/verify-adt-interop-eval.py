@@ -7,6 +7,7 @@ import pathlib
 import platform
 import subprocess
 import tempfile
+from datetime import datetime
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "tools" / "adt-interop-eval" / "Cargo.toml"
@@ -50,6 +51,7 @@ def main():
 
     report = {
         "format_version": 1,
+        "collected_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "base_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "rows": args.rows,
         "samples_per_backend": args.samples,

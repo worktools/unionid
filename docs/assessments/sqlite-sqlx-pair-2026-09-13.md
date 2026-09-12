@@ -1,6 +1,6 @@
 # unionid 与 SQLite + SQLx 配对记录 / unionid and SQLite + SQLx paired record
 
-- 日期 / Date: 2026-09-13
+- 采集时间 / Collected at: `2026-09-13T06:16:24+08:00`（日期由此时间戳确定 / date derived from this timestamp）
 - 跟踪 / Tracking: [#290](https://github.com/worktools/unionid/issues/290)
 - 可重复入口 / Repeatable entry point: `python3 scripts/verify-adt-interop-eval.py`
 - 原始样本 / Raw samples: [`docs/benchmarks/data/adt-interop-2026-09-13-1k.json`](../benchmarks/data/adt-interop-2026-09-13-1k.json)
@@ -39,8 +39,8 @@
 
 | backend | startup µs | batch write µs | read µs | migration µs | DB bytes | peak RSS bytes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| unionid | 62,432 | 26,165 | 2,527 | 33,490 | 991,232 | 24,018,944 |
-| SQLite + SQLx | 2,670 | 7,337 | 139 | 555 | 81,920 | 8,749,056 |
+| unionid | 62,036 | 30,037 | 3,008 | 45,732 | 991,232 | 23,871,488 |
+| SQLite + SQLx | 2,553 | 7,283 | 135 | 863 | 81,920 | 8,847,360 |
 
 SQLite 在这个小型关系编码负载中明显更快、更小。unionid 当前代价来自 schema/query 解析、完整 typed state 与 migration 重写；本样本不足以推广到其他机器、规模或 workload。unionid 的实际收益位于语义边界：应用和查询共享名义 ADT、穷尽性、精确标量与 schema digest，少维护一套关系编码。若数据天然扁平、SQL 生态和最低资源成本优先，SQLite + SQLx 更合适；若 sum/product 深度进入持久模型、查询和长期演进，unionid 提供 SQLite/SQLx 本身没有的端到端约束。
 
@@ -58,4 +58,4 @@ The evaluator uses SQLx's runtime query API so a release binary can bootstrap an
 
 For evolution, unionid rejects a stale exhaustive match during bundle generation and rejects stale bundles against the new catalog with `E_SCHEMA_CHANGED` during prepare. SQLite adds a variant row and payload column; a missing Rust decoder arm remains latent until that tag is read. A defaulted unionid field updates the generated result and schema digest, while an old dynamic SQL projection can silently ignore an added SQLite column.
 
-The five local macOS arm64 release samples have medians of 62,432/26,165/2,527/33,490 µs for unionid startup/write/read/migration and 2,670/7,337/139/555 µs for SQLite + SQLx. Database sizes were 991,232 versus 81,920 bytes, and peak RSS medians were 24,018,944 versus 8,749,056 bytes. These figures describe only this 1,000-row run. SQLite is clearly faster and smaller here. unionid's benefit is the shared nominal ADT, exhaustiveness, exact-scalar, and schema-digest boundary. Prefer SQLite + SQLx for naturally flat data and mature SQL tooling; unionid becomes relevant when sum/product structure must remain consistent across storage, queries, application types, and evolution.
+The five local macOS arm64 release samples have medians of 62,036/30,037/3,008/45,732 µs for unionid startup/write/read/migration and 2,553/7,283/135/863 µs for SQLite + SQLx. Database sizes were 991,232 versus 81,920 bytes, and peak RSS medians were 23,871,488 versus 8,847,360 bytes. These figures describe only this 1,000-row run. SQLite is clearly faster and smaller here. unionid's benefit is the shared nominal ADT, exhaustiveness, exact-scalar, and schema-digest boundary. Prefer SQLite + SQLx for naturally flat data and mature SQL tooling; unionid becomes relevant when sum/product structure must remain consistent across storage, queries, application types, and evolution.
