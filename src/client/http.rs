@@ -31,7 +31,7 @@ impl HttpClient {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|error| Error::new("E_CONFIG", format!("build HTTP client: {error}")))?;
-        Self::from_client(base_url, client, timeout)
+        Self::from_client_inner(base_url, client, timeout, true)
     }
 
     /// Use an application-configured client for proxy, TLS, or authentication settings.
@@ -39,6 +39,27 @@ impl HttpClient {
         base_url: impl AsRef<str>,
         client: reqwest::Client,
         timeout: Duration,
+    ) -> Result<Self> {
+        Self::from_client_inner(base_url, client, timeout, false)
+    }
+
+    /// Use an application-configured client against an HTTP loopback service.
+    ///
+    /// This explicit constructor accepts plaintext only for `localhost` or a
+    /// loopback IP. Use [`Self::from_client`] for every remote service.
+    pub fn from_local_client(
+        base_url: impl AsRef<str>,
+        client: reqwest::Client,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::from_client_inner(base_url, client, timeout, true)
+    }
+
+    fn from_client_inner(
+        base_url: impl AsRef<str>,
+        client: reqwest::Client,
+        timeout: Duration,
+        allow_loopback_http: bool,
     ) -> Result<Self> {
         if timeout.is_zero() {
             return Err(Error::new(
@@ -52,6 +73,13 @@ impl HttpClient {
             return Err(Error::new(
                 "E_CONFIG",
                 "HTTP base URL must use http or https and include an origin",
+            ));
+        }
+        if query_url.scheme() == "http" && (!allow_loopback_http || !is_loopback_origin(&query_url))
+        {
+            return Err(Error::new(
+                "E_CONFIG",
+                "plaintext HTTP is allowed only for explicit loopback clients",
             ));
         }
         query_url.set_path(QUERY_PATH);
@@ -197,8 +225,19 @@ impl HttpClient {
         let mut request = request.clone();
         request.request_id = request_id.into();
         request.page = Some(page);
+        request.idempotency_key = None;
         self.page(&request).await.map(Some)
     }
+}
+
+fn is_loopback_origin(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 struct AttemptFailure {

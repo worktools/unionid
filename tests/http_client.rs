@@ -70,8 +70,12 @@ async fn typed_http_client_reuses_the_official_adapter_and_continues_pages() {
         ProtocolRequest::query("page-1", "from items\nsort id").with_page(PageSpec::forward(2));
     let first = client.page::<Item>(&page_request).await.unwrap();
     assert_eq!(first.rows, values[..2]);
+    let keyed_page_request = ProtocolRequest {
+        idempotency_key: Some("must-not-reach-page".into()),
+        ..page_request.clone()
+    };
     let second = client
-        .next_page::<Item>(&page_request, &first.page, "page-2")
+        .next_page::<Item>(&keyed_page_request, &first.page, "page-2")
         .await
         .unwrap()
         .unwrap();
@@ -167,6 +171,33 @@ async fn typed_http_client_requires_a_key_for_automatic_retry() {
         .await
         .unwrap_err();
     assert_eq!(error.code, "E_CONFIG");
+}
+
+#[test]
+fn configured_http_clients_require_https_or_an_explicit_loopback_constructor() {
+    let configured = reqwest::Client::new();
+    let error = HttpClient::from_client(
+        "http://127.0.0.1:3000",
+        configured.clone(),
+        Duration::from_secs(1),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "E_CONFIG");
+    HttpClient::from_local_client(
+        "http://127.0.0.1:3000",
+        configured.clone(),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(
+        HttpClient::from_local_client(
+            "http://database.example.com",
+            configured,
+            Duration::from_secs(1),
+        )
+        .is_err()
+    );
 }
 
 async fn slow_query() -> &'static str {
