@@ -972,15 +972,15 @@ fn measure_stream(
                 stream_version,
                 request_id: frame_request,
                 operation_id: frame_operation,
+                emitted_rows,
                 error,
-                ..
             } => {
-                if !saw_schema
-                    || stream_version != stream::VERSION
+                if stream_version != stream::VERSION
                     || frame_request != request_id
                     || frame_operation != operation_id
+                    || emitted_rows.parse::<usize>()? != rows_received
                 {
-                    return Err("stream error frame order or identity mismatch".into());
+                    return Err("stream error frame count or identity mismatch".into());
                 }
                 let category = match error.code.as_str() {
                     "E_CANCELLED" => "cancelled",
@@ -996,8 +996,14 @@ fn measure_stream(
         }
     }
     let terminal_micros = elapsed_micros(started.elapsed());
-    if consumer == StreamConsumer::Slow && terminal.as_deref() != Some("E_CANCELLED") {
-        return Err("slow stream did not finish with E_CANCELLED".into());
+    match consumer {
+        StreamConsumer::Normal if terminal.as_deref() != Some("complete") => {
+            return Err("normal stream did not finish with complete".into());
+        }
+        StreamConsumer::Slow if terminal.as_deref() != Some("E_CANCELLED") => {
+            return Err("slow stream did not finish with E_CANCELLED".into());
+        }
+        _ => {}
     }
     if encoded_bytes
         > u64::try_from(stream::MAX_EMITTED_BYTES.saturating_add(stream::MAX_FRAME_BYTES))?
