@@ -56,6 +56,10 @@ required-features = ["http"]
 name = "http_client"
 required-features = ["http", "http-client"]
 
+[[test]]
+name = "current-consumer"
+required-features = ["http", "http-client"]
+
 [[example]]
 name = "http_service"
 required-features = ["http"]

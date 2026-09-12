@@ -4,7 +4,7 @@
 
 ## 中文说明
 
-计划更新：用户确认后，#262/#263 纳入 v0.3.0，#264/#265 纳入 v0.4.0，联合验收分别由 [#268](https://github.com/worktools/unionid/issues/268) 与 [#269](https://github.com/worktools/unionid/issues/269) 跟踪，最新版本分工见[路线图](../ROADMAP.md)。评估完成后 #267 合并了 TCP/async SDK 首个切片，#270 修复依赖排序，#271 修复 serde 表示漂移；#242/#263 的剩余范围仍开放。下文代码探针保留原基线证据，不继续当作当前行为描述。
+计划更新：用户确认后，#262/#263 纳入 v0.3.0，#264/#265 纳入 v0.4.0，联合验收分别由 [#268](https://github.com/worktools/unionid/issues/268) 与 [#269](https://github.com/worktools/unionid/issues/269) 跟踪，最新版本分工见[路线图](../ROADMAP.md)。评估完成后 #267/#277/#278 已交付同步 TCP、HTTP 与异步 TCP typed client，打包后的独立消费者完成 #242 的四入口验收；#270 修复依赖排序，#271 修复 serde 表示漂移，#263 的剩余范围仍开放。下文代码探针保留原基线证据，不继续当作当前行为描述。
 
 ### 1. 判断：核心技术命题已经得到验证，应用采用的命题仍待验证
 
@@ -25,7 +25,7 @@ unionid 已经证明，有限 ADT 可以成为数据库的共同数据模型，�
 | 关联读取 | #259 已实现同一快照下、与输入等长同序的 indexed `fetch_by_key`，缺失用 `None` | #241 仍开放：这是 Rust 批量取回 API；查询语言 lookup join 尚未实现 |
 | 迁移体验 | #260 增加影响报告，#261 增加离线副本预演；已有 checkpoint、原子 cutover 和恢复 | #243 仍开放；限速回填等剩余范围不能因预演落地就标为完成 |
 | 数据可靠性 | 稳定 schema/field/variant ID、RowId、索引、幂等回执、backup、check、恢复和 compact 有成套验证 | 这些是当前数据库状态的保证，不能代替旧应用二进制与新 schema 的兼容检查 |
-| 服务与 SDK | 同一 Engine 语义接入嵌入式、TCP 和 HTTP 示例；有有界并发读、取消和 stream | #242 的官方 async/typed SDK 尚未完成；示例中的集成工作仍需应用承担 |
+| 服务与 SDK | 同一 Engine 语义接入嵌入式、同步/异步 TCP 和 HTTP；官方 typed client 覆盖分页、重试、取消和 stream，并由打包后的独立消费者验收 | 暂无跨语言 typed client；应用仍需明确处理 schema/cursor 失效 |
 
 依据：[RFC 0012](../rfc/0012-schema-rust-bindings.md)、[RFC 0013](../rfc/0013-minimal-relational-reads.md)、[#240](https://github.com/worktools/unionid/issues/240)、[#241](https://github.com/worktools/unionid/issues/241)、[#242](https://github.com/worktools/unionid/issues/242)、[#243](https://github.com/worktools/unionid/issues/243)。
 
@@ -163,7 +163,7 @@ Rust 主导的嵌入式项目可选择 Rust derive 为权威来源；多语言�
 
 ## English Description
 
-Planning update: after user confirmation, #262/#263 target v0.3.0 and #264/#265 target v0.4.0, with joint acceptance in #268 and #269. ROADMAP records current assignments. #267 delivered the first TCP/async SDK slice, #270 fixed dependency ordering, and #271 addressed serde representation drift; #242/#263 retain their remaining scope. The code probes below preserve their original baseline and no longer describe current behavior.
+Planning update: after user confirmation, #262/#263 target v0.3.0 and #264/#265 target v0.4.0, with joint acceptance in #268 and #269. ROADMAP records current assignments. #267/#277/#278 delivered the synchronous TCP, HTTP, and asynchronous TCP typed clients, and a packaged independent consumer completes the four-entry-point acceptance for #242. #270 fixed dependency ordering, #271 addressed serde representation drift, and #263 retains its remaining scope. The code probes below preserve their original baseline and no longer describe current behavior.
 
 ### Assessment
 

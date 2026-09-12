@@ -10,7 +10,7 @@ import tempfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CONSUMER_SOURCE = ROOT / "tests" / "current-consumer" / "main.rs"
+CONSUMER_SOURCES = ROOT / "tests" / "current-consumer"
 
 
 def main():
@@ -51,7 +51,8 @@ def main():
 
         consumer = temporary / "consumer"
         (consumer / "src").mkdir(parents=True)
-        (consumer / "src" / "main.rs").write_bytes(CONSUMER_SOURCE.read_bytes())
+        for source_file in CONSUMER_SOURCES.glob("*.rs"):
+            (consumer / "src" / source_file.name).write_bytes(source_file.read_bytes())
         dependency = json.dumps(str(packaged_root))
         (consumer / "Cargo.toml").write_text(
             f"""[package]
@@ -61,13 +62,19 @@ edition = "2024"
 rust-version = "1.94"
 
 [dependencies]
+axum = "0.8"
 serde = {{ version = "1", features = ["derive"] }}
-unionid = {{ path = {dependency} }}
+serde_json = "1"
+tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync"] }}
+unionid = {{ path = {dependency}, features = ["http", "http-client"] }}
 """
         )
         work = temporary / "work"
         environment = os.environ.copy()
-        environment["CARGO_TARGET_DIR"] = str(temporary / "target")
+        # Keep the consumer source isolated while reusing dependency artifacts.
+        # A fresh target directory duplicates several GiB of the HTTP stack and
+        # makes this release check unnecessarily expensive on developer hosts.
+        environment["CARGO_TARGET_DIR"] = str(ROOT / "target")
         subprocess.run(
             [
                 "cargo",
@@ -86,6 +93,7 @@ unionid = {{ path = {dependency} }}
             "ok": True,
             "package": package.name,
             "consumer": "independent",
+            "sdk_paths": ["engine", "tcp", "async_tcp", "http"],
             "storage_format": 6,
             "protocol": 2,
             "legacy_inputs": False,

@@ -9,6 +9,8 @@ use unionid::scalars::{Timestamp, Uuid};
 use unionid::server::execute_protocol_request;
 use unionid::{Engine, PageSpec};
 
+mod sdk;
+
 const INITIAL: &str = r#"migration m0001_current_consumer
   add type State = Draft | Published {at timestamp}
   add type Entry =
@@ -92,7 +94,8 @@ fn rows() -> Result<Vec<EntryV1>, unionid::Error> {
     ])
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(
         std::env::args_os()
             .nth(1)
@@ -188,8 +191,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(restored_rows, upgraded);
     assert_eq!(restored_engine.check_integrity()?.versions.format, 6);
 
+    sdk::verify().await?;
+
     println!(
-        "current-consumer: packaged public API, protocol v2, format 6, retry, page, restart, migration, check and restore passed"
+        "current-consumer: packaged Engine, TCP, async TCP and HTTP typed SDK journeys passed"
     );
     Ok(())
 }
