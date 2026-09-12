@@ -44,7 +44,7 @@
 
 ### 6. 反向：Rust → DDL（已实现）
 
-`unionid-derive` 提供 `#[derive(UnionidSchema)]`，把 Rust struct/enum 映射为 unionid `type` 声明，并用 `#[unionid(table = "...", key = "...")]` 生成 `table` 声明。生成代码实现 `unionid::UnionidSchema`，通过 `unionid::SchemaBuilder` 汇总为可直接执行的 schema 脚本。
+`unionid-derive` 提供 `#[derive(UnionidSchema)]`，把 Rust struct/enum 映射为 unionid `type` 声明，并用 `#[unionid(table = "...", key = "...")]` 生成 `table` 声明。生成代码实现 `unionid::UnionidSchema`，通过 `unionid::SchemaBuilder` 汇总为可直接执行的 schema 脚本。`SchemaBuilder::build()` 以依赖顺序输出类型（被引用类型先声明，注册顺序无关），缺失依赖或不受支持的互递归返回 `E_SCHEMA`（`build` 返回 `Result`）。
 
 - 类型映射：`i64/i32→int`、`f64/f32→float`、`bool→bool`、`String/&'static str→text`、`Uuid/Date/Timestamp/Duration/Bytes→uuid/date/timestamp/duration/bytes`、`Decimal` 需 `#[unionid(decimal = "P S")]`；`Option<T>→option (T)`、`Vec<T>→list (T)`、`Box<T>→T`、tuple 与嵌套命名类型按名引用。
 - record struct → `type Name = { field type, ... }`；enum 的 unit / 单字段 / 多字段 / record variant 分别生成 `Variant`、`Variant ty`、`Variant (a, b)`、`Variant { field type }`。
@@ -93,7 +93,7 @@ Codegen first because it needs no crate-structure change, is testable without ma
 
 ### 6. Reverse: Rust -> DDL (implemented)
 
-`unionid-derive` provides `#[derive(UnionidSchema)]`, mapping a Rust struct/enum to a unionid `type` declaration and, with `#[unionid(table = "...", key = "...")]`, a `table` declaration. The generated code implements `unionid::UnionidSchema`, and `unionid::SchemaBuilder` collects declarations into an executable schema script.
+`unionid-derive` provides `#[derive(UnionidSchema)]`, mapping a Rust struct/enum to a unionid `type` declaration and, with `#[unionid(table = "...", key = "...")]`, a `table` declaration. The generated code implements `unionid::UnionidSchema`, and `unionid::SchemaBuilder` collects declarations into an executable schema script. `SchemaBuilder::build()` emits types in dependency order (referenced types first, independent of registration order) and returns `E_SCHEMA` for a missing dependency or an unsupported cycle (`build` returns `Result`).
 
 - Type mapping: `i64/i32->int`, `f64/f32->float`, `bool->bool`, `String/&'static str->text`, `Uuid/Date/Timestamp/Duration/Bytes->uuid/date/timestamp/duration/bytes`, `Decimal` requires `#[unionid(decimal = "P S")]`; `Option<T>->option (T)`, `Vec<T>->list (T)`, `Box<T>->T`, tuples and nested named types by name.
 - Record structs become `type Name = { field type, ... }`; enum unit / single-field / multi-field / record variants become `Variant`, `Variant ty`, `Variant (a, b)`, and `Variant { field type }`.

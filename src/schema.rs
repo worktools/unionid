@@ -817,6 +817,11 @@ pub trait UnionidSchema {
     const UNIONID_TYPE_NAME: &'static str;
     /// The complete `type Name = ...` declaration.
     fn unionid_type_ddl() -> String;
+    /// Schema type names this declaration references. Used to emit types in
+    /// dependency order; self-references are allowed and ignored for ordering.
+    fn unionid_dependencies() -> Vec<&'static str> {
+        Vec::new()
+    }
     /// The table name when this type also declares a table.
     fn unionid_table_name() -> Option<&'static str> {
         None
@@ -827,10 +832,16 @@ pub trait UnionidSchema {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RegisteredType {
+    ddl: String,
+    dependencies: Vec<String>,
+}
+
 /// Collects derived type and table declarations into one schema script.
 #[derive(Debug, Default, Clone)]
 pub struct SchemaBuilder {
-    types: BTreeMap<String, String>,
+    types: BTreeMap<String, RegisteredType>,
     tables: BTreeMap<String, String>,
 }
 
@@ -841,13 +852,18 @@ impl SchemaBuilder {
 
     /// Add one derived type, deduplicating by schema name. Identical duplicates
     /// are accepted; a conflicting declaration for the same type or table name
-    /// returns `E_SCHEMA`. Types are emitted in name order and tables after
-    /// them, as the schema parser requires.
+    /// returns `E_SCHEMA`.
     pub fn add<T: UnionidSchema>(mut self) -> Result<Self> {
         let type_name = T::UNIONID_TYPE_NAME.to_string();
-        let type_ddl = T::unionid_type_ddl();
+        let registered = RegisteredType {
+            ddl: T::unionid_type_ddl(),
+            dependencies: T::unionid_dependencies()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        };
         match self.types.get(&type_name) {
-            Some(existing) if existing != &type_ddl => {
+            Some(existing) if existing.ddl != registered.ddl => {
                 return Err(Error::new(
                     "E_SCHEMA",
                     format!("conflicting declaration for type '{type_name}'"),
@@ -855,7 +871,7 @@ impl SchemaBuilder {
             }
             Some(_) => {}
             None => {
-                self.types.insert(type_name, type_ddl);
+                self.types.insert(type_name, registered);
             }
         }
         if let Some(table_name) = T::unionid_table_name() {
@@ -881,16 +897,71 @@ impl SchemaBuilder {
         Ok(self)
     }
 
-    pub fn build(self) -> String {
+    /// Build a schema script with type declarations in dependency order,
+    /// followed by table declarations. A referenced type that was not added, or
+    /// an unsupported cycle between distinct types, returns `E_SCHEMA`.
+    pub fn build(self) -> Result<String> {
+        let order = self.dependency_order()?;
         let mut source = String::new();
-        for declaration in self.types.values() {
-            source.push_str(declaration);
+        for name in order {
+            source.push_str(&self.types[&name].ddl);
             source.push('\n');
         }
         for table in self.tables.values() {
             source.push_str(table);
             source.push('\n');
         }
-        source
+        Ok(source)
+    }
+
+    fn dependency_order(&self) -> Result<Vec<String>> {
+        let mut dependencies: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (name, registered) in &self.types {
+            let mut set = BTreeSet::new();
+            for dependency in &registered.dependencies {
+                if dependency == name {
+                    // Supported direct self-recursion; it does not affect order.
+                    continue;
+                }
+                if !self.types.contains_key(dependency) {
+                    return Err(Error::new(
+                        "E_SCHEMA",
+                        format!(
+                            "type '{name}' references '{dependency}', which was not added to the builder"
+                        ),
+                    ));
+                }
+                set.insert(dependency.as_str());
+            }
+            dependencies.insert(name.as_str(), set);
+        }
+        let mut remaining: BTreeSet<&str> = self.types.keys().map(String::as_str).collect();
+        let mut order = Vec::with_capacity(remaining.len());
+        while !remaining.is_empty() {
+            let ready = remaining
+                .iter()
+                .copied()
+                .filter(|name| dependencies[name].is_empty())
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                return Err(Error::new(
+                    "E_SCHEMA",
+                    format!(
+                        "unsupported mutually recursive types: {}",
+                        remaining.iter().copied().collect::<Vec<_>>().join(", ")
+                    ),
+                ));
+            }
+            for name in &ready {
+                remaining.remove(name);
+                order.push((*name).to_string());
+            }
+            for set in dependencies.values_mut() {
+                for name in &ready {
+                    set.remove(name);
+                }
+            }
+        }
+        Ok(order)
     }
 }
