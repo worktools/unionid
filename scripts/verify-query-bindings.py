@@ -21,6 +21,7 @@ def main():
         mutation = temporary / "create_task.rs"
         query_v1 = temporary / "classify_task_v1.rs"
         query_v2 = temporary / "classify_task_v2.rs"
+        query_bundle = temporary / "queries.rs"
         evolved_db = temporary / "evolved.redb"
         subprocess.run(
             [
@@ -38,6 +39,26 @@ def main():
                 str(FIXTURE / "find_task.uid"),
                 "--output",
                 str(generated),
+            ],
+            cwd=ROOT,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "cargo",
+                "run",
+                "--quiet",
+                "--bin",
+                "unionid",
+                "--",
+                "query",
+                "rust",
+                "--schema",
+                str(FIXTURE / "schema.uid"),
+                "--dir",
+                str(FIXTURE / "bundle"),
+                "--output",
+                str(query_bundle),
             ],
             cwd=ROOT,
             check=True,
@@ -163,6 +184,7 @@ def main():
             "classify_task_v2": hashlib.sha256(query_v2.read_bytes()).hexdigest(),
             "create_task": hashlib.sha256(mutation.read_bytes()).hexdigest(),
             "find_task": hashlib.sha256(generated.read_bytes()).hexdigest(),
+            "query_bundle": hashlib.sha256(query_bundle.read_bytes()).hexdigest(),
         }
         if actual != expected:
             raise RuntimeError(
@@ -191,6 +213,7 @@ unionid = {{ path = {root} }}
         environment["UNIONID_GENERATED_MUTATION"] = str(mutation)
         environment["UNIONID_GENERATED_QUERY_V1"] = str(query_v1)
         environment["UNIONID_GENERATED_QUERY_V2"] = str(query_v2)
+        environment["UNIONID_GENERATED_QUERY_BUNDLE"] = str(query_bundle)
         environment["UNIONID_SCHEMA"] = str(FIXTURE / "schema.uid")
         environment["UNIONID_EVOLVED_DB"] = str(evolved_db)
         subprocess.run(
@@ -209,6 +232,7 @@ unionid = {{ path = {root} }}
                         "classify_task_v2",
                         "create_task",
                         "find_task",
+                        "query_bundle",
                     ],
                 }
             )

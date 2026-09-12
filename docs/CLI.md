@@ -93,9 +93,15 @@ unionid query describe --schema schema.uid --file queries/create_task.uid --outp
 unionid query rust --schema schema.uid --file queries/find_task.uid --output generated/find_task.rs
 unionid query rust --db app.redb --file queries/find_task.uid --output generated/find_task.rs
 unionid query rust --schema schema.uid --file queries/create_task.uid --name create_task
+unionid query rust --schema schema.uid --dir queries --output generated/queries.rs
+unionid query rust --db app.redb --dir queries --output generated/queries.rs
 ```
 
+`--dir` 会递归读取目录中的 `.uid` 文件并一次生成 bundle。schema ADT 只生成一份，每个查询位于按相对路径命名的公开子 module 中，因此 mutation 参数和 query 结果共享同一份领域类型。文件按规范化相对路径排序；空目录、非 `.uid` 路径、生成名称冲突或任一绑定错误都会使整个命令失败，且不会覆盖已有输出。目录模式不接受 `--name`。
+
 `query rust` generates a directly compilable Rust file from the same contract, including schema ADTs, query `Params`, a result row, and an Engine call function. The function name defaults to the query file stem and can be set with `--name`. It converts each parameter to a typed `Value`, returns `T`, `Option<T>`, or `Vec<T>` according to cardinality, and includes affected rows for mutations. The call checks the generated schema revision/hash before prepare, so drift fails explicitly with `E_SCHEMA_CHANGED`.
+
+`--dir` recursively reads `.uid` files and emits one bundle. Schema ADTs appear once and every query lives in a public submodule named from its relative path, so mutation parameters and query results share the same domain types. Files are sorted by normalized relative path. An empty directory, a non-`.uid` path, a generated-name collision, or any binding error fails the whole command without replacing an existing output. Directory mode does not accept `--name`.
 
 ## JSON 错误与退出码
 

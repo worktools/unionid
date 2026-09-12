@@ -214,14 +214,15 @@ Fix mapping/generation correctness, then complete SDK, relational-read, migratio
 
 ### v0.4.0 · 类型化查询与 ADT 互通 / Typed queries and ADT interoperability
 
-[Milestone 12](https://github.com/worktools/unionid/milestone/12)；#265 的 version 1 描述、运行时 validator、通用向量与四方向 schema 演进报告已完成基础切片；#264 的静态查询描述、Rust 参数/结果/调用生成、独立 consumer、生成漂移和两版演进矩阵已交付，下一步联合收口 #265 并推进 #269。#120 服务器命名查询与 #118 泛型不是前置。
+[Milestone 12](https://github.com/worktools/unionid/milestone/12)；#265 的 version 1 描述、运行时 validator、通用向量与四方向 schema 演进报告已完成；#264 的静态查询描述、Rust 参数/结果/调用生成、独立 consumer、生成漂移和两版演进矩阵已交付。#287 继续把逐文件生成收敛为共享一份 schema ADT 的多查询 bundle，再推进 #269 的完整应用与配对验收。#120 服务器命名查询与 #118 泛型不是前置。
 
-The #265 version-1 description, runtime validator, common vectors, and four-direction schema evolution foundation is implemented. #264 now delivers static-query descriptions, generated Rust parameters/results/calls, an independent consumer, drift checks, and a two-version evolution matrix. Next, jointly close the remaining #265 scope and proceed to #269. Neither server-side named queries nor user generics is a prerequisite.
+The #265 version-1 description, runtime validator, common vectors, and four-direction schema evolution contract is complete. #264 delivers static-query descriptions, generated Rust parameters/results/calls, an independent consumer, drift checks, and a two-version evolution matrix. #287 now replaces per-file model duplication with a multi-query bundle sharing one schema ADT model before the full #269 application and paired acceptance. Neither server-side named queries nor user generics is a prerequisite.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#265](https://github.com/worktools/unionid/issues/265) | 可移植 ADT 与客户端演进契约 / portable ADT and client evolution contracts | P0 |
-| [#264](https://github.com/worktools/unionid/issues/264) | 查询文件生成参数、结果和调用函数 / generated query arguments, results and functions | P0 |
+| [#265](https://github.com/worktools/unionid/issues/265) | 可移植 ADT 与客户端演进契约 / portable ADT and client evolution contracts | 已交付 / Delivered |
+| [#264](https://github.com/worktools/unionid/issues/264) | 查询文件生成参数、结果和调用函数 / generated query arguments, results and functions | 已交付 / Delivered |
+| [#287](https://github.com/worktools/unionid/issues/287) | 共享模型的多查询 Rust bundle / shared-model multi-query Rust bundle | P0 |
 | [#269](https://github.com/worktools/unionid/issues/269) | 应用演进、采用成本与发布验收 / application evolution, adoption cost and release acceptance | P0 |
 
 本版本要求契约与 Rust 参考向量；具体第二语言适配仍由 #192 在调用方准备好后另排版本，不能把规范交付或仓库示例称为外部采用。/ Contracts and Rust reference vectors are required. Schedule a concrete #192 second-language adapter only for a ready caller; specifications and repository examples do not establish external adoption.

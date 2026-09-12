@@ -244,6 +244,51 @@ fn generates_typed_rust_params_rows_and_cardinality_calls() {
 }
 
 #[test]
+fn generates_multiple_queries_with_one_shared_schema_model() {
+    let queries = [
+        (
+            "create_task".into(),
+            "insert tasks $task\nreturning {id, state}".into(),
+        ),
+        (
+            "find_task".into(),
+            "from tasks | filter id == $id | select {id, state} | take 1".into(),
+        ),
+    ];
+    let generated = unionid::codegen::rust_query_bundle(SCHEMA, &queries).unwrap();
+    assert_eq!(generated.matches("pub enum State {").count(), 1);
+    assert_eq!(generated.matches("pub struct Task {").count(), 1);
+    assert!(generated.contains("pub mod create_task {"));
+    assert!(generated.contains("pub task: Task,"));
+    assert!(generated.contains("pub mod find_task {"));
+    assert!(generated.contains("pub state: State,"));
+    let reversed = queries.into_iter().rev().collect::<Vec<_>>();
+    assert_eq!(
+        generated,
+        unionid::codegen::rust_query_bundle(SCHEMA, &reversed).unwrap()
+    );
+
+    let collision = unionid::codegen::rust_query_bundle(
+        SCHEMA,
+        &[
+            ("find-task".into(), "from tasks".into()),
+            ("find_task".into(), "from tasks".into()),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(collision.code, "E_QUERY_BINDING");
+    assert!(collision.message.contains("collides"));
+
+    let keyword = unionid::codegen::rust_query_bundle(
+        SCHEMA,
+        &[("type".into(), "from tasks | take 1".into())],
+    )
+    .unwrap();
+    assert!(keyword.contains("pub mod type_ {"));
+    assert!(keyword.contains("pub const TYPE_SOURCE"));
+}
+
+#[test]
 fn cli_generates_rust_query_file_with_an_inferred_or_explicit_name() {
     let dir = TempDir::new();
     let schema = dir.0.join("schema.uid");
@@ -296,6 +341,73 @@ fn cli_generates_rust_query_file_with_an_inferred_or_explicit_name() {
 }
 
 #[test]
+fn cli_generates_a_deterministic_query_directory_bundle_without_partial_failures() {
+    let dir = TempDir::new();
+    let schema = dir.0.join("schema.uid");
+    let queries = dir.0.join("queries");
+    let nested = queries.join("tasks");
+    let output = dir.0.join("queries.rs");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(&schema, SCHEMA).unwrap();
+    std::fs::write(
+        queries.join("create.uid"),
+        "insert tasks $task\nreturning {id, state}",
+    )
+    .unwrap();
+    std::fs::write(
+        nested.join("find.uid"),
+        "from tasks | filter id == $id | take 1",
+    )
+    .unwrap();
+
+    let command = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "query",
+            "rust",
+            "--schema",
+            schema.to_str().unwrap(),
+            "--dir",
+            queries.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        command.status.success(),
+        "{}",
+        String::from_utf8_lossy(&command.stderr)
+    );
+    let generated = std::fs::read_to_string(&output).unwrap();
+    assert!(
+        generated.find("pub mod create").unwrap() < generated.find("pub mod tasks_find").unwrap()
+    );
+    assert_eq!(generated.matches("pub enum State {").count(), 1);
+
+    std::fs::write(&output, "keep this complete output").unwrap();
+    std::fs::write(queries.join("create!.uid"), "from missing").unwrap();
+    let failed = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "query",
+            "rust",
+            "--schema",
+            schema.to_str().unwrap(),
+            "--dir",
+            queries.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("query 'create!':"));
+    assert_eq!(
+        std::fs::read_to_string(output).unwrap(),
+        "keep this complete output"
+    );
+}
+
+#[test]
 fn generated_result_fields_escape_nested_paths_for_serde() {
     let schema = r#"type Endpoint = {host text, port int}
 type Config = {id int, endpoint Endpoint}
@@ -343,9 +455,17 @@ fn database_generation_preserves_the_live_migration_identity() {
         expected
     };
     let query = dir.0.join("find_task.uid");
+    let query_directory = dir.0.join("queries");
     let rust_output = dir.0.join("find_task.rs");
+    let bundle_output = dir.0.join("queries.rs");
     let json_output = dir.0.join("find_task.json");
+    std::fs::create_dir(&query_directory).unwrap();
     std::fs::write(&query, "from tasks | filter id == $id | take 1").unwrap();
+    std::fs::write(
+        query_directory.join("find_task.uid"),
+        "from tasks | filter id == $id | take 1",
+    )
+    .unwrap();
 
     for (subcommand, output) in [("rust", &rust_output), ("describe", &json_output)] {
         let command = Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -370,6 +490,27 @@ fn database_generation_preserves_the_live_migration_identity() {
     let generated = std::fs::read_to_string(rust_output).unwrap();
     assert!(generated.contains(&format!("SCHEMA_REVISION: u64 = {};", expected.revision)));
     assert!(generated.contains(&expected.hash));
+    let bundled = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "query",
+            "rust",
+            "--db",
+            database.to_str().unwrap(),
+            "--dir",
+            query_directory.to_str().unwrap(),
+            "--output",
+            bundle_output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        bundled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bundled.stderr)
+    );
+    let bundled = std::fs::read_to_string(bundle_output).unwrap();
+    assert!(bundled.contains(&format!("SCHEMA_REVISION: u64 = {};", expected.revision)));
+    assert!(bundled.contains(&expected.hash));
     let described: QueryDescription =
         serde_json::from_slice(&std::fs::read(json_output).unwrap()).unwrap();
     assert_eq!(described.schema, expected.into());

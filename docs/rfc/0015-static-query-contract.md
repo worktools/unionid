@@ -53,6 +53,8 @@ digest 对 formatter 的 canonical source 计算，因此等价空格和换行�
 
 生成函数保存 schema revision/hash、canonical query source 和 digest。它在 runtime prepare 前核对 Engine schema identity；随后仍使用 `PreparedQuery` 完成绑定与执行检查。匿名 product/sum 结果递归生成局部 Rust struct/enum，命名 ADT 继续引用同文件生成的 schema 类型。
 
+真实应用可用 `--dir <queries>` 一次生成 bundle。根 module 只包含一份 schema ADT，每个 `.uid` 文件按规范化相对路径进入公开子 module，并引用根 module 的命名类型。这使多个 mutation/query 共享同一 Rust 领域类型。生成器先绑定并检查全部查询，再构造输出；目录内容稳定排序，空目录、非 `.uid` 路径、规范化名称冲突或任一绑定失败都不会留下部分生成物。
+
 generated drift 和两版 schema/query/client 演进验收见[静态查询绑定演进验收](../assessments/query-binding-evolution-2026-09-13.md)。服务器命名查询、用户泛型和第二执行器不属于本 RFC。
 
 ## English Description
@@ -80,5 +82,7 @@ Generated code must still call `prepare` on the target `Engine`. `PreparedQuery`
 `unionid query rust --schema <schema.uid> --file <query.uid>` generates a complete Rust file from the same description; an existing migrated database uses `--db <db.redb>` to retain its real catalog identity. Output contains schema ADTs, a query parameter struct, a result row, and an Engine call function. The file stem maps to the function name by default, with `--name` providing a stable explicit name. Each parameter is converted through `Value::from_serde`; cardinality decodes rows as `T`, `Option<T>`, or `Vec<T>`. Mutations with returning produce an output containing typed rows and affected rows, while mutations without returning produce the affected-row count.
 
 Generated functions retain the schema revision/hash, canonical query source, and digest. They check the Engine schema identity before runtime prepare, which continues to enforce binding and execution invariants. Anonymous product/sum shapes recursively generate local Rust structs/enums, while named ADTs refer to schema types generated in the same file.
+
+Applications can use `--dir <queries>` to generate one bundle. The root module contains one schema model, while each `.uid` file becomes a public submodule named from its normalized relative path and refers to the root's named types. Mutations and reads therefore share the same Rust domain types. Generation binds and checks the complete query set before constructing output; directory entries are stable-sorted, and an empty directory, non-`.uid` path, normalized-name collision, or binding error emits no partial artifact.
 
 Generated-drift CI and the two-version schema/query/client evolution matrix are recorded in the [static query binding evolution acceptance](../assessments/query-binding-evolution-2026-09-13.md). Server-side named queries, user generics, and a second executor are outside this RFC.
