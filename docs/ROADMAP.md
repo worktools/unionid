@@ -1,8 +1,8 @@
 # unionid 路线图
 
-规划日期：2026-09-10。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
+规划日期：2026-09-12。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
-总览：[#1](https://github.com/worktools/unionid/issues/1) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones)
+当前验收：[v0.3 #268](https://github.com/worktools/unionid/issues/268) · [v0.4 #269](https://github.com/worktools/unionid/issues/269) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
 
 [2026-09-12 ADT 与语言互通评估](assessments/adt-adoption-2026-09-12.md)记录当前实现、独立消费探针、业界对照及采用建议；它是评估快照，不替代 issues 的实时范围与完成状态。 / The dated assessment records implementation evidence, consumer probes, industry comparisons, and adoption proposals; issues remain the source of current scope and status.
 
@@ -190,48 +190,80 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 | [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | 至少两个真实调用方需要共享同一参数化 typed pipeline |
 | [#192](https://github.com/worktools/unionid/issues/192) | [集成] 宿主语言 typed 数据适配 | 真实调用方证明现有 versioned protocol 或 Rust API 无法满足，并列出具体 API 缺口 |
 
-## 版本里程碑（v0.3.0 起）
+## 版本里程碑（v0.3.0 起） / Version milestones
 
-M0–M9 以阶段组织；从 `v0.3.0` 起改用版本号里程碑，聚焦“把一个原生 ADT 数据库用于中等复杂业务”时最常遇到的采用障碍。优先级沿用 P0（采纳门槛）／P1（重要能力）／P2（探索），不预设工期。计划状态以 GitHub milestone 为准。
+M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.2.0`，以下为目标版本，不表示已经发布。issue 的完整验收决定完成状态；计划整理不修改 Cargo 版本、不创建 tag，也不预设发布日期。软件版本与 storage/protocol 版本独立冻结。
 
-### v0.3.0 · 应用集成与关联读
+M0–M9 retain completed-stage evidence. The latest published release is `v0.2.0`; the versions below are targets. Full issue acceptance determines completion. Planning does not bump Cargo versions, create tags or promise dates. Software, storage and protocol versions are frozen independently.
 
-| Issue | 任务 | 优先级 |
+### v0.3.0 · 可靠 Rust 接入与应用闭环 / Reliable Rust integration and application workflows
+
+[Milestone 11](https://github.com/worktools/unionid/milestone/11)；先修生成/映射正确性，再完成 SDK、关联读、migration 与独立应用验收。#240 的生成能力已交付；#267 已交付首个 TCP 客户端与 async 切片，#242 的剩余范围继续验收。
+
+Fix mapping/generation correctness, then complete SDK, relational-read, migration and independent-application acceptance. Generation in #240 is delivered; #267 delivers the first TCP/async slice, while the rest of #242 remains independent.
+
+| Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#240](https://github.com/worktools/unionid/issues/240) | [集成] 从 schema 生成并校验 Rust 类型 | P0 |
-| [#241](https://github.com/worktools/unionid/issues/241) | [查询] 最小关联读：索引 lookup join 与批量主键取回 | P0 |
-| [#242](https://github.com/worktools/unionid/issues/242) | [集成] 官方异步执行与 typed 客户端 SDK | P0 |
-| [#243](https://github.com/worktools/unionid/issues/243) | [迁移] 降低迁移成本：影响估算、限速回填与离线演练 | P1 |
+| [#240](https://github.com/worktools/unionid/issues/240) | Schema ↔ Rust 单一来源 / single-source model generation | 已交付 / Delivered |
+| [#262](https://github.com/worktools/unionid/issues/262) | SchemaBuilder 依赖顺序 / dependency ordering | P0 |
+| [#263](https://github.com/worktools/unionid/issues/263) | serde、数值与领域身份映射 / representation and identity fidelity | P1 |
+| [#241](https://github.com/worktools/unionid/issues/241) | 批量取回与有界 lookup join / batch fetch and bounded lookup join | P0 |
+| [#242](https://github.com/worktools/unionid/issues/242) | 官方 async/typed SDK / official async and typed SDK | P0 |
+| [#243](https://github.com/worktools/unionid/issues/243) | 迁移影响、预演与剩余维护体验 / migration impacts, rehearsal and maintenance UX | P1 |
+| [#268](https://github.com/worktools/unionid/issues/268) | 独立 Rust 应用、版本冻结与发布验收 / application and release acceptance | P0 |
 
-### v0.4.0 · 查询与类型表达力
+### v0.4.0 · 类型化查询与 ADT 互通 / Typed queries and ADT interoperability
 
-| Issue | 任务 | 优先级 |
+[Milestone 12](https://github.com/worktools/unionid/milestone/12)；先冻结 #265 的描述/映射契约，再实现 #264，最后联合验证。该契约切片的依赖不要求先关闭整个 #265；#120 服务器命名查询与 #118 泛型不是前置。
+
+Freeze the description/mapping slice of #265, implement #264, then validate jointly. This slice dependency does not require closing all of #265 first, nor delivering server-side named queries or user generics.
+
+| Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#244](https://github.com/worktools/unionid/issues/244) | [查询] 子查询、IN/EXISTS 与集合运算 | P1 |
-| [#245](https://github.com/worktools/unionid/issues/245) | [查询] 聚合扩展与基础窗口 | P1 |
-| [#246](https://github.com/worktools/unionid/issues/246) | [类型] 开放 record 与 map/json 逃生通道 | P1 |
-| [#247](https://github.com/worktools/unionid/issues/247) | [类型] decimal 乘除/avg/舍入与 calendar 算术 | P1 |
-| [#248](https://github.com/worktools/unionid/issues/248) | [索引] 部分索引与表达式索引 | P2 |
-| [#118](https://github.com/worktools/unionid/issues/118) | [类型] 用户泛型与互递归 ADT | P2 |
-| [#120](https://github.com/worktools/unionid/issues/120) | [查询] 可复用命名查询 | P2 |
+| [#265](https://github.com/worktools/unionid/issues/265) | 可移植 ADT 与客户端演进契约 / portable ADT and client evolution contracts | P0 |
+| [#264](https://github.com/worktools/unionid/issues/264) | 查询文件生成参数、结果和调用函数 / generated query arguments, results and functions | P0 |
+| [#269](https://github.com/worktools/unionid/issues/269) | 应用演进、采用成本与发布验收 / application evolution, adoption cost and release acceptance | P0 |
 
-### v0.5.0 · 可观测、备份与运维
+本版本要求契约与 Rust 参考向量；具体第二语言适配仍由 #192 在调用方准备好后另排版本，不能把规范交付或仓库示例称为外部采用。/ Contracts and Rust reference vectors are required. Schedule a concrete #192 second-language adapter only for a ready caller; specifications and repository examples do not establish external adoption.
 
-| Issue | 任务 | 优先级 |
+### v0.5.0 · 可观测、备份与运维 / Observability, backup, and operations
+
+[Milestone 13](https://github.com/worktools/unionid/milestone/13)；独立正确性或安全修复可带证据提前安排。 / Independent correctness or security fixes may be scheduled earlier with evidence.
+
+| Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#249](https://github.com/worktools/unionid/issues/249) | [质量] 可观测性：metrics、tracing、slow query 与 explain analyze | P1 |
-| [#250](https://github.com/worktools/unionid/issues/250) | [存储] 增量/物理备份与 compact no-op 短路 | P1 |
-| [#251](https://github.com/worktools/unionid/issues/251) | [服务] 认证与 TLS：内置或官方网关指南 | P1 |
+| [#249](https://github.com/worktools/unionid/issues/249) | Metrics、tracing、slow query 与 explain analyze | P1 |
+| [#250](https://github.com/worktools/unionid/issues/250) | 增量/物理备份与 compact no-op / incremental or physical backup and compact no-op | P1 |
+| [#251](https://github.com/worktools/unionid/issues/251) | 认证与 TLS 方案 / authentication and TLS | P1 |
 
-### v1.0 · 生产规模化探索
+### v0.6.0 · 场景驱动的查询与类型扩展 / Scenario-driven query and type extensions
 
-| Issue | 任务 | 优先级 |
+[Milestone 15](https://github.com/worktools/unionid/milestone/15)；从原 v0.4 通用表达力计划移入，为近期 ADT 接入留出范围。以真实场景、typed 语义和资源预算决定切片；更早版本遇到已验证的硬性阻塞时，可单独调整归属。
+
+Move general expressiveness work from the former v0.4 plan to keep near-term releases focused on ADT integration. Define slices from real scenarios, typed semantics and resource budgets; evidence of an earlier blocker may justify rescheduling an individual issue.
+
+| Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#252](https://github.com/worktools/unionid/issues/252) | [设计] 多写者、复制与高可用边界评估 | P2 |
-| [#253](https://github.com/worktools/unionid/issues/253) | [设计] CDC、订阅与物化视图评估 | P2 |
-| [#254](https://github.com/worktools/unionid/issues/254) | [设计] 超过 10 万行的规模架构评估 | P2 |
+| [#244](https://github.com/worktools/unionid/issues/244) | 子查询、IN/EXISTS 与集合运算 / subqueries and set operations | P1 |
+| [#245](https://github.com/worktools/unionid/issues/245) | 聚合扩展与基础窗口 / aggregates and basic windows | P1 |
+| [#246](https://github.com/worktools/unionid/issues/246) | Typed map 或显式 JSON 逃生通道 / typed map or explicit JSON escape hatch | P1 |
+| [#247](https://github.com/worktools/unionid/issues/247) | Decimal 与 calendar 算术 / decimal and calendar arithmetic | P1 |
+| [#248](https://github.com/worktools/unionid/issues/248) | 部分/表达式索引 / partial and expression indexes | P2 |
 
-这组版本里程碑来自一次“传统数据库背景 + Rust 重度 ADT + 中等复杂业务”的引入评估：核心能力（ADT schema、typed 读写、migration、稳定分页、幂等回执）已经可用，采纳障碍集中在 Schema/类型双份维护、缺少关联读、异步/客户端集成偏薄、迁移成本、查询表达力与生产运维。`#192` 继续作为真实需求触发的宿主语言适配探索。
+### 按需探索 · 版本待定 / Demand-driven exploration · version TBD
+
+[Milestone 14](https://github.com/worktools/unionid/milestone/14) 是候选池，原“v1.0 生产规模化探索”名称已移除，不把探索等同于 v1.0 发布承诺。进入条件是具体调用方/工作负载、最小范围、正确性与资源预算以及验收方式；满足后移入具体版本。v1.0 的长期稳定性与兼容承诺以后另行确定。
+
+This candidate backlog replaces the former “v1.0 production scale exploration” label without making exploratory capabilities a v1.0 promise. Require a caller/workload, minimal scope, correctness/resource budgets and acceptance before assigning a release. Define v1.0 stability and compatibility commitments separately.
+
+| Issue | 探索 / Exploration | 优先级 / Priority |
+| --- | --- | --- |
+| [#118](https://github.com/worktools/unionid/issues/118) | 用户泛型与互递归 / user generics and mutual recursion | P2 / deferred |
+| [#120](https://github.com/worktools/unionid/issues/120) | 服务器 named query/module / server-side named queries and modules | P2 / deferred |
+| [#192](https://github.com/worktools/unionid/issues/192) | 一个真实第二语言适配 / one real second-language adapter | P2 / deferred |
+| [#252](https://github.com/worktools/unionid/issues/252) | 多写者、复制与 HA / multi-writer, replication and HA | P2 / deferred |
+| [#253](https://github.com/worktools/unionid/issues/253) | CDC、订阅与物化视图 / CDC, subscriptions and materialized views | P2 / deferred |
+| [#254](https://github.com/worktools/unionid/issues/254) | 超过 100k 的架构 / architecture beyond 100k rows | P2 / deferred |
 
 ## M5 收口状态
 

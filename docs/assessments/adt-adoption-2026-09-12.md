@@ -4,6 +4,8 @@
 
 ## 中文说明
 
+计划更新：用户确认后，#262/#263 纳入 v0.3.0，#264/#265 纳入 v0.4.0，联合验收分别由 [#268](https://github.com/worktools/unionid/issues/268) 与 [#269](https://github.com/worktools/unionid/issues/269) 跟踪，最新版本分工见[路线图](../ROADMAP.md)。评估完成后 #267 又合并了 TCP/async SDK 首个切片，#242 剩余范围仍开放；下文代码探针保留原基线证据。
+
 ### 1. 判断：核心技术命题已经得到验证，应用采用的命题仍待验证
 
 unionid 已经证明，有限 ADT 可以成为数据库的共同数据模型，并贯穿声明、参数绑定、查询构造与解构、索引、事务、持久化和 schema 演进。这比“把 enum 序列化后存起来”前进了很大一步。
@@ -145,9 +147,9 @@ Rust 主导的嵌入式项目可选择 Rust derive 为权威来源；多语言�
 | C | 用有界关联读与 migration 完成一个中等复杂场景 | 继续 #241、#243 | 引用缺失以 option 表达、索引计划明确；一次新增 variant + 字段变换 + 索引变更完成预演与恢复 |
 | D | 冻结跨语言契约，接入一个真实第二语言调用方 | #192 继续按需求进入；先完成规范与测试向量 | 核心 ADT、极值标量、嵌套 option、错误和两版应用演进逐项一致 |
 
-上述顺序是本次建议，新增设计项不自动变成 v0.3 的发布门槛。修复现有正确性问题优先于扩张承诺。
+上述顺序已进入版本计划：先完成 v0.3 接入质量，再完成 v0.4 查询绑定与互通契约。修复现有正确性问题优先于扩张承诺。
 
-本次已建立独立跟踪：[#262 依赖顺序](https://github.com/worktools/unionid/issues/262)、[#263 Rust 映射保真](https://github.com/worktools/unionid/issues/263)、[#264 查询文件绑定](https://github.com/worktools/unionid/issues/264)、[#265 可移植契约与客户端演进](https://github.com/worktools/unionid/issues/265)。#262/#263 跟进 v0.3 的现有 Rust 接入质量；#264/#265 为未指定发布里程碑的设计提案。它们不关闭或替代 #241–#243、#118、#120、#192。
+本次已建立独立跟踪：[#262 依赖顺序](https://github.com/worktools/unionid/issues/262)、[#263 Rust 映射保真](https://github.com/worktools/unionid/issues/263)、[#264 查询文件绑定](https://github.com/worktools/unionid/issues/264)、[#265 可移植契约与客户端演进](https://github.com/worktools/unionid/issues/265)。#262/#263 跟进 v0.3 的现有 Rust 接入质量；#264/#265 已纳入 v0.4.0，由 #269 联合验收。它们不关闭或替代 #241–#243、#118、#120、#192。
 
 泛型/互递归 #118、开放 map/JSON #246、表达式/部分索引 #248 应由具体模型推动。泛型可先评估有限实例化的 `Result<T,E>` 等常见数据模板；typed map 可以先于任意开放对象。只有实际 `filter match` 计划显示出必要性时，再据 #248 增加 variant/payload 的索引策略。子查询、窗口、分布式和 >100k 架构继续保留各自需求门槛。
 
@@ -160,6 +162,8 @@ Rust 主导的嵌入式项目可选择 Rust derive 为权威来源；多语言�
 建议的采用验收不是“又支持几个类型”，而是：模型只改一次；查询结果不手写同步；错误能在生成阶段定位；正常接入不手写 wire 编解码；一次真实升级有完整文档和可执行验证。随后观察独立使用者能否在没有维护者带领的情况下完成教程和变更。如果收益始终只停留在类型定义更漂亮，就应收缩表达力扩张，把精力投向绑定、工具和明确的应用场景。
 
 ## English Description
+
+Planning update: after user confirmation, #262/#263 target v0.3.0 and #264/#265 target v0.4.0, with joint acceptance in #268 and #269. ROADMAP records current assignments. #267 subsequently delivered the first TCP/async SDK slice while #242 remains open for its remaining scope. The code probes below retain their original baseline.
 
 ### Assessment
 
@@ -181,6 +185,6 @@ Official SpacetimeDB, DuckDB, Gel, Convex, SQLx, Irmin, WIT, and Protobuf docume
 
 Use one authoritative model source per application, generate the other representations, and expose a versioned description of existing type/query metadata. Preserve options, scalar precision, and domain identities; diagnose unsupported mappings. Keep data, query, client-read, and client-write compatibility separate. Start with Rust and one demand-driven second-language integration under #192 rather than promising many SDKs. This does not reopen historical compatibility commitments.
 
-Follow-ups are tracked in #262 (dependency order), #263 (Rust mapping fidelity), #264 (query-file bindings), and #265 (portable contracts and client evolution). The first two follow existing v0.3 integration quality; the latter two are design proposals without a release milestone. Existing issues remain independent.
+Follow-ups are tracked in #262 (dependency order), #263 (Rust mapping fidelity), #264 (query-file bindings), and #265 (portable contracts and client evolution). The first two follow existing v0.3 integration quality; the latter two now target v0.4.0 with joint acceptance in #269. Existing issues remain independent.
 
 Validate adoption with a real application and a fair SQLite + SQLx comparison: initial integration steps, manual conversion code, files changed during evolution, when mistakes are detected, and representative latency/memory. New proposals do not automatically become v0.3 release gates. Current implementation status remains in GitHub issues.
