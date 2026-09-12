@@ -1815,6 +1815,7 @@ impl Engine {
         let mut pending = Vec::new();
         for file in &files[applied_count..] {
             let before = candidate.schema_info();
+            let before_db = candidate.clone();
             candidate
                 .execute(Statement::Migration {
                     name: file.id.clone(),
@@ -1825,6 +1826,11 @@ impl Engine {
             candidate.advance_schema_revision()?;
             let after = candidate.schema_info();
             let operations = file.steps.iter().map(describe_step).collect::<Vec<_>>();
+            let impacts = crate::schema::changed_type_impacts(
+                self.committed.db.as_ref(),
+                &before_db,
+                &candidate,
+            );
             pending.push(MigrationPlanItem {
                 id: file.id.clone(),
                 parent: file.parent.clone(),
@@ -1836,6 +1842,7 @@ impl Engine {
                     .map(|(description, _)| description.clone())
                     .collect(),
                 destructive: operations.iter().any(|(_, destructive)| *destructive),
+                impacts,
             });
             candidate.append_migration(MigrationEntry {
                 id: file.id.clone(),
