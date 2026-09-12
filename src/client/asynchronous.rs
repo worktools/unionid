@@ -130,8 +130,7 @@ impl AsyncTcpClient {
             request: request.clone(),
         };
         write_json_line_until(&mut stream, &command, deadline).await?;
-        let first =
-            read_line_until(&mut stream, stream_protocol::MAX_FRAME_BYTES, deadline).await?;
+        let first = read_stream_frame_until(&mut stream, deadline).await?;
         let emitted_bytes = first.len().saturating_add(1);
         let frame = match serde_json::from_slice::<Frame>(&first) {
             Ok(frame) => frame,
@@ -212,29 +211,26 @@ impl AsyncTcpClient {
         request: &Request,
         deadline: Instant,
     ) -> Result<Response> {
-        if connection.is_none() {
-            *connection = Some(connect_until(&self.address, deadline).await?);
-        }
         let encoded = serde_json::to_vec(request)
             .map_err(|error| Error::new("E_PROTOCOL", format!("encode request: {error}")))?;
+        let mut stream = match connection.take() {
+            Some(stream) => stream,
+            None => connect_until(&self.address, deadline).await?,
+        };
         let result = async {
-            let stream = connection.as_mut().expect("connection was established");
-            write_line(stream, &encoded).await?;
-            let line = read_line(stream, MAX_RESPONSE_BYTES).await?;
+            write_line(&mut stream, &encoded).await?;
+            let line = read_line(&mut stream, MAX_RESPONSE_BYTES).await?;
             let response = serde_json::from_slice(&line)
                 .map_err(|error| Error::new("E_PROTOCOL", format!("decode response: {error}")))?;
             validate_response(request, response)
         };
         match timeout_at(deadline, result).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(error)) => {
-                connection.take();
-                Err(error)
+            Ok(Ok(response)) => {
+                *connection = Some(stream);
+                Ok(response)
             }
-            Err(_) => {
-                connection.take();
-                Err(deadline_error("complete the TCP request"))
-            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(deadline_error("complete the TCP request")),
         }
     }
 
@@ -273,12 +269,7 @@ impl AsyncTcpStream {
         if self.validator.terminal() {
             return Ok(None);
         }
-        let encoded = read_line_until(
-            &mut self.stream,
-            stream_protocol::MAX_FRAME_BYTES,
-            self.deadline,
-        )
-        .await?;
+        let encoded = read_stream_frame_until(&mut self.stream, self.deadline).await?;
         self.emitted_bytes = self
             .emitted_bytes
             .saturating_add(encoded.len().saturating_add(1));
@@ -346,6 +337,21 @@ async fn read_line_until(
     timeout_at(deadline, read_line(stream, limit))
         .await
         .map_err(|_| deadline_error("read the TCP response"))?
+}
+
+async fn read_stream_frame_until(
+    stream: &mut BufStream<TcpStream>,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    read_line_until(stream, stream_protocol::MAX_FRAME_BYTES, deadline)
+        .await
+        .map_err(|error| {
+            if error.code == "E_LIMIT" {
+                Error::new("E_STREAM_LIMIT", "stream frame exceeds the byte limit")
+            } else {
+                error
+            }
+        })
 }
 
 async fn read_line(stream: &mut BufStream<TcpStream>, limit: usize) -> Result<Vec<u8>> {

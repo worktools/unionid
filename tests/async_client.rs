@@ -217,6 +217,42 @@ async fn async_tcp_client_applies_one_deadline_to_the_request() {
 }
 
 #[tokio::test]
+async fn cancelling_a_request_future_discards_its_partially_consumed_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let mut engine = Engine::memory();
+    assert!(engine.execute(schema()).ok);
+    let engine = ConcurrentEngine::new(engine);
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+    let worker = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        let first_request = read_request(&mut first);
+        let first_response = engine.execute_protocol_request(first_request);
+        seen_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = serde_json::to_writer(&mut first, &first_response);
+        let _ = first.write_all(b"\n");
+
+        let (mut second, _) = listener.accept().unwrap();
+        let second_request = read_request(&mut second);
+        let second_response = engine.execute_protocol_request(second_request);
+        serde_json::to_writer(&mut second, &second_response).unwrap();
+        second.write_all(b"\n").unwrap();
+    });
+    let client = AsyncTcpClient::connect(address).await.unwrap();
+    let pending_client = client.clone();
+    let pending =
+        tokio::spawn(async move { pending_client.query("cancelled-request", "from jobs").await });
+    seen_rx.await.unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+
+    let healthy = client.query("healthy-request", "from jobs").await.unwrap();
+    assert!(healthy.ok, "{}", healthy.message);
+    worker.join().unwrap();
+}
+
+#[tokio::test]
 async fn async_tcp_client_requires_a_key_for_automatic_retry() {
     let server = Server::start(&[]);
     let client = AsyncTcpClient::connect(server.addr.clone()).await.unwrap();

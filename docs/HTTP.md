@@ -97,7 +97,7 @@ while let Some(event) = stream.next_event::<Todo>().await? {
         TypedStreamEvent::Row { row, .. } => consume(row),
         TypedStreamEvent::Complete { .. } => break,
         TypedStreamEvent::Error { error, .. } => return Err(error),
-        TypedStreamEvent::Schema { .. } => {}
+        TypedStreamEvent::Schema { .. } => {},
     }
 }
 let outcome = client.cancel("cancel-check", operation_id).await?;
@@ -157,8 +157,11 @@ let rows = client.request(&request).await?.typed_rows::<Todo>()?;
 let mut stream = client.stream(&request).await?;
 let operation_id = stream.operation_id().to_owned();
 while let Some(event) = stream.next_event::<Todo>().await? {
-    if let TypedStreamEvent::Row { row, .. } = event {
-        consume(row)
+    match event {
+        TypedStreamEvent::Schema { .. } => {}
+        TypedStreamEvent::Row { row, .. } => consume(row),
+        TypedStreamEvent::Complete { .. } => break,
+        TypedStreamEvent::Error { error, .. } => return Err(error),
     }
 }
 let terminal = client.cancel("cancel-check", operation_id).await?;
