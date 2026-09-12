@@ -10,7 +10,10 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use unionid::asynchronous;
 use unionid::asynchronous::http::{self, Config};
-use unionid::{ConcurrentEngine, Engine, HttpClient, PageSpec, ProtocolRequest};
+use unionid::{
+    CancelStatus, ConcurrentEngine, Engine, HttpClient, OperationOutcome, PageSpec,
+    ProtocolRequest, TypedStreamEvent,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Item {
@@ -96,6 +99,86 @@ async fn typed_http_client_reuses_the_official_adapter_and_continues_pages() {
     assert_eq!(page_request.request_id, "page-1");
     assert_eq!(page_request.page, Some(PageSpec::forward(2)));
 
+    let stream_request = ProtocolRequest::query("stream-items", "from items\nsort id");
+    let mut stream = client.stream(&stream_request).await.unwrap();
+    assert_eq!(stream.request_id(), "stream-items");
+    let operation_id = stream.operation_id().to_owned();
+    assert!(!operation_id.is_empty());
+    let mut streamed = Vec::new();
+    let mut saw_schema = false;
+    let mut saw_complete = false;
+    while let Some(event) = stream.next_event::<Item>().await.unwrap() {
+        match event {
+            TypedStreamEvent::Schema { columns, .. } => {
+                assert!(!saw_schema);
+                assert_eq!(columns.len(), 2);
+                saw_schema = true;
+            }
+            TypedStreamEvent::Row { row, .. } => {
+                assert!(saw_schema);
+                streamed.push(row);
+            }
+            TypedStreamEvent::Complete { row_count, .. } => {
+                assert_eq!(row_count, "3");
+                saw_complete = true;
+            }
+            TypedStreamEvent::Error { error, .. } => panic!("unexpected stream error: {error}"),
+        }
+    }
+    assert_eq!(streamed, values);
+    assert!(saw_complete);
+    let cancelled = client
+        .cancel("cancel-terminal", operation_id)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.result.status, CancelStatus::AlreadyTerminal);
+    assert_eq!(cancelled.result.outcome, Some(OperationOutcome::Completed));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn typed_http_stream_returns_pre_acceptance_engine_errors() {
+    let app = http::router(ConcurrentEngine::new(Engine::memory()), Config::default());
+    let (base_url, server) = serve(app).await;
+    let client = HttpClient::connect(base_url).unwrap();
+    let error = client
+        .stream(&ProtocolRequest::query("mutation-stream", schema()))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code, "E_STREAM_SHAPE");
+    server.abort();
+}
+
+async fn row_before_schema() -> axum::response::Response {
+    let body = concat!(
+        "{\"frame\":\"accepted\",\"stream_version\":1,\"request_id\":\"invalid-stream\",",
+        "\"operation_id\":\"o1.invalid\"}\n",
+        "{\"frame\":\"row\",\"stream_version\":1,\"request_id\":\"invalid-stream\",",
+        "\"operation_id\":\"o1.invalid\",\"sequence\":\"0\",\"row\":{}}\n"
+    );
+    (
+        [
+            ("content-type", "application/x-ndjson"),
+            ("x-unionid-operation-id", "o1.invalid"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+#[tokio::test]
+async fn typed_http_stream_rejects_invalid_frame_order() {
+    let app = Router::new().route(http::STREAM_PATH, post(row_before_schema));
+    let (base_url, server) = serve(app).await;
+    let client = HttpClient::connect(base_url).unwrap();
+    let mut stream = client
+        .stream(&ProtocolRequest::query("invalid-stream", "from items"))
+        .await
+        .unwrap();
+    let error = stream.next_frame().await.unwrap_err();
+    assert_eq!(error.code, "E_PROTOCOL");
     server.abort();
 }
 

@@ -513,24 +513,7 @@ impl Response {
         self.rows
             .iter()
             .enumerate()
-            .map(|(index, row)| {
-                let fields = row
-                    .iter()
-                    .map(|(name, value)| {
-                        Value::try_from(value.clone()).map(|value| (name.clone(), value))
-                    })
-                    .collect::<Result<BTreeMap<_, _>, _>>()?;
-                Value::Record(fields).to_serde().map_err(|error| {
-                    Error::new(
-                        error.code.as_str(),
-                        format!(
-                            "decode protocol result row {}: {}",
-                            index + 1,
-                            error.message
-                        ),
-                    )
-                })
-            })
+            .map(|(index, row)| decode_typed_row(self.version, row, index + 1))
             .collect()
     }
 
@@ -634,4 +617,27 @@ impl Response {
         response.schema = Some(schema);
         Self::from_query(request_id, response)
     }
+}
+
+pub(crate) fn decode_typed_row<T: serde::de::DeserializeOwned>(
+    version: u32,
+    row: &BTreeMap<String, WireValue>,
+    index: usize,
+) -> Result<T, Error> {
+    if version == VERSION && row.values().any(WireValue::requires_v2) {
+        return Err(Error::new(
+            "E_PROTOCOL_TYPE",
+            "production scalar rows require protocol version 2",
+        ));
+    }
+    let fields = row
+        .iter()
+        .map(|(name, value)| Value::try_from(value.clone()).map(|value| (name.clone(), value)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    Value::Record(fields).to_serde().map_err(|error| {
+        Error::new(
+            error.code.as_str(),
+            format!("decode protocol result row {index}: {}", error.message),
+        )
+    })
 }
