@@ -38,9 +38,20 @@
 
 ### 5. 后续
 
-- 反向 Rust → DDL（proc-macro 或 codegen），让 Rust 类型成为单一来源。
 - 从 catalog 生成类型时保留稳定 ID 与 migration 兼容提示。
 - 多语言 typed client 生成（与 [#192](https://github.com/worktools/unionid/issues/192) 协同）。
+- 反向 derive 的属性扩展：字段默认值、table/index 名称、是否唯一等更细粒度声明。
+
+### 6. 反向：Rust → DDL（已实现）
+
+`unionid-derive` 提供 `#[derive(UnionidSchema)]`，把 Rust struct/enum 映射为 unionid `type` 声明，并用 `#[unionid(table = "...", key = "...")]` 生成 `table` 声明。生成代码实现 `unionid::UnionidSchema`，通过 `unionid::SchemaBuilder` 汇总为可直接执行的 schema 脚本。
+
+- 类型映射：`i64/i32→int`、`f64/f32→float`、`bool→bool`、`String/&'static str→text`、`Uuid/Date/Timestamp/Duration/Bytes→uuid/date/timestamp/duration/bytes`、`Decimal` 需 `#[unionid(decimal = "P S")]`；`Option<T>→option (T)`、`Vec<T>→list (T)`、`Box<T>→T`、tuple 与嵌套命名类型按名引用。
+- record struct → `type Name = { field type, ... }`；enum 的 unit / 单字段 / 多字段 / record variant 分别生成 `Variant`、`Variant ty`、`Variant (a, b)`、`Variant { field type }`。
+- 泛型类型与 union 明确拒绝；匿名 tuple struct 不是 record，报错。
+- 该 crate 与核心 `unionid` 解耦（`unionid` 不依赖 `unionid-derive`），应用同时声明两个依赖；避免影响 `unionid` 的 crates.io 发布契约。发布工作流会先校验并发布 `unionid-derive`。
+
+方向取舍：schema → Rust 与 Rust → schema 并存，但**每个项目只选一个单一来源**，另一端用生成器保持同步；不做双向自动合并。
 
 ## English Description
 
@@ -76,6 +87,17 @@ Codegen first because it needs no crate-structure change, is testable without ma
 
 ### 5. Follow-up
 
-- Reverse Rust -> DDL (proc-macro or codegen) so Rust types are the single source.
 - Preserve stable IDs and migration-compatibility hints when generating from a catalog.
 - Multi-language typed client generation (coordinate with [#192](https://github.com/worktools/unionid/issues/192)).
+- Extend the reverse derive attributes: field defaults, custom table/index names, and uniqueness.
+
+### 6. Reverse: Rust -> DDL (implemented)
+
+`unionid-derive` provides `#[derive(UnionidSchema)]`, mapping a Rust struct/enum to a unionid `type` declaration and, with `#[unionid(table = "...", key = "...")]`, a `table` declaration. The generated code implements `unionid::UnionidSchema`, and `unionid::SchemaBuilder` collects declarations into an executable schema script.
+
+- Type mapping: `i64/i32->int`, `f64/f32->float`, `bool->bool`, `String/&'static str->text`, `Uuid/Date/Timestamp/Duration/Bytes->uuid/date/timestamp/duration/bytes`, `Decimal` requires `#[unionid(decimal = "P S")]`; `Option<T>->option (T)`, `Vec<T>->list (T)`, `Box<T>->T`, tuples and nested named types by name.
+- Record structs become `type Name = { field type, ... }`; enum unit / single-field / multi-field / record variants become `Variant`, `Variant ty`, `Variant (a, b)`, and `Variant { field type }`.
+- Generic types and unions are rejected; anonymous tuple structs are not records and error.
+- The crate stays decoupled from core `unionid` (no dependency from `unionid` to `unionid-derive`); applications depend on both, keeping `unionid`'s crates.io release contract unchanged. The release workflow verifies and publishes `unionid-derive`.
+
+Direction tradeoff: schema -> Rust and Rust -> schema coexist, but each project picks exactly one single source and keeps the other side generated; no bidirectional auto-merge.

@@ -66,6 +66,7 @@ pub use protocol::{
 };
 pub use query::{PageDirection, PageSpec};
 pub use schema::{
-    SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation, SchemaDiffTableImpact,
+    SchemaBuilder, SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation,
+    SchemaDiffTableImpact, UnionidSchema,
 };
 pub use syntax::{InputStatus, input_status};

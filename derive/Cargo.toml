@@ -1,0 +1,23 @@
+[package]
+name = "unionid-derive"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Derive unionid schema declarations from Rust types"
+license = "MIT"
+repository = "https://github.com/worktools/unionid"
+homepage = "https://github.com/worktools/unionid"
+documentation = "https://docs.rs/unionid-derive"
+keywords = ["database", "adt", "derive", "unionid"]
+categories = ["database"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+unionid = { path = "..", version = "0.2.0" }
