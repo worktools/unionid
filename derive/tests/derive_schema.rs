@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use unionid::scalars::{Bytes, Date, Decimal, Duration, Timestamp, Uuid};
-use unionid::{Engine, SchemaBuilder, Value};
+use unionid::{Engine, QueryAccessKind, SchemaBuilder, Value};
 use unionid_derive::UnionidSchema;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
@@ -50,6 +50,41 @@ struct PricedItem {
     id: i64,
     #[unionid(decimal = "5 2")]
     amount: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
+enum QueuePayload {
+    Sync { source: String, target: String },
+    Webhook { url: String, body: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
+enum QueueState {
+    Queued {
+        #[unionid(default = "0")]
+        attempt: i64,
+    },
+    Running {
+        worker: String,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
+#[unionid(table = "queue_jobs", key = "id")]
+struct QueueJob {
+    id: String,
+    #[unionid(unique)]
+    external_id: String,
+    #[unionid(default = "0")]
+    priority: i64,
+    #[unionid(default = "[]")]
+    tags: Vec<String>,
+    payload: QueuePayload,
+    #[unionid(index)]
+    state: QueueState,
 }
 
 fn schema() -> String {
@@ -129,6 +164,101 @@ fn decimal_precision_is_enforced_by_the_schema_boundary() {
     );
     assert!(!response.ok);
     assert_eq!(response.error.unwrap().code, "E_DECIMAL_RANGE");
+}
+
+#[test]
+fn real_job_queue_model_preserves_defaults_indexes_and_typed_values() {
+    let source = SchemaBuilder::new()
+        // Deliberately register the row first: dependency ordering still makes
+        // this source executable.
+        .add::<QueueJob>()
+        .unwrap()
+        .add::<QueueState>()
+        .unwrap()
+        .add::<QueuePayload>()
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(source.contains("attempt int = 0"), "{source}");
+    assert!(source.contains("priority int = 0"), "{source}");
+    assert!(source.contains("tags list (text) = []"), "{source}");
+    assert!(
+        source.contains("create unique index queue_jobs (external_id)"),
+        "{source}"
+    );
+    assert!(
+        source.contains("create index queue_jobs (state)"),
+        "{source}"
+    );
+
+    let mut engine = Engine::memory();
+    let created = engine.execute(&source);
+    assert!(created.ok, "{}", created.message);
+
+    // Schema defaults belong to insert input semantics. The full Rust row still
+    // contains every field after the database fills omitted values.
+    let inserted = engine.execute(
+        r#"insert queue_jobs {
+  id = "job-1",
+  external_id = "incoming-1",
+  payload = Sync {source = "inbox", target = "archive"},
+  state = Queued {},
+}
+returning"#,
+    );
+    assert!(inserted.ok, "{}", inserted.message);
+    assert_eq!(
+        inserted.typed_rows::<QueueJob>().unwrap(),
+        [QueueJob {
+            id: "job-1".into(),
+            external_id: "incoming-1".into(),
+            priority: 0,
+            tags: Vec::new(),
+            payload: QueuePayload::Sync {
+                source: "inbox".into(),
+                target: "archive".into(),
+            },
+            state: QueueState::Queued { attempt: 0 },
+        }]
+    );
+
+    let job = QueueJob {
+        id: "job-2".into(),
+        external_id: "incoming-2".into(),
+        priority: 20,
+        tags: vec!["webhook".into(), "urgent".into()],
+        payload: QueuePayload::Webhook {
+            url: "https://example.test/hook".into(),
+            body: "{}".into(),
+        },
+        state: QueueState::Running {
+            worker: "worker-1".into(),
+        },
+    };
+    let insert = engine.prepare("insert queue_jobs $job\nreturning").unwrap();
+    let response = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([("job".into(), Value::from_serde(&job).unwrap())]),
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.typed_rows::<QueueJob>().unwrap(), [job]);
+
+    let plan = engine
+        .execute(r#"explain from queue_jobs | filter external_id == "incoming-2""#)
+        .plan
+        .unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::SecondaryIndexLookup);
+
+    let duplicate = engine.execute(
+        r#"insert queue_jobs {
+  id = "job-3",
+  external_id = "incoming-2",
+  payload = Sync {source = "a", target = "b"},
+  state = Failed {reason = "duplicate"},
+}"#,
+    );
+    assert!(!duplicate.ok);
+    assert_eq!(duplicate.error.unwrap().code, "E_CONSTRAINT");
 }
 
 #[test]
@@ -328,6 +458,35 @@ fn build_rejects_mutually_recursive_types() {
     assert!(error.message.contains("recursive"), "{}", error.message);
 }
 
+#[derive(UnionidSchema)]
+struct InvalidDefault {
+    #[unionid(default = "Some(")]
+    value: Option<i64>,
+}
+
+#[derive(UnionidSchema)]
+struct InvalidTypedDefault {
+    #[unionid(default = "\"not an int\"")]
+    value: i64,
+}
+
+#[test]
+fn build_validates_generated_default_expressions() {
+    let error = SchemaBuilder::new()
+        .add::<InvalidDefault>()
+        .unwrap()
+        .build()
+        .unwrap_err();
+    assert_eq!(error.code, "E_SYNTAX");
+
+    let error = SchemaBuilder::new()
+        .add::<InvalidTypedDefault>()
+        .unwrap()
+        .build()
+        .unwrap_err();
+    assert_eq!(error.code, "E_TYPE");
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, UnionidSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE", rename_all_fields = "camelCase")]
 enum RenamedState {
@@ -348,6 +507,7 @@ struct RenamedJob {
     display_name: String,
     #[serde(rename = "externalCode")]
     external_code: String,
+    #[unionid(index)]
     current_state: RenamedState,
 }
 
@@ -370,6 +530,10 @@ fn serde_renames_define_the_schema_and_primary_key_names() {
     assert!(source.contains("externalCode text"), "{source}");
     assert!(source.contains("currentState RenamedState"), "{source}");
     assert!(source.contains("key jobId"), "{source}");
+    assert!(
+        source.contains("create index renamed_jobs (currentState)"),
+        "{source}"
+    );
 
     let row = RenamedJob {
         job_id: 7,

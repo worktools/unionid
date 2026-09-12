@@ -2,8 +2,9 @@
 //!
 //! `#[derive(UnionidSchema)]` maps a Rust struct or enum to a unionid `type`
 //! declaration and, when `#[unionid(table = "...", key = "...")]` is present, a
-//! `table` declaration. The generated code implements `unionid::UnionidSchema`
-//! so declarations can be collected with `unionid::SchemaBuilder`.
+//! `table` declaration. Field attributes can declare schema defaults and simple
+//! indexes. The generated code implements `unionid::UnionidSchema` so
+//! declarations can be collected and validated with `unionid::SchemaBuilder`.
 
 use std::collections::BTreeSet;
 
@@ -63,6 +64,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let type_name = input.ident.to_string();
     let mut dependencies = BTreeSet::new();
     let mut table_key = None;
+    let mut indexes = Vec::new();
     let type_ddl = match &input.data {
         Data::Struct(data) => {
             let fields = named_fields(&data.fields, "unionid records require named fields")?;
@@ -75,8 +77,40 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 if options.key.as_deref() == Some(rust_name.as_str()) {
                     table_key = Some(name.clone());
                 }
-                let ty = field_type(&field.ty, &field.attrs, &mut dependencies)?;
-                lines.push(format!("  {name} {ty},"));
+                let field_options = field_options(&field.attrs)?;
+                if (field_options.index || field_options.unique) && options.table.is_none() {
+                    return Err(syn::Error::new(
+                        field.span(),
+                        "unionid index attributes require the record to declare a table",
+                    ));
+                }
+                if field_options.index && field_options.unique {
+                    return Err(syn::Error::new(
+                        field.span(),
+                        "a field cannot declare both `index` and `unique`",
+                    ));
+                }
+                if options.key.as_deref() == Some(rust_name.as_str())
+                    && (field_options.index || field_options.unique)
+                {
+                    return Err(syn::Error::new(
+                        field.span(),
+                        "the table key is already indexed and cannot declare `index` or `unique`",
+                    ));
+                }
+                if field_options.index || field_options.unique {
+                    indexes.push((field_options.unique, name.clone()));
+                }
+                let ty = type_ddl(
+                    &field.ty,
+                    field_options.decimal.as_deref(),
+                    &mut dependencies,
+                )?;
+                let default = field_options
+                    .default
+                    .as_ref()
+                    .map_or(String::new(), |value| format!(" = {value}"));
+                lines.push(format!("  {name} {ty}{default},"));
             }
             format!("type {type_name} = {{\n{}\n}}", lines.join("\n"))
         }
@@ -110,8 +144,18 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                                 field.span(),
                                 "variant field",
                             )?;
-                            let ty = field_type(&field.ty, &field.attrs, &mut dependencies)?;
-                            inner.push(format!("{field_name} {ty}"));
+                            let field_options = field_options(&field.attrs)?;
+                            reject_index_options(&field_options, field.span())?;
+                            let ty = type_ddl(
+                                &field.ty,
+                                field_options.decimal.as_deref(),
+                                &mut dependencies,
+                            )?;
+                            let default = field_options
+                                .default
+                                .as_ref()
+                                .map_or(String::new(), |value| format!(" = {value}"));
+                            inner.push(format!("{field_name} {ty}{default}"));
                         }
                         format!("{name} {{{}}}", inner.join(", "))
                     }
@@ -119,7 +163,19 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         let mut rendered = Vec::new();
                         for field in &fields.unnamed {
                             reject_unnamed_field_serde_shape(&field.attrs)?;
-                            rendered.push(field_type(&field.ty, &field.attrs, &mut dependencies)?);
+                            let field_options = field_options(&field.attrs)?;
+                            reject_index_options(&field_options, field.span())?;
+                            if field_options.default.is_some() {
+                                return Err(syn::Error::new(
+                                    field.span(),
+                                    "unionid defaults require a named record field",
+                                ));
+                            }
+                            rendered.push(type_ddl(
+                                &field.ty,
+                                field_options.decimal.as_deref(),
+                                &mut dependencies,
+                            )?);
                         }
                         if rendered.len() == 1 {
                             format!("{name} {}", rendered[0])
@@ -176,6 +232,15 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         None => quote!(::core::option::Option::None),
     };
     let ident = &input.ident;
+    let index_ddls = indexes.iter().map(|(unique, field)| {
+        let table = options.table.as_deref().expect("indexes require a table");
+        let kind = if *unique {
+            "create unique index"
+        } else {
+            "create index"
+        };
+        LitStr::new(&format!("{kind} {table} ({field})"), Span::call_site())
+    });
     let dependency_lits = dependencies
         .iter()
         .map(|name| LitStr::new(name, Span::call_site()));
@@ -197,6 +262,10 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
             fn unionid_table_ddl() -> ::core::option::Option<::std::string::String> {
                 #table_ddl
+            }
+
+            fn unionid_index_ddls() -> ::std::vec::Vec<::std::string::String> {
+                ::std::vec![#(::std::string::String::from(#index_ddls)),*]
             }
         }
     })
@@ -618,31 +687,62 @@ fn named_fields<'a>(
     }
 }
 
-fn field_type(
-    ty: &Type,
-    attrs: &[Attribute],
-    dependencies: &mut BTreeSet<String>,
-) -> syn::Result<String> {
-    let decimal = decimal_attribute(attrs)?;
-    type_ddl(ty, decimal.as_deref(), dependencies)
+#[derive(Debug, Default)]
+struct FieldOptions {
+    decimal: Option<String>,
+    default: Option<String>,
+    index: bool,
+    unique: bool,
 }
 
-fn decimal_attribute(attrs: &[Attribute]) -> syn::Result<Option<String>> {
-    let mut decimal = None;
+fn field_options(attrs: &[Attribute]) -> syn::Result<FieldOptions> {
+    let mut options = FieldOptions::default();
     for attr in attrs {
         if !attr.path().is_ident("unionid") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("decimal") {
-                decimal = Some(meta.value()?.parse::<LitStr>()?.value());
+                if options.decimal.is_some() {
+                    return Err(meta.error("duplicate unionid `decimal` attribute"));
+                }
+                options.decimal = Some(meta.value()?.parse::<LitStr>()?.value());
+                Ok(())
+            } else if meta.path.is_ident("default") {
+                if options.default.is_some() {
+                    return Err(meta.error("duplicate unionid `default` attribute"));
+                }
+                let value = meta.value()?.parse::<LitStr>()?.value();
+                if value.trim().is_empty() || value.contains('\n') || value.contains('\r') {
+                    return Err(meta.error("unionid default must be a non-empty single-line expression"));
+                }
+                options.default = Some(value);
+                Ok(())
+            } else if meta.path.is_ident("index") {
+                options.index = true;
+                Ok(())
+            } else if meta.path.is_ident("unique") {
+                options.unique = true;
                 Ok(())
             } else {
-                Err(meta.error("unknown unionid field attribute; expected `decimal`"))
+                Err(meta.error(
+                    "unknown unionid field attribute; expected `decimal`, `default`, `index`, or `unique`",
+                ))
             }
         })?;
     }
-    Ok(decimal)
+    Ok(options)
+}
+
+fn reject_index_options(options: &FieldOptions, span: Span) -> syn::Result<()> {
+    if options.index || options.unique {
+        Err(syn::Error::new(
+            span,
+            "unionid index attributes are supported only on top-level table fields",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn type_ddl(
@@ -830,6 +930,46 @@ mod tests {
         }
         let source = "struct T { #[unionid(decimal = \"12 2\")] amount: Decimal }";
         assert!(expand_str(source).is_ok());
+    }
+
+    #[test]
+    fn emits_defaults_and_table_indexes() {
+        let expanded = expand_str(
+            r#"#[unionid(table = "jobs", key = "id")]
+struct Job {
+    id: i64,
+    #[unionid(unique)] external_id: String,
+    #[unionid(default = "0")] priority: i64,
+    #[unionid(default = "[]", index)] tags: Vec<String>,
+}"#,
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("priority int = 0"), "{expanded}");
+        assert!(expanded.contains("tags list (text) = []"), "{expanded}");
+        assert!(expanded.contains("create unique index jobs (external_id)"));
+        assert!(expanded.contains("create index jobs (tags)"));
+    }
+
+    #[test]
+    fn rejects_indexes_without_a_table_or_with_conflicting_kinds() {
+        let no_table = expand_str("struct T { #[unionid(index)] value: i64 }").unwrap_err();
+        assert!(no_table.to_string().contains("declare a table"));
+
+        let conflict = expand_str(
+            "#[unionid(table = \"rows\")] struct T { #[unionid(index, unique)] value: i64 }",
+        )
+        .unwrap_err();
+        assert!(conflict.to_string().contains("both `index` and `unique`"));
+
+        let nested = expand_str("enum T { A { #[unionid(index)] value: i64 } }").unwrap_err();
+        assert!(nested.to_string().contains("top-level table fields"));
+
+        let key_index = expand_str(
+            "#[unionid(table = \"rows\", key = \"id\")] struct T { #[unionid(index)] id: i64 }",
+        )
+        .unwrap_err();
+        assert!(key_index.to_string().contains("already indexed"));
     }
 
     #[test]

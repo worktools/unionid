@@ -115,6 +115,8 @@ cargo run --locked --example getting_started -- /tmp/unionid-embedded.redb
 
 Rust API、本地 CLI 和 TCP 在同一 schema 下返回相同的 typed rows、列和 schema identity。应用可进一步使用 `prepare`、typed parameters 和 schema 前置条件，见[版本化接口与参数](PROTOCOL.md)。
 
+若 Rust 类型是 schema 的单一来源，可同时依赖 `unionid` 与 `unionid-derive`，为 struct/enum 派生 `UnionidSchema`，再用 `SchemaBuilder` 产生可执行 schema。`#[unionid(table = "jobs", key = "id")]` 声明表；字段上的 `default = "0"`、`index` 和 `unique` 分别声明数据库默认值、单字段索引和唯一索引。`build()` 会检查依赖顺序和完整 schema，避免把错误推迟到服务启动。默认值只允许 insert 省略字段；读取和 `typed_rows` 使用的 Rust row 仍包含完整字段。详细支持矩阵见 [Rust schema bindings RFC](rfc/0012-schema-rust-bindings.md)。
+
 冷热分离的 Rust 持久化示例见 [应用数据边界](APPLICATION_DATA.md)：摘要与 ADT 正文原子写入，摘要有界读取，正文按需获取并携带实际版本。
 
 ## 自动验证整段教程
@@ -134,5 +136,7 @@ python3 tutorial/validate.py \
 The four files under `tutorial/` form one executable five-minute journey. Start with `unionid version --format json`, run `01_setup.uid` against a new `--db` path, query the `Running` variant with `02_running.uid`, atomically change the pending row with `03_update.uid`, then launch a new process with `04_reopen.uid`. Finish with `unionid doctor --db tasks.redb --format json` and `unionid check --db tasks.redb`: doctor reports compatibility and schema/ledger summaries from a private copy without changing the source, while check opens and verifies the actual database. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
 
 The TCP commands above execute the same files through `unionid cli --addr`. The Rust example calls `Engine::open_redb` with those same sources. `tutorial/validate.py` runs both paths from an empty directory and compares their typed rows, columns, and schema identity.
+
+When Rust types are the schema source of truth, depend on both `unionid` and `unionid-derive`, derive `UnionidSchema` for structs and enums, and assemble an executable schema with `SchemaBuilder`. `#[unionid(table = "jobs", key = "id")]` declares a table; field-level `default = "0"`, `index`, and `unique` declare database defaults and single-field indexes. `build()` checks dependency order and validates the complete schema before startup. Defaults allow insert input to omit a field, while rows returned through `typed_rows` remain complete. See the [Rust schema bindings RFC](rfc/0012-schema-rust-bindings.md) for the support matrix.
 
 For atomic summary/content writes and on-demand versioned ADT reads, see the Rust example in [Application data boundaries](APPLICATION_DATA.md).
