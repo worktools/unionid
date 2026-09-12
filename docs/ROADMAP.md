@@ -205,7 +205,7 @@ Fix mapping/generation correctness, then complete SDK, relational-read, migratio
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
 | [#240](https://github.com/worktools/unionid/issues/240) | Schema ↔ Rust 单一来源 / single-source model generation | 已交付 / Delivered |
-| [#262](https://github.com/worktools/unionid/issues/262) | SchemaBuilder 依赖顺序 / dependency ordering | P0 |
+| [#262](https://github.com/worktools/unionid/issues/262) | SchemaBuilder 依赖顺序 / dependency ordering | 已交付 / Delivered |
 | [#263](https://github.com/worktools/unionid/issues/263) | serde、数值与领域身份映射 / representation and identity fidelity | P1 |
 | [#241](https://github.com/worktools/unionid/issues/241) | 批量取回与有界 lookup join / batch fetch and bounded lookup join | P0 |
 | [#242](https://github.com/worktools/unionid/issues/242) | 官方 async/typed SDK / official async and typed SDK | P0 |

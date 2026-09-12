@@ -57,7 +57,7 @@ unionid 已经证明，有限 ADT 可以成为数据库的共同数据模型，�
 
 直接依据：[SchemaBuilder](../../src/schema.rs)、[derive 实现](../../derive/src/lib.rs)、[Rust codegen](../../src/codegen.rs)。名义类型的数据库内部身份与 serde 边界有意分离；这里的判断是宿主侧没有完整保留领域区别，不是数据库丢失了持久 ID。字段检查和解码错误也说明当前路径是显式失败，而不是这些探针已造成静默坏数据。
 
-后续实现已经按这一证据推进：#270 修复依赖排序，#271 对齐或拒绝 serde 表示；#263 第二个切片拒绝无法覆盖数据库完整值域的窄数值 derive，把命名 scalar/tuple 生成为 Rust newtype，并明确 decimal P/S 由 schema 边界检查。模块命名、默认值和索引元数据仍需在后续契约中处理。
+后续实现已经按这一证据推进：#270 修复依赖排序，#271 对齐或拒绝 serde 表示；#263 第二个切片拒绝无法覆盖数据库完整值域的窄数值 derive，把命名 scalar/tuple 生成为 Rust newtype，并明确 decimal P/S 由 schema 边界检查。#263 最后一个切片增加 Rust-first 默认值与单字段索引元数据，让 `SchemaBuilder::build()` 校验完整生成结果，并用嵌套 job queue 模型覆盖默认补齐、typed 写读、唯一约束和索引计划。复合/嵌套索引继续由 schema-first 工作流表达；模块命名不属于表模型映射的前置。
 
 #### 4.2 查询结果类型仍是另一份模型
 
@@ -173,7 +173,7 @@ Product adoption remains unproven. Repository-owned consumer and recovery tests 
 
 ### Observed gaps
 
-An independent temporary Rust consumer reproduced five boundaries through public APIs: SchemaBuilder sorted declarations by name rather than dependency; serde camelCase renaming disagreed with derived field names; adjacently tagged enums serialized differently from the generated sum schema; an i32-derived database field accepted values that could not decode back into i32; and named scalar types generated Rust aliases that did not preserve domain-ID distinctions. #270 fixed dependency ordering and #271 aligned or rejected serde representations. The second #263 slice rejects narrow numeric derives, emits named scalar/tuple newtypes, and documents schema-bound decimal P/S enforcement. These probes used synthetic in-memory data, not existing databases or a performance benchmark.
+An independent temporary Rust consumer reproduced five boundaries through public APIs: SchemaBuilder sorted declarations by name rather than dependency; serde camelCase renaming disagreed with derived field names; adjacently tagged enums serialized differently from the generated sum schema; an i32-derived database field accepted values that could not decode back into i32; and named scalar types generated Rust aliases that did not preserve domain-ID distinctions. #270 fixed dependency ordering and #271 aligned or rejected serde representations. The second #263 slice rejects narrow numeric derives, emits named scalar/tuple newtypes, and documents schema-bound decimal P/S enforcement. The final #263 slice adds derive metadata for defaults and single-field indexes, validates the assembled schema during `SchemaBuilder::build`, and exercises a nested job-queue model through default filling, typed writes/reads, uniqueness, and indexed planning. These probes use synthetic data, not existing databases or a performance benchmark.
 
 Generated table models also do not establish query-specific parameter and result types. Successful data migration does not prove compatibility with previously built clients or exhaustive queries. ADT shape validity does not enforce business transitions or foreign-key integrity. Throttling maintenance may lower resource pressure while extending the write-blocking interval.
 

@@ -830,6 +830,12 @@ pub trait UnionidSchema {
     fn unionid_table_ddl() -> Option<String> {
         None
     }
+    /// Optional index declarations owned by this row type. Derive-generated
+    /// declarations are emitted after every table so schema phase ordering is
+    /// preserved.
+    fn unionid_index_ddls() -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -843,6 +849,7 @@ struct RegisteredType {
 pub struct SchemaBuilder {
     types: BTreeMap<String, RegisteredType>,
     tables: BTreeMap<String, String>,
+    indexes: BTreeSet<String>,
 }
 
 impl SchemaBuilder {
@@ -894,6 +901,7 @@ impl SchemaBuilder {
                 }
             }
         }
+        self.indexes.extend(T::unionid_index_ddls());
         Ok(self)
     }
 
@@ -911,6 +919,11 @@ impl SchemaBuilder {
             source.push_str(table);
             source.push('\n');
         }
+        for index in &self.indexes {
+            source.push_str(index);
+            source.push('\n');
+        }
+        check(&source)?;
         Ok(source)
     }
 
