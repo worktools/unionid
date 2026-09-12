@@ -696,8 +696,8 @@ fn path_ddl(
     let name = segment.ident.to_string();
     match &segment.arguments {
         PathArguments::None => match name.as_str() {
-            "i64" | "i32" => Ok("int".to_string()),
-            "f64" | "f32" => Ok("float".to_string()),
+            "i64" => Ok("int".to_string()),
+            "f64" => Ok("float".to_string()),
             "bool" => Ok("bool".to_string()),
             "String" | "str" => Ok("text".to_string()),
             "Uuid" => Ok("uuid".to_string()),
@@ -717,6 +717,14 @@ fn path_ddl(
                     validated_decimal(value, path.span())?
                 ))
             }
+            "i32" => Err(syn::Error::new(
+                path.span(),
+                "i32 cannot represent every unionid int; use i64 at the database boundary",
+            )),
+            "f32" => Err(syn::Error::new(
+                path.span(),
+                "f32 cannot represent every unionid float; use f64 at the database boundary",
+            )),
             "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i128" | "isize"
             | "char" => Err(syn::Error::new(
                 path.span(),
@@ -828,9 +836,21 @@ mod tests {
     fn rejects_unsupported_primitives() {
         for primitive in ["u64", "usize", "char", "i128", "u8"] {
             let source = format!("struct T {{ value: {primitive} }}");
+            let error = expand_str(&source).unwrap_err();
             assert!(
-                expand_str(&source).is_err(),
-                "{primitive} should be rejected"
+                error.to_string().contains("unsupported primitive"),
+                "unexpected error for {primitive}: {error}"
+            );
+        }
+        for (source, expected) in [
+            ("struct T { value: i32 }", "use i64"),
+            ("struct T { value: Vec<Option<i32>> }", "use i64"),
+            ("enum T { Value(f32) }", "use f64"),
+        ] {
+            let error = expand_str(source).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error for {source}: {error}"
             );
         }
     }

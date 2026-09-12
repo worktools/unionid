@@ -23,7 +23,7 @@
 
 ### 3. 语义
 
-- record → `pub struct`，字段用 `pub name: T`；`option T` → `Option<T>`，`list T` → `Vec<T>`，tuple → Rust tuple，命名 tuple 生成 `pub type`。
+- record → `pub struct`，字段用 `pub name: T`；`option T` → `Option<T>`，`list T` → `Vec<T>`，tuple → Rust tuple，命名 scalar/tuple 生成 serde-transparent tuple newtype。
 - sum → `pub enum`：unit variant、单位置负载 `Variant(T)`、record 负载 `Variant { .. }`、多位置负载 `Variant(A, B)`。
 - 直接自递归（如 `Neg Expr`）在 Rust 需要间接层，生成 `Box<T>`；经 `list` 的递归由 `Vec` 已经间接，不再 box。
 - 标量映射：`int→i64`、`float→f64`、`bool→bool`、`text→String`、`uuid/date/timestamp/duration/decimal/bytes → unionid::scalars::*`。
@@ -46,7 +46,7 @@
 
 `unionid-derive` 提供 `#[derive(UnionidSchema)]`，把 Rust struct/enum 映射为 unionid `type` 声明，并用 `#[unionid(table = "...", key = "...")]` 生成 `table` 声明。生成代码实现 `unionid::UnionidSchema`，通过 `unionid::SchemaBuilder` 汇总为可直接执行的 schema 脚本。`SchemaBuilder::build()` 以依赖顺序输出类型（被引用类型先声明，注册顺序无关），缺失依赖或不受支持的互递归返回 `E_SCHEMA`（`build` 返回 `Result`）。
 
-- 类型映射：`i64/i32→int`、`f64/f32→float`、`bool→bool`、`String/&'static str→text`、`Uuid/Date/Timestamp/Duration/Bytes→uuid/date/timestamp/duration/bytes`、`Decimal` 需 `#[unionid(decimal = "P S")]`；`Option<T>→option (T)`、`Vec<T>→list (T)`、`Box<T>→T`、tuple 与嵌套命名类型按名引用。
+- 类型映射：`i64→int`、`f64→float`、`bool→bool`、`String/&'static str→text`、`Uuid/Date/Timestamp/Duration/Bytes→uuid/date/timestamp/duration/bytes`、`Decimal` 需 `#[unionid(decimal = "P S")]`；`Option<T>→option (T)`、`Vec<T>→list (T)`、`Box<T>→T`、tuple 与嵌套命名类型按名引用。`i32/f32` 等无法覆盖数据库完整值域的数值类型在 derive 阶段拒绝。
 - record struct → `type Name = { field type, ... }`；enum 的 unit / 单字段 / 多字段 / record variant 分别生成 `Variant`、`Variant ty`、`Variant (a, b)`、`Variant { field type }`。
 - 泛型类型与 union 明确拒绝；匿名 tuple struct 不是 record，报错。
 - 该 crate 与核心 `unionid` 解耦（`unionid` 不依赖 `unionid-derive`），应用同时声明两个依赖；避免影响 `unionid` 的 crates.io 发布契约。发布工作流会先校验并发布 `unionid-derive`。
@@ -68,7 +68,20 @@
 
 `#[unionid(key = "...")]` 仍写 Rust 字段名；生成表声明时自动换成该字段的 serde 名称。应用不需要在同一 Rust 类型里重复 schema 字段名。
 
-这一切片只保证已列出的 serde 表示一致性。`i32/f32` 的单向扩大映射、decimal 精度/scale 的宿主约束、命名 scalar/tuple 的 Rust newtype 策略仍由 [#263](https://github.com/worktools/unionid/issues/263) 后续切片决定，不能称为完整的双向无损映射。
+这一切片只保证已列出的 serde 表示一致性。数值值域、decimal 精度/scale 和命名 scalar/tuple 的契约见下一节。
+
+### 8. 数值与名义类型保真（#263 第二个切片）
+
+生成边界采用“Rust 类型必须覆盖数据库类型完整值域”的规则：
+
+| 方向 | 契约 |
+| --- | --- |
+| Rust → schema derive | `i64` 覆盖 `int` 完整值域；`f64` 覆盖数据库只允许有限值的 `float` 完整值域，NaN/Infinity 在写入时拒绝。`i32/f32` 与其他窄数值在 derive 阶段拒绝。应用若只在局部使用窄数值，应在数据库边界显式转换并处理范围错误。 |
+| schema → Rust codegen | `int→i64`、`float→f64`；不生成一个只能读取部分合法数据库值的窄类型。 |
+| `decimal P S` | 生成/derive 使用 `unionid::scalars::Decimal`。wrapper 保存 coefficient 与 scale，schema 的 P/S 在 prepared bind/write、查询与 migration 边界检查；Rust 类型本身不在编译期携带 P/S。 |
+| 命名 scalar/tuple | 生成 `#[serde(transparent)] pub struct Name(pub T)`，保留 `UserId`/`OrderId` 等 Rust 名义区别，同时维持底层 unionid value 表示。 |
+
+命名 newtype 的公开字段允许应用显式构造和取出底层值。它们不暴露 unionid 的内部稳定 type ID；持久名义身份仍由 catalog 处理。已有按旧版本生成的 `pub type` 源码需要重新生成，属于生成产物升级，而不是存储格式变更。
 
 ## English Description
 
@@ -89,7 +102,7 @@ Codegen first because it needs no crate-structure change, is testable without ma
 
 ### 3. Semantics
 
-- record -> `pub struct` with `pub name: T`; `option T` -> `Option<T>`, `list T` -> `Vec<T>`, tuples map to Rust tuples, and named tuples become `pub type`.
+- record -> `pub struct` with `pub name: T`; `option T` -> `Option<T>`, `list T` -> `Vec<T>`, tuples map to Rust tuples, and named scalars/tuples become serde-transparent tuple newtypes.
 - sum -> `pub enum`: unit, single positional `Variant(T)`, record `Variant { .. }`, and multi-positional `Variant(A, B)`.
 - Direct self-recursion (e.g. `Neg Expr`) needs indirection in Rust and becomes `Box<T>`; recursion through `list` is already indirected by `Vec` and is not boxed.
 - Scalars: `int->i64`, `float->f64`, `bool->bool`, `text->String`, `uuid/date/timestamp/duration/decimal/bytes -> unionid::scalars::*`.
@@ -112,7 +125,7 @@ Codegen first because it needs no crate-structure change, is testable without ma
 
 `unionid-derive` provides `#[derive(UnionidSchema)]`, mapping a Rust struct/enum to a unionid `type` declaration and, with `#[unionid(table = "...", key = "...")]`, a `table` declaration. The generated code implements `unionid::UnionidSchema`, and `unionid::SchemaBuilder` collects declarations into an executable schema script. `SchemaBuilder::build()` emits types in dependency order (referenced types first, independent of registration order) and returns `E_SCHEMA` for a missing dependency or an unsupported cycle (`build` returns `Result`).
 
-- Type mapping: `i64/i32->int`, `f64/f32->float`, `bool->bool`, `String/&'static str->text`, `Uuid/Date/Timestamp/Duration/Bytes->uuid/date/timestamp/duration/bytes`, `Decimal` requires `#[unionid(decimal = "P S")]`; `Option<T>->option (T)`, `Vec<T>->list (T)`, `Box<T>->T`, tuples and nested named types by name.
+- Type mapping: `i64->int`, `f64->float`, `bool->bool`, `String/&'static str->text`, `Uuid/Date/Timestamp/Duration/Bytes->uuid/date/timestamp/duration/bytes`, `Decimal` requires `#[unionid(decimal = "P S")]`; `Option<T>->option (T)`, `Vec<T>->list (T)`, `Box<T>->T`, tuples and nested named types by name. The derive rejects `i32/f32` and other numeric types that cannot represent the complete database domain.
 - Record structs become `type Name = { field type, ... }`; enum unit / single-field / multi-field / record variants become `Variant`, `Variant ty`, `Variant (a, b)`, and `Variant { field type }`.
 - Generic types and unions are rejected; anonymous tuple structs are not records and error.
 - The crate stays decoupled from core `unionid` (no dependency from `unionid` to `unionid-derive`); applications depend on both, keeping `unionid`'s crates.io release contract unchanged. The release workflow verifies and publishes `unionid-derive`.
@@ -134,4 +147,17 @@ Schemas emitted by `UnionidSchema` must match the names and shapes observed by `
 
 `#[unionid(key = "...")]` continues to name the Rust field. The table declaration automatically uses that field's serde name, avoiding a duplicate schema name in the Rust type.
 
-This slice only guarantees the listed serde representations. Directional `i32/f32` widening, host enforcement of decimal precision/scale, and Rust newtypes for named scalar/tuple declarations remain follow-ups in [#263](https://github.com/worktools/unionid/issues/263); they are not yet a complete lossless bidirectional mapping.
+This slice only guarantees the listed serde representations. The numeric-domain, decimal, and named scalar/tuple contracts follow below.
+
+### 8. Numeric and nominal fidelity (second #263 slice)
+
+The generation boundary requires the Rust type to represent the database type's complete value domain:
+
+| Direction | Contract |
+| --- | --- |
+| Rust -> schema derive | `i64` covers the complete `int` domain. `f64` covers the complete finite-only database `float` domain; writes reject NaN and infinity. The derive rejects `i32/f32` and other narrow numeric types. Applications using narrow local values convert explicitly at the database boundary and handle range errors. |
+| schema -> Rust codegen | `int->i64` and `float->f64`; generated fields do not accept only a subset of legal database values. |
+| `decimal P S` | Generation/derive uses `unionid::scalars::Decimal`. The wrapper retains coefficient and scale; prepared bind/write, query, and migration boundaries enforce schema P/S. The Rust type itself does not carry P/S at compile time. |
+| Named scalar/tuple | Emit `#[serde(transparent)] pub struct Name(pub T)`, preserving Rust distinctions such as `UserId` versus `OrderId` while keeping the underlying unionid value representation. |
+
+The public newtype field allows explicit construction and extraction. It does not expose unionid's internal stable type ID; the catalog continues to own durable nominal identity. Source generated by older versions with `pub type` aliases must be regenerated. This changes generated source, not the storage format.
