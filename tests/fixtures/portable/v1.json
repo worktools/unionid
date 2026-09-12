@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "schema": "type Nested = option (option int)\ntype Wide = int\ntype Money = decimal 38 9\ntype Moment = {on date, at timestamp, elapsed duration}\ntype Blob = bytes\ntype Payload = Empty | Positional(int, text) | Named {id uuid, data bytes}\ntype Node = End | Next {value int, next option Node}\ntype Envelope = {nested Nested, tags list text = [], payload Payload, node Node}\ntable envelopes Envelope",
+  "vectors": [
+    {
+      "name": "nested_none",
+      "type_name": "Nested",
+      "value": {"type": "option", "value": null},
+      "expected_ok": true
+    },
+    {
+      "name": "nested_some_none",
+      "type_name": "Nested",
+      "value": {"type": "option", "value": {"type": "option", "value": null}},
+      "expected_ok": true
+    },
+    {
+      "name": "nested_some_some",
+      "type_name": "Nested",
+      "value": {"type": "option", "value": {"type": "option", "value": {"type": "int", "value": "7"}}},
+      "expected_ok": true
+    },
+    {
+      "name": "i64_min",
+      "type_name": "Wide",
+      "value": {"type": "int", "value": "-9223372036854775808"},
+      "expected_ok": true
+    },
+    {
+      "name": "i64_max",
+      "type_name": "Wide",
+      "value": {"type": "int", "value": "9223372036854775807"},
+      "expected_ok": true
+    },
+    {
+      "name": "i64_overflow",
+      "type_name": "Wide",
+      "value": {"type": "int", "value": "9223372036854775808"},
+      "expected_ok": false,
+      "error_code": "E_PARAM_TYPE"
+    },
+    {
+      "name": "decimal_exact",
+      "type_name": "Money",
+      "value": {"type": "decimal", "coefficient": "-12345678901234567890123456789", "scale": 9},
+      "expected_ok": true
+    },
+    {
+      "name": "temporal_units",
+      "type_name": "Moment",
+      "value": {"type": "record", "fields": {"on": {"type": "date", "value": "2024-02-29"}, "at": {"type": "timestamp", "value": "1969-12-31T23:59:59.999999Z"}, "elapsed": {"type": "duration", "microseconds": "-1"}}},
+      "expected_ok": true
+    },
+    {
+      "name": "bytes",
+      "type_name": "Blob",
+      "value": {"type": "bytes", "base64url": "AAH_"},
+      "expected_ok": true
+    },
+    {
+      "name": "positional_payload",
+      "type_name": "Payload",
+      "value": {"type": "variant", "name": "Positional", "variant_id": "0", "args": [{"type": "int", "value": "4"}, {"type": "text", "value": "four"}]},
+      "expected_ok": true
+    },
+    {
+      "name": "record_payload",
+      "type_name": "Payload",
+      "value": {"type": "variant", "name": "Named", "variant_id": "0", "args": [{"type": "record", "fields": {"id": {"type": "uuid", "value": "00000000-0000-0000-0000-000000000000"}, "data": {"type": "bytes", "base64url": ""}}}]},
+      "expected_ok": true
+    },
+    {
+      "name": "unknown_variant",
+      "type_name": "Payload",
+      "value": {"type": "variant", "name": "Future", "variant_id": "0", "args": []},
+      "expected_ok": false,
+      "error_code": "E_TYPE"
+    },
+    {
+      "name": "bounded_recursion",
+      "type_name": "Node",
+      "value": {"type": "variant", "name": "Next", "variant_id": "0", "args": [{"type": "record", "fields": {"value": {"type": "int", "value": "1"}, "next": {"type": "option", "value": {"type": "variant", "name": "End", "variant_id": "0", "args": []}}}}]},
+      "expected_ok": true
+    },
+    {
+      "name": "defaulted_empty_collection",
+      "type_name": "Envelope",
+      "value": {"type": "record", "fields": {"nested": {"type": "option", "value": null}, "payload": {"type": "variant", "name": "Empty", "variant_id": "0", "args": []}, "node": {"type": "variant", "name": "End", "variant_id": "0", "args": []}}},
+      "expected_ok": true
+    },
+    {
+      "name": "missing_required_key",
+      "type_name": "Envelope",
+      "value": {"type": "record", "fields": {"nested": {"type": "option", "value": null}, "node": {"type": "variant", "name": "End", "variant_id": "0", "args": []}}},
+      "expected_ok": false,
+      "error_code": "E_FIELD"
+    }
+  ]
+}

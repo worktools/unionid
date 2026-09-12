@@ -361,6 +361,43 @@ pub fn schema_rust(
     Ok(())
 }
 
+pub fn schema_describe(
+    file: Option<&Path>,
+    db: Option<PathBuf>,
+    output: Option<&Path>,
+) -> Result<(), String> {
+    let description = match (file, db) {
+        (Some(path), None) => {
+            let source = read_source(
+                std::fs::File::open(path)
+                    .map_err(|error| format!("open '{}': {error}", path.display()))?,
+            )?;
+            crate::portable::describe(&source).map_err(|error| error.to_string())?
+        }
+        (None, Some(db)) => {
+            require_existing_database(&db)?;
+            Engine::open_redb_read_only(db)
+                .map_err(|error| error.to_string())?
+                .portable_contract()
+                .map_err(|error| error.to_string())?
+                .into_description()
+        }
+        _ => return Err("provide exactly one of --file or --db".into()),
+    };
+    let mut encoded =
+        serde_json::to_string_pretty(&description).map_err(|error| error.to_string())?;
+    encoded.push('\n');
+    match output {
+        Some(destination) => {
+            std::fs::write(destination, encoded)
+                .map_err(|error| format!("write '{}': {error}", destination.display()))?;
+            println!("wrote {}", destination.display());
+        }
+        None => print!("{encoded}"),
+    }
+    Ok(())
+}
+
 pub fn migration_diff(
     db: impl Into<PathBuf>,
     schema_path: impl AsRef<Path>,
