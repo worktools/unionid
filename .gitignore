@@ -7,5 +7,6 @@
 /tools/concurrency-eval/target
 /tools/churn-eval/target
 /tools/compaction-eval/target
+/tools/adt-interop-eval/target
 /derive/target
 /dist
