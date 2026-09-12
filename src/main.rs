@@ -147,6 +147,11 @@ enum Command {
         #[command(subcommand)]
         command: SchemaCommand,
     },
+    /// Validate and describe static query files for generated bindings.
+    Query {
+        #[command(subcommand)]
+        command: QueryCommand,
+    },
     /// Create a verified logical backup from a redb database.
     Backup {
         #[arg(long)]
@@ -324,6 +329,19 @@ enum SchemaCommand {
         #[arg(long)]
         db: Option<PathBuf>,
         /// Write JSON to this path instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum QueryCommand {
+    /// Bind one query against a schema and emit its versioned contract.
+    Describe {
+        #[arg(long)]
+        schema: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -750,6 +768,13 @@ fn run(args: Args) -> Result<(), String> {
             SchemaCommand::Describe { file, db, output } => {
                 cli::schema_describe(file.as_deref(), db, output.as_deref())
             }
+        },
+        Command::Query { command } => match command {
+            QueryCommand::Describe {
+                schema,
+                file,
+                output,
+            } => cli::query_describe(&schema, &file, output.as_deref()),
         },
         Command::Backup { db, output, format } => {
             cli::backup_create(db, output, matches!(format, Format::Json))
