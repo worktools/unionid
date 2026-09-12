@@ -94,6 +94,8 @@ def main():
             {"name": "full_test_suite", "status": "passed"},
             {"name": "rust_engine_local_cli_tcp_adt", "status": "passed"},
             {"name": "packaged_independent_rust_consumer", "status": "passed"},
+            {"name": "typed_query_binding_application_evolution", "status": "passed"},
+            {"name": "paired_sqlite_sqlx_evaluation", "status": "passed"},
             {"name": "http_protocol_stream_adt", "status": "passed"},
             {"name": "upgrade_migration_recovery_read_only", "status": "passed"},
             {"name": "idempotency_cursor_cancel_limits", "status": "passed"},
@@ -103,6 +105,14 @@ def main():
             "rust_engine_local_cli_tcp_adt": "tests/getting_started.rs",
             "packaged_independent_rust_consumer": (
                 "tests/current-consumer and scripts/verify-current-consumer.py"
+            ),
+            "typed_query_binding_application_evolution": (
+                "scripts/verify-query-bindings.py, scripts/verify-typed-application.py, "
+                "and docs/assessments/typed-application-2026-09-13.md"
+            ),
+            "paired_sqlite_sqlx_evaluation": (
+                "tools/adt-interop-eval, scripts/verify-adt-interop-eval.py, and "
+                "docs/assessments/sqlite-sqlx-pair-2026-09-13.md"
             ),
             "http_protocol_stream_adt": "examples/todolist.rs and tests/interfaces.rs",
             "upgrade_migration_recovery_read_only": "tests/released_v010_upgrade.rs, tests/migration.rs, tests/storage.rs, tests/backup.rs, and tests/interfaces.rs",

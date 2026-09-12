@@ -34,6 +34,8 @@ jobs:
           cargo clippy --locked --all-targets --features asynchronous -- -D warnings
           cargo test --locked
           cargo test --locked --features asynchronous --test asynchronous --test async_client
+          python3 scripts/verify-query-bindings.py
+          python3 scripts/verify-typed-application.py
       - name: Check and exercise standalone evaluation tools
         shell: bash
         run: |
