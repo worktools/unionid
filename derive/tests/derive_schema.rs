@@ -44,9 +44,13 @@ struct Event {
 fn schema() -> String {
     SchemaBuilder::new()
         .add::<Contact>()
+        .unwrap()
         .add::<State>()
+        .unwrap()
         .add::<Task>()
+        .unwrap()
         .add::<Event>()
+        .unwrap()
         .build()
 }
 
@@ -89,11 +93,51 @@ fn schema_executes_in_an_engine() {
 
 #[test]
 fn add_deduplicates_types() {
-    let once = SchemaBuilder::new().add::<Contact>().build();
+    let once = SchemaBuilder::new().add::<Contact>().unwrap().build();
     let twice = SchemaBuilder::new()
         .add::<Contact>()
+        .unwrap()
         .add::<Contact>()
+        .unwrap()
         .build();
     assert_eq!(once, twice);
     assert_eq!(twice.matches("type Contact =").count(), 1);
+}
+
+mod first {
+    use unionid_derive::UnionidSchema;
+
+    #[derive(UnionidSchema)]
+    pub struct User {
+        pub id: i64,
+    }
+}
+
+mod second {
+    use unionid_derive::UnionidSchema;
+
+    #[derive(UnionidSchema)]
+    pub struct User {
+        pub id: i64,
+        pub label: String,
+    }
+}
+
+#[test]
+fn add_rejects_conflicting_names() {
+    let error = SchemaBuilder::new()
+        .add::<first::User>()
+        .unwrap()
+        .add::<second::User>()
+        .unwrap_err();
+    assert_eq!(error.code, "E_SCHEMA");
+    assert!(error.message.contains("conflicting"));
+    // Identical duplicates are still accepted.
+    assert!(
+        SchemaBuilder::new()
+            .add::<first::User>()
+            .unwrap()
+            .add::<first::User>()
+            .is_ok()
+    );
 }

@@ -34,6 +34,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         ));
     }
     let options = container_options(&input.attrs)?;
+    validate_table_options(input, &options)?;
     let type_name = input.ident.to_string();
     let type_ddl = match &input.data {
         Data::Struct(data) => {
@@ -113,6 +114,13 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
         None => quote!(::core::option::Option::None),
     };
+    let table_name = match &options.table {
+        Some(table) => {
+            let literal = LitStr::new(table, Span::call_site());
+            quote!(::core::option::Option::Some(#literal))
+        }
+        None => quote!(::core::option::Option::None),
+    };
     let ident = &input.ident;
     Ok(quote! {
         impl ::unionid::UnionidSchema for #ident {
@@ -122,11 +130,48 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 ::std::string::String::from(#type_ddl_lit)
             }
 
+            fn unionid_table_name() -> ::core::option::Option<&'static str> {
+                #table_name
+            }
+
             fn unionid_table_ddl() -> ::core::option::Option<::std::string::String> {
                 #table_ddl
             }
         }
     })
+}
+
+fn validate_table_options(input: &DeriveInput, options: &ContainerOptions) -> syn::Result<()> {
+    if options.table.is_none() && options.key.is_some() {
+        return Err(syn::Error::new(input.span(), "`key` requires `table`"));
+    }
+    let Some(_) = options.table else {
+        return Ok(());
+    };
+    let data = match &input.data {
+        Data::Struct(data) => data,
+        _ => {
+            return Err(syn::Error::new(
+                input.span(),
+                "only a named struct can declare a unionid table",
+            ));
+        }
+    };
+    let fields = named_fields(
+        &data.fields,
+        "a unionid table requires a struct with named fields",
+    )?;
+    if let Some(key) = &options.key
+        && !fields
+            .iter()
+            .any(|field| field.ident.as_ref().is_some_and(|ident| ident == key))
+    {
+        return Err(syn::Error::new(
+            input.span(),
+            format!("key '{key}' is not a field of '{}'", input.ident),
+        ));
+    }
+    Ok(())
 }
 
 fn container_options(attrs: &[Attribute]) -> syn::Result<ContainerOptions> {
@@ -235,14 +280,23 @@ fn path_ddl(path: &syn::TypePath, decimal: Option<&str>) -> syn::Result<String> 
             "Timestamp" => Ok("timestamp".to_string()),
             "Duration" => Ok("duration".to_string()),
             "Bytes" => Ok("bytes".to_string()),
-            "Decimal" => decimal
-                .map(|value| format!("decimal {value}"))
-                .ok_or_else(|| {
+            "Decimal" => {
+                let value = decimal.ok_or_else(|| {
                     syn::Error::new(
                         path.span(),
                         "a Decimal field needs #[unionid(decimal = \"P S\")]",
                     )
-                }),
+                })?;
+                Ok(format!(
+                    "decimal {}",
+                    validated_decimal(value, path.span())?
+                ))
+            }
+            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i128" | "isize"
+            | "char" => Err(syn::Error::new(
+                path.span(),
+                format!("unsupported primitive type `{name}` for a unionid schema"),
+            )),
             _ => Ok(name),
         },
         PathArguments::AngleBracketed(arguments) if arguments.args.len() == 1 => {
@@ -269,5 +323,91 @@ fn path_ddl(path: &syn::TypePath, decimal: Option<&str>) -> syn::Result<String> 
             path.span(),
             "unsupported generic type for a unionid schema",
         )),
+    }
+}
+
+fn validated_decimal(value: &str, span: Span) -> syn::Result<String> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 2 {
+        return Err(syn::Error::new(
+            span,
+            "decimal must be written as \"P S\" with two integers",
+        ));
+    }
+    let precision = parts[0]
+        .parse::<u8>()
+        .map_err(|_| syn::Error::new(span, "decimal precision must be an integer"))?;
+    let scale = parts[1]
+        .parse::<u8>()
+        .map_err(|_| syn::Error::new(span, "decimal scale must be an integer"))?;
+    if !(1..=38).contains(&precision) {
+        return Err(syn::Error::new(span, "decimal precision must be 1..=38"));
+    }
+    if scale > precision {
+        return Err(syn::Error::new(span, "decimal scale must be <= precision"));
+    }
+    Ok(format!("{precision} {scale}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expand_str(source: &str) -> syn::Result<proc_macro2::TokenStream> {
+        expand(&syn::parse_str::<DeriveInput>(source).unwrap())
+    }
+
+    #[test]
+    fn rejects_key_without_table() {
+        let error = expand_str("#[unionid(key = \"id\")] struct T { id: i64 }").unwrap_err();
+        assert!(error.to_string().contains("requires `table`"), "{error}");
+    }
+
+    #[test]
+    fn rejects_table_on_enum() {
+        let error = expand_str("#[unionid(table = \"t\", key = \"id\")] enum T { A }").unwrap_err();
+        assert!(error.to_string().contains("named struct"), "{error}");
+    }
+
+    #[test]
+    fn rejects_key_that_is_not_a_field() {
+        let error = expand_str("#[unionid(table = \"t\", key = \"missing\")] struct T { id: i64 }")
+            .unwrap_err();
+        assert!(error.to_string().contains("not a field"), "{error}");
+    }
+
+    #[test]
+    fn rejects_invalid_decimal_metadata() {
+        for value in ["invalid", "12", "39 2", "2 3", "12 x"] {
+            let source =
+                format!("struct T {{ #[unionid(decimal = \"{value}\")] amount: Decimal }}");
+            assert!(
+                expand_str(&source).is_err(),
+                "decimal {value:?} should fail"
+            );
+        }
+        let source = "struct T { #[unionid(decimal = \"12 2\")] amount: Decimal }";
+        assert!(expand_str(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_unsupported_primitives() {
+        for primitive in ["u64", "usize", "char", "i128", "u8"] {
+            let source = format!("struct T {{ value: {primitive} }}");
+            assert!(
+                expand_str(&source).is_err(),
+                "{primitive} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn maps_supported_types() {
+        let expanded = expand_str(
+            "struct T { id: i64, name: String, tags: Vec<Option<String>>, owner: Contact }",
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("list (option (text))"), "{expanded}");
     }
 }

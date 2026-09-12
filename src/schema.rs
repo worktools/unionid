@@ -778,6 +778,10 @@ pub trait UnionidSchema {
     const UNIONID_TYPE_NAME: &'static str;
     /// The complete `type Name = ...` declaration.
     fn unionid_type_ddl() -> String;
+    /// The table name when this type also declares a table.
+    fn unionid_table_name() -> Option<&'static str> {
+        None
+    }
     /// The optional `table ...` declaration for this row type.
     fn unionid_table_ddl() -> Option<String> {
         None
@@ -788,7 +792,7 @@ pub trait UnionidSchema {
 #[derive(Debug, Default, Clone)]
 pub struct SchemaBuilder {
     types: BTreeMap<String, String>,
-    tables: Vec<String>,
+    tables: BTreeMap<String, String>,
 }
 
 impl SchemaBuilder {
@@ -796,17 +800,46 @@ impl SchemaBuilder {
         Self::default()
     }
 
-    /// Add one derived type, deduplicating by type name. Types are emitted in
-    /// name order and tables after them, as the schema parser requires.
-    pub fn add<T: UnionidSchema>(mut self) -> Self {
-        self.types
-            .insert(T::UNIONID_TYPE_NAME.to_string(), T::unionid_type_ddl());
-        if let Some(table) = T::unionid_table_ddl()
-            && !self.tables.contains(&table)
-        {
-            self.tables.push(table);
+    /// Add one derived type, deduplicating by schema name. Identical duplicates
+    /// are accepted; a conflicting declaration for the same type or table name
+    /// returns `E_SCHEMA`. Types are emitted in name order and tables after
+    /// them, as the schema parser requires.
+    pub fn add<T: UnionidSchema>(mut self) -> Result<Self> {
+        let type_name = T::UNIONID_TYPE_NAME.to_string();
+        let type_ddl = T::unionid_type_ddl();
+        match self.types.get(&type_name) {
+            Some(existing) if existing != &type_ddl => {
+                return Err(Error::new(
+                    "E_SCHEMA",
+                    format!("conflicting declaration for type '{type_name}'"),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                self.types.insert(type_name, type_ddl);
+            }
         }
-        self
+        if let Some(table_name) = T::unionid_table_name() {
+            let table_ddl = T::unionid_table_ddl().ok_or_else(|| {
+                Error::new(
+                    "E_SCHEMA",
+                    format!("table '{table_name}' has no declaration"),
+                )
+            })?;
+            match self.tables.get(table_name) {
+                Some(existing) if existing != &table_ddl => {
+                    return Err(Error::new(
+                        "E_SCHEMA",
+                        format!("conflicting declaration for table '{table_name}'"),
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    self.tables.insert(table_name.to_string(), table_ddl);
+                }
+            }
+        }
+        Ok(self)
     }
 
     pub fn build(self) -> String {
@@ -815,7 +848,7 @@ impl SchemaBuilder {
             source.push_str(declaration);
             source.push('\n');
         }
-        for table in &self.tables {
+        for table in self.tables.values() {
             source.push_str(table);
             source.push('\n');
         }
