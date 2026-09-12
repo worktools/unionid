@@ -1,8 +1,11 @@
 //! A small typed database with a whitespace-oriented query language.
 //!
 //! The Engine is shared by embedded applications, the local CLI, and TCP.
+#[cfg(feature = "asynchronous")]
+pub mod asynchronous;
 pub mod backup;
 pub mod cli;
+pub mod client;
 pub mod codec;
 pub mod codegen;
 mod control;
@@ -36,6 +39,7 @@ pub mod syntax;
 pub mod wal;
 
 pub use backup::BackupInfo;
+pub use client::{MAX_RESPONSE_BYTES, TcpClient};
 pub use db::{
     IndexRangePlan, IndexTraversal, PageAccessKind, PageInfo, PageOrder, PagePlan, QueryAccessKind,
     QueryAccessPlan, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind, SchemaInfo,
@@ -68,5 +72,9 @@ pub use query::{PageDirection, PageSpec};
 pub use schema::{
     SchemaBuilder, SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation,
     SchemaDiffTableImpact, UnionidSchema,
+};
+pub use server::{
+    CancelResult, CancelStatus, ConcurrencyStats, ConcurrentEngine, OperationOutcome,
+    ReadOperation, ServerStats,
 };
 pub use syntax::{InputStatus, input_status};

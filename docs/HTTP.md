@@ -86,6 +86,10 @@ cargo run --example todolist -- /path/to/empty-work-directory
 
 示例中的 `/v1/admin/*` 是应用生命周期 API，用于展示 migration、restart、check、backup 和 restore 全程通过 HTTP；它们不是内置公共管理服务。生产部署必须自行增加鉴权、授权、TLS、审计、限流和安全的备份目标配置，不能允许不受信任的请求选择服务器文件路径。
 
+## 官方客户端与异步适配
+
+Rust 应用可直接使用 `unionid::client::TcpClient` 连接 TCP 服务：`query`/`request` 发送 version 1 请求，`request_retrying` 在携带 `idempotency_key` 时自动重连重试，响应用 `Response::typed_rows` 解码为应用类型。需要 async handler 时启用可选 `asynchronous` feature，用 `unionid::asynchronous::execute_protocol_request` 在 blocking worker 上执行同一 `ConcurrentEngine` 入口并传递绝对 deadline，无需 `Mutex<Engine>` 或自建线程池；`ConcurrentEngine`、`ReadOperation`、`ConcurrencyStats` 等集成类型已在 crate root 导出。
+
 ## 生产边界
 
 - `request_id` 只做一次尝试的关联。需要安全重试的 mutation 使用独立 `idempotency_key`，并原样复用 query、typed params 和 schema precondition；response 中的 `replayed` 区分首次提交与回执重放。

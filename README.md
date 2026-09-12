@@ -205,7 +205,11 @@ Batched relational reads use `Engine::fetch_by_key` / `typed_fetch_by_key` again
 
 可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、typed cursor 分页、真实客户端断开、丢响应后的幂等重试、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
 
+远程调用可用 `unionid::client::TcpClient`（`request`/`request_retrying` 加 `typed_rows`）；异步框架可启用可选 `asynchronous` feature，用 `unionid::asynchronous::execute_protocol_request` 在 blocking worker 上执行同一入口。`ConcurrentEngine` 等集成类型已在 crate root 导出。
+
 See runnable code in [`parameters.rs`](examples/parameters.rs). The complete HTTP/Axum todolist validates ADTs, typed cursor pages, a real client disconnect, idempotent retry after a lost response, migrations, restart, integrity checking, backup, and restore through the same version 1 data protocol; see [HTTP.md](docs/HTTP.md).
+
+Remote calls can use `unionid::client::TcpClient` (`request`/`request_retrying` plus `typed_rows`); async frameworks can enable the optional `asynchronous` feature and run the same entry point on a blocking worker via `unionid::asynchronous::execute_protocol_request`. Integration types such as `ConcurrentEngine` are re-exported at the crate root.
 
 ## 当前边界 / Current boundaries
 
