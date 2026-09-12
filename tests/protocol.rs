@@ -119,6 +119,14 @@ fn prepared_queries_reject_schema_changes_and_unsupported_mutations() {
     assert_eq!(prepared.parameters(), &["id"]);
     assert_eq!(prepared.parameter_types()["id"], "int");
     assert_eq!(
+        prepared
+            .result_columns()
+            .iter()
+            .map(|column| (column.name.as_str(), column.ty.as_str()))
+            .collect::<Vec<_>>(),
+        [("id", "int"), ("title", "text"), ("state", "State")]
+    );
+    assert_eq!(
         engine
             .prepare("from tasks | filter absent == $id")
             .unwrap_err()

@@ -3610,6 +3610,27 @@ impl Database {
         Ok(columns.types)
     }
 
+    pub(crate) fn prepare_returning_columns(
+        &self,
+        table: &str,
+        returning: Option<&Returning>,
+    ) -> Result<Vec<Column>> {
+        let Some(bound) = self.bind_returning(table, returning)? else {
+            return Ok(Vec::new());
+        };
+        Ok(bound
+            .fields
+            .into_iter()
+            .zip(bound.types)
+            .map(|(name, ty)| Column {
+                name,
+                ty,
+                default: None,
+                id: 0,
+            })
+            .collect())
+    }
+
     fn bind_aggregate(&self, schema: &[Column], aggregate: &mut Aggregate) -> Result<Vec<Column>> {
         if aggregate.assignments.len() > MAX_AGGREGATE_OUTPUTS {
             return Err(Error::new(

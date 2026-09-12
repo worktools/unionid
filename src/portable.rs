@@ -1116,7 +1116,7 @@ fn describe_database(database: &Database) -> Result<SchemaDescription> {
     Ok(description)
 }
 
-fn describe_type(catalog: &Catalog, ty: &ScalarType) -> Result<TypeShape> {
+pub(crate) fn describe_type(catalog: &Catalog, ty: &ScalarType) -> Result<TypeShape> {
     Ok(match ty {
         ScalarType::Int => TypeShape::Int {
             min: i64::MIN.to_string(),

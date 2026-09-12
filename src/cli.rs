@@ -399,6 +399,31 @@ pub fn schema_describe(
     Ok(())
 }
 
+pub fn query_describe(schema: &Path, query: &Path, output: Option<&Path>) -> Result<(), String> {
+    let schema_source = read_source(
+        std::fs::File::open(schema)
+            .map_err(|error| format!("open '{}': {error}", schema.display()))?,
+    )?;
+    let query_source = read_source(
+        std::fs::File::open(query)
+            .map_err(|error| format!("open '{}': {error}", query.display()))?,
+    )?;
+    let description = crate::query_contract::describe(&schema_source, &query_source)
+        .map_err(|error| error.to_string())?;
+    let mut encoded =
+        serde_json::to_string_pretty(&description).map_err(|error| error.to_string())?;
+    encoded.push('\n');
+    match output {
+        Some(destination) => {
+            std::fs::write(destination, encoded)
+                .map_err(|error| format!("write '{}': {error}", destination.display()))?;
+            println!("wrote {}", destination.display());
+        }
+        None => print!("{encoded}"),
+    }
+    Ok(())
+}
+
 pub fn migration_diff(
     db: impl Into<PathBuf>,
     schema_path: impl AsRef<Path>,

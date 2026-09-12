@@ -73,6 +73,19 @@ unionid schema describe --db app.redb --output schema.contract.json
 
 `schema describe` emits the RFC 0014 version-1 JSON used by query-binding generators and future host-language adapters. File mode creates an independent catalog from declarations, while database mode describes a private byte-for-byte copy of the live catalog so redb recovery bookkeeping cannot change the requested file; migration-stable IDs are preserved. IDs are decimal strings scoped to one database lineage. The description includes schema identity, named ADTs, recursive references, exact scalar constraints, defaults/omission, tables, keys, and indexes; it excludes rows, database instance identity, cursor secrets, and business values. `PortableContract::validate_type` reuses prepared-binding validation and fails explicitly on unknown variants.
 
+### 静态查询描述 / Static query descriptions
+
+`query describe` 使用当前 parser、binder 和 type IR，离线检查一个静态查询文件，并输出 [RFC 0015](rfc/0015-static-query-contract.md) 的 version 1 JSON。一个查询文件只包含一个 prepared operation；schema 文件仍只接受声明：
+
+```bash
+unionid query describe --schema schema.uid --file queries/find_task.uid
+unionid query describe --schema schema.uid --file queries/create_task.uid --output generated/create_task.json
+```
+
+输出包含 schema identity、规范化源码及其 SHA-256、operation、按名称排序的参数类型、结果字段类型、`none` / `exactly_one` / `at_most_one` / `many` cardinality，以及是否返回 affected-row metadata。字段、payload、参数统一失败和非穷尽 match 会在离线绑定时失败并带源码 span。digest 忽略等价的空格/换行布局，但投影或语义变化会改变 digest；运行时仍由 `PreparedQuery` 精确核对 schema revision/hash。
+
+`query describe` uses the runtime parser, binder, and type IR to validate one static query file offline and emit the RFC 0015 version-1 JSON contract. A query file contains exactly one prepared operation, while the schema input remains declaration-only. Output includes schema identity, canonical source and SHA-256 digest, operation, name-sorted parameter shapes, result field shapes, conservative cardinality, and affected-row metadata. Field, payload, parameter-unification, and match-coverage errors fail during offline binding with a source span. Equivalent layout has the same digest; projection or semantic changes do not. `PreparedQuery` still checks the exact schema revision/hash at runtime.
+
 ## JSON 错误与退出码
 
 支持 `--format json` 的非查询命令统一返回 version 1 错误 envelope，且只写 stdout：

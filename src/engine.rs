@@ -241,6 +241,9 @@ pub struct PreparedQuery {
     schema: crate::db::SchemaInfo,
     parameters: Vec<String>,
     parameter_types: std::collections::BTreeMap<String, String>,
+    parameter_type_ir: std::collections::BTreeMap<String, crate::model::ScalarType>,
+    response_columns: Vec<crate::model::Column>,
+    result_columns: Vec<crate::db::ResponseColumn>,
     mutating: bool,
 }
 
@@ -259,6 +262,25 @@ impl PreparedQuery {
 
     pub fn parameter_types(&self) -> &std::collections::BTreeMap<String, String> {
         &self.parameter_types
+    }
+
+    /// Ordered row fields returned by a successful execution.
+    pub fn result_columns(&self) -> &[crate::db::ResponseColumn] {
+        &self.result_columns
+    }
+
+    pub(crate) fn parameter_type_ir(
+        &self,
+    ) -> &std::collections::BTreeMap<String, crate::model::ScalarType> {
+        &self.parameter_type_ir
+    }
+
+    pub(crate) fn response_columns(&self) -> &[crate::model::Column] {
+        &self.response_columns
+    }
+
+    pub(crate) fn statements(&self) -> &[LocatedStatement] {
+        &self.statements
     }
 }
 
@@ -482,6 +504,17 @@ impl Engine {
 
     pub fn memory() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn from_database(database: Database) -> Self {
+        Self {
+            committed: Arc::new(CommittedView::memory(database, ReceiptMap::new())),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn catalog(&self) -> &crate::model::Catalog {
+        &self.committed.db.catalog
     }
 
     pub fn open(
@@ -1110,14 +1143,23 @@ impl Engine {
     pub fn prepare(&self, source: &str) -> Result<PreparedQuery> {
         let mut statements = syntax::parse(source)?;
         let mut mutating = false;
+        let mut response_columns = Vec::new();
         for located in &mut statements {
             match &mut located.statement {
-                Statement::Explain(pipeline) | Statement::Pipeline(pipeline) => self
-                    .committed
-                    .db
-                    .prepare_pipeline(pipeline)
-                    .map(|_| ())
-                    .map_err(|error| error.at(located.span))?,
+                Statement::Pipeline(pipeline) => {
+                    response_columns = self
+                        .committed
+                        .db
+                        .prepare_pipeline(pipeline)
+                        .map_err(|error| error.at(located.span))?;
+                }
+                Statement::Explain(pipeline) => {
+                    self.committed
+                        .db
+                        .prepare_pipeline(pipeline)
+                        .map_err(|error| error.at(located.span))?;
+                    response_columns.clear();
+                }
                 Statement::InsertManyParameter {
                     table,
                     parameter_type,
@@ -1130,6 +1172,11 @@ impl Engine {
                             .prepare_bulk_insert_parameter(table, returning.as_ref())
                             .map_err(|error| error.at(located.span))?,
                     );
+                    response_columns = self
+                        .committed
+                        .db
+                        .prepare_returning_columns(table, returning.as_ref())
+                        .map_err(|error| error.at(located.span))?;
                     mutating = true;
                 }
                 Statement::InsertParameter {
@@ -1144,6 +1191,11 @@ impl Engine {
                             .prepare_insert_parameter(table, returning.as_ref())
                             .map_err(|error| error.at(located.span))?,
                     );
+                    response_columns = self
+                        .committed
+                        .db
+                        .prepare_returning_columns(table, returning.as_ref())
+                        .map_err(|error| error.at(located.span))?;
                     mutating = true;
                 }
                 Statement::UpsertParameter {
@@ -1158,6 +1210,11 @@ impl Engine {
                             .prepare_upsert_parameter(table, returning.as_ref())
                             .map_err(|error| error.at(located.span))?,
                     );
+                    response_columns = self
+                        .committed
+                        .db
+                        .prepare_returning_columns(table, returning.as_ref())
+                        .map_err(|error| error.at(located.span))?;
                     mutating = true;
                 }
                 Statement::UpsertManyParameter {
@@ -1172,6 +1229,11 @@ impl Engine {
                             .prepare_bulk_upsert_parameter(table, returning.as_ref())
                             .map_err(|error| error.at(located.span))?,
                     );
+                    response_columns = self
+                        .committed
+                        .db
+                        .prepare_returning_columns(table, returning.as_ref())
+                        .map_err(|error| error.at(located.span))?;
                     mutating = true;
                 }
                 Statement::Update {
@@ -1183,12 +1245,22 @@ impl Engine {
                         .db
                         .prepare_update(target, assignments, returning.as_ref())
                         .map_err(|error| error.at(located.span))?;
+                    response_columns = self
+                        .committed
+                        .db
+                        .prepare_returning_columns(&target.from, returning.as_ref())
+                        .map_err(|error| error.at(located.span))?;
                     mutating = true;
                 }
                 Statement::Delete { target, returning } => {
                     self.committed
                         .db
                         .prepare_delete(target, returning.as_ref())
+                        .map_err(|error| error.at(located.span))?;
+                    response_columns = self
+                        .committed
+                        .db
+                        .prepare_returning_columns(&target.from, returning.as_ref())
                         .map_err(|error| error.at(located.span))?;
                     mutating = true;
                 }
@@ -1201,14 +1273,25 @@ impl Engine {
                 }
             }
         }
-        let parameter_types = crate::params::types(&statements)?
-            .into_iter()
-            .map(|(name, ty)| (name, self.committed.db.catalog.describe(&ty)))
+        let parameter_type_ir = crate::params::types(&statements)?;
+        let parameter_types = parameter_type_ir
+            .iter()
+            .map(|(name, ty)| (name.clone(), self.committed.db.catalog.describe(ty)))
+            .collect();
+        let result_columns = response_columns
+            .iter()
+            .map(|column| crate::db::ResponseColumn {
+                name: column.name.clone(),
+                ty: self.committed.db.catalog.describe(&column.ty),
+            })
             .collect();
         Ok(PreparedQuery {
             source: source.into(),
             parameters: crate::params::names(&statements).into_iter().collect(),
             parameter_types,
+            parameter_type_ir,
+            response_columns,
+            result_columns,
             statements,
             schema: self.committed.db.schema_info(),
             mutating,

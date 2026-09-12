@@ -27,6 +27,7 @@ pub mod portable;
 pub mod profile;
 pub mod protocol;
 pub mod query;
+pub mod query_contract;
 mod redb_storage;
 mod repl;
 mod row_source;
@@ -78,6 +79,10 @@ pub use protocol::{
     Response as ProtocolResponse, WireValue,
 };
 pub use query::{PageDirection, PageSpec};
+pub use query_contract::{
+    QUERY_DESCRIPTION_VERSION, QueryCardinality, QueryDescription, QueryFieldDescription,
+    QueryOperation, QueryParameterDescription, QueryResultDescription,
+};
 pub use schema::{
     SchemaBuilder, SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation,
     SchemaDiffTableImpact, UnionidSchema,
