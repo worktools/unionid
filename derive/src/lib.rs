@@ -5,6 +5,8 @@
 //! `table` declaration. The generated code implements `unionid::UnionidSchema`
 //! so declarations can be collected with `unionid::SchemaBuilder`.
 
+use std::collections::BTreeSet;
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
@@ -36,13 +38,14 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let options = container_options(&input.attrs)?;
     validate_table_options(input, &options)?;
     let type_name = input.ident.to_string();
+    let mut dependencies = BTreeSet::new();
     let type_ddl = match &input.data {
         Data::Struct(data) => {
             let fields = named_fields(&data.fields, "unionid records require named fields")?;
             let mut lines = Vec::new();
             for field in fields {
                 let name = field.ident.as_ref().expect("named field").to_string();
-                let ty = field_type(&field.ty, &field.attrs)?;
+                let ty = field_type(&field.ty, &field.attrs, &mut dependencies)?;
                 lines.push(format!("  {name} {ty},"));
             }
             format!("type {type_name} = {{\n{}\n}}", lines.join("\n"))
@@ -57,7 +60,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         let mut inner = Vec::new();
                         for field in &fields.named {
                             let field_name = field.ident.as_ref().expect("named field").to_string();
-                            let ty = field_type(&field.ty, &field.attrs)?;
+                            let ty = field_type(&field.ty, &field.attrs, &mut dependencies)?;
                             inner.push(format!("{field_name} {ty}"));
                         }
                         format!("{name} {{{}}}", inner.join(", "))
@@ -65,7 +68,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     Fields::Unnamed(fields) => {
                         let mut rendered = Vec::new();
                         for field in &fields.unnamed {
-                            rendered.push(field_type(&field.ty, &field.attrs)?);
+                            rendered.push(field_type(&field.ty, &field.attrs, &mut dependencies)?);
                         }
                         if rendered.len() == 1 {
                             format!("{name} {}", rendered[0])
@@ -122,12 +125,19 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         None => quote!(::core::option::Option::None),
     };
     let ident = &input.ident;
+    let dependency_lits = dependencies
+        .iter()
+        .map(|name| LitStr::new(name, Span::call_site()));
     Ok(quote! {
         impl ::unionid::UnionidSchema for #ident {
             const UNIONID_TYPE_NAME: &'static str = #type_name_lit;
 
             fn unionid_type_ddl() -> ::std::string::String {
                 ::std::string::String::from(#type_ddl_lit)
+            }
+
+            fn unionid_dependencies() -> ::std::vec::Vec<&'static str> {
+                ::std::vec![#(#dependency_lits),*]
             }
 
             fn unionid_table_name() -> ::core::option::Option<&'static str> {
@@ -205,9 +215,13 @@ fn named_fields<'a>(
     }
 }
 
-fn field_type(ty: &Type, attrs: &[Attribute]) -> syn::Result<String> {
+fn field_type(
+    ty: &Type,
+    attrs: &[Attribute],
+    dependencies: &mut BTreeSet<String>,
+) -> syn::Result<String> {
     let decimal = decimal_attribute(attrs)?;
-    type_ddl(ty, decimal.as_deref())
+    type_ddl(ty, decimal.as_deref(), dependencies)
 }
 
 fn decimal_attribute(attrs: &[Attribute]) -> syn::Result<Option<String>> {
@@ -228,9 +242,13 @@ fn decimal_attribute(attrs: &[Attribute]) -> syn::Result<Option<String>> {
     Ok(decimal)
 }
 
-fn type_ddl(ty: &Type, decimal: Option<&str>) -> syn::Result<String> {
+fn type_ddl(
+    ty: &Type,
+    decimal: Option<&str>,
+    dependencies: &mut BTreeSet<String>,
+) -> syn::Result<String> {
     match ty {
-        Type::Path(path) => path_ddl(path, decimal),
+        Type::Path(path) => path_ddl(path, decimal, dependencies),
         Type::Tuple(tuple) => {
             if tuple.elems.len() == 1 {
                 return Err(syn::Error::new(
@@ -241,7 +259,7 @@ fn type_ddl(ty: &Type, decimal: Option<&str>) -> syn::Result<String> {
             let parts = tuple
                 .elems
                 .iter()
-                .map(|element| type_ddl(element, decimal))
+                .map(|element| type_ddl(element, decimal, dependencies))
                 .collect::<syn::Result<Vec<_>>>()?;
             Ok(format!("({})", parts.join(", ")))
         }
@@ -262,7 +280,11 @@ fn type_ddl(ty: &Type, decimal: Option<&str>) -> syn::Result<String> {
     }
 }
 
-fn path_ddl(path: &syn::TypePath, decimal: Option<&str>) -> syn::Result<String> {
+fn path_ddl(
+    path: &syn::TypePath,
+    decimal: Option<&str>,
+    dependencies: &mut BTreeSet<String>,
+) -> syn::Result<String> {
     let segment = path
         .path
         .segments
@@ -297,7 +319,10 @@ fn path_ddl(path: &syn::TypePath, decimal: Option<&str>) -> syn::Result<String> 
                 path.span(),
                 format!("unsupported primitive type `{name}` for a unionid schema"),
             )),
-            _ => Ok(name),
+            _ => {
+                dependencies.insert(name.clone());
+                Ok(name)
+            }
         },
         PathArguments::AngleBracketed(arguments) if arguments.args.len() == 1 => {
             let inner = match &arguments.args[0] {
@@ -310,9 +335,15 @@ fn path_ddl(path: &syn::TypePath, decimal: Option<&str>) -> syn::Result<String> 
                 }
             };
             match name.as_str() {
-                "Option" => Ok(format!("option ({})", type_ddl(inner, decimal)?)),
-                "Vec" => Ok(format!("list ({})", type_ddl(inner, decimal)?)),
-                "Box" => type_ddl(inner, decimal),
+                "Option" => Ok(format!(
+                    "option ({})",
+                    type_ddl(inner, decimal, dependencies)?
+                )),
+                "Vec" => Ok(format!(
+                    "list ({})",
+                    type_ddl(inner, decimal, dependencies)?
+                )),
+                "Box" => type_ddl(inner, decimal, dependencies),
                 _ => Err(syn::Error::new(
                     path.span(),
                     "unsupported generic type for a unionid schema",
