@@ -14,6 +14,8 @@ use crate::idempotency::{ReceiptMap, ensure_legacy_receipts, validate_receipts};
 use crate::profile::ExecutionObservation;
 use crate::row_source::TypedRowSource;
 
+pub mod incremental;
+
 const LEGACY_BACKUP_FORMAT_VERSION: u32 = 1;
 const RECEIPT_BACKUP_FORMAT_VERSION: u32 = 2;
 const SCALAR_BACKUP_FORMAT_VERSION: u32 = 3;
