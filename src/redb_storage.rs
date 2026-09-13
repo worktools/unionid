@@ -18,6 +18,7 @@ use redb::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::backup::incremental::{ArchiveFrame, ArchiveHeader, BaselineSource, JournalSource};
 use crate::codec::{PRODUCTION_VALUE_CODEC_VERSION, VALUE_CODEC_VERSION};
 use crate::db::{
     Database, DurableCatalogEntry, DurableMeta, DurableTable, IndexDefinition, LogicalWriteSet,
@@ -141,6 +142,14 @@ pub(crate) struct RedbCompaction {
     pub(crate) changed: bool,
     pub(crate) before_bytes: u64,
     pub(crate) after_bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct ArchiveMetaRecord {
+    sequence: u64,
+    schema_revision: u64,
+    next_catalog_id: u64,
+    schema_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1604,6 +1613,359 @@ impl RedbStore {
             },
             |state| state.status(self.committed.layout.format, self.committed.meta.sequence),
         )
+    }
+
+    pub(crate) fn incremental_baseline_source(&self, chain_id: &str) -> Result<BaselineSource> {
+        if self.committed.journal.is_some() {
+            return Err(Error::new(
+                "E_BACKUP_CHAIN",
+                "an active backup chain already exists",
+            ));
+        }
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin incremental baseline read", error))?;
+        let generation = self.committed.generation.active;
+        let (lower, upper) = generation_scan_bounds(generation)?;
+        let bounds = || (borrowed_bound(&lower), borrowed_bound(&upper));
+        let catalog = match generation {
+            GenerationRef::Legacy0 => transaction
+                .open_table(CATALOG)
+                .map_err(|error| storage_error("open baseline catalog", error))?,
+            GenerationRef::Generated(_) => transaction
+                .open_table(GENERATION_CATALOG)
+                .map_err(|error| storage_error("open baseline catalog", error))?,
+        };
+        let rows = match generation {
+            GenerationRef::Legacy0 => transaction
+                .open_table(ROWS)
+                .map_err(|error| storage_error("open baseline rows", error))?,
+            GenerationRef::Generated(_) => transaction
+                .open_table(GENERATION_ROWS)
+                .map_err(|error| storage_error("open baseline rows", error))?,
+        };
+        let mut frames = vec![ArchiveFrame::new(
+            1,
+            serde_json::to_vec(&ArchiveMetaRecord {
+                sequence: self.committed.meta.sequence,
+                schema_revision: self.committed.meta.schema_revision,
+                next_catalog_id: self.committed.meta.next_catalog_id,
+                schema_hash: self.committed.meta.schema_hash.clone(),
+            })
+            .map_err(|error| Error::new("E_STORAGE", format!("encode baseline meta: {error}")))?,
+        )];
+        for entry in catalog
+            .range::<&[u8]>(bounds())
+            .map_err(|error| storage_error("scan baseline catalog", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read baseline catalog", error))?;
+            frames.push(ArchiveFrame::write(
+                2,
+                logical_generation_key(generation, key.value())?,
+                value.value(),
+            )?);
+        }
+        for entry in rows
+            .range::<&[u8]>(bounds())
+            .map_err(|error| storage_error("scan baseline rows", error))?
+        {
+            let (key, value) = entry.map_err(|error| storage_error("read baseline row", error))?;
+            frames.push(ArchiveFrame::write(
+                3,
+                logical_generation_key(generation, key.value())?,
+                value.value(),
+            )?);
+        }
+        let migrations = transaction
+            .open_table(MIGRATION_LEDGER)
+            .map_err(|error| storage_error("open baseline migration ledger", error))?;
+        for entry in migrations
+            .iter()
+            .map_err(|error| storage_error("scan baseline migration ledger", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read baseline migration", error))?;
+            frames.push(ArchiveFrame::write(
+                4,
+                &key.value().to_be_bytes(),
+                value.value(),
+            )?);
+        }
+        let receipts = transaction
+            .open_table(IDEMPOTENCY_RECEIPTS)
+            .map_err(|error| storage_error("open baseline receipts", error))?;
+        for entry in receipts
+            .iter()
+            .map_err(|error| storage_error("scan baseline receipts", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read baseline receipt", error))?;
+            frames.push(ArchiveFrame::write(5, key.value(), value.value())?);
+        }
+        let mut identity = Sha256::new();
+        identity.update(b"unionid-incremental-database-v1\0");
+        identity.update(self.committed.meta.cursor_instance_id);
+        Ok(BaselineSource {
+            previous_storage_format: self.committed.layout.format,
+            header: ArchiveHeader {
+                chain_id: chain_id.to_owned(),
+                database_digest: format!("sha256:{:x}", identity.finalize()),
+                first_sequence: self.committed.meta.sequence,
+                last_sequence: self.committed.meta.sequence,
+                catalog_codec: u32::from(self.committed.layout.catalog),
+                value_codec: u32::from(self.committed.layout.value),
+                receipt_codec: u32::from(self.committed.layout.receipt),
+            },
+            frames,
+        })
+    }
+
+    pub(crate) fn incremental_journal_source(
+        &self,
+        through_sequence: Option<u64>,
+    ) -> Result<Option<JournalSource>> {
+        let state = self
+            .committed
+            .journal
+            .as_ref()
+            .ok_or_else(|| Error::new("E_BACKUP_CHAIN", "backup journal is not active"))?;
+        let Some(first) = state.first_retained_sequence else {
+            return Ok(None);
+        };
+        let last = through_sequence.unwrap_or(state.last_retained_sequence.unwrap_or(first));
+        if last < first || last > state.last_retained_sequence.unwrap_or(first) {
+            return Err(Error::new(
+                "E_BACKUP_CHAIN",
+                "export sequence is outside the retained journal range",
+            ));
+        }
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin backup journal export read", error))?;
+        let table = transaction
+            .open_table(BACKUP_JOURNAL)
+            .map_err(|error| storage_error("open backup journal for export", error))?;
+        let mut frames = Vec::new();
+        let mut commits = 0u64;
+        let mut last_checksum = None;
+        for entry in table
+            .iter()
+            .map_err(|error| storage_error("scan backup journal for export", error))?
+        {
+            let (key, value) =
+                entry.map_err(|error| storage_error("read backup journal for export", error))?;
+            let (sequence, _) = decode_journal_key(key.value())?;
+            if sequence > last {
+                break;
+            }
+            let (kind, payload) = decode_journal_record(value.value())?;
+            if kind == 25 {
+                commits = commits.saturating_add(1);
+                last_checksum = Some(
+                    std::str::from_utf8(payload)
+                        .map_err(|_| Error::new("E_STORAGE", "journal checksum is not UTF-8"))?
+                        .to_owned(),
+                );
+            }
+            frames.push(ArchiveFrame::new(kind, payload.to_vec()));
+        }
+        if commits == 0 || frames.last().is_none_or(|frame| frame.kind != 25) {
+            return Err(Error::new(
+                "E_BACKUP_CHAIN",
+                "export range ends inside a journal commit",
+            ));
+        }
+        Ok(Some(JournalSource {
+            header: ArchiveHeader {
+                chain_id: state.chain_id.clone(),
+                database_digest: String::new(),
+                first_sequence: first,
+                last_sequence: last,
+                catalog_codec: u32::from(self.committed.layout.catalog),
+                value_codec: u32::from(self.committed.layout.value),
+                receipt_codec: u32::from(self.committed.layout.receipt),
+            },
+            frames,
+            last_commit_checksum: last_checksum.expect("complete journal commit has checksum"),
+            commit_count: commits,
+        }))
+    }
+
+    pub(crate) fn prune_exported_journal(
+        &mut self,
+        through_sequence: u64,
+        commit_checksum: &str,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        let expected = self.committed.journal.clone().ok_or_else(|| {
+            CommitFailure::Definite(Error::new("E_BACKUP_CHAIN", "backup journal is not active"))
+        })?;
+        if through_sequence <= expected.exported_sequence {
+            if through_sequence == expected.exported_sequence
+                && commit_checksum == expected.exported_checksum
+            {
+                return Ok(self.backup_journal_status());
+            }
+            return Err(CommitFailure::Definite(Error::new(
+                "E_BACKUP_CHAIN",
+                "archive export head conflicts with the database export head",
+            )));
+        }
+        let first = expected.first_retained_sequence.ok_or_else(|| {
+            CommitFailure::Definite(Error::new(
+                "E_BACKUP_CHAIN",
+                "journal has no records to prune",
+            ))
+        })?;
+        if first != expected.exported_sequence.saturating_add(1)
+            || through_sequence > expected.last_retained_sequence.unwrap_or(first)
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_BACKUP_CHAIN",
+                "archive export range is not a retained journal prefix",
+            )));
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|error| CommitFailure::definite("begin exported journal prune read", error))?;
+        let table = read
+            .open_table(BACKUP_JOURNAL)
+            .map_err(|error| CommitFailure::definite("open exported journal prune read", error))?;
+        let mut keys = Vec::new();
+        let mut removed_bytes = 0u64;
+        let mut removed_commits = 0u64;
+        let mut actual_checksum = None;
+        for entry in table
+            .iter()
+            .map_err(|error| CommitFailure::definite("scan exported journal prefix", error))?
+        {
+            let (key, value) = entry
+                .map_err(|error| CommitFailure::definite("read exported journal prefix", error))?;
+            let (sequence, _) = decode_journal_key(key.value()).map_err(CommitFailure::Definite)?;
+            if sequence > through_sequence {
+                break;
+            }
+            let (kind, payload) =
+                decode_journal_record(value.value()).map_err(CommitFailure::Definite)?;
+            removed_bytes = removed_bytes
+                .checked_add(usize_u64(key.value().len()))
+                .and_then(|value_bytes| value_bytes.checked_add(usize_u64(value.value().len())))
+                .ok_or_else(|| {
+                    CommitFailure::Definite(Error::new(
+                        "E_LIMIT",
+                        "journal prune byte count overflow",
+                    ))
+                })?;
+            if kind == 25 {
+                removed_commits = removed_commits.saturating_add(1);
+                actual_checksum = Some(
+                    std::str::from_utf8(payload)
+                        .map_err(|_| {
+                            CommitFailure::Definite(Error::new(
+                                "E_STORAGE",
+                                "journal checksum is not UTF-8",
+                            ))
+                        })?
+                        .to_owned(),
+                );
+            }
+            keys.push(key.value().to_vec());
+        }
+        drop(table);
+        drop(read);
+        if actual_checksum.as_deref() != Some(commit_checksum) {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_BACKUP_CHAIN",
+                "archive export checksum does not match the retained journal prefix",
+            )));
+        }
+        let mut next = expected.clone();
+        next.exported_sequence = through_sequence;
+        next.exported_checksum = commit_checksum.to_owned();
+        next.commit_count = next
+            .commit_count
+            .checked_sub(removed_commits)
+            .ok_or_else(|| {
+                CommitFailure::Definite(Error::new(
+                    "E_STORAGE",
+                    "journal prune commit count underflow",
+                ))
+            })?;
+        next.expanded_bytes = next
+            .expanded_bytes
+            .checked_sub(removed_bytes)
+            .ok_or_else(|| {
+                CommitFailure::Definite(Error::new(
+                    "E_STORAGE",
+                    "journal prune byte count underflow",
+                ))
+            })?;
+        if next.commit_count == 0 {
+            next.first_retained_sequence = None;
+            next.last_retained_sequence = None;
+        } else {
+            next.first_retained_sequence = through_sequence.checked_add(1);
+        }
+        let encoded = encode_journal_state(&next).map_err(CommitFailure::Definite)?;
+        self.invalidate_compaction_proof()
+            .map_err(CommitFailure::Definite)?;
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin exported journal prune", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure exported journal prune", error))?;
+        transaction.set_two_phase_commit(true);
+        {
+            let mut states = transaction
+                .open_table(BACKUP_CHAIN_STATE)
+                .map_err(|error| {
+                    CommitFailure::definite("open backup chain state for prune", error)
+                })?;
+            let stored = states
+                .get(JOURNAL_STATE_KEY)
+                .map_err(|error| {
+                    CommitFailure::definite("read backup chain state for prune", error)
+                })?
+                .ok_or_else(|| {
+                    CommitFailure::Definite(Error::new(
+                        "E_BACKUP_CHAIN",
+                        "backup chain state disappeared",
+                    ))
+                })?;
+            let actual = decode_journal_state(stored.value()).map_err(CommitFailure::Definite)?;
+            drop(stored);
+            if actual != expected {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_BACKUP_CHAIN",
+                    "backup chain changed before journal prune",
+                )));
+            }
+            states
+                .insert(JOURNAL_STATE_KEY, encoded.as_slice())
+                .map_err(|error| {
+                    CommitFailure::definite("update backup chain state for prune", error)
+                })?;
+        }
+        {
+            let mut journal = transaction
+                .open_table(BACKUP_JOURNAL)
+                .map_err(|error| CommitFailure::definite("open backup journal for prune", error))?;
+            for key in keys {
+                journal.remove(key.as_slice()).map_err(|error| {
+                    CommitFailure::definite("remove exported journal record", error)
+                })?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit exported journal prune", error))?;
+        self.committed.journal = Some(next);
+        Ok(self.backup_journal_status())
     }
 
     pub(crate) fn enable_backup_journal(

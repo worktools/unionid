@@ -1,8 +1,20 @@
 # 备份、还原与旧格式导入
 
-当前可执行入口仍是下述完整 logical backup。v0.5 的增量备份采用“可选数据库内原子 journal + 外部 portable baseline/segment chain”，只把实际连续记录并封存的 sequence 声明为恢复点；完整契约与实现顺序见 [RFC 0016](rfc/0016-incremental-backup-chains.md)。RFC 已接受但实现由 [#304](https://github.com/worktools/unionid/issues/304) 跟踪，在命令落地前不要把文档中的预定 `backup incremental` 语法当作可用功能。
+完整 logical backup 和增量 archive 都可使用。v0.5 的增量备份采用“可选数据库内原子 journal + 外部 portable baseline/segment chain”，只把实际连续记录并封存的 sequence 声明为恢复点；完整契约与后续 restore/retention 工作见 [RFC 0016](rfc/0016-incremental-backup-chains.md) 与 [#304](https://github.com/worktools/unionid/issues/304)。
 
-前两层 Rust primitives 已落地。`backup::incremental` 提供 archive codec 1：`UIB1` baseline、`UIS1` segment、canonical manifest/header、`none`/zstd level 3、payload/stored SHA-256、严格 frame 顺序和解压前资源上限。`Engine::enable_backup_journal` 可显式把 format 6 升为 format 7，并从已发布 baseline 的 sequence/checksum 开始记录；`backup_journal_status` 和 introspection 只暴露状态、范围、容量与 checksum，不暴露业务值。启用后，DDL、DML、receipt 变化和 migration cutover 与 canonical journal delta 在同一个 redb transaction 提交；派生索引不重复记录。容量不足会在业务 transaction 前返回 `E_BACKUP_JOURNAL_FULL`。format 6 默认行为不变，禁用 journal 也不会把 format 7 隐式降级。外部 archive 的 `init/export/restore` CLI 仍由 [#308](https://github.com/worktools/unionid/issues/308) 实现，应用不应自行拼接低层 records。
+`backup::incremental` 提供 archive codec 1 以及 `init`、`export`、`list`、`verify` Rust API。CLI 对应如下：
+
+```text
+unionid backup incremental init --db app.redb --repo backups/
+unionid backup incremental export --db app.redb --repo backups/
+unionid backup incremental export --db app.redb --repo backups/ --through-sequence 42
+unionid backup incremental list --repo backups/ --format json
+unionid backup incremental verify --repo backups/
+```
+
+`init` 先从独占、完整检查的 committed view 写出并重读验证 baseline，再发布 `prepared` manifest，最后用同步事务启用 journal 并把 manifest 切为 `active`。它是把 format 6 升到 format 7 的显式授权。中断后重试会对账两侧 chain ID、baseline sequence 与 checksum；数据库在没有 durable baseline 时不会进入 active。`export` 只读取完整连续 commit，先发布不可变 segment，再原子更新 manifest，最后裁剪源 journal。中断留下的重复 journal 会在下次 export 补做裁剪；未被 manifest 引用的文件由 `verify` 扫描并作为 orphan 报告。
+
+`list` 只读取最多 1 MiB 的 manifest，不读取业务 records。`verify` 有界读取所有已引用 artifact，核对 magic、codec、压缩与大小限制、stored/payload checksum、archive 父链、sequence 和逐 commit checksum。默认每个 segment 最多 1,000 commits/64 MiB，可用 `--max-segment-commits` 与 `--max-segment-bytes` 调低；journal 容量可在 init 时设置。所有 JSON report 都有独立 `version`。增量 restore 和 retention 由后续 [#309](https://github.com/worktools/unionid/issues/309) 交付。
 
 unionid 使用版本化逻辑备份保存完整 `Database` 状态，包括稳定 catalog/type/field/variant/table/index ID、ADT 行与 RowId 水位、schema revision/hash 和 migration ledger。存在幂等写入回执时，备份还会保存完整 receipt map，确保恢复后的重试不会重复 effect。备份包含格式版本、payload SHA-256 和 schema 元数据；它不是 CSV 投影，也不丢失 i64、sum tag、Option 或嵌套 product。
 
@@ -32,9 +44,11 @@ unionid import-legacy \
 
 ## English Description
 
-The currently executable interface remains the complete logical backup described above. The v0.5 incremental design uses an optional transactionally embedded journal plus an external portable baseline/segment chain and declares only actually contiguous, sealed sequences as restore points. See [RFC 0016](rfc/0016-incremental-backup-chains.md) for the contract and delivery order. The RFC is accepted, while implementation is tracked by [#304](https://github.com/worktools/unionid/issues/304); do not treat its proposed `backup incremental` syntax as available until that issue lands.
+Both complete logical backups and incremental archives are available. The v0.5 design uses an optional transactionally embedded journal plus an external portable baseline/segment chain and declares only contiguous, sealed sequences as restore points. See [RFC 0016](rfc/0016-incremental-backup-chains.md) and [#304](https://github.com/worktools/unionid/issues/304) for the full contract and remaining restore/retention work.
 
-The first two Rust layers are now available. `backup::incremental` provides archive codec 1 with `UIB1` baselines, `UIS1` segments, canonical manifests/headers, `none`/zstd level 3, payload/stored SHA-256, strict frame ordering, and pre-allocation decode limits. `Engine::enable_backup_journal` explicitly upgrades format 6 to format 7 and starts from a published baseline sequence/checksum. `backup_journal_status` and introspection expose only state, ranges, capacity, and checksums. Once enabled, DDL, DML, receipt changes, and migration cutover commit their canonical journal delta in the same redb transaction; derived indexes are omitted. Capacity admission returns `E_BACKUP_JOURNAL_FULL` before the business transaction. Default format-6 behavior remains unchanged, and disabling the journal does not implicitly downgrade format 7. The external archive `init/export/restore` CLI remains tracked by [#308](https://github.com/worktools/unionid/issues/308); applications should not assemble low-level records themselves.
+`backup::incremental` exposes archive codec 1 plus the `init`, `export`, `list`, and `verify` Rust APIs. The matching CLI is `backup incremental init/export/list/verify`, as shown in the Chinese command block above. Init writes and verifies a baseline from an exclusively opened, fully checked committed view, publishes a prepared manifest, enables the journal in a synchronous transaction, and activates the manifest. This is explicit authorization to upgrade format 6 to format 7. A retry reconciles chain ID, baseline sequence, and checksum; the database cannot become active without a durable baseline.
+
+Export reads only complete contiguous commits, publishes immutable segments and the manifest before pruning the source journal. A retry safely prunes duplicate retained entries after a crash. List reads only the bounded manifest. Verify scans the archive, reports unreferenced files as orphans, and checks every referenced artifact's format, limits, stored and payload checksums, archive parent chain, sequences, and commit checksum chain. Segments default to 1,000 commits/64 MiB and reports carry an independent version. Incremental restore and retention remain in [#309](https://github.com/worktools/unionid/issues/309).
 
 Logical backup preserves the complete `Database` state, stable catalog/type/field/variant/table/index IDs, ADT rows and RowId watermarks, schema identity, migration ledger, and idempotency receipts. It streams from one exclusively opened, fully checked committed redb view, publishes only a flushed and synced complete output, and never overwrites an existing backup or database. Restore validates format, checksum, schema, typed rows, RowIds, indexes, ledger, and receipts before creating a new redb target. Formats 1–4 remain readable according to their frozen compatibility rules.
 
