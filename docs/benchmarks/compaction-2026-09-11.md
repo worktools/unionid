@@ -41,6 +41,8 @@ tools/compaction-eval/target/release/unionid-compaction-eval \
 
 第二次运行在全新进程中打开第一次压缩后的数据库，`before_bytes == after_bytes == durable_bytes`，`changed=false`、`reclaimed_bytes=0`，schema identity 与行数保持不变。因此 no-op 在跨进程、跨打开的场景下是稳定的。
 
+这组原始数据早于 #301 的 authenticated compact proof，保留的是完整 native no-op 的历史成本。version 2 report 可在 proof 完整匹配时于昂贵路径之前返回 `fast_no_op=true`；小型 Linux/macOS 回归验证跨进程命中及写入、替换、缺失、损坏 proof 的保守回退。10k/100k 的新耗时不在普通 PR 重跑，留到 v0.5 发版候选 evaluator。
+
 ### durable 大小与 reopen 语义
 
 redb 的 `Database::compact()` 返回时文件长度小于其持久化 region 布局，紧接着执行 `check_integrity`/读事务后，下一次打开会运行 repair 并把文件向上取整到 region 边界。首版实现据此在 native compact 之后、post-check 之前重开数据库，使 repair 发生在同一次维护操作内部：报告的 `after_bytes` 等于重开后的 durable 大小，`changed` 只在文件实际变小时为 true。这样重复运行稳定返回 no-op（本次实测第二次运行 `changed=false`、`reclaimed_bytes=0`）。重开与 repair 需要完整遍历文件，因此即使 `changed=false`，一次 compact 仍可能有秒级成本，不能当作廉价轮询。
@@ -79,6 +81,8 @@ Each input is a copy of the churn 10k/100k result so the original churn evidence
 | Second run compact time | 0.76 s | 7.03 s |
 
 The second run opens the compacted database in a fresh process with `before_bytes == after_bytes == durable_bytes`, `changed=false`, and `reclaimed_bytes=0`, while schema identity and row count stay identical. No-op is therefore stable across processes and opens.
+
+These raw measurements predate the #301 authenticated compaction proof and retain the historical cost of a complete native no-op. A version-2 report can now return `fast_no_op=true` before the expensive path when the proof fully matches. Bounded Linux/macOS regression tests cover cross-process hits and conservative fallback after writes, replacement, missing, or corrupt proof data. Fresh 10k/100k timings remain a v0.5 release-candidate evaluator rather than an ordinary PR job.
 
 ### Durable size and reopen semantics
 

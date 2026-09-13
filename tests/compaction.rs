@@ -180,25 +180,71 @@ fn redb_compaction_reaches_a_stable_no_op_across_opens() {
     let dir = TempDir::new();
     let path = dir.0.join("noop.redb");
     prepare(&path);
-    let mut changed = true;
-    for _ in 0..4 {
-        let mut engine = Engine::open_redb(&path).unwrap();
-        let report = engine.compact_storage().unwrap();
-        assert!(report.identity_preserved);
-        assert_eq!(engine.execute("from items").rows.len(), ROWS);
-        assert!(engine.check_integrity().unwrap().backend_clean);
-        drop(engine);
-        if !report.changed {
-            assert_eq!(report.reclaimed_bytes, 0);
-            changed = false;
-            break;
-        }
-    }
-    assert!(!changed, "compaction never reached a stable no-op");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let first = engine.compact_storage().unwrap();
+    assert!(!first.fast_no_op);
+    assert!(first.proof_persisted);
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let no_op = reopened.compact_storage().unwrap();
+    assert_eq!(no_op.version, 2);
+    assert!(no_op.fast_no_op);
+    assert!(no_op.proof_persisted);
+    assert!(!no_op.changed);
+    assert_eq!(no_op.reclaimed_bytes, 0);
+    assert_eq!(no_op.before_bytes, no_op.after_bytes);
+    assert_eq!(reopened.execute("from items").rows.len(), ROWS);
 }
 
 fn engine_schema(path: &Path) -> SchemaInfo {
     Engine::open_redb(path).unwrap().schema_info()
+}
+
+fn proof_path(path: &Path) -> PathBuf {
+    let mut proof = path.as_os_str().to_os_string();
+    proof.push(".unionid-compact-proof.json");
+    PathBuf::from(proof)
+}
+
+#[test]
+fn durable_write_and_tampered_proof_disable_compaction_fast_path() {
+    let dir = TempDir::new();
+    let path = dir.0.join("proof-invalidated.redb");
+    prepare(&path);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(engine.compact_storage().unwrap().proof_persisted);
+    drop(engine);
+
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let updated = engine.execute("update items | filter id == 1 | set label = \"changed\"");
+    assert!(updated.ok, "{}", updated.message);
+    let after_write = engine.compact_storage().unwrap();
+    assert!(!after_write.fast_no_op);
+    assert!(after_write.proof_persisted);
+    drop(engine);
+
+    std::fs::write(proof_path(&path), b"{\"version\":1}").unwrap();
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let after_tamper = reopened.compact_storage().unwrap();
+    assert!(!after_tamper.fast_no_op);
+    assert!(after_tamper.proof_persisted);
+    drop(reopened);
+
+    std::fs::remove_file(proof_path(&path)).unwrap();
+    let mut without_proof = Engine::open_redb(&path).unwrap();
+    let after_missing = without_proof.compact_storage().unwrap();
+    assert!(!after_missing.fast_no_op);
+    assert!(after_missing.proof_persisted);
+    drop(without_proof);
+
+    let replacement = dir.0.join("replacement.redb");
+    drop(Engine::open_redb(&replacement).unwrap());
+    std::fs::rename(&replacement, &path).unwrap();
+    let mut replaced = Engine::open_redb(&path).unwrap();
+    let after_replacement = replaced.compact_storage().unwrap();
+    assert!(!after_replacement.fast_no_op);
+    assert!(after_replacement.proof_persisted);
 }
 
 #[test]
