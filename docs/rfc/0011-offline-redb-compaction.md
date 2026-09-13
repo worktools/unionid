@@ -118,7 +118,7 @@ redb 的 `Database::compact()` 返回时文件长度小于其持久化 region �
 
 ### 9. 实现补充：经过认证的 fast no-op proof
 
-只有 native compact、重开 repair、完整 post-check、committed view 重建和逻辑身份比较全部成功后，unionid 才原子发布 `<database>.unionid-compact-proof.json`。版本化 payload 绑定 database instance ID、commit sequence、schema identity、全部 storage/codec versions，以及 Unix device/inode 文件身份；使用数据库已有 cursor secret 计算 HMAC-SHA256，secret 本身不会进入 proof 或 report。
+只有 native compact、重开 repair、完整 post-check、committed view 重建和逻辑身份比较全部成功后，unionid 才原子发布 `<database>.unionid-compact-proof.json`。版本化 payload 绑定 database instance ID、commit sequence、schema identity、全部 storage/codec versions、当前 proof token，以及 Unix 文件长度/device/inode 身份；使用数据库已有 cursor secret 计算 HMAC-SHA256，secret 本身不会进入 proof 或 report。redb 在 open/close 时可保留或释放一个有界的 64 KiB region，因此同一认证文件的长度比较只允许这一个固定差额，其他 identity 与 token 比较仍精确。
 
 后续调用完整匹配时，在 full check、row digest、native compact 和 reopen 之前返回 version 2 fast no-op。任何写入都会改变 sequence，文件替换会改变文件或数据库身份。proof 缺失、过大、格式错误、版本未知、认证失败或身份不符都只视为 cache miss，并执行完整路径。proof 只在全部后置条件通过后发布，因此中断不会为未完成的 compact 提供有效证明。没有 Unix device/inode 元数据的平台退化为认证的逻辑身份；当前发布验证覆盖 Linux 和 macOS。
 
@@ -178,7 +178,7 @@ The implementation therefore runs: native compact -> release the old handle and 
 
 ### 9. Implementation addendum: authenticated fast no-op proof
 
-After native compaction, reopen repair, the complete post-check, committed-view rebuild, and logical identity comparison all succeed, unionid atomically publishes `<database>.unionid-compact-proof.json`. The versioned payload binds the database instance ID, commit sequence, schema identity, all storage/codec versions, and the Unix device/inode identity. It is authenticated with HMAC-SHA256 using the database's existing cursor secret; the secret itself is never written to the proof or report.
+After native compaction, reopen repair, the complete post-check, committed-view rebuild, and logical identity comparison all succeed, unionid atomically publishes `<database>.unionid-compact-proof.json`. The versioned payload binds the database instance ID, commit sequence, schema identity, all storage/codec versions, the current proof token, and Unix file length/device/inode identity. It is authenticated with HMAC-SHA256 using the database's existing cursor secret; the secret itself is never written to the proof or report. redb can retain or release one bounded 64 KiB region across open/close, so a matching authenticated file permits only that fixed difference; every other identity and token comparison remains exact.
 
 On a later invocation, a complete match returns a version-2 fast no-op before the full check, row digest, native compact, or reopen. Any write changes the sequence. Replacement changes the file or database identity. Missing, oversized, malformed, unknown-version, unauthenticated, or mismatched proof data is treated as a cache miss and runs the complete path. Publishing happens only after all postconditions pass, so interruption cannot certify an incomplete compaction. On platforms without Unix device/inode metadata, the authenticated logical identity remains the conservative key; current release verification covers Linux and macOS.
 

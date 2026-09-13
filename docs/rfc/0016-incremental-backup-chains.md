@@ -282,7 +282,7 @@ A crash before segment publication leaves nothing; one between segment and manif
 
 Existing logical CLI remains unchanged. Incremental commands use `backup incremental init/export/list/verify` and `restore incremental --at-sequence`; Rust exposes the same core through `backup::incremental`. Every report has its own version. The query language does not expose filesystem maintenance.
 
-`list` reads only the bounded manifest and reports baseline, segments, inclusive recoverable range, gaps, and stored/expanded bytes without business records. `verify` streams every referenced artifact and validates formats, limits, both checksums, parent chain, sequence continuity, and schema transitions without creating a database.
+`list` reads only the bounded manifest and reports the baseline, segments, inclusive recoverable range, and stored/expanded bytes without business records. A manifest with a gap or fork is rejected while decoding rather than returned as a partially usable list. `verify` streams every referenced artifact and validates formats, limits, both checksums, parent chain, sequence continuity, and schema transitions without creating a database.
 
 Restore validates availability first, then verifies every required artifact, applies the baseline and deltas to a sibling temporary redb, rebuilds indexes, validates schema/ledger/receipts/RowIds, runs the full check, and atomically publishes a nonexistent target followed by directory sync. A target below baseline returns `E_BACKUP_BEFORE_BASELINE`; one above sealed head returns `E_BACKUP_AFTER_HEAD`; a gap or fork returns `E_BACKUP_CHAIN`. Failure removes the temporary target and never changes the archive, source, or existing destination.
 

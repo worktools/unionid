@@ -4,7 +4,7 @@
 
 本记录为 [#307](https://github.com/worktools/unionid/issues/307) 保存 journal mutation profile 与 workload evaluator 的有界证据。测量使用 Apple M1 Pro、macOS ARM64、8 logical CPUs、Rust 1.94.0 和 release 构建；输入只有 100 行，每个写入场景预热 5 次并采样 5 次。它用于验证计量和写集形状，不是容量结论或 SLA。普通 CI 只编译 evaluator；跨平台或更大数据复验留给发布工作流。
 
-原始 JSON：[`data/journal-100-2026-09-13.json`](data/journal-100-2026-09-13.json)。
+原始 JSON 是可复现的生成产物，不纳入仓库；请使用文末命令在本地生成。
 
 | 场景 | 总延迟 p50 / p95 | durable commit p50 / p95 | journal p50 / p95 | journal bytes p50 / p95 |
 | --- | ---: | ---: | ---: | ---: |
@@ -23,7 +23,7 @@ cargo run --release --locked --manifest-path tools/workload-eval/Cargo.toml -- /
 
 This record preserves bounded mutation-profile and workload-evaluator evidence for [#307](https://github.com/worktools/unionid/issues/307). It used an Apple M1 Pro, macOS ARM64, 8 logical CPUs, Rust 1.94.0, and a release build. The input has only 100 rows; each write case uses five warm-ups and five measured samples. It validates instrumentation and write-set shape rather than establishing a capacity result or SLA. Regular CI only compiles the evaluator; cross-platform or larger reruns remain release-workflow work.
 
-Raw JSON: [`data/journal-100-2026-09-13.json`](data/journal-100-2026-09-13.json).
+Raw JSON is a reproducible generated artifact and is not committed; generate it locally with the command below.
 
 | Case | Total p50 / p95 | Durable commit p50 / p95 | Journal p50 / p95 | Journal bytes p50 / p95 |
 | --- | ---: | ---: | ---: | ---: |

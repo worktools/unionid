@@ -51,6 +51,8 @@ pub struct BackupJournalStatus {
     pub baseline_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exported_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exported_checksum: Option<String>,
     pub head_sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_retained_sequence: Option<u64>,

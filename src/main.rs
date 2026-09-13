@@ -945,8 +945,8 @@ fn run(args: Args) -> Result<(), String> {
             format,
         } => match command {
             None => cli::backup_create(
-                db.ok_or_else(|| "logical backup requires --db".to_owned())?,
-                output.ok_or_else(|| "logical backup requires --output".to_owned())?,
+                db.ok_or_else(|| "E_ARGUMENT: logical backup requires --db".to_owned())?,
+                output.ok_or_else(|| "E_ARGUMENT: logical backup requires --output".to_owned())?,
                 matches!(format, Format::Json),
             ),
             Some(BackupCommand::Incremental { command }) => match command {

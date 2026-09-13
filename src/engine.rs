@@ -324,6 +324,7 @@ trait DurableBackend: Send {
             chain_id: None,
             baseline_sequence: None,
             exported_sequence: None,
+            exported_checksum: None,
             head_sequence: 0,
             first_retained_sequence: None,
             last_retained_sequence: None,

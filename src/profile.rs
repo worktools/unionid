@@ -130,7 +130,9 @@ pub struct DurableCommitProfile {
     pub diff_micros: u64,
     pub transaction_apply_micros: u64,
     pub sync_micros: u64,
+    #[serde(default)]
     pub journal_micros: u64,
+    #[serde(default)]
     pub journal_bytes: u64,
     pub catalog_changes: usize,
     pub row_changes: usize,
@@ -138,4 +140,21 @@ pub struct DurableCommitProfile {
     pub migration_changes: usize,
     pub receipt_changes: usize,
     pub encoded_change_bytes: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DurableCommitProfile;
+
+    #[test]
+    fn durable_commit_profile_reads_pre_journal_json() {
+        let mut value = serde_json::to_value(DurableCommitProfile::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("journal_micros");
+        object.remove("journal_bytes");
+
+        let decoded: DurableCommitProfile = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.journal_micros, 0);
+        assert_eq!(decoded.journal_bytes, 0);
+    }
 }

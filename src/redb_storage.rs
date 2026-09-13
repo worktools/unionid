@@ -67,6 +67,10 @@ const MAINTENANCE_RECLAIM_MAX_ENTRIES: usize = 1_024;
 const COMPACTION_PROOF_VERSION: u16 = 1;
 const MAX_COMPACTION_PROOF_BYTES: u64 = 16 * 1024;
 const COMPACTION_PROOF_DOMAIN: &[u8] = b"unionid-compaction-proof-v1\0";
+// redb may reserve or release a bounded 64 KiB region while opening a database. The
+// authenticated token and logical identity remain exact; this only avoids
+// rejecting the same clean file because of that bounded allocator bookkeeping.
+const COMPACTION_FILE_LENGTH_SLACK: u64 = 64 * 1024;
 static COMPACTION_PROOF_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn production_versions() -> StorageVersions {
@@ -133,7 +137,6 @@ pub(crate) struct RedbStore {
     database: RedbDatabase,
     path: PathBuf,
     committed: DurableHead,
-    opened_file_identity: Option<CompactionFileIdentity>,
     compaction_token: Option<[u8; 32]>,
 }
 
@@ -178,7 +181,8 @@ struct CompactionFileIdentity {
 
 impl CompactionFileIdentity {
     fn matches(&self, actual: &Self) -> bool {
-        self.device == actual.device
+        self.length.abs_diff(actual.length) <= COMPACTION_FILE_LENGTH_SLACK
+            && self.device == actual.device
             && self.inode == actual.inode
             && self.generation == actual.generation
     }
@@ -1061,6 +1065,7 @@ impl JournalState {
             chain_id: Some(self.chain_id.clone()),
             baseline_sequence: Some(self.baseline_sequence),
             exported_sequence: Some(self.exported_sequence),
+            exported_checksum: Some(self.exported_checksum.clone()),
             head_sequence,
             first_retained_sequence: self.first_retained_sequence,
             last_retained_sequence: self.last_retained_sequence,
@@ -1258,14 +1263,6 @@ impl RedbStore {
             })?;
         }
         let fresh = std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0);
-        // redb may update file metadata while opening and repairing a database. Capture the
-        // durable identity before opening so a proof published by the previous clean handle can
-        // be checked without mistaking redb's own open work for an external replacement.
-        let opened_file_identity = if fresh {
-            None
-        } else {
-            Some(compaction_file_identity(&path)?)
-        };
         let redb_started = Instant::now();
         let database = RedbDatabase::create(&path).map_err(open_error)?;
         let path = std::fs::canonicalize(&path)
@@ -1277,7 +1274,6 @@ impl RedbStore {
             database,
             path,
             committed: DurableHead::from_prepared(&initial),
-            opened_file_identity,
             compaction_token: None,
         };
         let bootstrap_started = Instant::now();
@@ -1349,7 +1345,7 @@ impl RedbStore {
             database,
             self.versions(),
             self.compaction_token?,
-            self.opened_file_identity.clone()?,
+            compaction_file_identity(&self.path).ok()?,
         );
         if proof.version != COMPACTION_PROOF_VERSION
             || proof.payload.database_id != expected.database_id
@@ -1357,6 +1353,7 @@ impl RedbStore {
             || proof.payload.schema_revision != expected.schema_revision
             || proof.payload.schema_hash != expected.schema_hash
             || proof.payload.storage != expected.storage
+            || proof.payload.compaction_token != expected.compaction_token
             || !proof.payload.file.matches(&expected.file)
             || !verify_compaction_proof(database, &proof.payload, &proof.signature)
         {
@@ -1371,12 +1368,7 @@ impl RedbStore {
     }
 
     pub(crate) fn publish_compaction_proof(&self, database: &Database) -> Result<()> {
-        let file = self.opened_file_identity.clone().ok_or_else(|| {
-            Error::new(
-                "E_STORAGE",
-                "compaction did not capture a stable closed-file identity",
-            )
-        })?;
+        let file = compaction_file_identity(&self.path)?;
         let token = self
             .compaction_token
             .ok_or_else(|| Error::new("E_STORAGE", "compaction did not persist a proof token"))?;
@@ -1467,10 +1459,6 @@ impl RedbStore {
                 error,
             ))
         })?;
-        // Proofs must describe the file while no redb handle is open. A live handle can reserve
-        // extra regions which are released on drop, so metadata observed after reopening is not
-        // a durable cross-process identity.
-        self.opened_file_identity = Some(closed_identity.clone());
         let after_bytes = std::fs::metadata(&self.path)
             .map_err(|error| {
                 CommitFailure::Uncertain(Error::new(
@@ -1602,6 +1590,7 @@ impl RedbStore {
                 chain_id: None,
                 baseline_sequence: None,
                 exported_sequence: None,
+                exported_checksum: None,
                 head_sequence: self.committed.meta.sequence,
                 first_retained_sequence: None,
                 last_retained_sequence: None,

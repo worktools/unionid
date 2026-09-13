@@ -134,7 +134,6 @@ pub struct IncrementalListReport {
     pub segments: Vec<ManifestArtifact>,
     pub recoverable_first_sequence: u64,
     pub recoverable_last_sequence: u64,
-    pub gaps: Vec<String>,
     pub stored_bytes: u64,
     pub expanded_bytes: u64,
     pub manifest_checksum: String,
@@ -287,9 +286,10 @@ pub fn export(
     if manifest.state != ManifestState::Active {
         return Err(chain_error("incremental export requires an active archive"));
     }
-    verify_manifest_artifacts(&repo, &manifest, &options.limits)?;
-    reconcile_exported_prefix(&mut engine, &repo, &manifest, &options.limits)?;
     let status = engine.backup_journal_status()?;
+    reconcile_exported_prefix(&mut engine, &repo, &manifest, &status, &options.limits)?;
+    let status = engine.backup_journal_status()?;
+    verify_export_head(&repo, &manifest, &status, &options.limits)?;
     reconcile_identity(&manifest, &status)?;
     let available_last = status.last_retained_sequence.unwrap_or(
         status
@@ -908,6 +908,78 @@ fn verify_manifest_artifacts(
     Ok(())
 }
 
+/// Export only needs the verified baseline and current archive head. Full-chain
+/// validation remains the explicit responsibility of `incremental verify`.
+fn verify_export_head(
+    repo: &Path,
+    manifest: &ArchiveManifest,
+    status: &super::BackupJournalStatus,
+    limits: &ArchiveLimits,
+) -> Result<()> {
+    let baseline = read_artifact(repo, &manifest.baseline, limits)?;
+    validate_decoded(
+        &baseline,
+        ArchiveKind::Baseline,
+        manifest,
+        &manifest.baseline,
+        None,
+    )?;
+    let meta: BaselineMeta = serde_json::from_slice(&baseline.frames[0].payload)
+        .map_err(|error| archive_error(format!("decode baseline meta: {error}")))?;
+    if meta.sequence != manifest.baseline.first_sequence
+        || meta.next_catalog_id == 0
+        || !meta.schema_hash.starts_with("sha256:")
+    {
+        return Err(chain_error("baseline meta does not match the manifest"));
+    }
+    let exported = status
+        .exported_sequence
+        .ok_or_else(|| chain_error("database has no active export head"))?;
+    let exported_checksum = status
+        .exported_checksum
+        .as_deref()
+        .ok_or_else(|| chain_error("database has no active export checksum"))?;
+    let Some(tail) = manifest.segments.last() else {
+        if exported != manifest.baseline.last_sequence
+            || exported_checksum != manifest.baseline.payload_checksum
+        {
+            return Err(chain_error(
+                "baseline does not match the database export head",
+            ));
+        }
+        return Ok(());
+    };
+    if exported != tail.last_sequence {
+        return Err(chain_error("archive and database export heads differ"));
+    }
+    let decoded = read_artifact(repo, tail, limits)?;
+    validate_decoded(
+        &decoded,
+        ArchiveKind::Segment,
+        manifest,
+        tail,
+        Some(&baseline.header),
+    )?;
+    let initial_parent = segment_initial_parent(&decoded.frames)?;
+    let actual =
+        verify_segment_commits(&decoded.frames, tail.first_sequence, &initial_parent, None)?;
+    if actual != exported_checksum {
+        return Err(chain_error(
+            "archive tail does not match the database export checksum",
+        ));
+    }
+    Ok(())
+}
+
+fn segment_initial_parent(frames: &[super::ArchiveFrame]) -> Result<String> {
+    let first = frames
+        .first()
+        .filter(|frame| frame.kind == 16)
+        .ok_or_else(|| chain_error("segment is missing its first commit"))?;
+    let (_, parent, _, _) = begin_identity(&first.payload)?;
+    Ok(parent)
+}
+
 fn read_artifact(
     repo: &Path,
     artifact: &ManifestArtifact,
@@ -1035,9 +1107,9 @@ fn reconcile_exported_prefix(
     engine: &mut Engine,
     repo: &Path,
     manifest: &ArchiveManifest,
+    status: &super::BackupJournalStatus,
     limits: &ArchiveLimits,
 ) -> Result<()> {
-    let status = engine.backup_journal_status()?;
     let exported = status
         .exported_sequence
         .ok_or_else(|| chain_error("database has no active export head"))?;
@@ -1058,16 +1130,28 @@ fn reconcile_exported_prefix(
             "archive/database export reconciliation is not contiguous",
         ));
     }
-    let mut commit_checksum = manifest.baseline.payload_checksum.clone();
-    for archived in &manifest.segments {
-        let decoded = read_artifact(repo, archived, limits)?;
-        commit_checksum = verify_segment_commits(
-            &decoded.frames,
-            archived.first_sequence,
-            &commit_checksum,
-            None,
-        )?;
-    }
+    let parent = status
+        .exported_checksum
+        .as_deref()
+        .ok_or_else(|| chain_error("database has no active export checksum"))?;
+    let baseline = read_artifact(repo, &manifest.baseline, limits)?;
+    validate_decoded(
+        &baseline,
+        ArchiveKind::Baseline,
+        manifest,
+        &manifest.baseline,
+        None,
+    )?;
+    let decoded = read_artifact(repo, segment, limits)?;
+    validate_decoded(
+        &decoded,
+        ArchiveKind::Segment,
+        manifest,
+        segment,
+        Some(&baseline.header),
+    )?;
+    let commit_checksum =
+        verify_segment_commits(&decoded.frames, segment.first_sequence, parent, None)?;
     engine.prune_exported_journal(segment.last_sequence, &commit_checksum)?;
     Ok(())
 }
@@ -1198,7 +1282,6 @@ fn list_report(manifest: ArchiveManifest) -> IncrementalListReport {
         segments: manifest.segments,
         recoverable_first_sequence: manifest.recoverable_first_sequence,
         recoverable_last_sequence: manifest.recoverable_last_sequence,
-        gaps: Vec::new(),
         stored_bytes: manifest.stored_bytes,
         expanded_bytes: manifest.expanded_bytes,
         manifest_checksum: manifest.checksum,

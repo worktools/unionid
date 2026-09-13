@@ -99,7 +99,6 @@ fn init_export_list_verify_and_retry_form_a_contiguous_chain() {
     let listed = backup::incremental::list(&repo).unwrap();
     assert_eq!(listed.segments.len(), 3);
     assert_eq!(listed.recoverable_last_sequence, init.baseline_sequence + 5);
-    assert!(listed.gaps.is_empty());
     let verified = backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap();
     assert_eq!(verified.segment_count, 3);
 
@@ -114,6 +113,25 @@ fn init_export_list_verify_and_retry_form_a_contiguous_chain() {
     );
     let retry = backup::incremental::export(&db, &repo, Default::default()).unwrap();
     assert!(retry.no_op);
+
+    // Routine export authenticates the baseline and archive head only. Older
+    // immutable segments remain the explicit, potentially expensive `verify`
+    // surface rather than making each newly sealed commit scan the whole chain.
+    let first_segment = repo.join(&listed.segments[0].path);
+    let mut bytes = std::fs::read(&first_segment).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&first_segment, bytes).unwrap();
+    let mut engine = Engine::open_redb(db.clone()).unwrap();
+    assert!(
+        engine
+            .execute("update items | filter id == 1 | set label = \"seven\"")
+            .ok
+    );
+    drop(engine);
+    let next = backup::incremental::export(&db, &repo, Default::default()).unwrap();
+    assert_eq!(next.exported_commits, 1);
+    assert!(backup::incremental::verify(&repo, ArchiveLimits::default()).is_err());
 }
 
 #[test]
