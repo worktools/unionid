@@ -539,6 +539,12 @@ impl Parser {
 
     fn explain(&mut self) -> Result<Statement> {
         self.expect_word("explain")?;
+        let analyze = if self.word("analyze") {
+            self.bump();
+            true
+        } else {
+            false
+        };
         let nested = *self.kind() == Kind::Newline;
         if nested {
             self.block()?;
@@ -549,7 +555,11 @@ impl Parser {
         if nested {
             self.expect(Kind::Dedent)?;
         }
-        Ok(Statement::Explain(pipeline))
+        Ok(if analyze {
+            Statement::ExplainAnalyze(pipeline)
+        } else {
+            Statement::Explain(pipeline)
+        })
     }
 
     fn define_type(&mut self) -> Result<Statement> {

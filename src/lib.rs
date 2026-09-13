@@ -48,8 +48,8 @@ pub use client::{AsyncTcpClient, AsyncTcpStream};
 pub use client::{MAX_RESPONSE_BYTES, TcpClient, TypedStreamEvent};
 pub use db::{
     IndexRangePlan, IndexTraversal, LookupPlan, PageAccessKind, PageInfo, PageOrder, PagePlan,
-    QueryAccessKind, QueryAccessPlan, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind,
-    SchemaInfo, TypedPage, UpsertAction,
+    QueryAccessKind, QueryAccessPlan, QueryAnalysis, QueryPlan, QueryPlanStage, QueryResponse,
+    QueryStageKind, SchemaInfo, TypedPage, UpsertAction,
 };
 pub use engine::{
     Engine, MutationProfile, PreparedQuery, StorageCompaction, StorageIntegrity, StorageUpgrade,

@@ -1160,6 +1160,13 @@ impl Engine {
                         .map_err(|error| error.at(located.span))?;
                     response_columns.clear();
                 }
+                Statement::ExplainAnalyze(pipeline) => {
+                    self.committed
+                        .db
+                        .prepare_pipeline(pipeline)
+                        .map_err(|error| error.at(located.span))?;
+                    response_columns.clear();
+                }
                 Statement::InsertManyParameter {
                     table,
                     parameter_type,
@@ -1630,7 +1637,9 @@ impl Engine {
         let contains_page = statements.iter().any(|located| {
             matches!(
                 &located.statement,
-                Statement::Pipeline(pipeline) | Statement::Explain(pipeline)
+                Statement::Pipeline(pipeline)
+                    | Statement::Explain(pipeline)
+                    | Statement::ExplainAnalyze(pipeline)
                     if pipeline.stages.iter().any(|stage| matches!(stage, Stage::Page(_)))
             )
         });

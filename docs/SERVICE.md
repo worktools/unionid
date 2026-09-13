@@ -8,7 +8,7 @@ unionid server 面向本机受信应用：默认监听 <code>127.0.0.1:7878</cod
 unionid server --db ./data/app.redb --read-only
 ```
 
-`--read-only` 必须与 `--db` 一起使用，且数据库文件必须已经存在。查询、`explain`、introspection、migration status/plan 可继续使用；任何包含 schema 或数据修改的原子脚本，以及待应用的 migration，都会返回 `E_READ_ONLY`。拒绝发生在完整解析和参数绑定之后、候选数据库 clone 和 redb transaction 之前，因此参数错误仍会准确报告，混合读写脚本也不会执行其中的读取或部分写入。`.storage` / version 1 introspection 的 `read_only` 字段可用于启动探针确认实际边界。
+`--read-only` 必须与 `--db` 一起使用，且数据库文件必须已经存在。查询、`explain`、`explain analyze`、introspection、migration status/plan 可继续使用；任何包含 schema 或数据修改的原子脚本，以及待应用的 migration，都会返回 `E_READ_ONLY`。拒绝发生在完整解析和参数绑定之后、候选数据库 clone 和 redb transaction 之前，因此参数错误仍会准确报告，混合读写脚本也不会执行其中的读取或部分写入。`.storage` / version 1 introspection 的 `read_only` 字段可用于启动探针确认实际边界。
 
 ## 有界资源
 

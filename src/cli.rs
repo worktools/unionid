@@ -1695,6 +1695,22 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                     page.max_cursor_bytes
                 );
             }
+            if let Some(analysis) = &response.analysis {
+                println!(
+                    "analysis | {} us, {} returned, {} decoded, {} index entry/entries",
+                    analysis.execution_micros,
+                    analysis.returned_rows,
+                    analysis.rows_decoded,
+                    analysis.index_entries_examined
+                );
+                println!(
+                    "work | {} batch(es), {} cache hit(s), {} cache miss(es), {} peak bytes",
+                    analysis.batches,
+                    analysis.row_cache_hits,
+                    analysis.row_cache_misses,
+                    analysis.working_peak_bytes
+                );
+            }
         } else if response.columns.is_empty() {
             println!("{}", response.message);
         } else {

@@ -138,6 +138,7 @@ take 20
 | 稳定分页 | `page 100` / `page 100 after "u1..."` | 以主键收尾的唯一 sort tuple、opaque cursor 和 sequence-pinned 一致性 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 与多行 pipeline 同语义 |
 | 计划 | `explain from tasks \| filter id == 1` | 只绑定查询并返回 full scan／索引 lookup、候选数、stage 顺序和结果 schema |
+| 实际剖析 | `explain analyze from tasks \| filter id == 1` | 同快照执行查询并返回 value-free 耗时、行数、索引、缓存、批次与内存统计，不返回业务行 |
 
 支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减，复杂算术可在括号内换行。运算数必须归一为同一个 int 或 float 类型；整数除法向零截断，溢出、除零或非有限 float 返回 `E_ARITH`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 提供有类型、可嵌套且有预算的元素字段谓词，`is_some`/`is_none` 显式检查 Option。函数使用空格传参。复杂条件放进跨行 `()`；match branches 放进 `{}`，分支结果也可使用括号跨行。混用 `and` 与 `or` 时规范写法加括号明确分组。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；每个键使用绑定静态类型的 total order，sum 按稳定 variant ID、record 按稳定 field ID、option 按 `None < Some`、list 按短前缀优先的词典序比较。`page` 要求最后一个排序键是源表主键，并返回可恢复的 opaque cursor。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。分页完整规则见[有界 keyset page](QUERY.md#有界-keyset-page)。
 
@@ -145,7 +146,7 @@ take 20
 
 查询局部定义使用 `let name = expression` 或 `let name = argument -> expression`。多个参数写成 `(left, right) ->`；通常从调用字段推断类型，歧义时使用 `let missing option int = None`、`let present = (value option int) -> is_some value` 这样的字段式注解。调用使用空格，嵌套调用加括号。定义只作用于当前 pipeline 的后续 stage，只能调用更早定义的函数，不支持递归、泛型或函数值；详见[查询局部 let 与纯函数](QUERY.md#查询局部-let-与纯函数)。
 
-`explain` 可直接放在单行查询前，也可把完整查询缩进到下一层。它执行与真实查询相同的静态绑定，返回结构化访问计划，但不读取或执行数据行。只有开头的单纯有索引等值 filter（允许前置 let）使用 lookup；planner 不越过其他 stage。完整字段与测量规则见 [Explain 与类型化索引计划](QUERY.md#explain-与类型化索引计划)。
+`explain` 可直接放在单行查询前，也可把完整查询缩进到下一层。它执行与真实查询相同的静态绑定，返回结构化访问计划，但不读取或执行数据行。`explain analyze` 使用相同布局，在同一读快照上额外执行 pipeline 并返回 value-free `analysis`，不会返回业务 rows 或 cursor。只有开头的单纯有索引等值 filter（允许前置 let）使用 lookup；planner 不越过其他 stage。完整字段与测量规则见 [Explain、实际剖析与类型化索引计划](QUERY.md#explain实际剖析与类型化索引计划)。
 
 未分组 `aggregate` 在空输入上返回一行：count 为 0、sum 为输入数值类型的零、min/max 为 `None`；分组空输入返回零行。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
 

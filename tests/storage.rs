@@ -137,6 +137,17 @@ insert many entries [
     assert_eq!(cached_observation.row_cache_misses, 0);
     assert_eq!(cached_observation.row_cache_hits, 1);
 
+    let analyzed = engine.execute("explain analyze from entries | filter id == 2 | select label");
+    assert!(analyzed.ok, "{}", analyzed.message);
+    assert!(analyzed.rows.is_empty());
+    let analyzed = analyzed.analysis.unwrap();
+    assert_eq!(analyzed.returned_rows, 1);
+    assert_eq!(analyzed.rows_examined, 1);
+    assert_eq!(analyzed.index_entries_examined, 1);
+    assert_eq!(analyzed.rows_decoded, 0);
+    assert_eq!(analyzed.row_cache_misses, 0);
+    assert_eq!(analyzed.row_cache_hits, 1);
+
     let inserted = engine.execute("insert entries {id = 4, label = \"four\"}");
     assert!(inserted.ok, "{}", inserted.message);
     let after_commit = engine.execute("from entries | filter id == 2 | select label");

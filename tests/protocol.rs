@@ -157,6 +157,28 @@ fn prepared_queries_reject_schema_changes_and_unsupported_mutations() {
         wire.plan.as_ref().unwrap().access.kind,
         QueryAccessKind::PrimaryKeyLookup
     );
+    let prepared_analyze = engine
+        .prepare("explain analyze from tasks | filter id == $id")
+        .unwrap();
+    let analyzed = engine.query(&prepared_analyze, params.clone());
+    assert!(analyzed.rows.is_empty());
+    assert_eq!(analyzed.analysis.as_ref().unwrap().returned_rows, 1);
+    let wire = Response::from_query("analyze-1", analyzed);
+    assert_eq!(wire.analysis.as_ref().unwrap().returned_rows, 1);
+    assert_eq!(wire.analysis.unwrap().rows_decoded, 1);
+    let wire = execute_protocol_request(
+        &mut engine,
+        Request::query(
+            "analyze-adapter-1",
+            "explain analyze from tasks | filter id == $id",
+        )
+        .with_serde_param("id", &9_007_199_254_740_993_i64)
+        .unwrap(),
+    );
+    assert_eq!(wire.request_id, "analyze-adapter-1");
+    assert!(wire.rows.is_empty());
+    assert_eq!(wire.analysis.as_ref().unwrap().returned_rows, 1);
+    assert_eq!(wire.analysis.unwrap().rows_decoded, 1);
     assert_eq!(
         engine
             .prepare("create table forbidden (id int)")

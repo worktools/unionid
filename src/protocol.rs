@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::db::{
-    PageInfo, QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, TypedPage, UpsertAction,
+    PageInfo, QueryAnalysis, QueryPlan, QueryResponse, ResponseColumn, SchemaInfo, TypedPage,
+    UpsertAction,
 };
 use crate::error::Error;
 use crate::idempotency::{
@@ -466,6 +467,8 @@ pub struct Response {
     pub receipts: Option<ReceiptOperationResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PageInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<QueryAnalysis>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -553,6 +556,7 @@ impl Response {
             upsert_actions: response.upsert_actions,
             plan: response.plan,
             page: response.page,
+            analysis: response.analysis,
             introspection: None,
             idempotency: None,
             receipts: None,
@@ -595,6 +599,7 @@ impl Response {
             idempotency: None,
             receipts: None,
             page: None,
+            analysis: None,
         }
     }
 

@@ -262,6 +262,7 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
         "from tasks\nfilter (\n  match state {\n    Pending => true,",
         "from tasks\ngroup state (\n  aggregate {\n    rows = count,\n  }",
         "explain\n",
+        "explain analyze\n",
         "migration initial\n",
         "update rows\nset state =\n",
         "update rows\nset state =\n  match state\n",
@@ -1743,6 +1744,73 @@ fn explain_reports_typed_access_without_reordering_pipeline_stages() {
             .len(),
         1
     );
+}
+
+#[test]
+fn explain_analyze_executes_without_returning_business_rows() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type Task = {id int, title text}
+table tasks Task
+  key id
+insert many tasks [
+  {id = 1, title = "private-alpha"},
+  {id = 2, title = "private-beta"},
+]"#,
+    );
+
+    let planned = ok(&mut engine, "explain from tasks | filter id == 1");
+    assert!(planned.analysis.is_none());
+    assert!(planned.execution.is_none());
+
+    let analyzed = ok(
+        &mut engine,
+        "explain analyze from tasks | filter id == 2 | select {id, title}",
+    );
+    assert!(analyzed.rows.is_empty());
+    assert!(analyzed.columns.is_empty());
+    assert!(analyzed.page.is_none());
+    assert!(analyzed.execution.is_none());
+    assert_eq!(
+        analyzed.plan.as_ref().unwrap().access.kind,
+        QueryAccessKind::PrimaryKeyLookup
+    );
+    let analysis = analyzed.analysis.as_ref().unwrap();
+    assert_eq!(analysis.returned_rows, 1);
+    assert_eq!(analysis.rows_examined, 1);
+    assert_eq!(analysis.index_entries_examined, 1);
+    assert_eq!(analysis.rows_decoded, 1);
+    assert_eq!(analysis.batches, 1);
+
+    let scanned = ok(
+        &mut engine,
+        "explain analyze from tasks | filter title == \"private-alpha\"",
+    );
+    assert_eq!(
+        scanned.plan.as_ref().unwrap().access.kind,
+        QueryAccessKind::FullScan
+    );
+    let scan = scanned.analysis.as_ref().unwrap();
+    assert_eq!(scan.returned_rows, 1);
+    assert_eq!(scan.rows_examined, 2);
+    assert_eq!(scan.index_entries_examined, 0);
+    assert_eq!(scan.rows_decoded, 2);
+
+    let json = serde_json::to_string(&scanned).unwrap();
+    assert!(json.contains("\"analysis\""));
+    assert!(!json.contains("private-alpha"));
+    assert!(!json.contains("private-beta"));
+
+    let empty = ok(
+        &mut engine,
+        "explain analyze\n  from tasks\n  filter id == 99",
+    );
+    let analysis = empty.analysis.unwrap();
+    assert_eq!(analysis.returned_rows, 0);
+    assert_eq!(analysis.rows_examined, 0);
+    assert_eq!(analysis.index_entries_examined, 0);
+    assert_eq!(analysis.rows_decoded, 0);
 }
 
 #[test]
