@@ -1717,8 +1717,10 @@ fn embedded_server_shutdown_returns_request_statistics() {
     let addr = listener.local_addr().unwrap().to_string();
     let shutdown = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&shutdown);
+    let engine = unionid::ConcurrentEngine::new(Engine::memory());
+    let server_engine = engine.clone();
     let server = std::thread::spawn(move || {
-        unionid::server::serve_until(listener, Engine::memory(), signal).unwrap()
+        unionid::server::serve_until_concurrent(listener, server_engine, signal).unwrap()
     });
     let response = cli::send_one(&addr, "from absent").unwrap();
     assert_eq!(response.error.unwrap().code, "E_TABLE");
@@ -1728,6 +1730,12 @@ fn embedded_server_shutdown_returns_request_statistics() {
     assert_eq!(stats.rejected_connections, 0);
     assert_eq!(stats.requests, 1);
     assert_eq!(stats.failed_requests, 1);
+    let metrics = engine.metrics_snapshot();
+    assert_eq!(metrics.connections.accepted, 1);
+    assert_eq!(metrics.connections.rejected, 0);
+    assert_eq!(metrics.connections.active, 0);
+    assert_eq!(metrics.operations.read.requests, 1);
+    assert_eq!(metrics.operations.read.failures, 1);
 }
 
 #[test]

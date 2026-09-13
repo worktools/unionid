@@ -997,6 +997,10 @@ impl Engine {
         })
     }
 
+    pub(crate) fn idempotency_receipt_count(&self) -> usize {
+        self.committed.receipts.len()
+    }
+
     pub fn plan_idempotency_prune(
         &self,
         options: IdempotencyPruneOptions,

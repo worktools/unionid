@@ -261,7 +261,8 @@ fn produce(
         Err(error) if error.code == "E_CANCELLED" => OperationOutcome::Cancelled,
         Err(_) => OperationOutcome::Failed,
     };
-    let outcome = execution.finish(proposed);
+    let error_code = result.as_ref().err().map(|error| error.code.as_str());
+    let outcome = execution.finish(proposed, error_code);
     let terminal = match (result, outcome) {
         (Ok(()), OperationOutcome::Completed) => Frame::Complete {
             stream_version: VERSION,

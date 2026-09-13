@@ -18,6 +18,9 @@ pub mod idempotency;
 pub mod introspection;
 mod local;
 mod matching;
+pub mod metrics;
+#[cfg(feature = "metrics")]
+mod metrics_export;
 pub mod migration;
 pub mod model;
 mod ordered_key;
@@ -61,6 +64,11 @@ pub use idempotency::{
     IdempotencyReceipt, IdempotencyStatus, IdempotentExecution,
 };
 pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
+pub use metrics::{
+    ConnectionMetrics, ErrorMetric, LATENCY_BUCKETS_MICROS, LatencyBucket, LatencyHistogram,
+    MAX_METRIC_ERROR_CODES, METRICS_VERSION, MetricsSnapshot, OperationMetrics, OperationsMetrics,
+    ReceiptMetrics,
+};
 pub use migration::{
     MigrationAbort, MigrationApply, MigrationFile, MigrationMaintenance, MigrationMaintenancePhase,
     MigrationPlan, MigrationProgress, MigrationStatus,

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::ExecutionControl;
 use crate::db::QueryRowSink;
+use crate::metrics::{MetricOperation, MetricsRegistry, MetricsSnapshot};
 use crate::protocol::{
     MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, ReceiptOperation, ReceiptOperationResult,
     Request as ProtocolRequest, Response as ProtocolResponse, VERSION, supported_version,
@@ -29,7 +30,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(25);
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerStats {
     pub accepted_connections: usize,
     pub rejected_connections: usize,
@@ -38,7 +39,7 @@ pub struct ServerStats {
     pub concurrency: ConcurrencyStats,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConcurrencyStats {
     pub active_reads: usize,
     pub queued_reads: usize,
@@ -83,6 +84,7 @@ struct ConcurrentEngineInner {
     write_queue_wait_micros: AtomicU64,
     max_write_queue_wait_micros: AtomicU64,
     operations: Mutex<OperationRegistry>,
+    metrics: MetricsRegistry,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,12 +145,14 @@ pub struct ReadOperation {
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
     shutdown: Option<Arc<AtomicBool>>,
+    metrics_started: Instant,
 }
 
 struct OperationGuard {
     engine: ConcurrentEngine,
     id: String,
     finished: bool,
+    metrics_started: Instant,
 }
 
 pub(crate) struct StreamReadExecution {
@@ -162,6 +166,7 @@ pub(crate) struct StreamReadExecution {
 
 impl ConcurrentEngine {
     pub fn new(engine: Engine) -> Self {
+        let receipts = engine.idempotency_status().ok();
         Self {
             inner: Arc::new(ConcurrentEngineInner {
                 engine: Mutex::new(engine),
@@ -180,6 +185,7 @@ impl ConcurrentEngine {
                 write_queue_wait_micros: AtomicU64::new(0),
                 max_write_queue_wait_micros: AtomicU64::new(0),
                 operations: Mutex::new(OperationRegistry::default()),
+                metrics: MetricsRegistry::new(receipts.as_ref()),
             }),
         }
     }
@@ -197,6 +203,25 @@ impl ConcurrentEngine {
         request: ProtocolRequest,
         deadline: Instant,
         shutdown: Option<Arc<AtomicBool>>,
+    ) -> Result<ReadOperation, Error> {
+        let started = Instant::now();
+        let result = self.try_register_read_with_shutdown(request, deadline, shutdown, started);
+        if let Err(error) = &result {
+            self.inner.metrics.record(
+                MetricOperation::Stream,
+                started.elapsed(),
+                Some(&error.code),
+            );
+        }
+        result
+    }
+
+    fn try_register_read_with_shutdown(
+        &self,
+        request: ProtocolRequest,
+        deadline: Instant,
+        shutdown: Option<Arc<AtomicBool>>,
+        metrics_started: Instant,
     ) -> Result<ReadOperation, Error> {
         let statements = validate_read_operation(&request)?;
         let mut registry = self
@@ -237,10 +262,22 @@ impl ConcurrentEngine {
             deadline,
             cancelled,
             shutdown,
+            metrics_started,
         })
     }
 
     pub fn cancel(&self, operation_id: &str) -> Result<CancelResult, Error> {
+        let started = Instant::now();
+        let result = self.try_cancel(operation_id);
+        self.inner.metrics.record(
+            MetricOperation::Stream,
+            started.elapsed(),
+            result.as_ref().err().map(|error| error.code.as_str()),
+        );
+        result
+    }
+
+    fn try_cancel(&self, operation_id: &str) -> Result<CancelResult, Error> {
         validate_operation_id(operation_id)?;
         let mut registry = self
             .inner
@@ -377,6 +414,11 @@ impl ConcurrentEngine {
         }
     }
 
+    /// Snapshot bounded, value-free metrics accumulated by this engine handle.
+    pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        self.inner.metrics.snapshot(self.stats())
+    }
+
     pub fn execute(&self, source: &str) -> QueryResponse {
         self.execute_until(source, Instant::now() + EXECUTION_TIMEOUT, None)
     }
@@ -387,7 +429,13 @@ impl ConcurrentEngine {
         deadline: Instant,
         shutdown: Option<&AtomicBool>,
     ) -> QueryResponse {
-        if source_is_read_only(source) {
+        let started = Instant::now();
+        let operation = if source_is_read_only(source) {
+            MetricOperation::Read
+        } else {
+            MetricOperation::Write
+        };
+        let response = if matches!(operation, MetricOperation::Read) {
             match self.with_read_snapshot(deadline, shutdown, |snapshot| {
                 snapshot.execute_with_params_until(
                     source,
@@ -408,7 +456,13 @@ impl ConcurrentEngine {
                     deadline,
                 )
             })
-        }
+        };
+        self.inner.metrics.record(
+            operation,
+            started.elapsed(),
+            response.error.as_ref().map(|error| error.code.as_str()),
+        );
+        response
     }
 
     pub fn execute_protocol_request(&self, request: ProtocolRequest) -> ProtocolResponse {
@@ -430,13 +484,30 @@ impl ConcurrentEngine {
         self.with_writer(operation)
     }
 
+    /// Run an observed maintenance operation under exclusive engine access.
+    pub fn with_maintenance<T>(
+        &self,
+        operation: impl FnOnce(&mut Engine) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let started = Instant::now();
+        let result = self.with_writer(operation);
+        self.inner.metrics.record(
+            MetricOperation::Maintenance,
+            started.elapsed(),
+            result.as_ref().err().map(|_| "E_MAINTENANCE"),
+        );
+        result
+    }
+
     fn execute_protocol_request_until_shutdown(
         &self,
         request: ProtocolRequest,
         deadline: Instant,
         shutdown: Option<&AtomicBool>,
     ) -> ProtocolResponse {
-        if protocol_request_is_read_only(&request) {
+        let started = Instant::now();
+        let operation = metric_operation_for_request(&request);
+        let response = if protocol_request_is_read_only(&request) {
             let request_id = request.request_id.clone();
             let version = request.version;
             match self.with_read_snapshot(deadline, shutdown, |snapshot| {
@@ -452,7 +523,13 @@ impl ConcurrentEngine {
             }
         } else {
             self.with_writer(|engine| execute_protocol_request_until(engine, request, deadline))
-        }
+        };
+        self.inner.metrics.record(
+            operation,
+            started.elapsed(),
+            response.error.as_ref().map(|error| error.code.as_str()),
+        );
+        response
     }
 
     fn schema_info(&self) -> crate::SchemaInfo {
@@ -492,7 +569,12 @@ impl ConcurrentEngine {
             }
         }
         let _active = ActiveWrite(&self.inner.active_writes);
-        execute(&mut engine)
+        let result = execute(&mut engine);
+        if engine.idempotency_receipt_count() != self.inner.metrics.receipt_count() {
+            let receipts = engine.idempotency_status().ok();
+            self.inner.metrics.update_receipts(receipts.as_ref());
+        }
+        result
     }
 
     fn with_read_snapshot<T>(
@@ -703,6 +785,7 @@ impl ReadOperation {
             engine: self.engine.clone(),
             id: self.id.clone(),
             finished: false,
+            metrics_started: self.metrics_started,
         };
         let request_id = request.request_id.clone();
         let version = request.version;
@@ -751,6 +834,7 @@ impl ReadOperation {
             engine: self.engine.clone(),
             id: self.id.clone(),
             finished: false,
+            metrics_started: self.metrics_started,
         };
         let request_id = request.request_id.clone();
         let version = request.version;
@@ -829,6 +913,14 @@ impl StreamReadExecution {
             );
             self.response.version = self.version;
         }
+        self.terminal.engine.inner.metrics.record(
+            MetricOperation::Stream,
+            self.terminal.metrics_started.elapsed(),
+            self.response
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+        );
         self.response
     }
 
@@ -836,8 +928,23 @@ impl StreamReadExecution {
         self.control.checkpoint()
     }
 
-    pub(crate) fn finish(&mut self, outcome: OperationOutcome) -> OperationOutcome {
-        self.terminal.finish(outcome)
+    pub(crate) fn finish(
+        &mut self,
+        outcome: OperationOutcome,
+        error_code: Option<&str>,
+    ) -> OperationOutcome {
+        let outcome = self.terminal.finish(outcome);
+        let effective_error = match outcome {
+            OperationOutcome::Completed => None,
+            OperationOutcome::Cancelled => Some("E_CANCELLED"),
+            OperationOutcome::Failed => Some(error_code.unwrap_or("E_INTERNAL")),
+        };
+        self.terminal.engine.inner.metrics.record(
+            MetricOperation::Stream,
+            self.terminal.metrics_started.elapsed(),
+            effective_error,
+        );
+        outcome
     }
 
     pub(crate) fn cancel_local(&self) {
@@ -858,6 +965,11 @@ impl Drop for OperationGuard {
         if !self.finished {
             self.engine
                 .finish_operation(&self.id, OperationOutcome::Failed);
+            self.engine.inner.metrics.record(
+                MetricOperation::Stream,
+                self.metrics_started.elapsed(),
+                Some("E_INTERNAL"),
+            );
         }
     }
 }
@@ -872,6 +984,11 @@ impl Drop for ReadOperation {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry.active.remove(&self.id);
+            self.engine.inner.metrics.record(
+                MetricOperation::Stream,
+                self.metrics_started.elapsed(),
+                Some("E_OPERATION_DROPPED"),
+            );
         }
     }
 }
@@ -976,6 +1093,18 @@ fn protocol_request_is_read_only(request: &ProtocolRequest) -> bool {
         Some(ReceiptOperation::Status | ReceiptOperation::Prune { .. }) => true,
         None if request.introspect.is_some() => true,
         None => source_is_read_only(&request.query),
+    }
+}
+
+fn metric_operation_for_request(request: &ProtocolRequest) -> MetricOperation {
+    if request.receipts.is_some() {
+        MetricOperation::Receipt
+    } else if request.introspect.is_some() {
+        MetricOperation::Introspection
+    } else if protocol_request_is_read_only(request) {
+        MetricOperation::Read
+    } else {
+        MetricOperation::Write
     }
 }
 
@@ -1152,23 +1281,26 @@ pub fn serve_until_concurrent(
                 if stats.active.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
                     stats.active.fetch_sub(1, Ordering::AcqRel);
                     stats.rejected.fetch_add(1, Ordering::Relaxed);
+                    engine.inner.metrics.connection_rejected();
                     if let Err(error) = reject_busy(stream) {
                         eprintln!("reject client: {error}");
                     }
                     continue;
                 }
                 stats.accepted.fetch_add(1, Ordering::Relaxed);
+                engine.inner.metrics.connection_accepted();
                 let engine = engine.clone();
                 let stats = Arc::clone(&stats);
                 let shutdown = Arc::clone(&shutdown);
                 std::thread::spawn(move || {
-                    struct Connection(Arc<RuntimeStats>);
+                    struct Connection(Arc<RuntimeStats>, ConcurrentEngine);
                     impl Drop for Connection {
                         fn drop(&mut self) {
                             self.0.active.fetch_sub(1, Ordering::AcqRel);
+                            self.1.inner.metrics.connection_closed();
                         }
                     }
-                    let _connection = Connection(Arc::clone(&stats));
+                    let _connection = Connection(Arc::clone(&stats), engine.clone());
                     if let Err(error) = handle(stream, engine, shutdown, stats) {
                         eprintln!("client error: {error}");
                     }
