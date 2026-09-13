@@ -14,7 +14,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use redb::{
     CompactionError as RedbCompactionError, Database as RedbDatabase, Durability, ReadableDatabase,
-    ReadableTable, TableDefinition, TableHandle,
+    ReadableTable, ReadableTableMetadata, TableDefinition, TableHandle,
 };
 use sha2::{Digest, Sha256};
 
@@ -45,6 +45,7 @@ const CURSOR_STORAGE_FORMAT_VERSION: u32 = 3;
 const SCALAR_STORAGE_FORMAT_VERSION: u32 = 4;
 const LEGACY_BOUNDED_STORAGE_FORMAT_VERSION: u32 = 5;
 pub(crate) const PRODUCTION_STORAGE_FORMAT_VERSION: u32 = 6;
+const JOURNAL_STORAGE_FORMAT_VERSION: u32 = 7;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
 const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
@@ -56,6 +57,7 @@ const MIGRATION_CODEC_VERSION: u16 = 1;
 const RECEIPT_CODEC_VERSION: u16 = 1;
 const PRODUCTION_RECEIPT_CODEC_VERSION: u16 = 2;
 const MAINTENANCE_CODEC_VERSION: u16 = 1;
+const JOURNAL_CODEC_VERSION: u16 = 1;
 const GENERATION_KEY_CODEC_VERSION: u16 = 1;
 const MAINTENANCE_EXECUTOR_VERSION: u16 = 1;
 const MAINTENANCE_TARGET_BATCH_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -76,6 +78,7 @@ pub(crate) fn production_versions() -> StorageVersions {
         migration_codec: layout.migration,
         receipt_codec: layout.receipt,
         maintenance_codec: layout.maintenance,
+        journal_codec: layout.journal,
         backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
     }
 }
@@ -93,6 +96,8 @@ const GENERATION_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("gen
 const GENERATION_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("generation_index");
 const MAINTENANCE_GENERATION: TableDefinition<u64, &[u8]> =
     TableDefinition::new("maintenance_generation");
+const BACKUP_CHAIN_STATE: TableDefinition<u8, &[u8]> = TableDefinition::new("backup_chain_state");
+const BACKUP_JOURNAL: TableDefinition<&[u8], &[u8]> = TableDefinition::new("backup_journal");
 
 const FORMAT_KEY: &str = "storage_format_version";
 const CATALOG_CODEC_KEY: &str = "catalog_codec_version";
@@ -101,6 +106,7 @@ const INDEX_KEY_CODEC_KEY: &str = "index_key_version";
 const MIGRATION_CODEC_KEY: &str = "migration_codec_version";
 const RECEIPT_CODEC_KEY: &str = "receipt_codec_version";
 const MAINTENANCE_CODEC_KEY: &str = "maintenance_codec_version";
+const JOURNAL_CODEC_KEY: &str = "backup_journal_codec_version";
 const ACTIVE_GENERATION_KEY: &str = "active_generation";
 const NEXT_GENERATION_ID_KEY: &str = "next_generation_id";
 const SEQUENCE_KEY: &str = "commit_sequence";
@@ -115,6 +121,11 @@ const MIGRATION_MAGIC: &[u8; 4] = b"UIDM";
 const RECEIPT_MAGIC: &[u8; 4] = b"UIDR";
 const GENERATION_KEY_MAGIC: &[u8; 4] = b"UIDG";
 const MAINTENANCE_MAGIC: &[u8; 4] = b"UIDN";
+const JOURNAL_STATE_MAGIC: &[u8; 4] = b"UIDS";
+const JOURNAL_RECORD_MAGIC: &[u8; 4] = b"UIDJ";
+const JOURNAL_COMMIT_DOMAIN: &[u8] = b"unionid-backup-journal-commit-v1\0";
+const JOURNAL_STATE_KEY: u8 = 0;
+const JOURNAL_CHAIN_ID_MAX_BYTES: usize = 256;
 
 pub(crate) struct RedbStore {
     database: RedbDatabase,
@@ -996,12 +1007,62 @@ impl GenerationState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalState {
+    version: u16,
+    chain_id: String,
+    baseline_sequence: u64,
+    exported_sequence: u64,
+    exported_checksum: String,
+    head_checksum: String,
+    first_retained_sequence: Option<u64>,
+    last_retained_sequence: Option<u64>,
+    commit_count: u64,
+    expanded_bytes: u64,
+    max_commits: u64,
+    max_bytes: u64,
+}
+
+impl JournalState {
+    fn status(
+        &self,
+        storage_format: u32,
+        head_sequence: u64,
+    ) -> crate::backup::incremental::BackupJournalStatus {
+        crate::backup::incremental::BackupJournalStatus {
+            version: crate::backup::incremental::BACKUP_JOURNAL_STATUS_VERSION,
+            storage_format,
+            state: crate::backup::incremental::BackupJournalState::Active,
+            chain_id: Some(self.chain_id.clone()),
+            baseline_sequence: Some(self.baseline_sequence),
+            exported_sequence: Some(self.exported_sequence),
+            head_sequence,
+            first_retained_sequence: self.first_retained_sequence,
+            last_retained_sequence: self.last_retained_sequence,
+            commit_count: self.commit_count,
+            expanded_bytes: self.expanded_bytes,
+            max_commits: self.max_commits,
+            max_bytes: self.max_bytes,
+            head_checksum: Some(self.head_checksum.clone()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct JournalAppend {
+    state: JournalState,
+    records: Vec<(Vec<u8>, Vec<u8>)>,
+    encoded_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 struct DurableHead {
     layout: StorageLayout,
     meta: DurableMeta,
     catalog_canonical: bool,
     generation: GenerationState,
+    journal: Option<JournalState>,
 }
 
 impl DurableHead {
@@ -1017,6 +1078,7 @@ impl DurableHead {
                     == Some(state.layout.catalog)
             }),
             generation: state.generation,
+            journal: state.journal.clone(),
         }
     }
 }
@@ -1030,6 +1092,7 @@ struct StorageLayout {
     migration: u16,
     receipt: u16,
     maintenance: u16,
+    journal: u16,
 }
 
 impl StorageLayout {
@@ -1042,6 +1105,7 @@ impl StorageLayout {
             migration: MIGRATION_CODEC_VERSION,
             receipt: RECEIPT_CODEC_VERSION,
             maintenance: 0,
+            journal: 0,
         }
     }
 
@@ -1054,6 +1118,20 @@ impl StorageLayout {
             migration: MIGRATION_CODEC_VERSION,
             receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
             maintenance: MAINTENANCE_CODEC_VERSION,
+            journal: 0,
+        }
+    }
+
+    const fn journal() -> Self {
+        Self {
+            format: JOURNAL_STORAGE_FORMAT_VERSION,
+            catalog: PRODUCTION_CATALOG_CODEC_VERSION,
+            value: PRODUCTION_VALUE_CODEC_VERSION,
+            index: PRODUCTION_INDEX_KEY_VERSION,
+            migration: MIGRATION_CODEC_VERSION,
+            receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
+            maintenance: MAINTENANCE_CODEC_VERSION,
+            journal: JOURNAL_CODEC_VERSION,
         }
     }
 
@@ -1066,11 +1144,14 @@ impl StorageLayout {
             migration: MIGRATION_CODEC_VERSION,
             receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
             maintenance: 0,
+            journal: 0,
         }
     }
 
     const fn for_format(format: u32) -> Self {
-        if format >= PRODUCTION_STORAGE_FORMAT_VERSION {
+        if format == JOURNAL_STORAGE_FORMAT_VERSION {
+            Self::journal()
+        } else if format == PRODUCTION_STORAGE_FORMAT_VERSION {
             Self::production()
         } else if format == LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
             Self {
@@ -1081,6 +1162,7 @@ impl StorageLayout {
                 migration: MIGRATION_CODEC_VERSION,
                 receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
                 maintenance: 0,
+                journal: 0,
             }
         } else if format == SCALAR_STORAGE_FORMAT_VERSION {
             Self::scalar()
@@ -1100,10 +1182,13 @@ pub(crate) enum CommitFailure {
     Uncertain(Error),
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct TransactionProfile {
     apply_micros: u64,
     sync_micros: u64,
+    journal: Option<JournalState>,
+    journal_micros: u64,
+    journal_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1251,6 +1336,18 @@ impl RedbStore {
         write_compaction_proof(&compaction_proof_path(&self.path), &envelope)
     }
 
+    fn invalidate_compaction_proof(&self) -> Result<()> {
+        let path = compaction_proof_path(&self.path);
+        match std::fs::remove_file(&path) {
+            Ok(()) => sync_parent_directory(&path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::new(
+                "E_IO",
+                format!("remove stale compaction proof: {error}"),
+            )),
+        }
+    }
+
     pub(crate) fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
         let before_bytes = std::fs::metadata(&self.path)
             .map_err(|error| {
@@ -1385,8 +1482,236 @@ impl RedbStore {
             migration_codec: layout.migration,
             receipt_codec: layout.receipt,
             maintenance_codec: layout.maintenance,
+            journal_codec: layout.journal,
             backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
         }
+    }
+
+    pub(crate) fn backup_journal_status(&self) -> crate::backup::incremental::BackupJournalStatus {
+        self.committed.journal.as_ref().map_or_else(
+            || crate::backup::incremental::BackupJournalStatus {
+                version: crate::backup::incremental::BACKUP_JOURNAL_STATUS_VERSION,
+                storage_format: self.committed.layout.format,
+                state: crate::backup::incremental::BackupJournalState::Disabled,
+                chain_id: None,
+                baseline_sequence: None,
+                exported_sequence: None,
+                head_sequence: self.committed.meta.sequence,
+                first_retained_sequence: None,
+                last_retained_sequence: None,
+                commit_count: 0,
+                expanded_bytes: 0,
+                max_commits: 0,
+                max_bytes: 0,
+                head_checksum: None,
+            },
+            |state| state.status(self.committed.layout.format, self.committed.meta.sequence),
+        )
+    }
+
+    pub(crate) fn enable_backup_journal(
+        &mut self,
+        config: &crate::backup::incremental::BackupJournalConfig,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        validate_journal_config(config, self.committed.meta.sequence)
+            .map_err(CommitFailure::Definite)?;
+        if let Some(current) = &self.committed.journal {
+            if current.chain_id == config.chain_id
+                && current.baseline_sequence == config.baseline_sequence
+                && current.exported_checksum == config.baseline_checksum
+                && current.max_commits == config.max_commits
+                && current.max_bytes == config.max_bytes
+            {
+                return Ok(self.backup_journal_status());
+            }
+            return Err(CommitFailure::Definite(Error::new(
+                "E_BACKUP_CHAIN",
+                "another backup journal chain is already active",
+            )));
+        }
+        if !matches!(
+            self.committed.layout.format,
+            PRODUCTION_STORAGE_FORMAT_VERSION | JOURNAL_STORAGE_FORMAT_VERSION
+        ) {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "backup journaling requires storage format 6",
+            )));
+        }
+        if self
+            .maintenance_info()
+            .map_err(CommitFailure::Definite)?
+            .is_some()
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_MAINTENANCE_IN_PROGRESS",
+                "backup journaling cannot be enabled during migration maintenance",
+            )));
+        }
+        self.invalidate_compaction_proof()
+            .map_err(CommitFailure::Definite)?;
+        let previous_layout = self.committed.layout;
+        let layout = StorageLayout::journal();
+        let state = JournalState {
+            version: JOURNAL_CODEC_VERSION,
+            chain_id: config.chain_id.clone(),
+            baseline_sequence: config.baseline_sequence,
+            exported_sequence: config.baseline_sequence,
+            exported_checksum: config.baseline_checksum.clone(),
+            head_checksum: config.baseline_checksum.clone(),
+            first_retained_sequence: None,
+            last_retained_sequence: None,
+            commit_count: 0,
+            expanded_bytes: 0,
+            max_commits: config.max_commits,
+            max_bytes: config.max_bytes,
+        };
+        let encoded = encode_journal_state(&state).map_err(CommitFailure::Definite)?;
+        let expected = (
+            self.committed.meta.clone(),
+            previous_layout,
+            self.committed.generation,
+        );
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin backup journal enable", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure backup journal enable", error))?;
+        transaction.set_two_phase_commit(true);
+        {
+            let mut meta = transaction
+                .open_table(META)
+                .map_err(|error| CommitFailure::definite("open backup journal meta", error))?;
+            write_meta(
+                &mut meta,
+                Some(&expected),
+                &self.committed.meta,
+                layout,
+                self.committed.generation,
+            )
+            .map_err(CommitFailure::Definite)?;
+        }
+        {
+            let journal = transaction
+                .open_table(BACKUP_JOURNAL)
+                .map_err(|error| CommitFailure::definite("create backup journal table", error))?;
+            if !journal
+                .is_empty()
+                .map_err(|error| CommitFailure::definite("inspect backup journal table", error))?
+            {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_BACKUP_CHAIN",
+                    "disabled backup journal contains unexpected records",
+                )));
+            }
+        }
+        {
+            let mut states = transaction
+                .open_table(BACKUP_CHAIN_STATE)
+                .map_err(|error| CommitFailure::definite("create backup chain state", error))?;
+            if !states
+                .is_empty()
+                .map_err(|error| CommitFailure::definite("inspect backup chain state", error))?
+            {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_BACKUP_CHAIN",
+                    "disabled backup chain contains unexpected state",
+                )));
+            }
+            states
+                .insert(JOURNAL_STATE_KEY, encoded.as_slice())
+                .map_err(|error| CommitFailure::definite("enable backup chain state", error))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit backup journal enable", error))?;
+        self.committed.layout = layout;
+        self.committed.journal = Some(state);
+        Ok(self.backup_journal_status())
+    }
+
+    pub(crate) fn disable_backup_journal(
+        &mut self,
+        discard_unexported: bool,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        let Some(expected) = self.committed.journal.clone() else {
+            return Ok(self.backup_journal_status());
+        };
+        if expected.commit_count != 0 && !discard_unexported {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_BACKUP_CHAIN",
+                format!(
+                    "backup journal retains sequences {}..{}; export them or explicitly discard unexported history",
+                    expected
+                        .first_retained_sequence
+                        .unwrap_or(expected.exported_sequence),
+                    expected
+                        .last_retained_sequence
+                        .unwrap_or(expected.exported_sequence)
+                ),
+            )));
+        }
+        self.invalidate_compaction_proof()
+            .map_err(CommitFailure::Definite)?;
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin backup journal disable", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("configure backup journal disable", error))?;
+        transaction.set_two_phase_commit(true);
+        {
+            let mut states = transaction
+                .open_table(BACKUP_CHAIN_STATE)
+                .map_err(|error| CommitFailure::definite("open backup chain state", error))?;
+            let stored = states
+                .get(JOURNAL_STATE_KEY)
+                .map_err(|error| CommitFailure::definite("read backup chain state", error))?
+                .ok_or_else(|| {
+                    CommitFailure::Definite(Error::new(
+                        "E_BACKUP_CHAIN",
+                        "active backup chain state disappeared",
+                    ))
+                })?;
+            let actual = decode_journal_state(stored.value()).map_err(CommitFailure::Definite)?;
+            drop(stored);
+            if actual != expected {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_BACKUP_CHAIN",
+                    "backup chain state changed before disable",
+                )));
+            }
+            states
+                .remove(JOURNAL_STATE_KEY)
+                .map_err(|error| CommitFailure::definite("disable backup chain state", error))?;
+        }
+        {
+            let mut journal = transaction
+                .open_table(BACKUP_JOURNAL)
+                .map_err(|error| CommitFailure::definite("open backup journal table", error))?;
+            let keys = journal
+                .iter()
+                .map_err(|error| CommitFailure::definite("iterate backup journal", error))?
+                .map(|entry| {
+                    entry
+                        .map(|(key, _)| key.value().to_vec())
+                        .map_err(|error| CommitFailure::definite("read backup journal key", error))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for key in keys {
+                journal.remove(key.as_slice()).map_err(|error| {
+                    CommitFailure::definite("remove backup journal record", error)
+                })?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit backup journal disable", error))?;
+        self.committed.journal = None;
+        Ok(self.backup_journal_status())
     }
 
     pub(crate) fn maintenance_info(&self) -> Result<Option<MaintenanceInfo>> {
@@ -1505,10 +1830,13 @@ impl RedbStore {
         target: &Database,
         file: &MigrationFile,
     ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
-        if self.committed.layout.format != PRODUCTION_STORAGE_FORMAT_VERSION {
+        if !matches!(
+            self.committed.layout.format,
+            PRODUCTION_STORAGE_FORMAT_VERSION | JOURNAL_STORAGE_FORMAT_VERSION
+        ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "recoverable migrations require storage format 6",
+                "recoverable migrations require storage format 6 or 7",
             )));
         }
         if source.durable_meta() != self.committed.meta {
@@ -2002,6 +2330,25 @@ impl RedbStore {
         let mut reclaimable = expected_manifest.clone();
         reclaimable.state = MaintenanceState::Reclaimable;
         reclaimable.updated_at_unix_ms = maintenance_time_ms().map_err(CommitFailure::Definite)?;
+        let journal = if let Some(state) = self.committed.journal.as_ref() {
+            let (_, receipts, previous, _) = self.load().map_err(CommitFailure::Definite)?;
+            let mut next = PreparedState::new_in_generation(
+                target,
+                &receipts,
+                self.committed.layout,
+                next_generation,
+            )
+            .map_err(CommitFailure::Definite)?;
+            next.journal = Some(state.clone());
+            let delta = PreparedDelta::between(&previous, &next);
+            Some(
+                delta
+                    .prepare_journal_append(state)
+                    .map_err(CommitFailure::Definite)?,
+            )
+        } else {
+            None
+        };
         let mut transaction = self
             .database
             .begin_write()
@@ -2073,12 +2420,26 @@ impl RedbStore {
                 .insert(current.target_generation, encoded.as_slice())
                 .map_err(|error| CommitFailure::definite("mark source reclaimable", error))?;
         }
+        if let Some(append) = &journal {
+            apply_journal_append(
+                &transaction,
+                self.committed
+                    .journal
+                    .as_ref()
+                    .expect("journal append requires an active state"),
+                append,
+            )
+            .map_err(CommitFailure::Definite)?;
+        }
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit maintenance cutover", error))?;
         self.committed.meta = target.durable_meta();
         self.committed.generation = next_generation;
         self.committed.catalog_canonical = true;
+        if let Some(append) = journal {
+            self.committed.journal = Some(append.state);
+        }
         Ok(MaintenanceInfo::from_manifest(&reclaimable))
     }
 
@@ -2359,7 +2720,7 @@ impl RedbStore {
         let (_, _, previous, _) = self.load().map_err(CommitFailure::Definite)?;
         let reload_previous_micros = elapsed_micros(reload_started);
         let encode_started = Instant::now();
-        let next =
+        let mut next =
             PreparedState::new_in_generation(database, receipts, layout, self.committed.generation)
                 .map_err(CommitFailure::Definite)?;
         let encode_next_micros = elapsed_micros(encode_started);
@@ -2369,6 +2730,7 @@ impl RedbStore {
         let counts = prepared.counts();
         let prepare_micros = elapsed_micros(prepare_started);
         let transaction = self.commit_prepared(&prepared)?;
+        next.journal = transaction.journal.clone();
         self.committed = DurableHead::from_prepared(&next);
         Ok(DurableCommitProfile {
             mode: DurableCommitMode::FullRebuild,
@@ -2379,6 +2741,8 @@ impl RedbStore {
             diff_micros,
             transaction_apply_micros: transaction.apply_micros,
             sync_micros: transaction.sync_micros,
+            journal_micros: transaction.journal_micros,
+            journal_bytes: transaction.journal_bytes,
             catalog_changes: counts.catalog_changes,
             row_changes: counts.row_changes,
             index_changes: counts.index_changes,
@@ -2420,12 +2784,15 @@ impl RedbStore {
         self.committed.layout = prepared.layout;
         self.committed.meta = prepared.meta.clone();
         self.committed.catalog_canonical = true;
+        self.committed.journal = transaction.journal.clone();
         Ok(DurableCommitProfile {
             mode: DurableCommitMode::Incremental,
             total_micros: elapsed_micros(total_started),
             prepare_micros,
             transaction_apply_micros: transaction.apply_micros,
             sync_micros: transaction.sync_micros,
+            journal_micros: transaction.journal_micros,
+            journal_bytes: transaction.journal_bytes,
             catalog_changes: counts.catalog_changes,
             row_changes: counts.row_changes,
             index_changes: counts.index_changes,
@@ -2440,6 +2807,19 @@ impl RedbStore {
         &mut self,
         prepared: &PreparedDelta,
     ) -> std::result::Result<TransactionProfile, CommitFailure> {
+        let journal_prepare_started = Instant::now();
+        let journal = self
+            .committed
+            .journal
+            .as_ref()
+            .map(|state| prepared.prepare_journal_append(state))
+            .transpose()
+            .map_err(CommitFailure::Definite)?;
+        let mut journal_micros = if journal.is_some() {
+            elapsed_micros(journal_prepare_started)
+        } else {
+            0
+        };
         let apply_started = Instant::now();
         let mut transaction = self
             .database
@@ -2528,6 +2908,30 @@ impl RedbStore {
             apply_bytes_delta(&mut table, &prepared.receipts, "idempotency receipt")
                 .map_err(CommitFailure::Definite)?;
         }
+        if prepared.layout.format >= JOURNAL_STORAGE_FORMAT_VERSION {
+            let journal_apply_started = Instant::now();
+            transaction
+                .open_table(BACKUP_JOURNAL)
+                .map_err(|error| CommitFailure::definite("open backup journal table", error))?;
+            transaction
+                .open_table(BACKUP_CHAIN_STATE)
+                .map_err(|error| CommitFailure::definite("open backup chain state table", error))?;
+            if let Some(append) = &journal {
+                apply_journal_append(
+                    &transaction,
+                    self.committed
+                        .journal
+                        .as_ref()
+                        .expect("journal append requires an active state"),
+                    append,
+                )
+                .map_err(CommitFailure::Definite)?;
+            }
+            if journal.is_some() {
+                journal_micros =
+                    journal_micros.saturating_add(elapsed_micros(journal_apply_started));
+            }
+        }
         let apply_micros = elapsed_micros(apply_started);
         let sync_started = Instant::now();
         transaction
@@ -2536,6 +2940,12 @@ impl RedbStore {
         Ok(TransactionProfile {
             apply_micros,
             sync_micros: elapsed_micros(sync_started),
+            journal: journal
+                .as_ref()
+                .map(|append| append.state.clone())
+                .or_else(|| self.committed.journal.clone()),
+            journal_micros,
+            journal_bytes: journal.as_ref().map_or(0, |append| append.encoded_bytes),
         })
     }
 
@@ -2820,11 +3230,13 @@ impl RedbStore {
         profile.meta_micros = elapsed_micros(meta_started);
         if !matches!(
             layout.format,
-            LEGACY_BOUNDED_STORAGE_FORMAT_VERSION | PRODUCTION_STORAGE_FORMAT_VERSION
+            LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
+                | PRODUCTION_STORAGE_FORMAT_VERSION
+                | JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(Error::new(
                 "E_STORAGE",
-                "bounded reads require storage format 5 or 6",
+                "bounded reads require storage format 5, 6, or 7",
             ));
         }
         validate_generation_state(&transaction, &meta, layout, generation)?;
@@ -2975,6 +3387,11 @@ impl RedbStore {
             meta,
             catalog_canonical,
             generation,
+            journal: read_journal_state_and_validate(
+                &transaction,
+                &metadata.durable_meta(),
+                layout,
+            )?,
         };
         let source: Arc<dyn TypedRowSource> = Arc::new(RedbReadSource::new(
             transaction,
@@ -3169,6 +3586,7 @@ impl RedbStore {
             catalog: layout.catalog.max(CATALOG_CODEC_VERSION),
             ..layout
         };
+        let journal = read_journal_state_and_validate(&transaction, &meta, layout)?;
         let committed = PreparedState {
             layout: committed_layout,
             generation,
@@ -3178,6 +3596,7 @@ impl RedbStore {
             secondary_indexes: stored_indexes,
             migrations: stored_migrations,
             receipts: stored_receipts,
+            journal,
         };
         profile.total_micros = elapsed_micros(total_started);
         Ok((database, receipts, committed, profile))
@@ -3193,6 +3612,7 @@ struct PreparedState {
     secondary_indexes: BTreeSet<Vec<u8>>,
     migrations: BTreeMap<u64, Vec<u8>>,
     receipts: BTreeMap<Vec<u8>, Vec<u8>>,
+    journal: Option<JournalState>,
 }
 
 impl PreparedState {
@@ -3265,6 +3685,7 @@ impl PreparedState {
             secondary_indexes,
             migrations,
             receipts,
+            journal: None,
         })
     }
 }
@@ -3503,6 +3924,208 @@ impl PreparedDelta {
                 .saturating_add(self.receipts.encoded_bytes()),
         }
     }
+
+    fn prepare_journal_append(&self, current: &JournalState) -> Result<JournalAppend> {
+        let sequence = self.meta.sequence;
+        if sequence
+            != current
+                .last_retained_sequence
+                .unwrap_or(current.exported_sequence)
+                .checked_add(1)
+                .ok_or_else(|| Error::new("E_LIMIT", "backup journal sequence exhausted"))?
+        {
+            return Err(Error::new(
+                "E_BACKUP_CHAIN",
+                "backup journal sequence does not extend its durable head",
+            ));
+        }
+
+        let counts = self.counts();
+        let mut records = Vec::<(Vec<u8>, Vec<u8>)>::new();
+        let mut ordinal = 0u64;
+        let mut begin = Vec::new();
+        begin.extend_from_slice(&sequence.to_be_bytes());
+        push_journal_bytes(&mut begin, current.head_checksum.as_bytes())?;
+        begin.extend_from_slice(&self.meta.schema_revision.to_be_bytes());
+        begin.extend_from_slice(&self.meta.next_catalog_id.to_be_bytes());
+        push_journal_bytes(&mut begin, self.meta.schema_hash.as_bytes())?;
+        for count in [
+            counts.catalog_changes,
+            counts.row_changes,
+            counts.migration_changes,
+            counts.receipt_changes,
+        ] {
+            begin.extend_from_slice(&usize_u64(count).to_be_bytes());
+        }
+        push_journal_record(&mut records, sequence, &mut ordinal, 16, begin)?;
+
+        append_bytes_journal_records(&mut records, sequence, &mut ordinal, 17, 18, &self.catalog)?;
+        append_bytes_journal_records(&mut records, sequence, &mut ordinal, 19, 20, &self.rows)?;
+        append_ledger_journal_records(&mut records, sequence, &mut ordinal, &self.migrations)?;
+        append_bytes_journal_records(&mut records, sequence, &mut ordinal, 23, 24, &self.receipts)?;
+
+        let mut digest = Sha256::new();
+        digest.update(JOURNAL_COMMIT_DOMAIN);
+        digest.update(current.head_checksum.as_bytes());
+        for (key, value) in &records {
+            digest.update(key);
+            digest.update(value);
+        }
+        let commit_checksum = format!("sha256:{:x}", digest.finalize());
+        push_journal_record(
+            &mut records,
+            sequence,
+            &mut ordinal,
+            25,
+            commit_checksum.as_bytes().to_vec(),
+        )?;
+        let encoded_bytes = records.iter().try_fold(0u64, |total, (key, value)| {
+            total
+                .checked_add(usize_u64(key.len()))
+                .and_then(|total| total.checked_add(usize_u64(value.len())))
+                .ok_or_else(|| Error::new("E_LIMIT", "backup journal byte count overflow"))
+        })?;
+        let commit_count = current
+            .commit_count
+            .checked_add(1)
+            .ok_or_else(|| Error::new("E_LIMIT", "backup journal commit count exhausted"))?;
+        let expanded_bytes = current
+            .expanded_bytes
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| Error::new("E_LIMIT", "backup journal byte count overflow"))?;
+        if commit_count > current.max_commits || expanded_bytes > current.max_bytes {
+            return Err(Error::new(
+                "E_BACKUP_JOURNAL_FULL",
+                format!(
+                    "backup journal capacity would be exceeded: retained commits {}/{}, bytes {}/{}; export the active chain before retrying",
+                    current.commit_count,
+                    current.max_commits,
+                    current.expanded_bytes,
+                    current.max_bytes
+                ),
+            ));
+        }
+        Ok(JournalAppend {
+            state: JournalState {
+                head_checksum: commit_checksum,
+                first_retained_sequence: current.first_retained_sequence.or(Some(sequence)),
+                last_retained_sequence: Some(sequence),
+                commit_count,
+                expanded_bytes,
+                ..current.clone()
+            },
+            records,
+            encoded_bytes,
+        })
+    }
+}
+
+fn append_bytes_journal_records(
+    records: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    sequence: u64,
+    ordinal: &mut u64,
+    delete_kind: u8,
+    write_kind: u8,
+    delta: &BytesDelta,
+) -> Result<()> {
+    let mut deletes = delta.deletes.iter().collect::<Vec<_>>();
+    deletes.sort_by(|left, right| left.key.cmp(&right.key));
+    for entry in deletes {
+        let mut payload = Vec::new();
+        push_journal_bytes(&mut payload, &entry.key)?;
+        push_journal_record(records, sequence, ordinal, delete_kind, payload)?;
+    }
+    let mut writes = delta.writes.iter().collect::<Vec<_>>();
+    writes.sort_by(|left, right| left.key.cmp(&right.key));
+    for entry in writes {
+        let mut payload = Vec::new();
+        push_journal_bytes(&mut payload, &entry.key)?;
+        push_journal_bytes(&mut payload, &entry.value)?;
+        push_journal_record(records, sequence, ordinal, write_kind, payload)?;
+    }
+    Ok(())
+}
+
+fn append_ledger_journal_records(
+    records: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    sequence: u64,
+    ordinal: &mut u64,
+    delta: &LedgerDelta,
+) -> Result<()> {
+    for (key, _) in &delta.deletes {
+        let mut payload = Vec::new();
+        push_journal_bytes(&mut payload, &key.to_be_bytes())?;
+        push_journal_record(records, sequence, ordinal, 21, payload)?;
+    }
+    for (key, _, value) in &delta.writes {
+        let mut payload = Vec::new();
+        push_journal_bytes(&mut payload, &key.to_be_bytes())?;
+        push_journal_bytes(&mut payload, value)?;
+        push_journal_record(records, sequence, ordinal, 22, payload)?;
+    }
+    Ok(())
+}
+
+fn push_journal_record(
+    records: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    sequence: u64,
+    ordinal: &mut u64,
+    kind: u8,
+    payload: Vec<u8>,
+) -> Result<()> {
+    let key = encode_journal_key(sequence, *ordinal);
+    *ordinal = ordinal
+        .checked_add(1)
+        .ok_or_else(|| Error::new("E_LIMIT", "backup journal ordinal exhausted"))?;
+    let mut value = Vec::with_capacity(7 + payload.len());
+    value.extend_from_slice(JOURNAL_RECORD_MAGIC);
+    value.extend_from_slice(&JOURNAL_CODEC_VERSION.to_be_bytes());
+    value.push(kind);
+    value.extend_from_slice(&payload);
+    records.push((key.to_vec(), value));
+    Ok(())
+}
+
+fn push_journal_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<()> {
+    let len = u32::try_from(value.len())
+        .map_err(|_| Error::new("E_LIMIT", "backup journal field exceeds u32"))?;
+    output.extend_from_slice(&len.to_be_bytes());
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+fn encode_journal_key(sequence: u64, ordinal: u64) -> [u8; 16] {
+    let mut key = [0u8; 16];
+    key[..8].copy_from_slice(&sequence.to_be_bytes());
+    key[8..].copy_from_slice(&ordinal.to_be_bytes());
+    key
+}
+
+fn decode_journal_key(key: &[u8]) -> Result<(u64, u64)> {
+    if key.len() != 16 {
+        return Err(Error::new("E_STORAGE", "invalid backup journal key length"));
+    }
+    Ok((
+        u64::from_be_bytes(key[..8].try_into().expect("fixed slice")),
+        u64::from_be_bytes(key[8..].try_into().expect("fixed slice")),
+    ))
+}
+
+fn decode_journal_record(value: &[u8]) -> Result<(u8, &[u8])> {
+    if value.len() < 7 || &value[..4] != JOURNAL_RECORD_MAGIC {
+        return Err(Error::new(
+            "E_STORAGE",
+            "invalid backup journal record magic",
+        ));
+    }
+    let version = u16::from_be_bytes(value[4..6].try_into().expect("fixed slice"));
+    if version != JOURNAL_CODEC_VERSION {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported backup journal record codec {version}"),
+        ));
+    }
+    Ok((value[6], &value[7..]))
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -3682,6 +4305,51 @@ fn generation_set_delta(delta: &SetDelta, generation: u64) -> Result<SetDelta> {
     })
 }
 
+fn apply_journal_append(
+    transaction: &redb::WriteTransaction,
+    expected: &JournalState,
+    append: &JournalAppend,
+) -> Result<()> {
+    let mut state_table = transaction
+        .open_table(BACKUP_CHAIN_STATE)
+        .map_err(|error| storage_error("open backup chain state table", error))?;
+    let stored = state_table
+        .get(JOURNAL_STATE_KEY)
+        .map_err(|error| storage_error("read expected backup chain state", error))?
+        .ok_or_else(|| Error::new("E_STORAGE", "active backup chain state disappeared"))?;
+    let actual = decode_journal_state(stored.value())?;
+    drop(stored);
+    if &actual != expected {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup chain state changed before journal commit",
+        ));
+    }
+    let mut journal = transaction
+        .open_table(BACKUP_JOURNAL)
+        .map_err(|error| storage_error("open backup journal table", error))?;
+    for (key, value) in &append.records {
+        if journal
+            .get(key.as_slice())
+            .map_err(|error| storage_error("read expected backup journal record", error))?
+            .is_some()
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "backup journal key is already occupied",
+            ));
+        }
+        journal
+            .insert(key.as_slice(), value.as_slice())
+            .map_err(|error| storage_error("append backup journal record", error))?;
+    }
+    let encoded = encode_journal_state(&append.state)?;
+    state_table
+        .insert(JOURNAL_STATE_KEY, encoded.as_slice())
+        .map_err(|error| storage_error("update backup chain state", error))?;
+    Ok(())
+}
+
 fn apply_bytes_delta(
     table: &mut redb::Table<'_, &[u8], &[u8]>,
     delta: &BytesDelta,
@@ -3838,6 +4506,9 @@ fn meta_entries(
             ),
         ]);
     }
+    if layout.format >= JOURNAL_STORAGE_FORMAT_VERSION {
+        entries.push((JOURNAL_CODEC_KEY, layout.journal.to_be_bytes().to_vec()));
+    }
     entries
 }
 
@@ -3853,6 +4524,7 @@ fn read_meta(
             | SCALAR_STORAGE_FORMAT_VERSION
             | LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
             | PRODUCTION_STORAGE_FORMAT_VERSION
+            | JOURNAL_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
     }
@@ -3893,6 +4565,11 @@ fn read_meta(
     } else {
         0
     };
+    let journal = if format_version >= JOURNAL_STORAGE_FORMAT_VERSION {
+        u16::from_be_bytes(read_fixed::<2>(table, JOURNAL_CODEC_KEY)?)
+    } else {
+        0
+    };
     if migration != expected.migration {
         return Err(Error::new(
             "E_STORAGE",
@@ -3911,6 +4588,12 @@ fn read_meta(
             format!("unsupported {MAINTENANCE_CODEC_KEY}"),
         ));
     }
+    if journal != expected.journal {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported {JOURNAL_CODEC_KEY}"),
+        ));
+    }
     let layout = StorageLayout {
         format: format_version,
         catalog: catalog_version,
@@ -3919,6 +4602,7 @@ fn read_meta(
         migration,
         receipt,
         maintenance,
+        journal,
     };
     let sequence = u64::from_be_bytes(read_fixed::<8>(table, SEQUENCE_KEY)?);
     let schema_revision = u64::from_be_bytes(read_fixed::<8>(table, SCHEMA_REVISION_KEY)?);
@@ -3984,6 +4668,420 @@ fn read_optional_version(
                 })
         })
         .transpose()
+}
+
+fn encode_journal_state(state: &JournalState) -> Result<Vec<u8>> {
+    validate_journal_state(state, None)?;
+    let payload = serde_json::to_vec(state).map_err(|error| {
+        Error::new("E_STORAGE", format!("encode backup journal state: {error}"))
+    })?;
+    let mut encoded = Vec::with_capacity(6 + payload.len());
+    encoded.extend_from_slice(JOURNAL_STATE_MAGIC);
+    encoded.extend_from_slice(&JOURNAL_CODEC_VERSION.to_be_bytes());
+    encoded.extend_from_slice(&payload);
+    Ok(encoded)
+}
+
+fn validate_journal_config(
+    config: &crate::backup::incremental::BackupJournalConfig,
+    sequence: u64,
+) -> Result<()> {
+    use crate::backup::incremental::{HARD_JOURNAL_MAX_BYTES, HARD_JOURNAL_MAX_COMMITS};
+
+    if config.chain_id.is_empty()
+        || config.chain_id.len() > JOURNAL_CHAIN_ID_MAX_BYTES
+        || config.chain_id.chars().any(char::is_control)
+    {
+        return Err(Error::new(
+            "E_BACKUP_CHAIN",
+            "backup chain ID must contain 1..256 non-control UTF-8 bytes",
+        ));
+    }
+    if config.baseline_sequence != sequence {
+        return Err(Error::new(
+            "E_BACKUP_CHAIN",
+            format!(
+                "baseline sequence {} does not match database sequence {sequence}",
+                config.baseline_sequence
+            ),
+        ));
+    }
+    if !is_canonical_sha256(&config.baseline_checksum) {
+        return Err(Error::new(
+            "E_BACKUP_CHAIN",
+            "baseline checksum must use canonical sha256:<lowercase-hex>",
+        ));
+    }
+    if config.max_commits == 0
+        || config.max_commits > HARD_JOURNAL_MAX_COMMITS
+        || config.max_bytes == 0
+        || config.max_bytes > HARD_JOURNAL_MAX_BYTES
+    {
+        return Err(Error::new(
+            "E_LIMIT",
+            format!(
+                "backup journal limits must be within 1..={HARD_JOURNAL_MAX_COMMITS} commits and 1..={HARD_JOURNAL_MAX_BYTES} bytes"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn decode_journal_state(value: &[u8]) -> Result<JournalState> {
+    if value.len() < 6 || &value[..4] != JOURNAL_STATE_MAGIC {
+        return Err(Error::new(
+            "E_STORAGE",
+            "invalid backup journal state magic",
+        ));
+    }
+    let version = u16::from_be_bytes(value[4..6].try_into().expect("fixed slice"));
+    if version != JOURNAL_CODEC_VERSION {
+        return Err(Error::new(
+            "E_STORAGE",
+            format!("unsupported backup journal state codec {version}"),
+        ));
+    }
+    let state: JournalState = serde_json::from_slice(&value[6..]).map_err(|error| {
+        Error::new("E_STORAGE", format!("decode backup journal state: {error}"))
+    })?;
+    if encode_journal_state(&state)? != value {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal state is not canonical",
+        ));
+    }
+    Ok(state)
+}
+
+fn validate_journal_state(state: &JournalState, meta: Option<&DurableMeta>) -> Result<()> {
+    use crate::backup::incremental::{HARD_JOURNAL_MAX_BYTES, HARD_JOURNAL_MAX_COMMITS};
+
+    if state.version != JOURNAL_CODEC_VERSION
+        || state.chain_id.is_empty()
+        || state.chain_id.len() > JOURNAL_CHAIN_ID_MAX_BYTES
+        || state.chain_id.chars().any(char::is_control)
+        || !is_canonical_sha256(&state.exported_checksum)
+        || !is_canonical_sha256(&state.head_checksum)
+        || state.baseline_sequence > state.exported_sequence
+        || state.max_commits == 0
+        || state.max_commits > HARD_JOURNAL_MAX_COMMITS
+        || state.max_bytes == 0
+        || state.max_bytes > HARD_JOURNAL_MAX_BYTES
+        || state.commit_count > state.max_commits
+        || state.expanded_bytes > state.max_bytes
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal state violates its version, identity, or capacity contract",
+        ));
+    }
+    match (state.first_retained_sequence, state.last_retained_sequence) {
+        (None, None) if state.commit_count == 0 && state.expanded_bytes == 0 => {
+            if state.head_checksum != state.exported_checksum {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "empty backup journal head does not match exported head",
+                ));
+            }
+        }
+        (Some(first), Some(last)) => {
+            let count = last
+                .checked_sub(first)
+                .and_then(|distance| distance.checked_add(1))
+                .ok_or_else(|| Error::new("E_STORAGE", "backup journal range is invalid"))?;
+            if first != state.exported_sequence.saturating_add(1)
+                || last < first
+                || count != state.commit_count
+                || state.expanded_bytes == 0
+            {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "backup journal retained range is inconsistent",
+                ));
+            }
+        }
+        _ => {
+            return Err(Error::new(
+                "E_STORAGE",
+                "backup journal retained range is incomplete",
+            ));
+        }
+    }
+    if let Some(meta) = meta
+        && state
+            .last_retained_sequence
+            .unwrap_or(state.exported_sequence)
+            != meta.sequence
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal head does not match the database commit sequence",
+        ));
+    }
+    Ok(())
+}
+
+fn read_journal_state_and_validate(
+    transaction: &redb::ReadTransaction,
+    meta: &DurableMeta,
+    layout: StorageLayout,
+) -> Result<Option<JournalState>> {
+    if layout.format < JOURNAL_STORAGE_FORMAT_VERSION {
+        return Ok(None);
+    }
+    let state_table = transaction
+        .open_table(BACKUP_CHAIN_STATE)
+        .map_err(|error| storage_error("open backup chain state table", error))?;
+    if state_table
+        .len()
+        .map_err(|error| storage_error("count backup chain state", error))?
+        > 1
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup chain state table contains multiple entries",
+        ));
+    }
+    let state = state_table
+        .get(JOURNAL_STATE_KEY)
+        .map_err(|error| storage_error("read backup chain state", error))?
+        .map(|value| decode_journal_state(value.value()))
+        .transpose()?;
+    let journal = transaction
+        .open_table(BACKUP_JOURNAL)
+        .map_err(|error| storage_error("open backup journal table", error))?;
+    let Some(state) = state else {
+        if !journal
+            .is_empty()
+            .map_err(|error| storage_error("inspect disabled backup journal", error))?
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "disabled backup journal still contains records",
+            ));
+        }
+        return Ok(None);
+    };
+    validate_journal_state(&state, Some(meta))?;
+    validate_journal_records(&journal, &state)?;
+    Ok(Some(state))
+}
+
+fn validate_journal_records(
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    state: &JournalState,
+) -> Result<()> {
+    let mut expected_sequence = state.first_retained_sequence;
+    let mut expected_ordinal = 0u64;
+    let mut expected_parent = state.exported_checksum.clone();
+    let mut digest: Option<Sha256> = None;
+    let mut previous_kind = 0u8;
+    let mut previous_change_key = Vec::new();
+    let mut expected_counts = [0u64; 4];
+    let mut actual_counts = [0u64; 4];
+    let mut commits = 0u64;
+    let mut bytes = 0u64;
+    for entry in table
+        .iter()
+        .map_err(|error| storage_error("iterate backup journal", error))?
+    {
+        let (key, value) = entry.map_err(|error| storage_error("read backup journal", error))?;
+        let journal_key = key.value();
+        let value = value.value();
+        bytes = bytes
+            .checked_add(usize_u64(journal_key.len()))
+            .and_then(|total| total.checked_add(usize_u64(value.len())))
+            .ok_or_else(|| Error::new("E_STORAGE", "backup journal byte count overflow"))?;
+        let (sequence, ordinal) = decode_journal_key(journal_key)?;
+        if Some(sequence) != expected_sequence || ordinal != expected_ordinal {
+            return Err(Error::new(
+                "E_STORAGE",
+                "backup journal sequence or ordinal is not contiguous",
+            ));
+        }
+        let (kind, payload) = decode_journal_record(value)?;
+        if ordinal == 0 {
+            if kind != 16 {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "backup journal commit has no begin record",
+                ));
+            }
+            let (stored_sequence, parent, counts) = decode_journal_begin(payload)?;
+            if stored_sequence != sequence || parent != expected_parent {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "backup journal commit parent or sequence is inconsistent",
+                ));
+            }
+            let mut current = Sha256::new();
+            current.update(JOURNAL_COMMIT_DOMAIN);
+            current.update(parent.as_bytes());
+            current.update(journal_key);
+            current.update(value);
+            digest = Some(current);
+            previous_kind = kind;
+            previous_change_key.clear();
+            expected_counts = counts;
+            actual_counts = [0; 4];
+        } else if kind == 25 {
+            if !is_canonical_sha256(std::str::from_utf8(payload).unwrap_or("")) {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "backup journal end checksum is invalid",
+                ));
+            }
+            let actual = format!(
+                "sha256:{:x}",
+                digest
+                    .take()
+                    .ok_or_else(|| Error::new("E_STORAGE", "backup journal end is misplaced"))?
+                    .finalize()
+            );
+            let stored = std::str::from_utf8(payload)
+                .map_err(|_| Error::new("E_STORAGE", "backup journal checksum is not UTF-8"))?;
+            if stored != actual {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "backup journal commit checksum mismatch",
+                ));
+            }
+            if actual_counts != expected_counts {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "backup journal commit change counts are inconsistent",
+                ));
+            }
+            expected_parent = actual;
+            expected_sequence = sequence.checked_add(1);
+            expected_ordinal = 0;
+            previous_kind = 0;
+            previous_change_key.clear();
+            commits = commits
+                .checked_add(1)
+                .ok_or_else(|| Error::new("E_STORAGE", "backup journal commit count overflow"))?;
+            continue;
+        } else {
+            if digest.is_none() || !(17..=24).contains(&kind) || kind < previous_kind {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "backup journal records are out of canonical order",
+                ));
+            }
+            let change_key = validate_journal_change_payload(kind, payload)?;
+            if kind == previous_kind && change_key <= previous_change_key.as_slice() {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "backup journal change keys are duplicated or unordered",
+                ));
+            }
+            let current = digest.as_mut().expect("commit digest was checked");
+            current.update(journal_key);
+            current.update(value);
+            previous_change_key.clear();
+            previous_change_key.extend_from_slice(change_key);
+            previous_kind = kind;
+            let count_index = usize::from((kind - 17) / 2);
+            actual_counts[count_index] = actual_counts[count_index]
+                .checked_add(1)
+                .ok_or_else(|| Error::new("E_STORAGE", "backup journal change count overflow"))?;
+        }
+        expected_ordinal = expected_ordinal
+            .checked_add(1)
+            .ok_or_else(|| Error::new("E_STORAGE", "backup journal ordinal overflow"))?;
+    }
+    if digest.is_some()
+        || commits != state.commit_count
+        || bytes != state.expanded_bytes
+        || expected_parent != state.head_checksum
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal records do not match their durable state",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_journal_begin(payload: &[u8]) -> Result<(u64, String, [u64; 4])> {
+    if payload.len() < 8 {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal begin record is truncated",
+        ));
+    }
+    let sequence = u64::from_be_bytes(payload[..8].try_into().expect("fixed slice"));
+    let (parent, mut remaining) = take_journal_bytes(&payload[8..])?;
+    let parent = std::str::from_utf8(parent)
+        .map_err(|_| Error::new("E_STORAGE", "backup journal parent is not UTF-8"))?
+        .to_owned();
+    if !is_canonical_sha256(&parent) || remaining.len() < 16 {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal begin metadata is invalid",
+        ));
+    }
+    remaining = &remaining[16..];
+    let (schema_hash, tail) = take_journal_bytes(remaining)?;
+    if tail.len() != 32 {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal begin counts are invalid",
+        ));
+    }
+    let schema_hash = std::str::from_utf8(schema_hash)
+        .map_err(|_| Error::new("E_STORAGE", "backup journal schema hash is not UTF-8"))?;
+    if !is_canonical_sha256(schema_hash) {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal schema hash is invalid",
+        ));
+    }
+    let mut counts = [0u64; 4];
+    for (index, count) in counts.iter_mut().enumerate() {
+        let start = index * 8;
+        *count = u64::from_be_bytes(tail[start..start + 8].try_into().expect("fixed slice"));
+    }
+    Ok((sequence, parent, counts))
+}
+
+fn validate_journal_change_payload(kind: u8, payload: &[u8]) -> Result<&[u8]> {
+    let (key, remaining) = take_journal_bytes(payload)?;
+    let trailing = if matches!(kind, 18 | 20 | 22 | 24) {
+        let (_, trailing) = take_journal_bytes(remaining)?;
+        trailing
+    } else {
+        remaining
+    };
+    if !trailing.is_empty() {
+        return Err(Error::new(
+            "E_STORAGE",
+            "backup journal change record has trailing bytes",
+        ));
+    }
+    Ok(key)
+}
+
+fn take_journal_bytes(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
+    if bytes.len() < 4 {
+        return Err(Error::new("E_STORAGE", "backup journal field is truncated"));
+    }
+    let len = u32::from_be_bytes(bytes[..4].try_into().expect("fixed slice")) as usize;
+    let end = 4usize
+        .checked_add(len)
+        .ok_or_else(|| Error::new("E_STORAGE", "backup journal field length overflow"))?;
+    if end > bytes.len() {
+        return Err(Error::new("E_STORAGE", "backup journal field is truncated"));
+    }
+    Ok((&bytes[4..end], &bytes[end..]))
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn encode_receipt(receipt: &IdempotencyReceipt, version: u16) -> Result<Vec<u8>> {
@@ -5124,6 +6222,16 @@ fn write_compaction_proof(path: &Path, proof: &CompactionProofEnvelope) -> Resul
     result.map_err(|error| Error::new("E_IO", format!("publish compaction proof: {error}")))
 }
 
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| Error::new("E_IO", format!("sync database directory: {error}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5446,6 +6554,60 @@ mod tests {
         full.expected_meta = incremental.expected_meta.clone();
 
         assert_eq!(incremental, full);
+    }
+
+    #[test]
+    fn backup_journal_commit_has_stable_sequence_ordinals_and_checksum() {
+        let mut previous = Database::default();
+        execute(
+            &mut previous,
+            "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ninsert entries {id = 1, label = \"one\"}",
+        );
+        let mut next = previous.clone();
+        execute(
+            &mut next,
+            "update entries | filter id == 1 | set label = \"two\"",
+        );
+        let receipts = ReceiptMap::new();
+        let previous = PreparedState::new(&previous, &receipts, StorageLayout::journal()).unwrap();
+        let next = PreparedState::new(&next, &receipts, StorageLayout::journal()).unwrap();
+        let delta = PreparedDelta::between(&previous, &next);
+        let baseline = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let state = JournalState {
+            version: JOURNAL_CODEC_VERSION,
+            chain_id: "golden".into(),
+            baseline_sequence: 1,
+            exported_sequence: 1,
+            exported_checksum: baseline.into(),
+            head_checksum: baseline.into(),
+            first_retained_sequence: None,
+            last_retained_sequence: None,
+            commit_count: 0,
+            expanded_bytes: 0,
+            max_commits: 10,
+            max_bytes: 1_000_000,
+        };
+        let append = delta.prepare_journal_append(&state).unwrap();
+        let keys = append
+            .records
+            .iter()
+            .map(|(key, _)| decode_journal_key(key).unwrap())
+            .collect::<Vec<_>>();
+        let kinds = append
+            .records
+            .iter()
+            .map(|(_, value)| decode_journal_record(value).unwrap().0)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, [(2, 0), (2, 1), (2, 2)]);
+        assert_eq!(kinds, [16, 20, 25]);
+        assert_eq!(
+            append.state.head_checksum,
+            "sha256:6f5c9f297b0a96da14493d889bed6dc8e0af47739fb3afbd917bda375e297f82"
+        );
+        assert_eq!(append.state.commit_count, 1);
+        assert_eq!(append.state.first_retained_sequence, Some(2));
+        assert_eq!(append.state.last_retained_sequence, Some(2));
+        assert_eq!(append.state.expanded_bytes, append.encoded_bytes);
     }
 
     #[test]
