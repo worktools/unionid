@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,13 @@ use super::{
     write_new_archive_entry,
 };
 use crate::Engine;
+use crate::db::{Database, DurableMeta};
 use crate::error::{Error, Result};
+use crate::idempotency::ReceiptMap;
+use crate::migration::MigrationEntry;
+use crate::redb_storage::{
+    decode_catalog_entry, decode_migration_entry, decode_receipt, decode_row_key,
+};
 
 pub const INCREMENTAL_BACKUP_REPORT_VERSION: u16 = 1;
 const RECORD_CODEC_VERSION: u16 = 1;
@@ -34,6 +40,24 @@ struct BaselineMeta {
 struct SchemaTransition {
     revision: u64,
     hash: String,
+}
+
+struct ReplayState {
+    sequence: u64,
+    schema_revision: u64,
+    next_catalog_id: u64,
+    schema_hash: String,
+    catalog: BTreeMap<Vec<u8>, Vec<u8>>,
+    rows: BTreeMap<Vec<u8>, Vec<u8>>,
+    migrations: BTreeMap<Vec<u8>, Vec<u8>>,
+    receipts: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+struct CommitMeta {
+    sequence: u64,
+    schema_revision: u64,
+    next_catalog_id: u64,
+    schema_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +151,17 @@ pub struct IncrementalVerifyReport {
     pub stored_bytes: u64,
     pub expanded_bytes: u64,
     pub orphan_files: Vec<String>,
+    pub manifest_checksum: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalRestoreReport {
+    pub version: u16,
+    pub chain_id: String,
+    pub restored_sequence: u64,
+    pub schema_revision: u64,
+    pub row_count: u64,
+    pub receipt_count: u64,
     pub manifest_checksum: String,
 }
 
@@ -372,6 +407,459 @@ pub fn verify(repo: impl AsRef<Path>, limits: ArchiveLimits) -> Result<Increment
         orphan_files,
         manifest_checksum: manifest.checksum,
     })
+}
+
+/// Restore one declared archive sequence to a new durable database.
+///
+/// The database is first materialized at a sibling temporary path, checked in
+/// full, and only then renamed into the requested previously nonexistent path.
+pub fn restore(
+    repo: impl AsRef<Path>,
+    db: impl Into<PathBuf>,
+    at_sequence: u64,
+    limits: ArchiveLimits,
+) -> Result<IncrementalRestoreReport> {
+    let repo = existing_repo(repo.as_ref())?;
+    let destination = db.into();
+    reject_existing_restore_target(&destination)?;
+    let manifest = read_manifest(&repo)?;
+    if at_sequence < manifest.recoverable_first_sequence {
+        return Err(Error::new(
+            "E_BACKUP_BEFORE_BASELINE",
+            "requested sequence is before the incremental baseline",
+        ));
+    }
+    if at_sequence > manifest.recoverable_last_sequence {
+        return Err(Error::new(
+            "E_BACKUP_AFTER_HEAD",
+            "requested sequence is after the sealed incremental head",
+        ));
+    }
+    let replay = replay_to_sequence(&repo, &manifest, at_sequence, &limits)?;
+    let row_count = u64::try_from(replay.rows.len())
+        .map_err(|_| Error::new("E_LIMIT", "restored row count exceeds u64"))?;
+    let (database, receipts) = replay_database(replay, &manifest)?;
+    let temporary = restore_temp_path(&destination)?;
+    let result = (|| {
+        let mut engine = Engine::restore_redb(temporary.clone(), database, receipts.clone())?;
+        engine.check_integrity()?;
+        drop(engine);
+        // A rename can replace a destination created after the initial check.
+        // The temporary database is a single sibling file, so hard-linking it
+        // atomically reserves only a nonexistent destination before removing
+        // the temporary name.
+        fs::hard_link(&temporary, &destination)
+            .map_err(|error| archive_error(format!("publish restored database: {error}")))?;
+        let _ = fs::remove_file(&temporary);
+        sync_parent_directory(&destination)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result?;
+    Ok(IncrementalRestoreReport {
+        version: INCREMENTAL_BACKUP_REPORT_VERSION,
+        chain_id: manifest.chain_id,
+        restored_sequence: at_sequence,
+        schema_revision: Engine::open_redb(destination)?.schema_info().revision,
+        row_count,
+        receipt_count: u64::try_from(receipts.len()).unwrap_or(u64::MAX),
+        manifest_checksum: manifest.checksum,
+    })
+}
+
+fn replay_to_sequence(
+    repo: &Path,
+    manifest: &ArchiveManifest,
+    at_sequence: u64,
+    limits: &ArchiveLimits,
+) -> Result<ReplayState> {
+    let baseline = read_artifact(repo, &manifest.baseline, limits)?;
+    validate_decoded(
+        &baseline,
+        ArchiveKind::Baseline,
+        manifest,
+        &manifest.baseline,
+        None,
+    )?;
+    let meta: BaselineMeta = serde_json::from_slice(&baseline.frames[0].payload)
+        .map_err(|error| archive_error(format!("decode baseline meta: {error}")))?;
+    if meta.sequence != manifest.baseline.first_sequence {
+        return Err(chain_error("baseline sequence does not match the manifest"));
+    }
+    let mut state = ReplayState {
+        sequence: meta.sequence,
+        schema_revision: meta.schema_revision,
+        next_catalog_id: meta.next_catalog_id,
+        schema_hash: meta.schema_hash,
+        catalog: BTreeMap::new(),
+        rows: BTreeMap::new(),
+        migrations: BTreeMap::new(),
+        receipts: BTreeMap::new(),
+    };
+    for frame in baseline.frames.iter().skip(1) {
+        apply_baseline_frame(&mut state, frame, limits)?;
+    }
+    if at_sequence == state.sequence {
+        return Ok(state);
+    }
+    let mut expected_parent = manifest.baseline.payload_checksum.clone();
+    for artifact in &manifest.segments {
+        if artifact.first_sequence > at_sequence {
+            break;
+        }
+        let segment = read_artifact(repo, artifact, limits)?;
+        validate_decoded(
+            &segment,
+            ArchiveKind::Segment,
+            manifest,
+            artifact,
+            Some(&baseline.header),
+        )?;
+        expected_parent = replay_segment(
+            &mut state,
+            &segment.frames,
+            at_sequence,
+            &expected_parent,
+            limits,
+        )?;
+        if state.sequence == at_sequence {
+            return Ok(state);
+        }
+    }
+    let _ = expected_parent;
+    Err(Error::new(
+        "E_BACKUP_CHAIN",
+        "requested sequence is absent from the verified archive chain",
+    ))
+}
+
+fn apply_baseline_frame(
+    state: &mut ReplayState,
+    frame: &super::ArchiveFrame,
+    limits: &ArchiveLimits,
+) -> Result<()> {
+    let (key, value) = split_write_frame(&frame.payload, limits)?;
+    let destination = match frame.kind {
+        2 => &mut state.catalog,
+        3 => &mut state.rows,
+        4 => &mut state.migrations,
+        5 => &mut state.receipts,
+        _ => return Err(chain_error("baseline contains an invalid data frame")),
+    };
+    if destination.insert(key.to_vec(), value.to_vec()).is_some() {
+        return Err(chain_error("baseline contains duplicate durable keys"));
+    }
+    Ok(())
+}
+
+fn replay_segment(
+    state: &mut ReplayState,
+    frames: &[super::ArchiveFrame],
+    target: u64,
+    initial_parent: &str,
+    limits: &ArchiveLimits,
+) -> Result<String> {
+    let mut parent = initial_parent.to_owned();
+    let mut active: Option<CommitMeta> = None;
+    let mut digest: Option<Sha256> = None;
+    let mut ordinal = 0_u64;
+    for frame in frames {
+        if frame.kind == 16 {
+            let meta = decode_commit_meta(&frame.payload)?;
+            if active.is_some() || meta.sequence != state.sequence.saturating_add(1) {
+                return Err(chain_error("segment commit sequence is not contiguous"));
+            }
+            let mut hash = Sha256::new();
+            hash.update(COMMIT_DOMAIN);
+            hash.update(parent.as_bytes());
+            hash.update(journal_key(meta.sequence, 0));
+            hash.update(journal_value(frame.kind, &frame.payload));
+            digest = Some(hash);
+            active = Some(meta);
+            ordinal = 1;
+            continue;
+        }
+        if frame.kind == 25 {
+            let meta = active
+                .take()
+                .ok_or_else(|| chain_error("segment end is misplaced"))?;
+            let actual = format!(
+                "sha256:{:x}",
+                digest
+                    .take()
+                    .ok_or_else(|| chain_error("segment checksum is missing"))?
+                    .finalize()
+            );
+            let stored = std::str::from_utf8(&frame.payload)
+                .map_err(|_| chain_error("segment checksum is not UTF-8"))?;
+            if stored != actual {
+                return Err(chain_error("segment commit checksum mismatch"));
+            }
+            parent = actual;
+            if meta.sequence <= target {
+                state.sequence = meta.sequence;
+                state.schema_revision = meta.schema_revision;
+                state.next_catalog_id = meta.next_catalog_id;
+                state.schema_hash = meta.schema_hash;
+            }
+            if state.sequence == target {
+                return Ok(parent);
+            }
+            ordinal = 0;
+            continue;
+        }
+        let meta = active
+            .as_ref()
+            .ok_or_else(|| chain_error("segment change is outside a commit"))?;
+        let hash = digest
+            .as_mut()
+            .ok_or_else(|| chain_error("segment checksum is missing"))?;
+        hash.update(journal_key(meta.sequence, ordinal));
+        hash.update(journal_value(frame.kind, &frame.payload));
+        ordinal = ordinal
+            .checked_add(1)
+            .ok_or_else(|| Error::new("E_LIMIT", "archive ordinal overflow"))?;
+        if meta.sequence <= target {
+            apply_delta_frame(state, frame, limits)?;
+        }
+    }
+    if active.is_some() {
+        return Err(chain_error("segment ends inside a commit"));
+    }
+    Ok(parent)
+}
+
+fn apply_delta_frame(
+    state: &mut ReplayState,
+    frame: &super::ArchiveFrame,
+    limits: &ArchiveLimits,
+) -> Result<()> {
+    let (destination, delete) = match frame.kind {
+        17 => (&mut state.catalog, true),
+        18 => (&mut state.catalog, false),
+        19 => (&mut state.rows, true),
+        20 => (&mut state.rows, false),
+        21 => (&mut state.migrations, true),
+        22 => (&mut state.migrations, false),
+        23 => (&mut state.receipts, true),
+        24 => (&mut state.receipts, false),
+        _ => return Err(chain_error("segment contains an invalid change frame")),
+    };
+    if delete {
+        let key = split_delete_frame(&frame.payload, limits)?;
+        if destination.remove(key).is_none() {
+            return Err(chain_error("segment deletes a missing durable key"));
+        }
+    } else {
+        let (key, value) = split_write_frame(&frame.payload, limits)?;
+        destination.insert(key.to_vec(), value.to_vec());
+    }
+    Ok(())
+}
+
+fn replay_database(
+    state: ReplayState,
+    _manifest: &ArchiveManifest,
+) -> Result<(Database, ReceiptMap)> {
+    let catalog_value = state
+        .catalog
+        .values()
+        .next()
+        .ok_or_else(|| chain_error("baseline catalog is empty"))?;
+    if catalog_value.len() < 6 {
+        return Err(chain_error("stored catalog entry is truncated"));
+    }
+    let catalog_codec = u16::from_be_bytes(catalog_value[4..6].try_into().expect("fixed slice"));
+    let receipt_codec = state
+        .receipts
+        .values()
+        .next()
+        .map(|value| {
+            if value.len() < 6 {
+                Err(chain_error("stored receipt is truncated"))
+            } else {
+                Ok(u16::from_be_bytes(
+                    value[4..6].try_into().expect("fixed slice"),
+                ))
+            }
+        })
+        .transpose()?
+        .unwrap_or(2);
+    let entries = state
+        .catalog
+        .iter()
+        .map(|(key, value)| decode_catalog_entry(key, value, catalog_codec))
+        .collect::<Result<Vec<_>>>()?;
+    let rows = state
+        .rows
+        .into_iter()
+        .map(|(key, value)| {
+            let (table_id, row_id) = decode_row_key(&key)?;
+            Ok((table_id, row_id, value))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let migrations = state
+        .migrations
+        .iter()
+        .enumerate()
+        .map(|(expected, (key, value))| {
+            if key.as_slice() != (expected as u64).to_be_bytes() {
+                return Err(chain_error("migration ledger sequence is not contiguous"));
+            }
+            decode_migration_entry(value)
+        })
+        .collect::<Result<Vec<MigrationEntry>>>()?;
+    let mut receipts = ReceiptMap::new();
+    for (key, value) in state.receipts {
+        let key = String::from_utf8(key)
+            .map_err(|_| chain_error("idempotency receipt key is not UTF-8"))?;
+        if receipts
+            .insert(key, decode_receipt(&value, receipt_codec)?)
+            .is_some()
+        {
+            return Err(chain_error("duplicate idempotency receipt key"));
+        }
+    }
+    let identity = crate::pagination::CursorIdentity::generate()?;
+    let meta = DurableMeta {
+        sequence: state.sequence,
+        schema_revision: state.schema_revision,
+        next_catalog_id: state.next_catalog_id,
+        schema_hash: state.schema_hash,
+        cursor_instance_id: *identity.instance_id(),
+        cursor_secret: *identity.secret(),
+    };
+    Ok((
+        Database::from_durable(meta, entries, rows, migrations)?,
+        receipts,
+    ))
+}
+
+fn decode_commit_meta(payload: &[u8]) -> Result<CommitMeta> {
+    if payload.len() < 8 {
+        return Err(chain_error("segment commit begin is truncated"));
+    }
+    let sequence = u64::from_be_bytes(payload[..8].try_into().expect("fixed slice"));
+    let (_, remaining) = take_prefixed(&payload[8..], usize::MAX)?;
+    if remaining.len() < 16 {
+        return Err(chain_error("segment commit metadata is truncated"));
+    }
+    let schema_revision = u64::from_be_bytes(remaining[..8].try_into().expect("fixed slice"));
+    let next_catalog_id = u64::from_be_bytes(remaining[8..16].try_into().expect("fixed slice"));
+    let (schema_hash, tail) = take_prefixed(&remaining[16..], 1024 * 1024)?;
+    if tail.len() != 32 || next_catalog_id == 0 {
+        return Err(chain_error("segment commit metadata is invalid"));
+    }
+    let schema_hash = std::str::from_utf8(schema_hash)
+        .map_err(|_| chain_error("segment schema hash is not UTF-8"))?
+        .to_owned();
+    if !schema_hash.starts_with("sha256:") {
+        return Err(chain_error("segment schema hash is invalid"));
+    }
+    Ok(CommitMeta {
+        sequence,
+        schema_revision,
+        next_catalog_id,
+        schema_hash,
+    })
+}
+
+fn split_delete_frame<'a>(payload: &'a [u8], limits: &ArchiveLimits) -> Result<&'a [u8]> {
+    let (key, trailing) = take_prefixed(payload, limits.max_key_bytes)?;
+    if !trailing.is_empty() {
+        return Err(chain_error("delete frame has trailing bytes"));
+    }
+    Ok(key)
+}
+
+fn split_write_frame<'a>(
+    payload: &'a [u8],
+    limits: &ArchiveLimits,
+) -> Result<(&'a [u8], &'a [u8])> {
+    let (key, remaining) = take_prefixed(payload, limits.max_key_bytes)?;
+    let (value, trailing) = take_prefixed(remaining, limits.max_value_bytes)?;
+    if !trailing.is_empty() {
+        return Err(chain_error("write frame has trailing bytes"));
+    }
+    Ok((key, value))
+}
+
+fn take_prefixed(bytes: &[u8], max: usize) -> Result<(&[u8], &[u8])> {
+    if bytes.len() < 4 {
+        return Err(chain_error("length-delimited frame is truncated"));
+    }
+    let length = u32::from_be_bytes(bytes[..4].try_into().expect("fixed slice")) as usize;
+    if length > max {
+        return Err(Error::new(
+            "E_LIMIT",
+            "archive frame value exceeds its limit",
+        ));
+    }
+    let end = 4usize
+        .checked_add(length)
+        .ok_or_else(|| Error::new("E_LIMIT", "archive frame length overflows"))?;
+    let value = bytes
+        .get(4..end)
+        .ok_or_else(|| chain_error("length-delimited frame is truncated"))?;
+    Ok((value, &bytes[end..]))
+}
+
+fn reject_existing_restore_target(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(Error::new(
+            "E_BACKUP",
+            "incremental restore target already exists",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(archive_error(format!("inspect restore target: {error}"))),
+    }
+}
+
+fn restore_temp_path(destination: &Path) -> Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            Error::new(
+                "E_BACKUP",
+                "incremental restore target must have a parent directory",
+            )
+        })?;
+    let metadata = fs::symlink_metadata(parent)
+        .map_err(|error| archive_error(format!("inspect restore parent: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::new(
+            "E_BACKUP",
+            "incremental restore parent must be a real directory",
+        ));
+    }
+    let name = destination.file_name().ok_or_else(|| {
+        Error::new(
+            "E_BACKUP",
+            "incremental restore target must name a database file",
+        )
+    })?;
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce)
+        .map_err(|error| archive_error(format!("generate restore temporary name: {error}")))?;
+    Ok(parent.join(format!(
+        ".{}-{:x}.tmp",
+        name.to_string_lossy(),
+        u128::from_be_bytes(nonce)
+    )))
+}
+
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| archive_error("restore target has no parent"))?;
+    let directory = fs::File::open(parent)
+        .map_err(|error| archive_error(format!("open restore parent for sync: {error}")))?;
+    directory
+        .sync_all()
+        .map_err(|error| archive_error(format!("sync restore parent: {error}")))
 }
 
 fn verify_manifest_artifacts(

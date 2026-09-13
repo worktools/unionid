@@ -368,6 +368,31 @@ pub fn incremental_backup_verify(repo: PathBuf, json: bool) -> Result<(), String
     Ok(())
 }
 
+pub fn incremental_backup_restore(
+    repo: PathBuf,
+    db: PathBuf,
+    at_sequence: u64,
+    json: bool,
+) -> Result<(), String> {
+    let report = backup::incremental::restore(repo, db, at_sequence, Default::default())
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "restored incremental sequence {} (schema revision {}, {} row(s), {} receipt(s))",
+            report.restored_sequence,
+            report.schema_revision,
+            report.row_count,
+            report.receipt_count
+        );
+    }
+    Ok(())
+}
+
 pub fn import_legacy(
     snapshot: Option<PathBuf>,
     wal: Option<PathBuf>,

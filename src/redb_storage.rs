@@ -5550,7 +5550,7 @@ fn encode_receipt(receipt: &IdempotencyReceipt, version: u16) -> Result<Vec<u8>>
     Ok(value)
 }
 
-fn decode_receipt(value: &[u8], expected_version: u16) -> Result<IdempotencyReceipt> {
+pub(crate) fn decode_receipt(value: &[u8], expected_version: u16) -> Result<IdempotencyReceipt> {
     if value.len() < 6 || &value[..4] != RECEIPT_MAGIC {
         return Err(Error::new(
             "E_STORAGE",
@@ -6132,7 +6132,7 @@ fn encode_migration_entry(entry: &MigrationEntry) -> Result<Vec<u8>> {
     Ok(value)
 }
 
-fn decode_migration_entry(value: &[u8]) -> Result<MigrationEntry> {
+pub(crate) fn decode_migration_entry(value: &[u8]) -> Result<MigrationEntry> {
     if value.len() < 6 || &value[..4] != MIGRATION_MAGIC {
         return Err(Error::new(
             "E_STORAGE",
@@ -6230,7 +6230,7 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
     Ok(value)
 }
 
-fn decode_catalog_entry(
+pub(crate) fn decode_catalog_entry(
     key: &[u8],
     value: &[u8],
     expected_version: u16,
@@ -6315,7 +6315,7 @@ fn generation_prefix(generation: u64) -> Result<Vec<u8>> {
     encode_generation_key(generation, &[])
 }
 
-fn decode_row_key(key: &[u8]) -> Result<(u64, u64)> {
+pub(crate) fn decode_row_key(key: &[u8]) -> Result<(u64, u64)> {
     if key.len() != 16 {
         return Err(Error::new("E_STORAGE", "invalid durable row key"));
     }

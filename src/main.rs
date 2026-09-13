@@ -83,6 +83,21 @@ enum BackupCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum RestoreCommand {
+    /// Restore one sealed incremental archive sequence to a new redb database.
+    Incremental {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        at_sequence: u64,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Print software, protocol, storage, codec, and target versions.
     Version {
@@ -220,10 +235,12 @@ enum Command {
     },
     /// Restore a verified backup to a new redb path.
     Restore {
+        #[command(subcommand)]
+        command: Option<RestoreCommand>,
         #[arg(long)]
-        backup: PathBuf,
+        backup: Option<PathBuf>,
         #[arg(long)]
-        db: PathBuf,
+        db: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -551,7 +568,6 @@ impl Args {
             Command::Version { format }
             | Command::Doctor { format, .. }
             | Command::Upgrade { format, .. }
-            | Command::Restore { format, .. }
             | Command::ImportLegacy { format, .. }
             | Command::Receipts {
                 command:
@@ -569,6 +585,19 @@ impl Args {
                     | MigrationCommand::Abort { format, .. }
                     | MigrationCommand::Rehearse { format, .. }
                     | MigrationCommand::Diff { format, .. },
+            } => ErrorOutput {
+                json: matches!(format, Format::Json),
+                query_response: false,
+                integrity: false,
+            },
+            Command::Restore {
+                command: Some(RestoreCommand::Incremental { format, .. }),
+                ..
+            }
+            | Command::Restore {
+                command: None,
+                format,
+                ..
             } => ErrorOutput {
                 json: matches!(format, Format::Json),
                 query_response: false,
@@ -967,9 +996,29 @@ fn run(args: Args) -> Result<(), String> {
                 }
             },
         },
-        Command::Restore { backup, db, format } => {
-            cli::backup_restore(backup, db, matches!(format, Format::Json))
-        }
+        Command::Restore {
+            command,
+            backup,
+            db,
+            format,
+        } => match command {
+            Some(RestoreCommand::Incremental {
+                repo,
+                db,
+                at_sequence,
+                format,
+            }) => cli::incremental_backup_restore(
+                repo,
+                db,
+                at_sequence,
+                matches!(format, Format::Json),
+            ),
+            None => cli::backup_restore(
+                backup.ok_or_else(|| "logical restore requires --backup".to_owned())?,
+                db.ok_or_else(|| "logical restore requires --db".to_owned())?,
+                matches!(format, Format::Json),
+            ),
+        },
         Command::ImportLegacy {
             snapshot,
             wal,
