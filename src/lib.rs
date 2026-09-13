@@ -23,6 +23,7 @@ pub mod metrics;
 mod metrics_export;
 pub mod migration;
 pub mod model;
+pub mod observability;
 mod ordered_key;
 mod pagination;
 mod params;
@@ -50,9 +51,10 @@ pub use client::http::{HttpClient, HttpStream};
 pub use client::{AsyncTcpClient, AsyncTcpStream};
 pub use client::{MAX_RESPONSE_BYTES, TcpClient, TypedStreamEvent};
 pub use db::{
-    IndexRangePlan, IndexTraversal, LookupPlan, PageAccessKind, PageInfo, PageOrder, PagePlan,
-    QueryAccessKind, QueryAccessPlan, QueryAnalysis, QueryPlan, QueryPlanStage, QueryResponse,
-    QueryStageKind, SchemaInfo, TypedPage, UpsertAction,
+    ExecutionPlanObservation, IndexRangePlan, IndexTraversal, LookupPlan,
+    MAX_EXECUTION_PLAN_STAGES, PageAccessKind, PageInfo, PageOrder, PagePlan, QueryAccessKind,
+    QueryAccessPlan, QueryAnalysis, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind,
+    SchemaInfo, TypedPage, UpsertAction,
 };
 pub use engine::{
     Engine, MutationProfile, PreparedQuery, StorageCompaction, StorageIntegrity, StorageUpgrade,
@@ -74,13 +76,19 @@ pub use migration::{
     MigrationPlan, MigrationProgress, MigrationStatus,
 };
 pub use model::{RowId, Value};
+#[cfg(feature = "tracing")]
+pub use observability::TracingObserver;
+pub use observability::{
+    OBSERVABILITY_VERSION, ObservabilityEvent, ObserverConfig, RequestEvent, RequestObserver,
+    RequestOperation, RequestPhaseTimings, RequestTerminal, RequestWork, ResourceLimit,
+};
 pub use portable::{
     CompatibilityAxis, CompatibilityFinding, CompatibilityLevel, EvolutionReport, PortableContract,
     PortableSchemaIdentity, SchemaDescription,
 };
 pub use profile::{
     DurableCommitMode, DurableCommitProfile, ExecutionObservation, MigrationProfile,
-    StorageCheckProfile, StorageOpenProfile,
+    QueryPhaseObservation, StorageCheckProfile, StorageOpenProfile,
 };
 pub use protocol::{
     IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,

@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::control::ExecutionControl;
 use crate::db::QueryRowSink;
 use crate::metrics::{MetricOperation, MetricsRegistry, MetricsSnapshot};
+use crate::observability::{
+    EventInput, ObserverConfig, ObserverRegistry, RequestObserver, RequestOperation,
+    duration_micros,
+};
 use crate::protocol::{
     MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, ReceiptOperation, ReceiptOperationResult,
     Request as ProtocolRequest, Response as ProtocolResponse, VERSION, supported_version,
@@ -85,6 +89,7 @@ struct ConcurrentEngineInner {
     max_write_queue_wait_micros: AtomicU64,
     operations: Mutex<OperationRegistry>,
     metrics: MetricsRegistry,
+    observer: Option<ObserverRegistry>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,6 +158,8 @@ struct OperationGuard {
     id: String,
     finished: bool,
     metrics_started: Instant,
+    request_id: String,
+    protocol_version: u32,
 }
 
 pub(crate) struct StreamReadExecution {
@@ -164,10 +171,38 @@ pub(crate) struct StreamReadExecution {
     terminal: OperationGuard,
 }
 
+struct ProtocolObservationContext<'a> {
+    request_id: Option<&'a str>,
+    protocol_version: Option<u32>,
+    operation: RequestOperation,
+    elapsed: Duration,
+    partial: bool,
+    emission_micros: Option<u64>,
+}
+
 impl ConcurrentEngine {
     pub fn new(engine: Engine) -> Self {
+        Self::build(engine, None).expect("default observer configuration is valid")
+    }
+
+    /// Construct an engine that emits value-free terminal and slow-query events.
+    pub fn with_observer(
+        engine: Engine,
+        config: ObserverConfig,
+        observer: Arc<dyn RequestObserver>,
+    ) -> Result<Self, Error> {
+        Self::build(engine, Some((config, observer)))
+    }
+
+    fn build(
+        engine: Engine,
+        observer: Option<(ObserverConfig, Arc<dyn RequestObserver>)>,
+    ) -> Result<Self, Error> {
         let receipts = engine.idempotency_status().ok();
-        Self {
+        let observer = observer
+            .map(|(config, observer)| ObserverRegistry::new(config, observer))
+            .transpose()?;
+        Ok(Self {
             inner: Arc::new(ConcurrentEngineInner {
                 engine: Mutex::new(engine),
                 read_slots: Mutex::new(0),
@@ -186,8 +221,9 @@ impl ConcurrentEngine {
                 max_write_queue_wait_micros: AtomicU64::new(0),
                 operations: Mutex::new(OperationRegistry::default()),
                 metrics: MetricsRegistry::new(receipts.as_ref()),
+                observer,
             }),
-        }
+        })
     }
 
     pub fn register_read(
@@ -205,6 +241,8 @@ impl ConcurrentEngine {
         shutdown: Option<Arc<AtomicBool>>,
     ) -> Result<ReadOperation, Error> {
         let started = Instant::now();
+        let request_id = request.request_id.clone();
+        let version = request.version;
         let result = self.try_register_read_with_shutdown(request, deadline, shutdown, started);
         if let Err(error) = &result {
             self.inner.metrics.record(
@@ -212,6 +250,23 @@ impl ConcurrentEngine {
                 started.elapsed(),
                 Some(&error.code),
             );
+            self.observe(EventInput {
+                request_id: Some(&request_id),
+                protocol_version: Some(version),
+                operation: RequestOperation::StreamQuery,
+                schema_revision: None,
+                elapsed: started.elapsed(),
+                execution: None,
+                query_phases: None,
+                analysis: None,
+                mutation: None,
+                returned_rows: 0,
+                plan: None,
+                error_code: Some(&error.code),
+                storage_outcome_uncertain: false,
+                partial: false,
+                emission_micros: None,
+            });
         }
         result
     }
@@ -267,6 +322,24 @@ impl ConcurrentEngine {
     }
 
     pub fn cancel(&self, operation_id: &str) -> Result<CancelResult, Error> {
+        self.cancel_with_context(operation_id, None, None)
+    }
+
+    pub(crate) fn cancel_protocol(
+        &self,
+        operation_id: &str,
+        request_id: &str,
+        protocol_version: u32,
+    ) -> Result<CancelResult, Error> {
+        self.cancel_with_context(operation_id, Some(request_id), Some(protocol_version))
+    }
+
+    fn cancel_with_context(
+        &self,
+        operation_id: &str,
+        request_id: Option<&str>,
+        protocol_version: Option<u32>,
+    ) -> Result<CancelResult, Error> {
         let started = Instant::now();
         let result = self.try_cancel(operation_id);
         self.inner.metrics.record(
@@ -274,6 +347,23 @@ impl ConcurrentEngine {
             started.elapsed(),
             result.as_ref().err().map(|error| error.code.as_str()),
         );
+        self.observe(EventInput {
+            request_id,
+            protocol_version,
+            operation: RequestOperation::StreamCancel,
+            schema_revision: None,
+            elapsed: started.elapsed(),
+            execution: None,
+            query_phases: None,
+            analysis: None,
+            mutation: None,
+            returned_rows: 0,
+            plan: None,
+            error_code: result.as_ref().err().map(|error| error.code.as_str()),
+            storage_outcome_uncertain: false,
+            partial: false,
+            emission_micros: None,
+        });
         result
     }
 
@@ -462,6 +552,14 @@ impl ConcurrentEngine {
             started.elapsed(),
             response.error.as_ref().map(|error| error.code.as_str()),
         );
+        self.observe_query_response(
+            None,
+            None,
+            request_operation(operation),
+            started.elapsed(),
+            &response,
+            None,
+        );
         response
     }
 
@@ -496,6 +594,36 @@ impl ConcurrentEngine {
             started.elapsed(),
             result.as_ref().err().map(|_| "E_MAINTENANCE"),
         );
+        let error_code = result.as_ref().err().map(|_| "E_MAINTENANCE");
+        let (schema_revision, mutation, uncertain) = {
+            let engine = self
+                .inner
+                .engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                Some(engine.schema_info().revision),
+                engine.last_mutation_profile(),
+                engine.durable_outcome_uncertain(),
+            )
+        };
+        self.observe(EventInput {
+            request_id: None,
+            protocol_version: None,
+            operation: RequestOperation::Maintenance,
+            schema_revision,
+            elapsed: started.elapsed(),
+            execution: None,
+            query_phases: None,
+            analysis: None,
+            mutation,
+            returned_rows: 0,
+            plan: None,
+            error_code,
+            storage_outcome_uncertain: uncertain,
+            partial: false,
+            emission_micros: None,
+        });
         result
     }
 
@@ -507,6 +635,8 @@ impl ConcurrentEngine {
     ) -> ProtocolResponse {
         let started = Instant::now();
         let operation = metric_operation_for_request(&request);
+        let request_id = request.request_id.clone();
+        let protocol_version = request.version;
         let response = if protocol_request_is_read_only(&request) {
             let request_id = request.request_id.clone();
             let version = request.version;
@@ -529,7 +659,76 @@ impl ConcurrentEngine {
             started.elapsed(),
             response.error.as_ref().map(|error| error.code.as_str()),
         );
+        self.observe_protocol_response(
+            ProtocolObservationContext {
+                request_id: Some(&request_id),
+                protocol_version: Some(protocol_version),
+                operation: request_operation(operation),
+                elapsed: started.elapsed(),
+                partial: false,
+                emission_micros: None,
+            },
+            &response,
+        );
         response
+    }
+
+    fn observe(&self, input: EventInput<'_>) {
+        if let Some(observer) = &self.inner.observer {
+            observer.record(input);
+        }
+    }
+
+    fn observe_query_response(
+        &self,
+        request_id: Option<&str>,
+        protocol_version: Option<u32>,
+        operation: RequestOperation,
+        elapsed: Duration,
+        response: &QueryResponse,
+        emission_micros: Option<u64>,
+    ) {
+        self.observe(EventInput {
+            request_id,
+            protocol_version,
+            operation,
+            schema_revision: response.schema.as_ref().map(|schema| schema.revision),
+            elapsed,
+            execution: response.execution,
+            query_phases: response.execution_phases,
+            analysis: response.analysis,
+            mutation: None,
+            returned_rows: response.execution_rows.unwrap_or(response.rows.len()),
+            plan: response.execution_plan.clone(),
+            error_code: response.error.as_ref().map(|error| error.code.as_str()),
+            storage_outcome_uncertain: false,
+            partial: false,
+            emission_micros,
+        });
+    }
+
+    fn observe_protocol_response(
+        &self,
+        context: ProtocolObservationContext<'_>,
+        response: &ProtocolResponse,
+    ) {
+        self.observe(EventInput {
+            request_id: context.request_id,
+            protocol_version: context.protocol_version,
+            operation: context.operation,
+            schema_revision: response.schema.as_ref().map(|schema| schema.revision),
+            elapsed: context.elapsed,
+            execution: response.execution,
+            query_phases: response.execution_phases,
+            analysis: response.analysis,
+            mutation: response.mutation_profile,
+            returned_rows: response.execution_rows.unwrap_or(response.rows.len()),
+            plan: response.execution_plan.clone(),
+            error_code: response.error.as_ref().map(|error| error.code.as_str()),
+            storage_outcome_uncertain: response.storage_outcome_uncertain,
+            partial: context.partial,
+            emission_micros: context.emission_micros,
+        });
     }
 
     fn schema_info(&self) -> crate::SchemaInfo {
@@ -786,6 +985,8 @@ impl ReadOperation {
             id: self.id.clone(),
             finished: false,
             metrics_started: self.metrics_started,
+            request_id: request.request_id.clone(),
+            protocol_version: request.version,
         };
         let request_id = request.request_id.clone();
         let version = request.version;
@@ -835,6 +1036,8 @@ impl ReadOperation {
             id: self.id.clone(),
             finished: false,
             metrics_started: self.metrics_started,
+            request_id: request.request_id.clone(),
+            protocol_version: request.version,
         };
         let request_id = request.request_id.clone();
         let version = request.version;
@@ -921,6 +1124,18 @@ impl StreamReadExecution {
                 .as_ref()
                 .map(|error| error.code.as_str()),
         );
+        self.terminal.engine.observe_protocol_response(
+            ProtocolObservationContext {
+                request_id: Some(&self.request_id),
+                protocol_version: Some(self.version),
+                operation: RequestOperation::StreamQuery,
+                elapsed: self.terminal.metrics_started.elapsed(),
+                partial: self.response.error.is_some()
+                    && self.response.execution_rows.unwrap_or(0) > 0,
+                emission_micros: Some(duration_micros(self.terminal.metrics_started.elapsed())),
+            },
+            &self.response,
+        );
         self.response
     }
 
@@ -944,6 +1159,24 @@ impl StreamReadExecution {
             self.terminal.metrics_started.elapsed(),
             effective_error,
         );
+        let elapsed = self.terminal.metrics_started.elapsed();
+        self.terminal.engine.observe(EventInput {
+            request_id: Some(&self.request_id),
+            protocol_version: Some(self.version),
+            operation: RequestOperation::StreamQuery,
+            schema_revision: self.response.schema.as_ref().map(|schema| schema.revision),
+            elapsed,
+            execution: self.response.execution,
+            query_phases: self.response.execution_phases,
+            analysis: self.response.analysis,
+            mutation: None,
+            returned_rows: self.response.execution_rows.unwrap_or(0),
+            plan: self.response.execution_plan.clone(),
+            error_code: effective_error,
+            storage_outcome_uncertain: false,
+            partial: effective_error.is_some() && self.response.execution_rows.unwrap_or(0) > 0,
+            emission_micros: Some(duration_micros(elapsed)),
+        });
         outcome
     }
 
@@ -970,13 +1203,30 @@ impl Drop for OperationGuard {
                 self.metrics_started.elapsed(),
                 Some("E_INTERNAL"),
             );
+            self.engine.observe(EventInput {
+                request_id: Some(&self.request_id),
+                protocol_version: Some(self.protocol_version),
+                operation: RequestOperation::StreamQuery,
+                schema_revision: None,
+                elapsed: self.metrics_started.elapsed(),
+                execution: None,
+                query_phases: None,
+                analysis: None,
+                mutation: None,
+                returned_rows: 0,
+                plan: None,
+                error_code: Some("E_OPERATION_DROPPED"),
+                storage_outcome_uncertain: false,
+                partial: false,
+                emission_micros: None,
+            });
         }
     }
 }
 
 impl Drop for ReadOperation {
     fn drop(&mut self) {
-        if self.request.is_some() {
+        if let Some(request) = &self.request {
             let mut registry = self
                 .engine
                 .inner
@@ -984,11 +1234,29 @@ impl Drop for ReadOperation {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry.active.remove(&self.id);
+            drop(registry);
             self.engine.inner.metrics.record(
                 MetricOperation::Stream,
                 self.metrics_started.elapsed(),
                 Some("E_OPERATION_DROPPED"),
             );
+            self.engine.observe(EventInput {
+                request_id: Some(&request.request_id),
+                protocol_version: Some(request.version),
+                operation: RequestOperation::StreamQuery,
+                schema_revision: None,
+                elapsed: self.metrics_started.elapsed(),
+                execution: None,
+                query_phases: None,
+                analysis: None,
+                mutation: None,
+                returned_rows: 0,
+                plan: None,
+                error_code: Some("E_OPERATION_DROPPED"),
+                storage_outcome_uncertain: false,
+                partial: false,
+                emission_micros: None,
+            });
         }
     }
 }
@@ -1105,6 +1373,17 @@ fn metric_operation_for_request(request: &ProtocolRequest) -> MetricOperation {
         MetricOperation::Read
     } else {
         MetricOperation::Write
+    }
+}
+
+fn request_operation(operation: MetricOperation) -> RequestOperation {
+    match operation {
+        MetricOperation::Read => RequestOperation::Read,
+        MetricOperation::Write => RequestOperation::Write,
+        MetricOperation::Introspection => RequestOperation::Introspection,
+        MetricOperation::Receipt => RequestOperation::Receipt,
+        MetricOperation::Stream => RequestOperation::StreamQuery,
+        MetricOperation::Maintenance => RequestOperation::Maintenance,
     }
 }
 
@@ -1786,6 +2065,12 @@ pub fn execute_protocol_request_until(
     let version = request.version;
     let mut response = execute_versioned_request(engine, request, deadline);
     response.version = version;
+    response.storage_outcome_uncertain = response
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "E_STORAGE")
+        && engine.durable_outcome_uncertain();
+    response.mutation_profile = engine.last_mutation_profile();
     response
 }
 

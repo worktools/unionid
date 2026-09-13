@@ -191,7 +191,7 @@ pub fn cancel(
     if request_id.len() > crate::protocol::MAX_REQUEST_ID_BYTES {
         return Err(Error::new("E_LIMIT", "request_id exceeds byte limit"));
     }
-    let result = engine.cancel(&operation_id)?;
+    let result = engine.cancel_protocol(&operation_id, &request_id, VERSION)?;
     Ok(CancelResponse {
         stream_version: VERSION,
         request_id,

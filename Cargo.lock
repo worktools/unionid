@@ -1475,6 +1475,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tower",
+ "tracing",
 ]
 
 [[package]]
