@@ -7,9 +7,9 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use unionid::{
-    DurableCommitMode, DurableCommitProfile, Engine, ExecutionObservation, IndexTraversal,
-    MigrationFile, MigrationProfile, PageAccessKind, PagePlan, QueryAccessKind, QueryAccessPlan,
-    QueryPlan, QueryResponse, StorageOpenProfile, UpsertAction, Value,
+    BackupJournalConfig, DurableCommitMode, DurableCommitProfile, Engine, ExecutionObservation,
+    IndexTraversal, MigrationFile, MigrationProfile, PageAccessKind, PagePlan, QueryAccessKind,
+    QueryAccessPlan, QueryPlan, QueryResponse, StorageOpenProfile, UpsertAction, Value,
 };
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
@@ -21,6 +21,8 @@ const BATCH_WRITE_ROWS: usize = 100;
 const ORDERED_READ_ROWS: usize = 25;
 const MIN_ROWS: usize = 100;
 const MAX_ROWS: usize = 1_000_000;
+const BENCHMARK_BACKUP_CHECKSUM: &str =
+    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 const MIGRATION: &str = r#"migration benchmark_task_v2
   rename variant State.Running to Claimed
@@ -72,6 +74,10 @@ struct CaseReport {
     durable_commit_p50_micros: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     durable_commit_p95_micros: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_p50_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_p95_bytes: Option<u64>,
     peak_rss_bytes: u64,
     access_kind: Option<QueryAccessKind>,
     index: Option<String>,
@@ -235,7 +241,12 @@ fn evaluate(path: &Path, rows: usize, samples: usize, batch_rows: usize) -> AnyR
     }
 
     let mut writes = Vec::new();
-    for case in ["conditional_update", "upsert", "atomic_batch"] {
+    for case in [
+        "conditional_update",
+        "upsert",
+        "atomic_batch",
+        "journal_update",
+    ] {
         let database = copy_for_case(path, case, 0)?;
         let raw = run_child_samples(
             &executable,
@@ -578,13 +589,21 @@ fn validate_query_plan(case: &str, plan: &QueryPlan, read_rows: usize) -> AnyRes
 fn measure_write(path: &Path, rows: usize, samples: usize, case: &str) -> AnyResult<()> {
     validate_sizes(rows, samples, DEFAULT_BATCH_ROWS)?;
     let mut engine = Engine::open_redb(path.to_path_buf())?;
+    if case == "journal_update" {
+        let baseline = engine.backup_journal_status()?;
+        engine.enable_backup_journal(BackupJournalConfig::new(
+            "workload-eval",
+            baseline.head_sequence,
+            BENCHMARK_BACKUP_CHECKSUM,
+        ))?;
+    }
     let target = rows / 2;
     let total = WARMUPS + samples;
     let sources = (0..total)
         .map(|iteration| write_source(case, rows, target, iteration))
         .collect::<AnyResult<Vec<_>>>()?;
     let (access_kind, index) = match case {
-        "conditional_update" | "upsert" => {
+        "conditional_update" | "journal_update" | "upsert" => {
             let lookup = format!("from tasks | filter id == {target} | take 1");
             require_plan(
                 &mut engine,
@@ -730,7 +749,7 @@ fn measure_open(path: &Path, rows: usize) -> AnyResult<()> {
 
 fn write_source(case: &str, rows: usize, target: usize, iteration: usize) -> AnyResult<String> {
     Ok(match case {
-        "conditional_update" => {
+        "conditional_update" | "journal_update" => {
             format!("update tasks\nfilter id == {target}\nset score = score + 1")
         }
         "upsert" => {
@@ -779,7 +798,7 @@ fn validate_write_result(
     total: usize,
 ) -> AnyResult<()> {
     match case {
-        "conditional_update" => {
+        "conditional_update" | "journal_update" => {
             let response = require_one(
                 engine.execute(&format!("from tasks | filter id == {target} | take 1")),
             )?;
@@ -854,6 +873,7 @@ fn require_write_profile(engine: &Engine, case: &str) -> AnyResult<unionid::Muta
         || durable.migration_changes != 0
         || durable.receipt_changes != 0
         || durable.encoded_change_bytes == 0
+        || (case == "journal_update") != (durable.journal_bytes > 0)
     {
         return Err(format!("{case} returned unexpected mutation profile {profile:?}").into());
     }
@@ -1085,6 +1105,8 @@ fn summarize(mut raw: RawSamples) -> AnyResult<CaseReport> {
         summarize_phase(&raw.candidate_samples_micros, raw.samples_micros.len())?;
     let (durable_commit_p50_micros, durable_commit_p95_micros) =
         summarize_phase(&raw.durable_commit_samples_micros, raw.samples_micros.len())?;
+    let (journal_p50_bytes, journal_p95_bytes) =
+        summarize_journal_bytes(&raw.durable_profiles, raw.samples_micros.len())?;
     let storage_phase_percentiles = summarize_storage_phases(
         &raw.open_profiles,
         &raw.durable_profiles,
@@ -1103,6 +1125,8 @@ fn summarize(mut raw: RawSamples) -> AnyResult<CaseReport> {
         durable_commit_samples_micros: raw.durable_commit_samples_micros.take(),
         durable_commit_p50_micros,
         durable_commit_p95_micros,
+        journal_p50_bytes,
+        journal_p95_bytes,
         peak_rss_bytes: raw.peak_rss_bytes,
         access_kind: raw.access_kind,
         index: raw.index,
@@ -1177,6 +1201,30 @@ fn summarize_storage_phases(
     }))
 }
 
+fn summarize_journal_bytes(
+    profiles: &Option<Vec<DurableCommitProfile>>,
+    expected: usize,
+) -> AnyResult<(Option<u64>, Option<u64>)> {
+    let Some(profiles) = profiles else {
+        return Ok((None, None));
+    };
+    if profiles.len() != expected {
+        return Err("durable profile count does not match total sample count".into());
+    }
+    let mut samples = profiles
+        .iter()
+        .map(|profile| profile.journal_bytes)
+        .collect::<Vec<_>>();
+    if samples.iter().all(|sample| *sample == 0) {
+        return Ok((None, None));
+    }
+    samples.sort_unstable();
+    Ok((
+        Some(percentile(&samples, 50)),
+        Some(percentile(&samples, 95)),
+    ))
+}
+
 fn open_phase_values(profile: StorageOpenProfile) -> [(&'static str, u64); 11] {
     [
         ("total", profile.total_micros),
@@ -1193,7 +1241,7 @@ fn open_phase_values(profile: StorageOpenProfile) -> [(&'static str, u64); 11] {
     ]
 }
 
-fn durable_phase_values(profile: DurableCommitProfile) -> [(&'static str, u64); 7] {
+fn durable_phase_values(profile: DurableCommitProfile) -> [(&'static str, u64); 8] {
     [
         ("total", profile.total_micros),
         ("prepare", profile.prepare_micros),
@@ -1202,6 +1250,7 @@ fn durable_phase_values(profile: DurableCommitProfile) -> [(&'static str, u64); 
         ("diff", profile.diff_micros),
         ("transaction_apply", profile.transaction_apply_micros),
         ("sync", profile.sync_micros),
+        ("journal", profile.journal_micros),
     ]
 }
 

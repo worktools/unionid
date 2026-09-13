@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::backup::incremental::BackupJournalStatus;
 use crate::{MigrationMaintenance, SchemaInfo};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +32,8 @@ pub struct StorageVersions {
     pub receipt_codec: u16,
     #[serde(default)]
     pub maintenance_codec: u16,
+    #[serde(default)]
+    pub journal_codec: u16,
     pub backup_codec: u32,
 }
 
@@ -51,4 +54,6 @@ pub struct Introspection {
     pub migration_head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<MigrationMaintenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_journal: Option<BackupJournalStatus>,
 }

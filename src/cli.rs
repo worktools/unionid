@@ -98,7 +98,7 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
         );
     } else {
         println!(
-            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance codecs {}/{}/{}/{}/{}/{}\nlogical check {}\nrows/indexes checked {}/{}\npoint lookups {}\nworking peak bytes {}\ntotal/backend/logical micros {}/{}/{}",
+            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance/journal codecs {}/{}/{}/{}/{}/{}/{}\nlogical check {}\nrows/indexes checked {}/{}\npoint lookups {}\nworking peak bytes {}\ntotal/backend/logical micros {}/{}/{}",
             if report.backend_clean {
                 "backend was clean"
             } else {
@@ -113,6 +113,7 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
             report.versions.migration_codec,
             report.versions.receipt_codec,
             report.versions.maintenance_codec,
+            report.versions.journal_codec,
             if report.profile.bounded {
                 "bounded"
             } else {
@@ -139,7 +140,7 @@ pub fn compact_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(
         );
     } else {
         println!(
-            "redb compaction completed ({})\nfast no-op {}\nproof persisted {}\nbefore bytes {}\nafter bytes {}\nreclaimed bytes {}\nschema revision {}\nschema hash {}\nsequence {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance codecs {}/{}/{}/{}/{}/{}",
+            "redb compaction completed ({})\nfast no-op {}\nproof persisted {}\nbefore bytes {}\nafter bytes {}\nreclaimed bytes {}\nschema revision {}\nschema hash {}\nsequence {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance/journal codecs {}/{}/{}/{}/{}/{}/{}",
             if report.changed {
                 "changed"
             } else if report.fast_no_op {
@@ -162,6 +163,7 @@ pub fn compact_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(
             report.storage.migration_codec,
             report.storage.receipt_codec,
             report.storage.maintenance_codec,
+            report.storage.journal_codec,
         );
     }
     Ok(())
@@ -1429,6 +1431,7 @@ fn print_introspection(
                 println!("migration codec {}", versions.migration_codec);
                 println!("receipt codec {}", versions.receipt_codec);
                 println!("maintenance codec {}", versions.maintenance_codec);
+                println!("journal codec {}", versions.journal_codec);
                 println!("backup codec {}", versions.backup_codec);
             }
             println!("migrations {}", introspection.migration_count);
@@ -1449,6 +1452,30 @@ fn print_introspection(
                 println!("maintenance indexes {}", maintenance.index_entries_written);
                 println!("maintenance bytes {}", maintenance.logical_bytes);
                 println!("maintenance actions {}", maintenance.actions.join(","));
+            }
+            if let Some(journal) = &introspection.backup_journal {
+                println!("backup journal {:?}", journal.state);
+                println!("backup journal head sequence {}", journal.head_sequence);
+                println!("backup journal commits {}", journal.commit_count);
+                println!("backup journal bytes {}", journal.expanded_bytes);
+                if let Some(chain_id) = &journal.chain_id {
+                    println!("backup journal chain {chain_id}");
+                }
+                if let (Some(first), Some(last)) = (
+                    journal.first_retained_sequence,
+                    journal.last_retained_sequence,
+                ) {
+                    println!("backup journal retained {first}..{last}");
+                }
+                if journal.max_commits > 0 {
+                    println!(
+                        "backup journal capacity {}/{} commits, {}/{} bytes",
+                        journal.commit_count,
+                        journal.max_commits,
+                        journal.expanded_bytes,
+                        journal.max_bytes
+                    );
+                }
             }
         }
     }
