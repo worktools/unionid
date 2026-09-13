@@ -13,8 +13,8 @@ pub use journal::{
 };
 pub use workflow::{
     INCREMENTAL_BACKUP_REPORT_VERSION, IncrementalExportOptions, IncrementalExportReport,
-    IncrementalInitOptions, IncrementalInitReport, IncrementalListReport, IncrementalVerifyReport,
-    export, init, list, verify,
+    IncrementalInitOptions, IncrementalInitReport, IncrementalListReport, IncrementalRestoreReport,
+    IncrementalVerifyReport, export, init, list, restore, verify,
 };
 
 use std::fs::OpenOptions;

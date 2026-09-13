@@ -140,3 +140,120 @@ fn verify_rejects_changed_artifact_and_list_reports_orphans() {
         "E_BACKUP_ARCHIVE" | "E_BACKUP_CHAIN"
     ));
 }
+
+#[test]
+fn restore_replays_each_declared_sequence_to_a_fresh_database() {
+    let temp = TempTree::new("incremental-restore");
+    let db = temp.path().join("app.redb");
+    let repo = temp.path().join("archive");
+    create_database(&db);
+    let initialized = backup::incremental::init(
+        &db,
+        &repo,
+        IncrementalInitOptions {
+            compression: Compression::None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(db.clone()).unwrap();
+    for label in ["two", "three"] {
+        assert!(
+            engine
+                .execute(&format!(
+                    "update items | filter id == 1 | set label = \"{label}\""
+                ))
+                .ok
+        );
+    }
+    drop(engine);
+    backup::incremental::export(
+        &db,
+        &repo,
+        IncrementalExportOptions {
+            compression: Compression::None,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let baseline_target = temp.path().join("baseline.redb");
+    let baseline = backup::incremental::restore(
+        &repo,
+        &baseline_target,
+        initialized.baseline_sequence,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(baseline.restored_sequence, initialized.baseline_sequence);
+    let mut restored = Engine::open_redb(baseline_target).unwrap();
+    assert!(restored.check_integrity().unwrap().backend_clean);
+    assert!(restored.execute("from items | filter label == \"one\"").ok);
+
+    let final_target = temp.path().join("final.redb");
+    let final_sequence = initialized.baseline_sequence + 2;
+    backup::incremental::restore(
+        &repo,
+        &final_target,
+        final_sequence,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    let mut restored = Engine::open_redb(&final_target).unwrap();
+    assert!(restored.check_integrity().unwrap().backend_clean);
+    let response = restored.execute("from items | filter label == \"three\"");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 1);
+
+    let cli_target = temp.path().join("cli.redb");
+    let final_sequence_text = final_sequence.to_string();
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "restore",
+            "incremental",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--db",
+            cli_target.to_str().unwrap(),
+            "--at-sequence",
+            &final_sequence_text,
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&cli.stdout).unwrap();
+    assert_eq!(report["restored_sequence"], final_sequence);
+
+    let existing = backup::incremental::restore(
+        &repo,
+        &final_target,
+        final_sequence,
+        ArchiveLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(existing.code, "E_BACKUP");
+
+    let after_head = backup::incremental::restore(
+        &repo,
+        temp.path().join("after-head.redb"),
+        final_sequence + 1,
+        ArchiveLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(after_head.code, "E_BACKUP_AFTER_HEAD");
+
+    let error = backup::incremental::restore(
+        &repo,
+        temp.path().join("outside.redb"),
+        initialized.baseline_sequence - 1,
+        ArchiveLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "E_BACKUP_BEFORE_BASELINE");
+}
