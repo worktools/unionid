@@ -169,6 +169,7 @@ pub(crate) struct StreamReadExecution {
     pub(crate) response: ProtocolResponse,
     control: ExecutionControl,
     terminal: OperationGuard,
+    emission_started: Option<Instant>,
 }
 
 struct ProtocolObservationContext<'a> {
@@ -588,25 +589,21 @@ impl ConcurrentEngine {
         operation: impl FnOnce(&mut Engine) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let started = Instant::now();
-        let result = self.with_writer(operation);
+        let (result, schema_revision, mutation, uncertain) = self.with_writer(|engine| {
+            let result = operation(engine);
+            (
+                result,
+                Some(engine.schema_info().revision),
+                engine.last_mutation_profile(),
+                engine.durable_outcome_uncertain(),
+            )
+        });
         self.inner.metrics.record(
             MetricOperation::Maintenance,
             started.elapsed(),
             result.as_ref().err().map(|_| "E_MAINTENANCE"),
         );
         let error_code = result.as_ref().err().map(|_| "E_MAINTENANCE");
-        let (schema_revision, mutation, uncertain) = {
-            let engine = self
-                .inner
-                .engine
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (
-                Some(engine.schema_info().revision),
-                engine.last_mutation_profile(),
-                engine.durable_outcome_uncertain(),
-            )
-        };
         self.observe(EventInput {
             request_id: None,
             protocol_version: None,
@@ -1022,6 +1019,7 @@ impl ReadOperation {
             response,
             control,
             terminal,
+            emission_started: None,
         }
     }
 
@@ -1046,6 +1044,7 @@ impl ReadOperation {
             Arc::clone(&self.cancelled),
             self.shutdown.clone(),
         );
+        let mut emission_started = None;
         let result = self
             .engine
             .operation_phase(&self.id, OperationPhase::Queued)
@@ -1055,6 +1054,7 @@ impl ReadOperation {
                     .with_controlled_read_snapshot(&self.id, &control, |snapshot| {
                         self.engine
                             .operation_phase(&self.id, OperationPhase::Emitting)?;
+                        emission_started = Some(Instant::now());
                         snapshot.execute_read_stream_controlled(
                             statements,
                             parameters,
@@ -1077,6 +1077,7 @@ impl ReadOperation {
             response,
             control,
             terminal,
+            emission_started,
         }
     }
 }
@@ -1132,7 +1133,7 @@ impl StreamReadExecution {
                 elapsed: self.terminal.metrics_started.elapsed(),
                 partial: self.response.error.is_some()
                     && self.response.execution_rows.unwrap_or(0) > 0,
-                emission_micros: Some(duration_micros(self.terminal.metrics_started.elapsed())),
+                emission_micros: None,
             },
             &self.response,
         );
@@ -1175,7 +1176,9 @@ impl StreamReadExecution {
             error_code: effective_error,
             storage_outcome_uncertain: false,
             partial: effective_error.is_some() && self.response.execution_rows.unwrap_or(0) > 0,
-            emission_micros: Some(duration_micros(elapsed)),
+            emission_micros: self
+                .emission_started
+                .map(|started| duration_micros(started.elapsed())),
         });
         outcome
     }
@@ -1196,12 +1199,18 @@ impl OperationGuard {
 impl Drop for OperationGuard {
     fn drop(&mut self) {
         if !self.finished {
-            self.engine
+            let outcome = self
+                .engine
                 .finish_operation(&self.id, OperationOutcome::Failed);
+            let error_code = match outcome {
+                OperationOutcome::Cancelled => "E_CANCELLED",
+                OperationOutcome::Failed => "E_OPERATION_DROPPED",
+                OperationOutcome::Completed => return,
+            };
             self.engine.inner.metrics.record(
                 MetricOperation::Stream,
                 self.metrics_started.elapsed(),
-                Some("E_INTERNAL"),
+                Some(error_code),
             );
             self.engine.observe(EventInput {
                 request_id: Some(&self.request_id),
@@ -1215,7 +1224,7 @@ impl Drop for OperationGuard {
                 mutation: None,
                 returned_rows: 0,
                 plan: None,
-                error_code: Some("E_OPERATION_DROPPED"),
+                error_code: Some(error_code),
                 storage_outcome_uncertain: false,
                 partial: false,
                 emission_micros: None,

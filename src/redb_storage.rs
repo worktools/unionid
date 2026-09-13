@@ -121,6 +121,7 @@ const MIGRATION_MAGIC: &[u8; 4] = b"UIDM";
 const RECEIPT_MAGIC: &[u8; 4] = b"UIDR";
 const GENERATION_KEY_MAGIC: &[u8; 4] = b"UIDG";
 const MAINTENANCE_MAGIC: &[u8; 4] = b"UIDN";
+const COMPACTION_TOKEN_KEY: &str = "compaction_proof_token";
 const JOURNAL_STATE_MAGIC: &[u8; 4] = b"UIDS";
 const JOURNAL_RECORD_MAGIC: &[u8; 4] = b"UIDJ";
 const JOURNAL_COMMIT_DOMAIN: &[u8] = b"unionid-backup-journal-commit-v1\0";
@@ -131,6 +132,8 @@ pub(crate) struct RedbStore {
     database: RedbDatabase,
     path: PathBuf,
     committed: DurableHead,
+    opened_file_identity: Option<CompactionFileIdentity>,
+    compaction_token: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,16 +151,28 @@ struct CompactionProofPayload {
     schema_revision: u64,
     schema_hash: String,
     storage: StorageVersions,
+    compaction_token: String,
     file: CompactionFileIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompactionFileIdentity {
+    length: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     inode: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u32>,
+}
+
+impl CompactionFileIdentity {
+    fn matches(&self, actual: &Self) -> bool {
+        self.device == actual.device
+            && self.inode == actual.inode
+            && self.generation == actual.generation
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1234,6 +1249,14 @@ impl RedbStore {
             })?;
         }
         let fresh = std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0);
+        // redb may update file metadata while opening and repairing a database. Capture the
+        // durable identity before opening so a proof published by the previous clean handle can
+        // be checked without mistaking redb's own open work for an external replacement.
+        let opened_file_identity = if fresh {
+            None
+        } else {
+            Some(compaction_file_identity(&path)?)
+        };
         let redb_started = Instant::now();
         let database = RedbDatabase::create(&path).map_err(open_error)?;
         let path = std::fs::canonicalize(&path)
@@ -1245,6 +1268,8 @@ impl RedbStore {
             database,
             path,
             committed: DurableHead::from_prepared(&initial),
+            opened_file_identity,
+            compaction_token: None,
         };
         let bootstrap_started = Instant::now();
         if fresh {
@@ -1260,6 +1285,7 @@ impl RedbStore {
             0
         };
         let format = store.current_layout()?.format;
+        store.compaction_token = store.read_compaction_token()?;
         if format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
             let (loaded, receipts, committed, source, mut profile) = store.load_bounded_view()?;
             store.committed = committed;
@@ -1310,9 +1336,19 @@ impl RedbStore {
 
     pub(crate) fn compaction_fast_no_op(&self, database: &Database) -> Option<RedbCompaction> {
         let proof = read_compaction_proof(&compaction_proof_path(&self.path))?;
-        let expected = compaction_proof_payload(&self.path, database, self.versions()).ok()?;
+        let expected = compaction_proof_payload_with_file(
+            database,
+            self.versions(),
+            self.compaction_token?,
+            self.opened_file_identity.clone()?,
+        );
         if proof.version != COMPACTION_PROOF_VERSION
-            || proof.payload != expected
+            || proof.payload.database_id != expected.database_id
+            || proof.payload.sequence != expected.sequence
+            || proof.payload.schema_revision != expected.schema_revision
+            || proof.payload.schema_hash != expected.schema_hash
+            || proof.payload.storage != expected.storage
+            || !proof.payload.file.matches(&expected.file)
             || !verify_compaction_proof(database, &proof.payload, &proof.signature)
         {
             return None;
@@ -1326,7 +1362,16 @@ impl RedbStore {
     }
 
     pub(crate) fn publish_compaction_proof(&self, database: &Database) -> Result<()> {
-        let payload = compaction_proof_payload(&self.path, database, self.versions())?;
+        let file = self.opened_file_identity.clone().ok_or_else(|| {
+            Error::new(
+                "E_STORAGE",
+                "compaction did not capture a stable closed-file identity",
+            )
+        })?;
+        let token = self
+            .compaction_token
+            .ok_or_else(|| Error::new("E_STORAGE", "compaction did not persist a proof token"))?;
+        let payload = compaction_proof_payload_with_file(database, self.versions(), token, file);
         let signature = sign_compaction_proof(database, &payload)?;
         let envelope = CompactionProofEnvelope {
             version: COMPACTION_PROOF_VERSION,
@@ -1349,6 +1394,7 @@ impl RedbStore {
     }
 
     pub(crate) fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
+        self.rotate_compaction_token()?;
         let before_bytes = std::fs::metadata(&self.path)
             .map_err(|error| {
                 CommitFailure::Definite(Error::new(
@@ -1398,15 +1444,9 @@ impl RedbStore {
             })?;
         let compacted = std::mem::replace(&mut self.database, placeholder);
         drop(compacted);
-        let compacted_bytes = std::fs::metadata(&self.path)
-            .map_err(|error| {
-                CommitFailure::Uncertain(Error::new(
-                    "E_IO",
-                    format!("stat database before compaction reopen: {error}"),
-                ))
-            })?
-            .len();
-        if compacted_bytes == 0 {
+        let closed_identity =
+            compaction_file_identity(&self.path).map_err(CommitFailure::Uncertain)?;
+        if closed_identity.length == 0 {
             return Err(CommitFailure::Uncertain(Error::new(
                 "E_STORAGE",
                 "database disappeared during compaction; reopen and run an integrity check",
@@ -1418,6 +1458,10 @@ impl RedbStore {
                 error,
             ))
         })?;
+        // Proofs must describe the file while no redb handle is open. A live handle can reserve
+        // extra regions which are released on drop, so metadata observed after reopening is not
+        // a durable cross-process identity.
+        self.opened_file_identity = Some(closed_identity.clone());
         let after_bytes = std::fs::metadata(&self.path)
             .map_err(|error| {
                 CommitFailure::Uncertain(Error::new(
@@ -1432,7 +1476,60 @@ impl RedbStore {
                 "database disappeared during compaction; reopen and run an integrity check",
             )));
         }
-        Ok(after_bytes)
+        Ok(closed_identity.length)
+    }
+
+    fn read_compaction_token(&self) -> Result<Option<[u8; 32]>> {
+        let transaction = self
+            .database
+            .begin_read()
+            .map_err(|error| storage_error("begin compaction token read", error))?;
+        let table = transaction
+            .open_table(META)
+            .map_err(|error| storage_error("open compaction token meta", error))?;
+        let Some(value) = table
+            .get(COMPACTION_TOKEN_KEY)
+            .map_err(|error| storage_error("read compaction token", error))?
+        else {
+            return Ok(None);
+        };
+        let token: [u8; 32] = value.value().try_into().map_err(|_| {
+            Error::new(
+                "E_STORAGE",
+                "stored compaction proof token has invalid length",
+            )
+        })?;
+        Ok(Some(token))
+    }
+
+    fn rotate_compaction_token(&mut self) -> std::result::Result<(), CommitFailure> {
+        let mut token = [0_u8; 32];
+        getrandom::fill(&mut token).map_err(|error| {
+            CommitFailure::Definite(Error::new(
+                "E_STORAGE",
+                format!("generate compaction proof token: {error}"),
+            ))
+        })?;
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|error| CommitFailure::definite("begin compaction token write", error))?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|error| CommitFailure::definite("set compaction token durability", error))?;
+        {
+            let mut table = transaction
+                .open_table(META)
+                .map_err(|error| CommitFailure::definite("open compaction token meta", error))?;
+            table
+                .insert(COMPACTION_TOKEN_KEY, token.as_slice())
+                .map_err(|error| CommitFailure::definite("write compaction token", error))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| CommitFailure::uncertain("commit compaction token", error))?;
+        self.compaction_token = Some(token);
+        Ok(())
     }
 
     pub(crate) fn committed_view(
@@ -6112,26 +6209,27 @@ fn compaction_proof_path(database: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn compaction_proof_payload(
-    path: &Path,
+fn compaction_proof_payload_with_file(
     database: &Database,
     storage: StorageVersions,
-) -> Result<CompactionProofPayload> {
+    compaction_token: [u8; 32],
+    file: CompactionFileIdentity,
+) -> CompactionProofPayload {
     let meta = database.durable_meta();
-    Ok(CompactionProofPayload {
+    CompactionProofPayload {
         database_id: URL_SAFE_NO_PAD.encode(meta.cursor_instance_id),
         sequence: meta.sequence,
         schema_revision: meta.schema_revision,
         schema_hash: meta.schema_hash,
         storage,
-        file: compaction_file_identity(path)?,
-    })
+        compaction_token: URL_SAFE_NO_PAD.encode(compaction_token),
+        file,
+    }
 }
 
 fn compaction_file_identity(path: &Path) -> Result<CompactionFileIdentity> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| Error::new("E_IO", format!("inspect compacted database: {error}")))?;
-
     #[cfg(unix)]
     let (device, inode) = {
         use std::os::unix::fs::MetadataExt;
@@ -6139,8 +6237,20 @@ fn compaction_file_identity(path: &Path) -> Result<CompactionFileIdentity> {
     };
     #[cfg(not(unix))]
     let (device, inode) = (None, None);
+    #[cfg(target_os = "macos")]
+    let generation = {
+        use std::os::macos::fs::MetadataExt as DarwinMetadataExt;
+        Some(DarwinMetadataExt::st_gen(&metadata))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let generation = None;
 
-    Ok(CompactionFileIdentity { device, inode })
+    Ok(CompactionFileIdentity {
+        length: metadata.len(),
+        device,
+        inode,
+        generation,
+    })
 }
 
 fn compaction_proof_bytes(payload: &CompactionProofPayload) -> Result<Vec<u8>> {

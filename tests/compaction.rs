@@ -247,6 +247,28 @@ fn durable_write_and_tampered_proof_disable_compaction_fast_path() {
     assert!(after_replacement.proof_persisted);
 }
 
+#[cfg(unix)]
+#[test]
+fn in_place_database_replacement_invalidates_compaction_proof() {
+    let dir = TempDir::new();
+    let path = dir.0.join("in-place-replacement.redb");
+    prepare(&path);
+    let older_image = dir.0.join("older-image.redb");
+    std::fs::copy(&path, &older_image).unwrap();
+
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(engine.compact_storage().unwrap().proof_persisted);
+    drop(engine);
+
+    // Copying over the existing path preserves its inode. The authenticated
+    // length/change token must still reject the proof from the newer image.
+    std::fs::copy(&older_image, &path).unwrap();
+    let mut replaced = Engine::open_redb(&path).unwrap();
+    let result = replaced.compact_storage().unwrap();
+    assert!(!result.fast_no_op);
+    assert!(result.proof_persisted);
+}
+
 #[test]
 fn redb_compaction_child() {
     let Ok(path) = std::env::var(COMPACT_PATH_ENV) else {

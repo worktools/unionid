@@ -45,14 +45,14 @@ tools/compaction-eval/target/release/unionid-compaction-eval \
 
 ### durable 大小与 reopen 语义
 
-redb 的 `Database::compact()` 返回时文件长度小于其持久化 region 布局，紧接着执行 `check_integrity`/读事务后，下一次打开会运行 repair 并把文件向上取整到 region 边界。首版实现据此在 native compact 之后、post-check 之前重开数据库，使 repair 发生在同一次维护操作内部：报告的 `after_bytes` 等于重开后的 durable 大小，`changed` 只在文件实际变小时为 true。这样重复运行稳定返回 no-op（本次实测第二次运行 `changed=false`、`reclaimed_bytes=0`）。重开与 repair 需要完整遍历文件，因此即使 `changed=false`，一次 compact 仍可能有秒级成本，不能当作廉价轮询。
+redb 的 `Database::compact()` 返回时文件长度小于其持久化 region 布局，紧接着执行 `check_integrity`/读事务后，下一次打开会运行 repair 并把文件向上取整到 region 边界。首版实现据此在 native compact 之后、post-check 之前重开数据库，使 repair 发生在同一次维护操作内部：报告的 `after_bytes` 等于重开后的 durable 大小，`changed` 只在文件实际变小时为 true。这样重复运行稳定返回 no-op（本次实测第二次运行 `changed=false`、`reclaimed_bytes=0`）。这里实测的是引入认证 proof 前的历史 native no-op；它的重开与 repair 需要完整遍历文件。当前 proof 完整匹配时可在遍历前快速返回，proof 缺失或失效后的 native no-op 仍可能有秒级成本，不能当作廉价轮询。
 
 ### 使用结论
 
 - 离线 compact 在真实 generation reclaim 后确实显著缩小文件：10k 约 52%，100k 约 70%；100k 从约 745 MiB 回落到约 219 MiB，接近逻辑行的 4 倍。
 - 完整 check、typed/indexed query、cursor continuation、幂等重放、migration ledger 和 logical backup 在压缩后保持压缩前语义；没有引入新 sequence 或 receipt。
 - 压缩是同步离线维护，会多次完整遍历并执行 redb 内部提交；10k 约 1 秒、100k 约 10 秒，100k peak RSS 约 281 MiB。应按生产数据副本预留维护窗口、内存和磁盘余量，并先保留 verified logical backup。
-- 第二次 compact 稳定返回 no-op，证实高水位已被真正回收；但 no-op 仍会完整遍历，调用方不应频繁触发。
+- 第二次 compact 稳定返回 no-op，证实高水位已被真正回收；这份历史 native no-op 会完整遍历，当前实现仅在认证 proof 完整匹配时快速返回，调用方不应把其余 no-op 当作廉价轮询。
 - 文件缩小比例和耗时为观测值，不是固定比例或 SLA。
 
 ## English Description
@@ -93,5 +93,5 @@ redb's `Database::compact()` returns while the file is shorter than its persiste
 - Offline compaction materially shrinks a file after real generation reclamation: about 52% at 10k and 70% at 100k, bringing 100k from roughly 745 MiB down to roughly 219 MiB, near four times the logical rows.
 - Full checks, typed and indexed queries, cursor continuation, idempotent replay, migration ledger, and logical backup retain their pre-compaction semantics; compaction adds no sequence step and no receipt.
 - Compaction is synchronous offline maintenance that performs several full traversals and native redb commits: about one second at 10k and ten seconds at 100k, with about 281 MiB peak RSS at 100k. Rehearse on a production-data copy, reserve a maintenance window, memory, and disk headroom, and retain a verified logical backup first.
-- A second compaction returns a stable no-op, proving the high-water mark was reclaimed; because a no-op still traverses the whole file, callers should not trigger it frequently.
+- A second compaction returns a stable no-op, proving the high-water mark was reclaimed. This historical native no-op traverses the complete file; the current implementation returns early only when its authenticated proof fully matches, so callers should not treat other no-op runs as cheap polling.
 - Shrink ratio and elapsed time are observations, not a fixed ratio or SLA.

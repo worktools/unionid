@@ -137,7 +137,7 @@ journal 增加的同步写字节与耗时进入 mutation profile 的独立 value
 4. 原子重写并 sync manifest，把 segment 加入 chain。此时外部 archive 已经完整拥有这些 commits。
 5. 用一个 redb transaction 更新 exported head 并删除已封存 journal entries；该物理 prune 不改变业务 sequence，但必须使旧 compact proof 失效。
 
-在步骤 3 前退出不会发布 segment。步骤 3 后、4 前可能留下 orphan immutable 文件，verify/list 忽略未被 manifest 引用的文件并报告它。步骤 4 后、5 前数据库仍保留重复 journal entries，下一次 export 通过 checksum 幂等完成 prune。绝不允许先删 journal 再发布 manifest。
+在步骤 3 前退出不会发布 segment。步骤 3 后、4 前可能留下 orphan immutable 文件；list 只读取 manifest 并忽略它，verify 扫描 archive 目录并报告它。步骤 4 后、5 前数据库仍保留重复 journal entries，下一次 export 通过 checksum 幂等完成 prune。绝不允许先删 journal 再发布 manifest。
 
 一个 segment 默认最多 1,000 commits 或 64 MiB expanded payload；大 commit 可以独占一个 segment但不能超过硬上限。export 可用 `--through-sequence` 限定到已提交 head，不能等待未来 commit。
 
@@ -276,7 +276,7 @@ A commit that would exceed the bound fails completely with `E_BACKUP_JOURNAL_FUL
 
 Export verifies database/archive chain identity and reads a complete contiguous stable journal range. It writes, syncs, reopens, and verifies immutable segments; atomically updates and syncs the manifest; and only then updates the source exported head and deletes covered journal entries in one redb transaction. That physical pruning does not change business sequence but invalidates any old compaction proof.
 
-A crash before segment publication leaves nothing; one between segment and manifest may leave a reported unreferenced immutable file; one after manifest but before source pruning leaves safe duplicates that a checksum-idempotent retry removes. Journal entries are never deleted before the manifest owns them. A segment defaults to 1,000 commits or 64 MiB expanded payload, while one oversized but valid commit may occupy a segment alone. `--through-sequence` can bound export at an already committed head and never waits for future work.
+A crash before segment publication leaves nothing; one between segment and manifest may leave an unreferenced immutable file that list ignores and verify reports; one after manifest but before source pruning leaves safe duplicates that a checksum-idempotent retry removes. Journal entries are never deleted before the manifest owns them. A segment defaults to 1,000 commits or 64 MiB expanded payload, while one oversized but valid commit may occupy a segment alone. `--through-sequence` can bound export at an already committed head and never waits for future work.
 
 ### 9. User interfaces and restore
 

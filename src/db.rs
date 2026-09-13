@@ -4867,7 +4867,7 @@ impl Database {
         let prepare_micros = instant_elapsed_micros(prepare_started);
         let plan_started = Instant::now();
         let stats = source.table_stats(&pipeline.from)?;
-        let access = self.plan_access(source, &pipeline, prepared_page.as_ref(), false)?;
+        let access = self.plan_access(source, &pipeline, prepared_page.as_ref(), true)?;
         let plan_micros = instant_elapsed_micros(plan_started);
         let execution_started = Instant::now();
         let execution_plan = ExecutionPlanObservation {
