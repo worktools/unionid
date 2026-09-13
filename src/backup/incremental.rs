@@ -3,6 +3,14 @@
 //! This module defines the archive codec independently from redb and the
 //! database journal. Higher-level init/export/restore operations build on it.
 
+mod journal;
+
+pub use journal::{
+    BACKUP_JOURNAL_STATUS_VERSION, BackupJournalConfig, BackupJournalState, BackupJournalStatus,
+    DEFAULT_JOURNAL_MAX_BYTES, DEFAULT_JOURNAL_MAX_COMMITS, HARD_JOURNAL_MAX_BYTES,
+    HARD_JOURNAL_MAX_COMMITS,
+};
+
 use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path};

@@ -6,7 +6,8 @@ use redb::{
 };
 use std::process::Command;
 use unionid::{
-    DurableCommitMode, Engine, MigrationFile, PageSpec, QueryAccessKind, UpsertAction, Value,
+    BackupJournalConfig, BackupJournalState, DurableCommitMode, Engine, IdempotencyPruneOptions,
+    MigrationFile, PageSpec, QueryAccessKind, UpsertAction, Value,
 };
 
 const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
@@ -22,6 +23,7 @@ const REDB_MAINTENANCE_GENERATION: TableDefinition<u64, &[u8]> =
 const REDB_MIGRATION_LEDGER: TableDefinition<u64, &[u8]> = TableDefinition::new("migration_ledger");
 const REDB_IDEMPOTENCY_RECEIPTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("idempotency_receipts");
+const REDB_BACKUP_JOURNAL: TableDefinition<&[u8], &[u8]> = TableDefinition::new("backup_journal");
 const CRASH_PATH_ENV: &str = "UNIONID_TEST_REDB_CRASH_PATH";
 const CRASH_MODE_ENV: &str = "UNIONID_TEST_REDB_CRASH_MODE";
 const DISK_LIMIT_PATH_ENV: &str = "UNIONID_TEST_REDB_DISK_LIMIT_PATH";
@@ -36,6 +38,240 @@ const TEST_IDEMPOTENCY_DIGEST: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TEST_IDEMPOTENCY_DIGEST_B: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const TEST_BACKUP_CHECKSUM: &str =
+    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+#[test]
+fn default_redb_writes_remain_format6_without_journal_metadata() {
+    let dir = TempDir::new();
+    let path = dir.0.join("default-format6.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let written = engine.execute("create table entries (id int)\ninsert entries {id = 1}");
+        assert!(written.ok, "{}", written.message);
+        let versions = engine.introspection().storage_versions.unwrap();
+        assert_eq!(versions.format, 6);
+        assert_eq!(versions.journal_codec, 0);
+        assert_eq!(
+            engine.backup_journal_status().unwrap().state,
+            BackupJournalState::Disabled
+        );
+        assert_eq!(
+            engine
+                .last_mutation_profile()
+                .unwrap()
+                .durable
+                .unwrap()
+                .journal_bytes,
+            0
+        );
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    let transaction = database.begin_read().unwrap();
+    let meta = transaction.open_table(REDB_META).unwrap();
+    assert!(meta.get("backup_journal_codec_version").unwrap().is_none());
+}
+
+#[test]
+fn explicit_backup_journal_tracks_atomic_commits_and_survives_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("backup-journal.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let initial = engine.backup_journal_status().unwrap();
+    assert_eq!(initial.storage_format, 6);
+    assert_eq!(initial.state, BackupJournalState::Disabled);
+
+    let enabled = engine
+        .enable_backup_journal(BackupJournalConfig::new(
+            "daily",
+            initial.head_sequence,
+            TEST_BACKUP_CHECKSUM,
+        ))
+        .unwrap();
+    assert_eq!(enabled.storage_format, 7);
+    assert_eq!(enabled.state, BackupJournalState::Active);
+    assert_eq!(engine.introspection().backup_journal, Some(enabled.clone()));
+    assert_eq!(
+        engine
+            .introspection()
+            .storage_versions
+            .unwrap()
+            .journal_codec,
+        1
+    );
+
+    let schema = engine.execute(
+        "type Entry =\n  id int\n  label text\ntable entries Entry\n  key id\ncreate index entries (label)",
+    );
+    assert!(schema.ok, "{}", schema.message);
+    let first_profile = engine.last_mutation_profile().unwrap().durable.unwrap();
+    assert!(first_profile.journal_bytes > 0);
+
+    let first = engine
+        .execute_idempotent_with_params(
+            "journal-entry-1",
+            TEST_IDEMPOTENCY_DIGEST,
+            "insert entries {id = 1, label = \"one\"}",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(!first.replayed);
+    let after_insert = engine.backup_journal_status().unwrap();
+    assert_eq!(after_insert.commit_count, 2);
+    assert_eq!(after_insert.first_retained_sequence, Some(1));
+    assert_eq!(after_insert.last_retained_sequence, Some(2));
+    assert_eq!(after_insert.head_sequence, 2);
+    assert!(after_insert.expanded_bytes > first_profile.journal_bytes);
+
+    let replay = engine
+        .execute_idempotent_with_params(
+            "journal-entry-1",
+            TEST_IDEMPOTENCY_DIGEST,
+            "this source is ignored by a replay",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(engine.backup_journal_status().unwrap(), after_insert);
+    let pruned = engine
+        .prune_idempotency_receipts(IdempotencyPruneOptions {
+            completed_before_unix_ms: None,
+            committed_through_sequence: Some(2),
+            max_receipts: 1,
+        })
+        .unwrap();
+    assert!(pruned.applied);
+    assert_eq!(pruned.selected_count, 1);
+    let after_prune = engine.backup_journal_status().unwrap();
+    assert_eq!(after_prune.commit_count, 3);
+    assert_eq!(after_prune.last_retained_sequence, Some(3));
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.backup_journal_status().unwrap(), after_prune);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+    let refused = reopened.disable_backup_journal(false).unwrap_err();
+    assert_eq!(refused.code, "E_BACKUP_CHAIN");
+    let disabled = reopened.disable_backup_journal(true).unwrap();
+    assert_eq!(disabled.state, BackupJournalState::Disabled);
+    assert_eq!(disabled.storage_format, 7);
+    drop(reopened);
+
+    let reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(
+        reopened.backup_journal_status().unwrap().state,
+        BackupJournalState::Disabled
+    );
+    assert_eq!(
+        reopened
+            .introspection()
+            .storage_versions
+            .unwrap()
+            .journal_codec,
+        1
+    );
+}
+
+#[test]
+fn backup_journal_capacity_rejects_the_business_commit_atomically() {
+    let dir = TempDir::new();
+    let path = dir.0.join("backup-journal-capacity.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let mut config = BackupJournalConfig::new("bounded", 0, TEST_BACKUP_CHECKSUM);
+    config.max_commits = 1;
+    engine.enable_backup_journal(config).unwrap();
+    assert!(engine.execute("create table entries (id int)").ok);
+
+    let rejected = engine.execute("insert entries {id = 1}");
+    assert!(!rejected.ok);
+    assert_eq!(rejected.error.unwrap().code, "E_BACKUP_JOURNAL_FULL");
+    let status = engine.backup_journal_status().unwrap();
+    assert_eq!(status.commit_count, 1);
+    assert_eq!(status.head_sequence, 1);
+    let rows = engine.execute("from entries");
+    assert!(rows.ok, "{}", rows.message);
+    assert!(rows.rows.is_empty());
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.backup_journal_status().unwrap(), status);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn recoverable_migration_cutover_is_one_backup_journal_commit() {
+    let dir = TempDir::new();
+    let path = dir.0.join("backup-journal-migration.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let created = engine
+        .execute("type Entry =\n  id int\ntable entries Entry\n  key id\ninsert entries {id = 1}");
+    assert!(created.ok, "{}", created.message);
+    let baseline_sequence = engine.backup_journal_status().unwrap().head_sequence;
+    engine
+        .enable_backup_journal(BackupJournalConfig::new(
+            "migration",
+            baseline_sequence,
+            TEST_BACKUP_CHECKSUM,
+        ))
+        .unwrap();
+    let migration = MigrationFile::parse(
+        "migration m0001_add_label\n  add field Entry.label text = \"unknown\"\n",
+    )
+    .unwrap();
+    let applied = engine
+        .apply_migrations(std::slice::from_ref(&migration))
+        .unwrap();
+    assert_eq!(applied.applied.len(), 1);
+    let status = engine.backup_journal_status().unwrap();
+    assert_eq!(status.commit_count, 1);
+    assert_eq!(status.first_retained_sequence, Some(baseline_sequence + 1));
+    assert_eq!(status.last_retained_sequence, Some(baseline_sequence + 1));
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.backup_journal_status().unwrap(), status);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+    let rows = reopened.execute("from entries | select id, label");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0]["label"].cmp_eq(&Value::Text("unknown".to_owned())));
+}
+
+#[test]
+fn corrupted_backup_journal_fails_closed_on_reopen() {
+    let dir = TempDir::new();
+    let path = dir.0.join("corrupt-backup-journal.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine
+            .enable_backup_journal(BackupJournalConfig::new("corrupt", 0, TEST_BACKUP_CHECKSUM))
+            .unwrap();
+        assert!(engine.execute("create table entries (id int)").ok);
+    }
+    let database = RedbDatabase::open(&path).unwrap();
+    {
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        let (key, mut value) = {
+            let journal = transaction.open_table(REDB_BACKUP_JOURNAL).unwrap();
+            let (key, value) = journal.iter().unwrap().next().unwrap().unwrap();
+            (key.value().to_vec(), value.value().to_vec())
+        };
+        let last = value.last_mut().unwrap();
+        *last ^= 1;
+        transaction
+            .open_table(REDB_BACKUP_JOURNAL)
+            .unwrap()
+            .insert(key.as_slice(), value.as_slice())
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    drop(database);
+    let error = Engine::open_redb(&path).err().unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+}
 
 #[test]
 fn storage_profiles_separate_successful_open_incremental_and_full_rebuild_phases() {
@@ -1233,6 +1469,63 @@ fn redb_recovers_complete_state_across_process_exit_boundaries() {
             .len(),
         1
     );
+}
+
+#[test]
+fn backup_journal_and_business_state_share_process_exit_boundaries() {
+    let dir = TempDir::new();
+    let path = dir.0.join("journal-crash.redb");
+    let baseline_sequence;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine
+            .apply_migrations(std::slice::from_ref(&crash_migration()))
+            .unwrap();
+        assert!(
+            engine
+                .execute("insert entries {id = 1, value = \"baseline\"}")
+                .ok
+        );
+        baseline_sequence = engine.backup_journal_status().unwrap().head_sequence;
+        engine
+            .enable_backup_journal(BackupJournalConfig::new(
+                "crash-matrix",
+                baseline_sequence,
+                TEST_BACKUP_CHECKSUM,
+            ))
+            .unwrap();
+    }
+
+    run_crash_child(&path, "before", CRASH_BEFORE_COMMIT);
+    {
+        let mut reopened = Engine::open_redb(&path).unwrap();
+        let status = reopened.backup_journal_status().unwrap();
+        assert_eq!(status.head_sequence, baseline_sequence);
+        assert_eq!(status.commit_count, 0);
+        assert_eq!(reopened.execute("from entries").rows.len(), 1);
+        assert!(reopened.check_integrity().unwrap().backend_clean);
+    }
+
+    run_crash_child(&path, "after", CRASH_AFTER_COMMIT);
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let status = reopened.backup_journal_status().unwrap();
+    assert_eq!(status.head_sequence, baseline_sequence + 1);
+    assert_eq!(status.commit_count, 1);
+    assert_eq!(status.first_retained_sequence, Some(baseline_sequence + 1));
+    assert_eq!(status.last_retained_sequence, Some(baseline_sequence + 1));
+    let replay = reopened
+        .execute_idempotent_with_params(
+            "crash-after-commit",
+            TEST_IDEMPOTENCY_DIGEST,
+            "this source must not be parsed for a committed replay",
+            std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(reopened.execute("from entries").rows.len(), 2);
+    assert_eq!(reopened.backup_journal_status().unwrap(), status);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
 }
 
 fn crash_migration() -> MigrationFile {

@@ -45,6 +45,11 @@ pub mod syntax;
 pub mod wal;
 
 pub use backup::BackupInfo;
+pub use backup::incremental::{
+    BACKUP_JOURNAL_STATUS_VERSION, BackupJournalConfig, BackupJournalState, BackupJournalStatus,
+    DEFAULT_JOURNAL_MAX_BYTES, DEFAULT_JOURNAL_MAX_COMMITS, HARD_JOURNAL_MAX_BYTES,
+    HARD_JOURNAL_MAX_COMMITS,
+};
 #[cfg(feature = "http-client")]
 pub use client::http::{HttpClient, HttpStream};
 #[cfg(feature = "asynchronous")]

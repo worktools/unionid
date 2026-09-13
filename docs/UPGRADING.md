@@ -17,6 +17,8 @@ v0.4 发布包同时携带 `RELEASE.json` 和独立的 `release/contract.json`�
 
 当前二进制读取 storage format 1–6；新数据库直接创建为 format 6，使用 catalog/value/index-key/receipt/maintenance codec 4/2/3/2/1。format 1/2 仍会补齐 cursor 身份并升级到 format 3；format 3 可显式升级到 4 以使用生产标量，format 4 可继续读写已有单列升序索引。创建复合或降序索引前必须先升级到 format 5。
 
+v0.5 开发版本还可读取显式启用增量备份 journal 后的 storage format 7。只有 `Engine::enable_backup_journal` 会执行 6→7；创建数据库和普通写入仍保持 format 6。format 7 增加 journal codec 1，没有原地降级；需要回到不理解 format 7 的二进制时，应从启用前的 logical backup 恢复到新路径。
+
 ### 从 v0.3.0 升级
 
 v0.4.0 不改变任何持久格式或协议版本，v0.3.0 format-6 数据库可直接打开。先在副本上运行 `doctor`、`check` 和应用读写。若应用使用静态查询生成物，应使用 v0.4.0 binary 对当前 schema 与全部 `.uid` 查询重新运行 `query rust`，提交新的 digest，并重新编译客户端；不要把旧 bundle 复制到新 schema identity 下继续使用。
@@ -87,6 +89,8 @@ The v0.4 archive contains both `RELEASE.json` and an independent `release/contra
 The public v0.1.0 release used version 1 for storage, catalog, values, index keys, migration records, backup, and the JSON Lines protocol. It did not contain receipts, cursor identity, production scalars, composite indexes, or generation envelopes. v0.2.0 introduced the format-6 boundary in the table above; v0.3.0 retained those versions while adding Rust integration, relational reads, and migration UX. v0.4.0 retains them again while adding portable ADT contracts and static query bindings. The v0.4 contract describes the new binary's current writes and complete readable range without changing older release contracts.
 
 The current binary reads storage formats 1–6. New databases start at format 6 with catalog/value/index-key/receipt/maintenance codecs 4/2/3/2/1. Formats 1 and 2 still gain cursor identity and move to format 3; format 3 can be explicitly upgraded to 4 for production scalars. Format 4 remains readable and writable for existing ascending single-column indexes, but composite or descending declarations first require format 5.
+
+The v0.5 development line can also read storage format 7 after incremental-backup journaling is explicitly enabled. Only `Engine::enable_backup_journal` performs 6-to-7; database creation and ordinary writes remain on format 6. Format 7 adds journal codec 1 and has no in-place downgrade. To return to a binary that does not understand format 7, restore the logical backup made before enablement into a new path.
 
 ### Upgrading from v0.3.0
 

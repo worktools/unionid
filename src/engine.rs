@@ -316,6 +316,42 @@ trait DurableBackend: Send {
         false
     }
     fn versions(&self) -> StorageVersions;
+    fn backup_journal_status(&self) -> crate::backup::incremental::BackupJournalStatus {
+        crate::backup::incremental::BackupJournalStatus {
+            version: crate::backup::incremental::BACKUP_JOURNAL_STATUS_VERSION,
+            storage_format: self.versions().format,
+            state: crate::backup::incremental::BackupJournalState::Disabled,
+            chain_id: None,
+            baseline_sequence: None,
+            exported_sequence: None,
+            head_sequence: 0,
+            first_retained_sequence: None,
+            last_retained_sequence: None,
+            commit_count: 0,
+            expanded_bytes: 0,
+            max_commits: 0,
+            max_bytes: 0,
+            head_checksum: None,
+        }
+    }
+    fn enable_backup_journal(
+        &mut self,
+        _config: &crate::backup::incremental::BackupJournalConfig,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "durable backend does not support backup journaling",
+        )))
+    }
+    fn disable_backup_journal(
+        &mut self,
+        _discard_unexported: bool,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "durable backend does not support backup journaling",
+        )))
+    }
     fn committed_view(
         &self,
         database: &Database,
@@ -434,6 +470,24 @@ impl DurableBackend for RedbStore {
 
     fn versions(&self) -> StorageVersions {
         RedbStore::versions(self)
+    }
+
+    fn backup_journal_status(&self) -> crate::backup::incremental::BackupJournalStatus {
+        RedbStore::backup_journal_status(self)
+    }
+
+    fn enable_backup_journal(
+        &mut self,
+        config: &crate::backup::incremental::BackupJournalConfig,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        RedbStore::enable_backup_journal(self, config)
+    }
+
+    fn disable_backup_journal(
+        &mut self,
+        discard_unexported: bool,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        RedbStore::disable_backup_journal(self, discard_unexported)
     }
 
     fn committed_view(
@@ -1925,7 +1979,7 @@ impl Engine {
         let mut candidate = if self
             .durable
             .as_ref()
-            .is_some_and(|durable| durable.versions().format == 6)
+            .is_some_and(|durable| matches!(durable.versions().format, 6 | 7))
         {
             self.committed.db.metadata_only()?
         } else {
@@ -1984,7 +2038,7 @@ impl Engine {
         self.apply_migrations_controlled(files, None)
     }
 
-    /// Advance format-6 migration maintenance by at most the requested number
+    /// Advance format-6/7 migration maintenance by at most the requested number
     /// of durable commits and return a structured checkpoint that can be resumed.
     pub fn advance_migrations(
         &mut self,
@@ -2000,11 +2054,11 @@ impl Engine {
         if self
             .durable
             .as_ref()
-            .is_none_or(|durable| durable.versions().format != 6)
+            .is_none_or(|durable| !matches!(durable.versions().format, 6 | 7))
         {
             return Err(Error::new(
                 "E_CONFIG",
-                "bounded migration progress requires a format-6 redb database",
+                "bounded migration progress requires a format-6 or format-7 redb database",
             ));
         }
         let mut budget = MaintenanceStepBudget::bounded(max_steps);
@@ -2164,7 +2218,7 @@ impl Engine {
         if self
             .durable
             .as_ref()
-            .is_some_and(|durable| durable.versions().format == 6)
+            .is_some_and(|durable| matches!(durable.versions().format, 6 | 7))
         {
             return self.apply_migration_file_shadow(file, control, budget);
         }
@@ -2596,7 +2650,10 @@ impl Engine {
                     }
                 }
                 Err(CommitFailure::Definite(error)) => {
-                    if error.code == "E_STORAGE_UPGRADE_REQUIRED" {
+                    if matches!(
+                        error.code.as_str(),
+                        "E_STORAGE_UPGRADE_REQUIRED" | "E_BACKUP_JOURNAL_FULL"
+                    ) {
                         return Err(error);
                     }
                     return Err(Error::new(
@@ -2981,6 +3038,98 @@ impl Engine {
         )
     }
 
+    pub fn backup_journal_status(&self) -> Result<crate::backup::incremental::BackupJournalStatus> {
+        self.durable
+            .as_ref()
+            .map(|durable| durable.backup_journal_status())
+            .ok_or_else(|| {
+                Error::new(
+                    "E_CONFIG",
+                    "backup journal status requires a database opened with Engine::open_redb",
+                )
+            })
+    }
+
+    pub fn enable_backup_journal(
+        &mut self,
+        config: crate::backup::incremental::BackupJournalConfig,
+    ) -> Result<crate::backup::incremental::BackupJournalStatus> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "backup journal enable requires reopening after an uncertain commit",
+            ));
+        }
+        if self.read_only {
+            return Err(Error::new(
+                "E_READ_ONLY",
+                "backup journal enable is a mutation",
+            ));
+        }
+        let result = self
+            .durable
+            .as_mut()
+            .ok_or_else(|| {
+                Error::new(
+                    "E_CONFIG",
+                    "backup journal enable requires a database opened with Engine::open_redb",
+                )
+            })?
+            .enable_backup_journal(&config);
+        self.finish_backup_journal_result(result)
+    }
+
+    pub fn disable_backup_journal(
+        &mut self,
+        discard_unexported: bool,
+    ) -> Result<crate::backup::incremental::BackupJournalStatus> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "backup journal disable requires reopening after an uncertain commit",
+            ));
+        }
+        if self.read_only {
+            return Err(Error::new(
+                "E_READ_ONLY",
+                "backup journal disable is a mutation",
+            ));
+        }
+        let result = self
+            .durable
+            .as_mut()
+            .ok_or_else(|| {
+                Error::new(
+                    "E_CONFIG",
+                    "backup journal disable requires a database opened with Engine::open_redb",
+                )
+            })?
+            .disable_backup_journal(discard_unexported);
+        self.finish_backup_journal_result(result)
+    }
+
+    fn finish_backup_journal_result<T>(
+        &mut self,
+        result: std::result::Result<T, CommitFailure>,
+    ) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(CommitFailure::Definite(error)) => Err(error),
+            Err(CommitFailure::Uncertain(error)) => {
+                self.durable = None;
+                self.write_failed = true;
+                self.read_reopen_required = true;
+                Err(Error::new(
+                    "E_STORAGE_REOPEN_REQUIRED",
+                    format!(
+                        "backup journal commit result is uncertain: {}; reopen the database and run check before retrying",
+                        error.message
+                    ),
+                ))
+            }
+        }
+    }
+
     pub fn upgrade_storage(&mut self, target: u32) -> Result<StorageUpgrade> {
         if self.write_failed {
             return Err(Error::new(
@@ -2990,6 +3139,15 @@ impl Engine {
         }
         if self.read_only {
             return Err(Error::new("E_READ_ONLY", "storage upgrade is a mutation"));
+        }
+        if self.durable.as_ref().is_some_and(|durable| {
+            durable.backup_journal_status().state
+                == crate::backup::incremental::BackupJournalState::Active
+        }) {
+            return Err(Error::new(
+                "E_BACKUP_CHAIN_ACTIVE",
+                "storage upgrade is blocked while a backup journal chain is active",
+            ));
         }
         if self.unfinished_maintenance()? {
             return Err(Error::new(
@@ -3088,6 +3246,10 @@ impl Engine {
                 .as_ref()
                 .and_then(|durable| durable.maintenance_info().ok().flatten())
                 .map(migration_maintenance),
+            backup_journal: self
+                .durable
+                .as_ref()
+                .map(|durable| durable.backup_journal_status()),
         }
     }
 
@@ -3405,6 +3567,7 @@ mod tests {
                 migration_codec: 1,
                 receipt_codec: 2,
                 maintenance_codec: 0,
+                journal_codec: 0,
                 backup_codec: 3,
             }
         }
@@ -3463,6 +3626,7 @@ mod tests {
                 migration_codec: 1,
                 receipt_codec: 2,
                 maintenance_codec: 1,
+                journal_codec: 0,
                 backup_codec: 4,
             }
         }
@@ -3540,6 +3704,7 @@ mod tests {
                 migration_codec: 1,
                 receipt_codec: 2,
                 maintenance_codec: 1,
+                journal_codec: 0,
                 backup_codec: 4,
             }
         }
