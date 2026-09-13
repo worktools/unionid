@@ -2,6 +2,8 @@
 
 当前可执行入口仍是下述完整 logical backup。v0.5 的增量备份采用“可选数据库内原子 journal + 外部 portable baseline/segment chain”，只把实际连续记录并封存的 sequence 声明为恢复点；完整契约与实现顺序见 [RFC 0016](rfc/0016-incremental-backup-chains.md)。RFC 已接受但实现由 [#304](https://github.com/worktools/unionid/issues/304) 跟踪，在命令落地前不要把文档中的预定 `backup incremental` 语法当作可用功能。
 
+作为第一层实现，`backup::incremental` 已提供 archive codec 1 的 Rust primitives：`UIB1` baseline、`UIS1` segment、canonical manifest/header、`none`/zstd level 3、payload/stored SHA-256、严格 frame 顺序和解压前资源上限。它还没有启用数据库 journal，也没有公开增量 CLI；应用不应自行拼接这些低层 records 来替代后续的 `init/export/restore` API。codec 与 golden vectors 由 [#306](https://github.com/worktools/unionid/issues/306) 跟踪，format 7 原子 journal 由 [#307](https://github.com/worktools/unionid/issues/307) 跟踪。
+
 unionid 使用版本化逻辑备份保存完整 `Database` 状态，包括稳定 catalog/type/field/variant/table/index ID、ADT 行与 RowId 水位、schema revision/hash 和 migration ledger。存在幂等写入回执时，备份还会保存完整 receipt map，确保恢复后的重试不会重复 effect。备份包含格式版本、payload SHA-256 和 schema 元数据；它不是 CSV 投影，也不丢失 i64、sum tag、Option 或嵌套 product。
 
 ```text
@@ -31,6 +33,8 @@ unionid import-legacy \
 ## English Description
 
 The currently executable interface remains the complete logical backup described above. The v0.5 incremental design uses an optional transactionally embedded journal plus an external portable baseline/segment chain and declares only actually contiguous, sealed sequences as restore points. See [RFC 0016](rfc/0016-incremental-backup-chains.md) for the contract and delivery order. The RFC is accepted, while implementation is tracked by [#304](https://github.com/worktools/unionid/issues/304); do not treat its proposed `backup incremental` syntax as available until that issue lands.
+
+The first implementation layer exposes archive-codec-1 Rust primitives under `backup::incremental`: `UIB1` baselines, `UIS1` segments, canonical manifests/headers, `none`/zstd level 3, payload/stored SHA-256, strict frame ordering, and pre-allocation decode limits. It does not enable the database journal or expose incremental CLI commands yet; applications should not assemble low-level records as a substitute for the forthcoming `init/export/restore` APIs. [#306](https://github.com/worktools/unionid/issues/306) tracks the codec and golden vectors, while [#307](https://github.com/worktools/unionid/issues/307) tracks the atomic format-7 journal.
 
 Logical backup preserves the complete `Database` state, stable catalog/type/field/variant/table/index IDs, ADT rows and RowId watermarks, schema identity, migration ledger, and idempotency receipts. It streams from one exclusively opened, fully checked committed redb view, publishes only a flushed and synced complete output, and never overwrites an existing backup or database. Restore validates format, checksum, schema, typed rows, RowIds, indexes, ledger, and receipts before creating a new redb target. Formats 1–4 remain readable according to their frozen compatibility rules.
 
