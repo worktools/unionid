@@ -675,6 +675,10 @@ impl Engine {
         self.last_mutation_profile
     }
 
+    pub(crate) fn durable_outcome_uncertain(&self) -> bool {
+        self.write_failed || self.read_reopen_required
+    }
+
     /// Return the value-free phase profile for the last successful format-6
     /// shadow-generation migration applied through this Engine.
     pub fn last_migration_profile(&self) -> Option<MigrationProfile> {

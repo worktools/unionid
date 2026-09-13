@@ -46,6 +46,8 @@ let body = engine.metrics_snapshot().prometheus_text();
 
 容量判断时同时观察 active/queued read/write、operation registry、错误 overflow、receipt count/bytes 与各 operation 的延迟。持续 queue 增长或 p95 接近 25 秒请求 deadline 表示应先降低并发工作量、增加索引或缩小 page，而不是提高无界资源上限。
 
+指标用于发现总体趋势；需要关联单个请求或取得脱敏的 plan/work 与 phase timing 时，使用 [结构化请求与慢查询事件](OBSERVABILITY.md)。两者共享 operation 与错误语义，但 observer 默认关闭且由应用控制采样和保留。
+
 ## English Description
 
 `ConcurrentEngine::metrics_snapshot()` returns an in-process version 1 `MetricsSnapshot`. It covers complete embedded, TCP, and HTTP requests executed through that shared engine plus registered stream/cancel operations. The built-in TCP listener also reports connection counts. Snapshots contain only fixed operation classes, internal error codes, cumulative counters, fixed latency buckets, concurrency gauges, and receipt capacity. They never retain source text, parameters, rows, table or field names, request IDs, cursors, idempotency keys, or operation capabilities.
@@ -61,3 +63,5 @@ Error labels come only from unionid `Error.code` values; arbitrary caller errors
 Metrics have the process-local lifetime of one `ConcurrentEngine`; counters restart when the process or engine instance is recreated. A snapshot reads lock-free counters independently and is therefore weakly consistent during concurrent work: every field is valid, but fields may straddle one completing request. Treat counters as monotonic series and observe rates rather than requiring one scrape to be a transactional snapshot.
 
 The default build has no exporter. Enabling `metrics` adds `MetricsSnapshot::prometheus_text()` without adding a listener or route. Mount the returned text only behind an authenticated management endpoint or controlled network. Scraping copies bounded counters and at most 64 error entries and never reads database rows. Use queue gauges, operation latency, error overflow, and receipt capacity together for capacity decisions.
+
+Metrics expose aggregate trends. Use [structured request and slow-query events](OBSERVABILITY.md) when one request needs correlation or sanitized plan/work and phase timings. Both surfaces share operation and error semantics; observers remain disabled by default and the application owns sampling and retention.

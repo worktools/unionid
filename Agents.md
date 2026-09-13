@@ -83,6 +83,7 @@
 - 离线 compact 已在 native compact 后、post-check 前重开数据库，使 redb 的 region repair 发生在同一次维护内：`after_bytes` 是 durable 大小，`changed` 只在文件实际变小时为 true，重复运行稳定 no-op。`tests/compaction.rs` 覆盖故障分类、cursor/receipt/ledger/RowId/schema/index/backup 保留与子进程中断恢复；`tools/compaction-eval` 与 [10k/100k 证据](docs/benchmarks/compaction-2026-09-11.md) 记录 100k 约 744.84→219.18 MiB、peak RSS 约 281 MiB。no-op 仍需完整遍历，不是廉价轮询。
 - v0.5 可观测性已开始落地：`explain analyze` 提供单次查询的 value-free 实测画像；`ConcurrentEngine::metrics_snapshot()` 提供版本化、有界 cardinality 的进程内请求、错误、延迟、并发、连接与 receipt 指标。默认关闭的 `metrics` feature 只渲染 Prometheus 文本，不自动开放 endpoint；指标生命周期、弱一致快照与安全挂载边界见 `docs/METRICS.md`。
 - `explain analyze` 在普通 `explain` 的无执行计划之外，使用同一 immutable read snapshot 和普通查询执行器返回扁平 `QueryAnalysis`：实际 pipeline 耗时、返回／examined／解码行、索引 entry、redb row cache、批次和工作内存峰值。Rust、CLI、JSON/TCP/HTTP 共用该 value-free 结构，响应不返回业务 rows、参数或 cursor；#295 是 #249 可观测性主线的第一步。
+- `ConcurrentEngine::with_observer` 提供 version 1 的 value-free terminal/slow-query event：每个 core 请求恰好一个 terminal，慢查询按显式阈值和有界采样追加；事件复用 query plan/work 与 mutation commit profile，只保留 access/stage kind 和计数。request ID 默认省略，可显式用 HMAC 摘要关联；可选 `tracing` feature 不自动启动 collector 或 endpoint，完整隐私、保留和排障边界见 `docs/OBSERVABILITY.md`。
 - 计划通过 GitHub issues 维护，勿因实现了部分能力就将完整阶段标为完成。
 
 ## 代码约定（当前）

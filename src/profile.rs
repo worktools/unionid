@@ -24,6 +24,14 @@ impl ExecutionObservation {
     }
 }
 
+/// Value-free timing split for a successfully executed query pipeline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct QueryPhaseObservation {
+    pub prepare_micros: u64,
+    pub plan_micros: u64,
+    pub execution_micros: u64,
+}
+
 /// Timings and cardinalities captured while opening a durable redb database.
 ///
 /// The profile is published only after a successful open and never contains
