@@ -334,6 +334,34 @@ trait DurableBackend: Send {
             head_checksum: None,
         }
     }
+    fn incremental_baseline_source(
+        &self,
+        _chain_id: &str,
+    ) -> Result<crate::backup::incremental::BaselineSource> {
+        Err(Error::new(
+            "E_CONFIG",
+            "durable backend does not support incremental backup",
+        ))
+    }
+    fn incremental_journal_source(
+        &self,
+        _through_sequence: Option<u64>,
+    ) -> Result<Option<crate::backup::incremental::JournalSource>> {
+        Err(Error::new(
+            "E_CONFIG",
+            "durable backend does not support incremental backup",
+        ))
+    }
+    fn prune_exported_journal(
+        &mut self,
+        _through_sequence: u64,
+        _commit_checksum: &str,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "durable backend does not support incremental backup",
+        )))
+    }
     fn enable_backup_journal(
         &mut self,
         _config: &crate::backup::incremental::BackupJournalConfig,
@@ -474,6 +502,28 @@ impl DurableBackend for RedbStore {
 
     fn backup_journal_status(&self) -> crate::backup::incremental::BackupJournalStatus {
         RedbStore::backup_journal_status(self)
+    }
+
+    fn incremental_baseline_source(
+        &self,
+        chain_id: &str,
+    ) -> Result<crate::backup::incremental::BaselineSource> {
+        RedbStore::incremental_baseline_source(self, chain_id)
+    }
+
+    fn incremental_journal_source(
+        &self,
+        through_sequence: Option<u64>,
+    ) -> Result<Option<crate::backup::incremental::JournalSource>> {
+        RedbStore::incremental_journal_source(self, through_sequence)
+    }
+
+    fn prune_exported_journal(
+        &mut self,
+        through_sequence: u64,
+        commit_checksum: &str,
+    ) -> std::result::Result<crate::backup::incremental::BackupJournalStatus, CommitFailure> {
+        RedbStore::prune_exported_journal(self, through_sequence, commit_checksum)
     }
 
     fn enable_backup_journal(
@@ -3048,6 +3098,45 @@ impl Engine {
                     "backup journal status requires a database opened with Engine::open_redb",
                 )
             })
+    }
+
+    pub(crate) fn incremental_baseline_source(
+        &self,
+        chain_id: &str,
+    ) -> Result<crate::backup::incremental::BaselineSource> {
+        self.durable
+            .as_ref()
+            .ok_or_else(|| Error::new("E_CONFIG", "incremental backup requires redb storage"))?
+            .incremental_baseline_source(chain_id)
+    }
+
+    pub(crate) fn incremental_journal_source(
+        &self,
+        through_sequence: Option<u64>,
+    ) -> Result<Option<crate::backup::incremental::JournalSource>> {
+        self.durable
+            .as_ref()
+            .ok_or_else(|| Error::new("E_CONFIG", "incremental backup requires redb storage"))?
+            .incremental_journal_source(through_sequence)
+    }
+
+    pub(crate) fn prune_exported_journal(
+        &mut self,
+        through_sequence: u64,
+        commit_checksum: &str,
+    ) -> Result<crate::backup::incremental::BackupJournalStatus> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "journal prune requires reopening after an uncertain commit",
+            ));
+        }
+        let result = self
+            .durable
+            .as_mut()
+            .ok_or_else(|| Error::new("E_CONFIG", "incremental backup requires redb storage"))?
+            .prune_exported_journal(through_sequence, commit_checksum);
+        self.finish_backup_journal_result(result)
     }
 
     pub fn enable_backup_journal(

@@ -4,11 +4,17 @@
 //! database journal. Higher-level init/export/restore operations build on it.
 
 mod journal;
+mod workflow;
 
 pub use journal::{
     BACKUP_JOURNAL_STATUS_VERSION, BackupJournalConfig, BackupJournalState, BackupJournalStatus,
     DEFAULT_JOURNAL_MAX_BYTES, DEFAULT_JOURNAL_MAX_COMMITS, HARD_JOURNAL_MAX_BYTES,
     HARD_JOURNAL_MAX_COMMITS,
+};
+pub use workflow::{
+    INCREMENTAL_BACKUP_REPORT_VERSION, IncrementalExportOptions, IncrementalExportReport,
+    IncrementalInitOptions, IncrementalInitReport, IncrementalListReport, IncrementalVerifyReport,
+    export, init, list, verify,
 };
 
 use std::fs::OpenOptions;
@@ -150,6 +156,21 @@ pub struct ArchiveHeader {
 pub struct ArchiveFrame {
     pub kind: u8,
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BaselineSource {
+    pub previous_storage_format: u32,
+    pub header: ArchiveHeader,
+    pub frames: Vec<ArchiveFrame>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct JournalSource {
+    pub header: ArchiveHeader,
+    pub frames: Vec<ArchiveFrame>,
+    pub last_commit_checksum: String,
+    pub commit_count: u64,
 }
 
 impl ArchiveFrame {

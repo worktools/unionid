@@ -28,6 +28,61 @@ enum CompactFormat {
 }
 
 #[derive(Debug, Subcommand)]
+enum IncrementalBackupCommand {
+    /// Create and activate a verified baseline and database journal.
+    Init {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        journal_max_commits: Option<u64>,
+        #[arg(long)]
+        journal_max_bytes: Option<u64>,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Seal contiguous journal commits into immutable archive segments.
+    Export {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        through_sequence: Option<u64>,
+        #[arg(long, default_value_t = 1_000)]
+        max_segment_commits: u64,
+        #[arg(long, default_value_t = 64 * 1024 * 1024)]
+        max_segment_bytes: u64,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// List bounded manifest metadata without reading business records.
+    List {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Verify all manifest-referenced baseline and segment artifacts.
+    Verify {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    /// Manage a portable baseline and incremental segment chain.
+    Incremental {
+        #[command(subcommand)]
+        command: IncrementalBackupCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Print software, protocol, storage, codec, and target versions.
     Version {
@@ -154,10 +209,12 @@ enum Command {
     },
     /// Create a verified logical backup from a redb database.
     Backup {
+        #[command(subcommand)]
+        command: Option<BackupCommand>,
         #[arg(long)]
-        db: PathBuf,
+        db: Option<PathBuf>,
         #[arg(long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -494,7 +551,6 @@ impl Args {
             Command::Version { format }
             | Command::Doctor { format, .. }
             | Command::Upgrade { format, .. }
-            | Command::Backup { format, .. }
             | Command::Restore { format, .. }
             | Command::ImportLegacy { format, .. }
             | Command::Receipts {
@@ -518,6 +574,37 @@ impl Args {
                 query_response: false,
                 integrity: false,
             },
+            Command::Backup {
+                command, format, ..
+            } => {
+                let json = command
+                    .as_ref()
+                    .map_or(matches!(format, Format::Json), |command| {
+                        matches!(
+                            command,
+                            BackupCommand::Incremental {
+                                command: IncrementalBackupCommand::Init {
+                                    format: Format::Json,
+                                    ..
+                                } | IncrementalBackupCommand::Export {
+                                    format: Format::Json,
+                                    ..
+                                } | IncrementalBackupCommand::List {
+                                    format: Format::Json,
+                                    ..
+                                } | IncrementalBackupCommand::Verify {
+                                    format: Format::Json,
+                                    ..
+                                }
+                            }
+                        )
+                    });
+                ErrorOutput {
+                    json,
+                    query_response: false,
+                    integrity: false,
+                }
+            }
             _ => ErrorOutput {
                 json: false,
                 query_response: false,
@@ -822,9 +909,64 @@ fn run(args: Args) -> Result<(), String> {
                 _ => Err("provide exactly one of --file or --dir".into()),
             },
         },
-        Command::Backup { db, output, format } => {
-            cli::backup_create(db, output, matches!(format, Format::Json))
-        }
+        Command::Backup {
+            command,
+            db,
+            output,
+            format,
+        } => match command {
+            None => cli::backup_create(
+                db.ok_or_else(|| "logical backup requires --db".to_owned())?,
+                output.ok_or_else(|| "logical backup requires --output".to_owned())?,
+                matches!(format, Format::Json),
+            ),
+            Some(BackupCommand::Incremental { command }) => match command {
+                IncrementalBackupCommand::Init {
+                    db,
+                    repo,
+                    journal_max_commits,
+                    journal_max_bytes,
+                    format,
+                } => {
+                    let mut options =
+                        unionid::backup::incremental::IncrementalInitOptions::default();
+                    if let Some(value) = journal_max_commits {
+                        options.journal_max_commits = value;
+                    }
+                    if let Some(value) = journal_max_bytes {
+                        options.journal_max_bytes = value;
+                    }
+                    cli::incremental_backup_init(db, repo, options, matches!(format, Format::Json))
+                }
+                IncrementalBackupCommand::Export {
+                    db,
+                    repo,
+                    through_sequence,
+                    max_segment_commits,
+                    max_segment_bytes,
+                    format,
+                } => {
+                    let options = unionid::backup::incremental::IncrementalExportOptions {
+                        through_sequence,
+                        max_commits_per_segment: max_segment_commits,
+                        max_expanded_bytes_per_segment: max_segment_bytes,
+                        ..Default::default()
+                    };
+                    cli::incremental_backup_export(
+                        db,
+                        repo,
+                        options,
+                        matches!(format, Format::Json),
+                    )
+                }
+                IncrementalBackupCommand::List { repo, format } => {
+                    cli::incremental_backup_list(repo, matches!(format, Format::Json))
+                }
+                IncrementalBackupCommand::Verify { repo, format } => {
+                    cli::incremental_backup_verify(repo, matches!(format, Format::Json))
+                }
+            },
+        },
         Command::Restore { backup, db, format } => {
             cli::backup_restore(backup, db, matches!(format, Format::Json))
         }
@@ -1005,6 +1147,8 @@ fn classify_exit(code: &str, integrity: bool) -> i32 {
         "E_BUSY" | "E_CONNECTION" | "E_PROTOCOL" | "E_PROTOCOL_VERSION" | "E_READ_SNAPSHOT"
         | "E_SHUTDOWN" | "E_TIMEOUT" => 4,
         "E_BACKUP"
+        | "E_BACKUP_ARCHIVE"
+        | "E_BACKUP_CHAIN"
         | "E_CHECKPOINT"
         | "E_CODEC"
         | "E_CODEC_KEY"
@@ -1022,12 +1166,45 @@ fn classify_exit(code: &str, integrity: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::classify_exit;
+    use clap::Parser;
+
+    use super::{Args, BackupCommand, Command, IncrementalBackupCommand, classify_exit};
 
     #[test]
     fn compaction_state_errors_keep_stable_exit_classes() {
         assert_eq!(classify_exit("E_MAINTENANCE_REQUIRED", false), 3);
         assert_eq!(classify_exit("E_BUSY", false), 4);
         assert_eq!(classify_exit("E_STORAGE_REOPEN_REQUIRED", false), 5);
+    }
+
+    #[test]
+    fn logical_and_incremental_backup_cli_shapes_coexist() {
+        let logical = Args::try_parse_from([
+            "unionid", "backup", "--db", "app.redb", "--output", "app.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            logical.command,
+            Command::Backup { command: None, .. }
+        ));
+
+        let incremental = Args::try_parse_from([
+            "unionid",
+            "backup",
+            "incremental",
+            "verify",
+            "--repo",
+            "backups",
+        ])
+        .unwrap();
+        assert!(matches!(
+            incremental.command,
+            Command::Backup {
+                command: Some(BackupCommand::Incremental {
+                    command: IncrementalBackupCommand::Verify { .. }
+                }),
+                ..
+            }
+        ));
     }
 }

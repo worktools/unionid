@@ -273,6 +273,101 @@ pub fn backup_restore(backup_path: PathBuf, db: PathBuf, json: bool) -> Result<(
     print_lifecycle(&info, "backup restored", json)
 }
 
+pub fn incremental_backup_init(
+    db: PathBuf,
+    repo: PathBuf,
+    options: backup::incremental::IncrementalInitOptions,
+    json: bool,
+) -> Result<(), String> {
+    let report = backup::incremental::init(db, repo, options).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "incremental backup active: baseline sequence {}, storage format {} -> {}, chain {}{}",
+            report.baseline_sequence,
+            report.previous_storage_format,
+            report.current_storage_format,
+            report.chain_id,
+            if report.resumed { " (resumed)" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_export(
+    db: PathBuf,
+    repo: PathBuf,
+    options: backup::incremental::IncrementalExportOptions,
+    json: bool,
+) -> Result<(), String> {
+    let report =
+        backup::incremental::export(db, repo, options).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else if report.no_op {
+        println!(
+            "incremental backup already exported through sequence {}",
+            report.last_sequence
+        );
+    } else {
+        println!(
+            "exported {} commit(s) in {} segment(s), sequences {}..{}",
+            report.exported_commits,
+            report.created_segments,
+            report.first_sequence.unwrap_or(report.last_sequence),
+            report.last_sequence
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_list(repo: PathBuf, json: bool) -> Result<(), String> {
+    let report = backup::incremental::list(repo).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{} archive: sequences {}..{}, {} segment(s), {} stored bytes",
+            report.chain_id,
+            report.recoverable_first_sequence,
+            report.recoverable_last_sequence,
+            report.segments.len(),
+            report.stored_bytes
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_verify(repo: PathBuf, json: bool) -> Result<(), String> {
+    let report =
+        backup::incremental::verify(repo, Default::default()).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "verified {} artifact(s), sequences {}..{}, {} orphan(s)",
+            report.artifact_count,
+            report.verified_first_sequence,
+            report.verified_last_sequence,
+            report.orphan_files.len()
+        );
+    }
+    Ok(())
+}
+
 pub fn import_legacy(
     snapshot: Option<PathBuf>,
     wal: Option<PathBuf>,
