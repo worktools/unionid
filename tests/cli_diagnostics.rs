@@ -89,6 +89,8 @@ fn compact_cli_reports_success_and_stable_state_errors() {
     let plain = String::from_utf8(plain.stdout).unwrap();
     for field in [
         "redb compaction completed",
+        "fast no-op false",
+        "proof persisted true",
         "before bytes ",
         "after bytes ",
         "reclaimed bytes ",
@@ -110,8 +112,10 @@ fn compact_cli_reports_success_and_stable_state_errors() {
     assert!(json_output.status.success());
     assert!(json_output.stderr.is_empty());
     let json_output = json(&json_output);
-    assert_eq!(json_output["version"], 1);
-    assert!(json_output["changed"].is_boolean());
+    assert_eq!(json_output["version"], 2);
+    assert_eq!(json_output["changed"], false);
+    assert_eq!(json_output["fast_no_op"], true);
+    assert_eq!(json_output["proof_persisted"], true);
     assert!(json_output["before_bytes"].is_u64());
     assert!(json_output["after_bytes"].is_u64());
     assert!(json_output["reclaimed_bytes"].is_u64());

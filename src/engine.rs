@@ -175,6 +175,8 @@ pub struct StorageUpgrade {
 pub struct StorageCompaction {
     pub version: u16,
     pub changed: bool,
+    pub fast_no_op: bool,
+    pub proof_persisted: bool,
     pub before_bytes: u64,
     pub after_bytes: u64,
     pub reclaimed_bytes: u64,
@@ -300,6 +302,15 @@ trait DurableBackend: Send {
             "durable backend does not support compaction",
         )))
     }
+    fn compaction_fast_no_op(&self, _database: &Database) -> Option<RedbCompaction> {
+        None
+    }
+    fn publish_compaction_proof(&self, _database: &Database) -> Result<()> {
+        Err(Error::new(
+            "E_CONFIG",
+            "durable backend does not support compaction proofs",
+        ))
+    }
     fn supports_production_scalars(&self) -> bool;
     fn supports_bounded_row_mutation(&self) -> bool {
         false
@@ -403,6 +414,14 @@ impl DurableBackend for RedbStore {
 
     fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
         RedbStore::compact(self)
+    }
+
+    fn compaction_fast_no_op(&self, database: &Database) -> Option<RedbCompaction> {
+        RedbStore::compaction_fast_no_op(self, database)
+    }
+
+    fn publish_compaction_proof(&self, database: &Database) -> Result<()> {
+        RedbStore::publish_compaction_proof(self, database)
     }
 
     fn supports_production_scalars(&self) -> bool {
@@ -2759,6 +2778,31 @@ impl Engine {
             ));
         }
 
+        if let Some(no_op) = self
+            .durable
+            .as_ref()
+            .expect("durable backend checked above")
+            .compaction_fast_no_op(&self.committed.db)
+        {
+            return Ok(StorageCompaction {
+                version: 2,
+                changed: false,
+                fast_no_op: true,
+                proof_persisted: true,
+                before_bytes: no_op.before_bytes,
+                after_bytes: no_op.after_bytes,
+                reclaimed_bytes: 0,
+                schema: self.committed.db.schema_info(),
+                sequence: self.committed.db.sequence,
+                storage: self
+                    .durable
+                    .as_ref()
+                    .expect("durable backend checked above")
+                    .versions(),
+                identity_preserved: true,
+            });
+        }
+
         self.check_integrity()?;
         let before_identity = self.compaction_identity()?;
         let metadata = self.committed.db.clone();
@@ -2850,9 +2894,17 @@ impl Engine {
                 "storage compaction changed durable database identity".to_string(),
             ));
         }
+        let proof_persisted = self
+            .durable
+            .as_ref()
+            .expect("durable backend checked above")
+            .publish_compaction_proof(&self.committed.db)
+            .is_ok();
         Ok(StorageCompaction {
-            version: 1,
+            version: 2,
             changed: compacted.changed,
+            fast_no_op: false,
+            proof_persisted,
             before_bytes: compacted.before_bytes,
             after_bytes: compacted.after_bytes,
             reclaimed_bytes: compacted.before_bytes.saturating_sub(compacted.after_bytes),
@@ -3735,7 +3787,9 @@ mod tests {
         drop(snapshot);
 
         let report = engine.compact_storage().unwrap();
-        assert_eq!(report.version, 1);
+        assert_eq!(report.version, 2);
+        assert!(!report.fast_no_op);
+        assert!(report.proof_persisted);
         assert_eq!(report.schema, before_schema);
         assert_eq!(report.sequence, before_identity.source.sequence);
         assert_eq!(report.storage, before_identity.storage);
@@ -3760,11 +3814,16 @@ mod tests {
         assert!(continued.rows[0]["id"].cmp_eq(&crate::Value::Int(2)));
 
         let no_op = engine.compact_storage().unwrap();
-        assert_eq!(no_op.version, 1);
+        assert_eq!(no_op.version, 2);
+        assert!(no_op.fast_no_op);
+        assert!(no_op.proof_persisted);
         assert!(no_op.identity_preserved);
         assert_eq!(no_op.schema, before_schema);
 
         drop(engine);
+        let mut proof = path.as_os_str().to_os_string();
+        proof.push(".unionid-compact-proof.json");
+        let _ = std::fs::remove_file(PathBuf::from(proof));
         let _ = std::fs::remove_file(path);
     }
 

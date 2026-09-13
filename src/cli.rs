@@ -139,8 +139,16 @@ pub fn compact_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(
         );
     } else {
         println!(
-            "redb compaction completed ({})\nbefore bytes {}\nafter bytes {}\nreclaimed bytes {}\nschema revision {}\nschema hash {}\nsequence {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance codecs {}/{}/{}/{}/{}/{}",
-            if report.changed { "changed" } else { "no-op" },
+            "redb compaction completed ({})\nfast no-op {}\nproof persisted {}\nbefore bytes {}\nafter bytes {}\nreclaimed bytes {}\nschema revision {}\nschema hash {}\nsequence {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance codecs {}/{}/{}/{}/{}/{}",
+            if report.changed {
+                "changed"
+            } else if report.fast_no_op {
+                "fast no-op"
+            } else {
+                "native no-op"
+            },
+            report.fast_no_op,
+            report.proof_persisted,
             report.before_bytes,
             report.after_bytes,
             report.reclaimed_bytes,

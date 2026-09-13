@@ -1,11 +1,17 @@
 //! Transactional redb storage for the durable Engine mode.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Write};
 use std::ops::Bound;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use hmac::{Hmac, Mac};
 use redb::{
     CompactionError as RedbCompactionError, Database as RedbDatabase, Durability, ReadableDatabase,
     ReadableTable, TableDefinition, TableHandle,
@@ -55,6 +61,10 @@ const MAINTENANCE_EXECUTOR_VERSION: u16 = 1;
 const MAINTENANCE_TARGET_BATCH_MAX_BYTES: usize = 32 * 1024 * 1024;
 const MAINTENANCE_GENERATION_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const MAINTENANCE_RECLAIM_MAX_ENTRIES: usize = 1_024;
+const COMPACTION_PROOF_VERSION: u16 = 1;
+const MAX_COMPACTION_PROOF_BYTES: u64 = 16 * 1024;
+const COMPACTION_PROOF_DOMAIN: &[u8] = b"unionid-compaction-proof-v1\0";
+static COMPACTION_PROOF_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn production_versions() -> StorageVersions {
     let layout = StorageLayout::production();
@@ -117,6 +127,34 @@ pub(crate) struct RedbCompaction {
     pub(crate) changed: bool,
     pub(crate) before_bytes: u64,
     pub(crate) after_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactionProofPayload {
+    database_id: String,
+    sequence: u64,
+    schema_revision: u64,
+    schema_hash: String,
+    storage: StorageVersions,
+    file: CompactionFileIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactionFileIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inode: Option<u64>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactionProofEnvelope {
+    version: u16,
+    payload: CompactionProofPayload,
+    signature: String,
 }
 
 type RedbOpen = (
@@ -1183,6 +1221,34 @@ impl RedbStore {
     pub(crate) fn supports_bounded_row_mutation(&self) -> bool {
         self.committed.layout.format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
             && self.committed.catalog_canonical
+    }
+
+    pub(crate) fn compaction_fast_no_op(&self, database: &Database) -> Option<RedbCompaction> {
+        let proof = read_compaction_proof(&compaction_proof_path(&self.path))?;
+        let expected = compaction_proof_payload(&self.path, database, self.versions()).ok()?;
+        if proof.version != COMPACTION_PROOF_VERSION
+            || proof.payload != expected
+            || !verify_compaction_proof(database, &proof.payload, &proof.signature)
+        {
+            return None;
+        }
+        let bytes = std::fs::metadata(&self.path).ok()?.len();
+        Some(RedbCompaction {
+            changed: false,
+            before_bytes: bytes,
+            after_bytes: bytes,
+        })
+    }
+
+    pub(crate) fn publish_compaction_proof(&self, database: &Database) -> Result<()> {
+        let payload = compaction_proof_payload(&self.path, database, self.versions())?;
+        let signature = sign_compaction_proof(database, &payload)?;
+        let envelope = CompactionProofEnvelope {
+            version: COMPACTION_PROOF_VERSION,
+            payload,
+            signature,
+        };
+        write_compaction_proof(&compaction_proof_path(&self.path), &envelope)
     }
 
     pub(crate) fn compact(&mut self) -> std::result::Result<RedbCompaction, CommitFailure> {
@@ -4940,6 +5006,122 @@ fn open_error(error: redb::DatabaseError) -> Error {
 
 fn storage_error(context: &str, error: impl std::fmt::Display) -> Error {
     Error::new("E_STORAGE", format!("{context}: {error}"))
+}
+
+fn compaction_proof_path(database: &Path) -> PathBuf {
+    let mut path = database.as_os_str().to_os_string();
+    path.push(".unionid-compact-proof.json");
+    PathBuf::from(path)
+}
+
+fn compaction_proof_payload(
+    path: &Path,
+    database: &Database,
+    storage: StorageVersions,
+) -> Result<CompactionProofPayload> {
+    let meta = database.durable_meta();
+    Ok(CompactionProofPayload {
+        database_id: URL_SAFE_NO_PAD.encode(meta.cursor_instance_id),
+        sequence: meta.sequence,
+        schema_revision: meta.schema_revision,
+        schema_hash: meta.schema_hash,
+        storage,
+        file: compaction_file_identity(path)?,
+    })
+}
+
+fn compaction_file_identity(path: &Path) -> Result<CompactionFileIdentity> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| Error::new("E_IO", format!("inspect compacted database: {error}")))?;
+
+    #[cfg(unix)]
+    let (device, inode) = {
+        use std::os::unix::fs::MetadataExt;
+        (Some(metadata.dev()), Some(metadata.ino()))
+    };
+    #[cfg(not(unix))]
+    let (device, inode) = (None, None);
+
+    Ok(CompactionFileIdentity { device, inode })
+}
+
+fn compaction_proof_bytes(payload: &CompactionProofPayload) -> Result<Vec<u8>> {
+    serde_json::to_vec(payload).map_err(|error| {
+        Error::new(
+            "E_STORAGE",
+            format!("encode compaction proof payload: {error}"),
+        )
+    })
+}
+
+fn sign_compaction_proof(database: &Database, payload: &CompactionProofPayload) -> Result<String> {
+    let bytes = compaction_proof_bytes(payload)?;
+    let secret = database.durable_meta().cursor_secret;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&secret)
+        .map_err(|_| Error::new("E_STORAGE", "invalid compaction proof secret"))?;
+    mac.update(COMPACTION_PROOF_DOMAIN);
+    mac.update(&bytes);
+    Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+fn verify_compaction_proof(
+    database: &Database,
+    payload: &CompactionProofPayload,
+    signature: &str,
+) -> bool {
+    let Ok(bytes) = compaction_proof_bytes(payload) else {
+        return false;
+    };
+    let Ok(signature) = URL_SAFE_NO_PAD.decode(signature) else {
+        return false;
+    };
+    let secret = database.durable_meta().cursor_secret;
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(&secret) else {
+        return false;
+    };
+    mac.update(COMPACTION_PROOF_DOMAIN);
+    mac.update(&bytes);
+    mac.verify_slice(&signature).is_ok()
+}
+
+fn read_compaction_proof(path: &Path) -> Option<CompactionProofEnvelope> {
+    let file = File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_COMPACTION_PROOF_BYTES {
+        return None;
+    }
+    serde_json::from_reader(BufReader::new(file)).ok()
+}
+
+fn write_compaction_proof(path: &Path, proof: &CompactionProofEnvelope) -> Result<()> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        COMPACTION_PROOF_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temp = PathBuf::from(name);
+    let result = (|| {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, proof)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+        std::fs::rename(&temp, path)?;
+        let parent = path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        File::open(parent)?.sync_all()?;
+        Ok::<_, std::io::Error>(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map_err(|error| Error::new("E_IO", format!("publish compaction proof: {error}")))
 }
 
 #[cfg(test)]
