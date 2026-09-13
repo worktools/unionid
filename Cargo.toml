@@ -16,6 +16,7 @@ default = []
 asynchronous = ["dep:tokio", "tokio/io-util", "tokio/net", "tokio/sync", "tokio/time"]
 http = ["asynchronous", "dep:axum", "dep:futures-core", "tokio/sync"]
 http-client = ["asynchronous", "dep:reqwest"]
+metrics = []
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -63,3 +64,7 @@ required-features = ["http", "http-client"]
 [[example]]
 name = "http_service"
 required-features = ["http"]
+
+[[example]]
+name = "metrics"
+required-features = ["metrics"]

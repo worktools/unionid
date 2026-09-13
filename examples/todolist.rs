@@ -855,7 +855,7 @@ async fn admin_with_engine<T: Serialize>(
     };
     let service = state.lock().await;
     Json(match service.engine.as_ref() {
-        Some(engine) => match engine.with_exclusive(|engine| operation(engine, &files)) {
+        Some(engine) => match engine.with_maintenance(|engine| operation(engine, &files)) {
             Ok(result) => admin_ok(request.request_id, result),
             Err(error) => admin_error(request.request_id, error),
         },
@@ -890,7 +890,7 @@ async fn check(
     }
     let service = state.lock().await;
     Json(match service.engine.as_ref() {
-        Some(engine) => match engine.with_exclusive(Engine::check_integrity) {
+        Some(engine) => match engine.with_maintenance(Engine::check_integrity) {
             Ok(result) => admin_ok(request.request_id, result),
             Err(error) => admin_error(request.request_id, error),
         },
