@@ -173,9 +173,31 @@ jobs:
           pattern: unionid-*
           merge-multiple: true
           path: dist
+      - name: Collect and verify release assets
+        shell: bash
+        run: |
+          mkdir release-assets
+          archive_count="$(find dist -type f -name '*.tar.gz' | wc -l)"
+          checksum_count="$(find dist -type f -name '*.tar.gz.sha256' | wc -l)"
+
+          if [[ "$archive_count" -ne 2 || "$checksum_count" -ne 2 ]]; then
+            echo "::error::expected two native archives and two checksum files, found ${archive_count} archives and ${checksum_count} checksums"
+            find dist -type f -print
+            exit 1
+          fi
+
+          find dist -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) -exec cp {} release-assets/ \;
+          if [[ "$(find release-assets -type f | wc -l)" -ne 4 ]]; then
+            echo "::error::release asset names are not unique"
+            find release-assets -type f -print
+            exit 1
+          fi
+
+          cd release-assets
+          sha256sum --check --strict *.sha256
       - uses: softprops/action-gh-release@v3
         with:
           body_path: docs/RELEASE-${{ github.ref_name }}.md
           files: |
-            dist/*.tar.gz
-            dist/*.sha256
+            release-assets/*.tar.gz
+            release-assets/*.sha256
