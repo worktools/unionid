@@ -90,6 +90,20 @@ index-key codec 3 使用 catalog 中绑定的 component 类型编码完整 tuple
 
 storage format 1 表示没有持久回执，format 2 增加 durable idempotency receipt。format 3 在 meta 中增加 128-bit database instance ID 和 256-bit cursor HMAC secret；format 4 增加生产标量 codec；format 5 增加有序复合索引；format 6 增加 generation envelope 和 recoverable migration；format 7 增加显式、可选的原子 backup journal。新库仍从 format 6 的 Generated(1) 开始，只有 `Engine::enable_backup_journal` 会执行 6→7，且不改变 schema、业务 sequence、RowId、ledger、receipt 或 database/cursor identity。format 7 没有原地 downgrade；停用只删除 chain state/journal 并保留格式。旧二进制拒绝未知的更高格式，回滚依赖启用前 logical backup/restore。memory Engine 使用进程内随机身份；WAL/snapshot 兼容入口不承诺跨重启 cursor。幂等语义见 [RFC 0002](rfc/0002-idempotent-write-receipts.md)，分页语义见 [RFC 0003](rfc/0003-stable-cursor-pagination.md)，增量备份语义见 [RFC 0016](rfc/0016-incremental-backup-chains.md)。
 
+### 增量备份保留与封存
+
+`backup incremental checkpoint` 会先把 journal 导出到当前数据库 head，再建立并完整验证一个新 baseline，将最早恢复点推进到该 sequence。旧 baseline/segments 此时只是未引用文件；使用 `prune` 先预览，核对文件数、bytes 和保留范围后再显式确认删除：
+
+```bash
+unionid backup incremental checkpoint --db app.redb --repo backups --format json
+unionid backup incremental prune --repo backups --before-sequence 42 --format json
+unionid backup incremental prune --repo backups --before-sequence 42 --confirm
+```
+
+`backup incremental disable` 只在没有未导出提交时直接封存。若 journal 仍有未导出 sequence，默认返回错误；`--discard-unexported` 先给出不会修改数据的丢失范围预览，只有同时提供 `--confirm` 才删除 journal 并把 manifest 标为 sealed。discard 只放弃对应恢复点，业务数据库保持当前状态。
+
+Checkpoint first exports through the database head, verifies a new baseline, and advances the retained floor. Prune is preview-only until `--confirm`, and it removes only verified, unreferenced artifacts older than that floor. Disable seals a fully exported chain directly; discarding an unexported tail requires both `--discard-unexported` and `--confirm`, reports the lost sequence range, and never rolls back business data.
+
 macOS/Linux 测试还在隔离子进程中用操作系统 `RLIMIT_FSIZE` 把 redb 文件上限固定在已提交基线大小，再写入 900,000 字节 typed text 强制触发真实文件增长失败。子进程忽略 `SIGXFSZ`，使底层写入以错误返回 Engine：若失败发生在 `commit` 前，响应明确中止且句柄允许再次尝试；若 `commit` 返回错误，响应标记结果不确定并禁用后续写。父进程重开并运行完整性检查，接受完整旧状态或完整新状态，再核对 typed row、主键索引、schema 和 migration ledger，不接受部分内部表。
 
 这些测试覆盖应用进程退出、真实文件增长失败和库级一致性检查，没有模拟机器掉电、文件系统违反同步承诺、物理设备损坏或每一个空间不足位置。`Immediate` 与 two-phase commit 的掉电保证来自 redb 的事务契约；设备与文件系统仍必须正确实现持久同步。更广的发布环境矩阵继续由 #24 跟踪。

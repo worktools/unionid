@@ -164,6 +164,58 @@ pub struct IncrementalRestoreReport {
     pub manifest_checksum: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalCheckpointOptions {
+    pub compression: Compression,
+    pub limits: ArchiveLimits,
+}
+
+impl Default for IncrementalCheckpointOptions {
+    fn default() -> Self {
+        Self {
+            compression: Compression::Zstd,
+            limits: ArchiveLimits::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalCheckpointReport {
+    pub version: u16,
+    pub chain_id: String,
+    pub previous_first_sequence: u64,
+    pub recoverable_first_sequence: u64,
+    pub recoverable_last_sequence: u64,
+    pub retired_artifacts: u64,
+    pub retired_bytes: u64,
+    pub manifest_checksum: String,
+    pub resumed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalPruneReport {
+    pub version: u16,
+    pub chain_id: String,
+    pub before_sequence: u64,
+    pub selected_files: Vec<String>,
+    pub selected_bytes: u64,
+    pub recoverable_first_sequence: u64,
+    pub recoverable_last_sequence: u64,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalDisableReport {
+    pub version: u16,
+    pub chain_id: String,
+    pub recoverable_first_sequence: u64,
+    pub recoverable_last_sequence: u64,
+    pub lost_first_sequence: Option<u64>,
+    pub lost_last_sequence: Option<u64>,
+    pub applied: bool,
+    pub manifest_checksum: String,
+}
+
 pub fn init(
     db: impl Into<PathBuf>,
     repo: impl AsRef<Path>,
@@ -188,6 +240,8 @@ pub fn init(
         if resumed {
             let previous = encode_manifest(manifest.clone())?;
             manifest.state = ManifestState::Active;
+            manifest.journal_max_commits = None;
+            manifest.journal_max_bytes = None;
             publish_manifest(&repo, Some(&previous), manifest.clone())?;
             manifest = read_manifest(&repo)?;
         }
@@ -246,6 +300,10 @@ pub fn init(
         recoverable_last_sequence: artifact.last_sequence,
         stored_bytes: artifact.stored_bytes,
         expanded_bytes: artifact.expanded_bytes,
+        journal_max_commits: None,
+        journal_max_bytes: None,
+        checkpoint_previous_first_sequence: None,
+        checkpoint_retired_artifacts: Vec::new(),
         checksum: String::new(),
     };
     let prepared_bytes = publish_manifest(&repo, None, prepared.clone())?;
@@ -280,6 +338,8 @@ pub fn export(
         reconcile_identity(&manifest, &status)?;
         let previous = encode_manifest(manifest.clone())?;
         manifest.state = ManifestState::Active;
+        manifest.journal_max_commits = None;
+        manifest.journal_max_bytes = None;
         publish_manifest(&repo, Some(&previous), manifest.clone())?;
         manifest = read_manifest(&repo)?;
     }
@@ -465,6 +525,292 @@ pub fn restore(
         schema_revision: Engine::open_redb(destination)?.schema_info().revision,
         row_count,
         receipt_count: u64::try_from(receipts.len()).unwrap_or(u64::MAX),
+        manifest_checksum: manifest.checksum,
+    })
+}
+
+pub fn checkpoint(
+    db: impl Into<PathBuf>,
+    repo: impl AsRef<Path>,
+    options: IncrementalCheckpointOptions,
+) -> Result<IncrementalCheckpointReport> {
+    let db = db.into();
+    let repo = existing_repo(repo.as_ref())?;
+    let manifest = read_manifest(&repo)?;
+    if manifest.state == ManifestState::Prepared && manifest.journal_max_commits.is_some() {
+        return resume_checkpoint(&db, &repo, manifest, &options.limits);
+    }
+    export(&db, &repo, IncrementalExportOptions::default())?;
+    let mut engine = Engine::open_redb(db.clone())?;
+    engine.check_integrity()?;
+    let status = engine.backup_journal_status()?;
+    let old = read_manifest(&repo)?;
+    reconcile_identity(&old, &status)?;
+    if status.commit_count != 0 || status.exported_sequence != Some(status.head_sequence) {
+        return Err(chain_error(
+            "checkpoint requires export through the database head",
+        ));
+    }
+    let source = engine.incremental_baseline_source(&old.chain_id)?;
+    let encoded = encode_archive(
+        ArchiveKind::Baseline,
+        old.record_codec,
+        options.compression,
+        &source.header,
+        &source.frames,
+        &options.limits,
+    )?;
+    let relative = format!(
+        "baselines/b-{}-{}.uib",
+        source.header.first_sequence,
+        checksum_suffix(&encoded.payload_checksum)
+    );
+    write_or_reuse_archive(&repo, Path::new(&relative), &encoded.bytes)?;
+    let baseline = ManifestArtifact {
+        path: relative,
+        first_sequence: source.header.first_sequence,
+        last_sequence: source.header.last_sequence,
+        parent_checksum: None,
+        payload_checksum: encoded.payload_checksum,
+        stored_checksum: encoded.stored_checksum,
+        compression: options.compression,
+        stored_bytes: encoded.bytes.len() as u64,
+        expanded_bytes: encoded.expanded_bytes,
+    };
+    let previous_bytes = encode_manifest(old.clone())?;
+    let mut prepared = old.clone();
+    prepared.state = ManifestState::Prepared;
+    prepared.baseline = baseline;
+    prepared.segments.clear();
+    prepared.recoverable_first_sequence = source.header.first_sequence;
+    prepared.recoverable_last_sequence = source.header.last_sequence;
+    prepared.stored_bytes = prepared.baseline.stored_bytes;
+    prepared.expanded_bytes = prepared.baseline.expanded_bytes;
+    prepared.journal_max_commits = Some(status.max_commits);
+    prepared.journal_max_bytes = Some(status.max_bytes);
+    prepared.checkpoint_previous_first_sequence = Some(old.recoverable_first_sequence);
+    prepared.checkpoint_retired_artifacts = std::iter::once(old.baseline.clone())
+        .chain(old.segments.iter().cloned())
+        .filter(|artifact| artifact.path != prepared.baseline.path)
+        .collect();
+    publish_manifest(&repo, Some(&previous_bytes), prepared.clone())?;
+    finish_checkpoint(&mut engine, &repo, prepared, &options.limits)
+}
+
+pub fn prune(
+    repo: impl AsRef<Path>,
+    before_sequence: u64,
+    confirm: bool,
+    limits: ArchiveLimits,
+) -> Result<IncrementalPruneReport> {
+    let repo = existing_repo(repo.as_ref())?;
+    let manifest = read_manifest(&repo)?;
+    if before_sequence > manifest.recoverable_first_sequence {
+        return Err(chain_error(
+            "retention cannot advance beyond the current checkpoint; create a checkpoint first",
+        ));
+    }
+    let mut selected_files = Vec::new();
+    let mut selected_bytes = 0u64;
+    for relative in find_orphans(&repo, &manifest) {
+        let path = Path::new(&relative);
+        validate_archive_entry(&repo, path)?;
+        let artifact_path = repo.join(path);
+        let metadata = fs::metadata(&artifact_path)
+            .map_err(|error| archive_error(format!("inspect retired archive artifact: {error}")))?;
+        if metadata.len() > limits.max_stored_bytes {
+            return Err(Error::new(
+                "E_LIMIT",
+                "retired archive artifact exceeds its stored-byte limit",
+            ));
+        }
+        let bytes = fs::read(artifact_path)
+            .map_err(|error| archive_error(format!("read retired archive artifact: {error}")))?;
+        let decoded = decode_archive(&bytes, &limits)?;
+        if decoded.header.chain_id == manifest.chain_id
+            && decoded.header.database_digest == manifest.database_digest
+            && decoded.header.last_sequence <= before_sequence
+        {
+            selected_bytes = selected_bytes.saturating_add(bytes.len() as u64);
+            selected_files.push(relative);
+        }
+    }
+    selected_files.sort();
+    if confirm {
+        for relative in &selected_files {
+            fs::remove_file(repo.join(relative)).map_err(|error| {
+                archive_error(format!("remove retired archive artifact: {error}"))
+            })?;
+        }
+        sync_directory(&repo.join("baselines"))?;
+        sync_directory(&repo.join("segments"))?;
+    }
+    Ok(IncrementalPruneReport {
+        version: INCREMENTAL_BACKUP_REPORT_VERSION,
+        chain_id: manifest.chain_id,
+        before_sequence,
+        selected_files,
+        selected_bytes,
+        recoverable_first_sequence: manifest.recoverable_first_sequence,
+        recoverable_last_sequence: manifest.recoverable_last_sequence,
+        applied: confirm,
+    })
+}
+
+pub fn disable(
+    db: impl Into<PathBuf>,
+    repo: impl AsRef<Path>,
+    discard_unexported: bool,
+    confirm: bool,
+) -> Result<IncrementalDisableReport> {
+    let repo = existing_repo(repo.as_ref())?;
+    let mut manifest = read_manifest(&repo)?;
+    verify_manifest_artifacts(&repo, &manifest, &ArchiveLimits::default())?;
+    let previous = encode_manifest(manifest.clone())?;
+    let mut engine = Engine::open_redb(db.into())?;
+    let status = engine.backup_journal_status()?;
+    if manifest.state == ManifestState::Sealed && status.state == BackupJournalState::Disabled {
+        return disable_report(manifest, None, None, false);
+    }
+    if status.state == BackupJournalState::Active {
+        reconcile_identity(&manifest, &status)?;
+        let lost_first = status.first_retained_sequence;
+        let lost_last = status.last_retained_sequence;
+        if status.commit_count != 0 && !discard_unexported {
+            return Err(chain_error(
+                "disable requires exporting the retained journal or explicitly discarding it",
+            ));
+        }
+        if status.commit_count != 0 && !confirm {
+            return disable_report(manifest, lost_first, lost_last, false);
+        }
+        engine.disable_backup_journal(discard_unexported)?;
+        manifest.state = ManifestState::Sealed;
+        publish_manifest(&repo, Some(&previous), manifest.clone())?;
+        return disable_report(read_manifest(&repo)?, lost_first, lost_last, true);
+    }
+    if manifest.state != ManifestState::Active {
+        return Err(chain_error(
+            "database and archive disable state do not match",
+        ));
+    }
+    manifest.state = ManifestState::Sealed;
+    publish_manifest(&repo, Some(&previous), manifest.clone())?;
+    disable_report(read_manifest(&repo)?, None, None, true)
+}
+
+fn resume_checkpoint(
+    db: &Path,
+    repo: &Path,
+    prepared: ArchiveManifest,
+    limits: &ArchiveLimits,
+) -> Result<IncrementalCheckpointReport> {
+    verify_manifest_artifacts(repo, &prepared, limits)?;
+    let mut engine = Engine::open_redb(db.to_path_buf())?;
+    finish_checkpoint(&mut engine, repo, prepared, limits).map(|mut report| {
+        report.resumed = true;
+        report
+    })
+}
+
+fn finish_checkpoint(
+    engine: &mut Engine,
+    repo: &Path,
+    mut prepared: ArchiveManifest,
+    limits: &ArchiveLimits,
+) -> Result<IncrementalCheckpointReport> {
+    verify_manifest_artifacts(repo, &prepared, limits)?;
+    let status = engine.backup_journal_status()?;
+    if status.state == BackupJournalState::Active
+        && status.baseline_sequence != Some(prepared.baseline.first_sequence)
+    {
+        if status.chain_id.as_deref() != Some(prepared.chain_id.as_str())
+            || status.commit_count != 0
+            || status.exported_sequence != Some(prepared.baseline.first_sequence)
+        {
+            return Err(chain_error(
+                "checkpoint does not match the active exported journal",
+            ));
+        }
+        engine.disable_backup_journal(false)?;
+    }
+    if engine.backup_journal_status()?.state == BackupJournalState::Disabled {
+        engine.enable_backup_journal(checkpoint_journal_config(&prepared)?)?;
+    }
+    reconcile_identity(&prepared, &engine.backup_journal_status()?)?;
+    let previous_first_sequence = prepared
+        .checkpoint_previous_first_sequence
+        .unwrap_or(prepared.recoverable_first_sequence);
+    let retired_artifacts = prepared.checkpoint_retired_artifacts.len() as u64;
+    let retired_bytes = prepared
+        .checkpoint_retired_artifacts
+        .iter()
+        .fold(0u64, |total, artifact| {
+            total.saturating_add(artifact.stored_bytes)
+        });
+    let previous = encode_manifest(prepared.clone())?;
+    prepared.state = ManifestState::Active;
+    prepared.journal_max_commits = None;
+    prepared.journal_max_bytes = None;
+    prepared.checkpoint_previous_first_sequence = None;
+    prepared.checkpoint_retired_artifacts.clear();
+    publish_manifest(repo, Some(&previous), prepared.clone())?;
+    Ok(IncrementalCheckpointReport {
+        version: INCREMENTAL_BACKUP_REPORT_VERSION,
+        chain_id: prepared.chain_id,
+        previous_first_sequence,
+        recoverable_first_sequence: prepared.recoverable_first_sequence,
+        recoverable_last_sequence: prepared.recoverable_last_sequence,
+        retired_artifacts,
+        retired_bytes,
+        manifest_checksum: read_manifest(repo)?.checksum,
+        resumed: false,
+    })
+}
+
+fn checkpoint_journal_config(manifest: &ArchiveManifest) -> Result<BackupJournalConfig> {
+    let mut config = BackupJournalConfig::new(
+        manifest.chain_id.clone(),
+        manifest.baseline.first_sequence,
+        manifest.baseline.payload_checksum.clone(),
+    );
+    config.max_commits = manifest
+        .journal_max_commits
+        .ok_or_else(|| chain_error("prepared checkpoint is missing its journal commit limit"))?;
+    config.max_bytes = manifest
+        .journal_max_bytes
+        .ok_or_else(|| chain_error("prepared checkpoint is missing its journal byte limit"))?;
+    Ok(config)
+}
+
+fn write_or_reuse_archive(repo: &Path, relative: &Path, bytes: &[u8]) -> Result<()> {
+    let path = repo.join(relative);
+    match fs::read(&path) {
+        Ok(existing) if existing == bytes => Ok(()),
+        Ok(_) => Err(chain_error(
+            "checkpoint artifact path already contains different bytes",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_new_archive_entry(repo, relative, bytes)
+        }
+        Err(error) => Err(archive_error(format!("read checkpoint artifact: {error}"))),
+    }
+}
+
+fn disable_report(
+    manifest: ArchiveManifest,
+    lost_first_sequence: Option<u64>,
+    lost_last_sequence: Option<u64>,
+    applied: bool,
+) -> Result<IncrementalDisableReport> {
+    Ok(IncrementalDisableReport {
+        version: INCREMENTAL_BACKUP_REPORT_VERSION,
+        chain_id: manifest.chain_id,
+        recoverable_first_sequence: manifest.recoverable_first_sequence,
+        recoverable_last_sequence: manifest.recoverable_last_sequence,
+        lost_first_sequence,
+        lost_last_sequence,
+        applied,
         manifest_checksum: manifest.checksum,
     })
 }
@@ -1509,6 +1855,10 @@ mod tests {
             recoverable_last_sequence: artifact.last_sequence,
             stored_bytes: artifact.stored_bytes,
             expanded_bytes: artifact.expanded_bytes,
+            journal_max_commits: None,
+            journal_max_bytes: None,
+            checkpoint_previous_first_sequence: None,
+            checkpoint_retired_artifacts: Vec::new(),
             checksum: String::new(),
         };
         publish_manifest(&repo, None, manifest.clone()).unwrap();
@@ -1608,5 +1958,87 @@ mod tests {
             .unwrap();
         assert_eq!(status.commit_count, 0);
         assert_eq!(status.exported_sequence, Some(source.header.last_sequence));
+    }
+
+    #[test]
+    fn checkpoint_resumes_after_prepared_manifest_publication() {
+        let temp = Temp::new();
+        let db = temp.0.join("checkpoint.redb");
+        let repo = temp.0.join("archive");
+        drop(database(&db));
+        init(&db, &repo, IncrementalInitOptions::default()).unwrap();
+        let mut engine = Engine::open_redb(db.clone()).unwrap();
+        assert!(engine.execute("update items | set label = \"two\"").ok);
+        drop(engine);
+        export(&db, &repo, Default::default()).unwrap();
+
+        let engine = Engine::open_redb(db.clone()).unwrap();
+        let status = engine.backup_journal_status().unwrap();
+        let old = read_manifest(&repo).unwrap();
+        let source = engine.incremental_baseline_source(&old.chain_id).unwrap();
+        let encoded = encode_archive(
+            ArchiveKind::Baseline,
+            old.record_codec,
+            Compression::Zstd,
+            &source.header,
+            &source.frames,
+            &ArchiveLimits::default(),
+        )
+        .unwrap();
+        let relative = format!(
+            "baselines/b-{}-{}.uib",
+            source.header.first_sequence,
+            checksum_suffix(&encoded.payload_checksum)
+        );
+        write_new_archive_entry(&repo, Path::new(&relative), &encoded.bytes).unwrap();
+        let mut prepared = old.clone();
+        prepared.state = ManifestState::Prepared;
+        prepared.baseline = ManifestArtifact {
+            path: relative,
+            first_sequence: source.header.first_sequence,
+            last_sequence: source.header.last_sequence,
+            parent_checksum: None,
+            payload_checksum: encoded.payload_checksum,
+            stored_checksum: encoded.stored_checksum,
+            compression: Compression::Zstd,
+            stored_bytes: encoded.bytes.len() as u64,
+            expanded_bytes: encoded.expanded_bytes,
+        };
+        prepared.segments.clear();
+        prepared.recoverable_first_sequence = source.header.first_sequence;
+        prepared.recoverable_last_sequence = source.header.last_sequence;
+        prepared.stored_bytes = prepared.baseline.stored_bytes;
+        prepared.expanded_bytes = prepared.baseline.expanded_bytes;
+        prepared.journal_max_commits = Some(status.max_commits);
+        prepared.journal_max_bytes = Some(status.max_bytes);
+        let retired = std::iter::once(old.baseline.clone())
+            .chain(old.segments.iter().cloned())
+            .filter(|artifact| artifact.path != prepared.baseline.path)
+            .collect::<Vec<_>>();
+        prepared.checkpoint_previous_first_sequence = Some(old.recoverable_first_sequence);
+        prepared.checkpoint_retired_artifacts = retired.clone();
+        publish_manifest(&repo, Some(&encode_manifest(old).unwrap()), prepared).unwrap();
+        drop(engine);
+
+        let report = checkpoint(&db, &repo, Default::default()).unwrap();
+        assert!(report.resumed);
+        assert_eq!(report.retired_artifacts, retired.len() as u64);
+        assert_eq!(
+            report.retired_bytes,
+            retired
+                .iter()
+                .map(|artifact| artifact.stored_bytes)
+                .sum::<u64>()
+        );
+        assert_eq!(read_manifest(&repo).unwrap().state, ManifestState::Active);
+        let status = Engine::open_redb(db)
+            .unwrap()
+            .backup_journal_status()
+            .unwrap();
+        assert_eq!(
+            status.baseline_sequence,
+            Some(report.recoverable_first_sequence)
+        );
+        assert_eq!(status.commit_count, 0);
     }
 }

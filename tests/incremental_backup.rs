@@ -223,6 +223,19 @@ fn restore_replays_each_declared_sequence_to_a_fresh_database() {
     assert!(response.ok, "{}", response.message);
     assert_eq!(response.rows.len(), 1);
 
+    let middle_target = temp.path().join("middle.redb");
+    backup::incremental::restore(
+        &repo,
+        &middle_target,
+        initialized.baseline_sequence + 1,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    let mut middle = Engine::open_redb(middle_target).unwrap();
+    let response = middle.execute("from items | filter label == \"two\"");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 1);
+
     let cli_target = temp.path().join("cli.redb");
     let final_sequence_text = final_sequence.to_string();
     let cli = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -274,4 +287,132 @@ fn restore_replays_each_declared_sequence_to_a_fresh_database() {
     )
     .unwrap_err();
     assert_eq!(error.code, "E_BACKUP_BEFORE_BASELINE");
+}
+
+#[test]
+fn checkpoint_prune_and_confirmed_disable_bound_retained_history() {
+    let temp = TempTree::new("incremental-lifecycle");
+    let db = temp.path().join("app.redb");
+    let repo = temp.path().join("archive");
+    create_database(&db);
+    backup::incremental::init(&db, &repo, Default::default()).unwrap();
+
+    let mut engine = Engine::open_redb(db.clone()).unwrap();
+    assert!(engine.execute("update items | set label = \"two\"").ok);
+    assert!(engine.execute("update items | set label = \"three\"").ok);
+    drop(engine);
+    backup::incremental::export(&db, &repo, Default::default()).unwrap();
+
+    let checkpoint = backup::incremental::checkpoint(&db, &repo, Default::default()).unwrap();
+    assert!(checkpoint.recoverable_first_sequence > checkpoint.previous_first_sequence);
+    let listed = backup::incremental::list(&repo).unwrap();
+    assert_eq!(
+        listed.recoverable_first_sequence,
+        checkpoint.recoverable_first_sequence
+    );
+    assert_eq!(
+        listed.recoverable_last_sequence,
+        checkpoint.recoverable_first_sequence
+    );
+    assert!(listed.segments.is_empty());
+    backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap();
+
+    let floor = checkpoint.recoverable_first_sequence.to_string();
+    let cli_preview = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "backup",
+            "incremental",
+            "prune",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--before-sequence",
+            &floor,
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(cli_preview.status.success());
+    let cli_preview: serde_json::Value = serde_json::from_slice(&cli_preview.stdout).unwrap();
+    assert_eq!(cli_preview["applied"], false);
+
+    let preview = backup::incremental::prune(
+        &repo,
+        checkpoint.recoverable_first_sequence,
+        false,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    assert!(!preview.applied);
+    assert!(!preview.selected_files.is_empty());
+    for relative in &preview.selected_files {
+        assert!(repo.join(relative).exists());
+    }
+    let applied = backup::incremental::prune(
+        &repo,
+        checkpoint.recoverable_first_sequence,
+        true,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    assert!(applied.applied);
+    assert_eq!(applied.selected_files, preview.selected_files);
+    assert!(
+        backup::incremental::prune(
+            &repo,
+            checkpoint.recoverable_first_sequence,
+            true,
+            ArchiveLimits::default(),
+        )
+        .unwrap()
+        .selected_files
+        .is_empty()
+    );
+
+    let mut engine = Engine::open_redb(db.clone()).unwrap();
+    assert!(engine.execute("update items | set label = \"four\"").ok);
+    drop(engine);
+    assert!(backup::incremental::disable(&db, &repo, false, false).is_err());
+    let preview = backup::incremental::disable(&db, &repo, true, false).unwrap();
+    assert!(!preview.applied);
+    assert_eq!(
+        preview.lost_first_sequence,
+        Some(checkpoint.recoverable_first_sequence + 1)
+    );
+    let disabled = backup::incremental::disable(&db, &repo, true, true).unwrap();
+    assert!(disabled.applied);
+    assert_eq!(disabled.lost_first_sequence, preview.lost_first_sequence);
+    assert_eq!(
+        backup::incremental::list(&repo).unwrap().state,
+        unionid::backup::incremental::ManifestState::Sealed
+    );
+    assert_eq!(
+        Engine::open_redb(&db)
+            .unwrap()
+            .backup_journal_status()
+            .unwrap()
+            .state,
+        unionid::backup::incremental::BackupJournalState::Disabled
+    );
+
+    let no_op = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "backup",
+            "incremental",
+            "disable",
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(no_op.status.success());
+    assert_eq!(
+        String::from_utf8(no_op.stdout).unwrap(),
+        format!(
+            "incremental archive already sealed at sequence {}\n",
+            checkpoint.recoverable_last_sequence
+        )
+    );
 }
