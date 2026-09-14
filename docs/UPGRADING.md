@@ -19,6 +19,10 @@ v0.4 发布包同时携带 `RELEASE.json` 和独立的 `release/contract.json`�
 
 v0.5 开发版本还可读取显式启用增量备份 journal 后的 storage format 7。只有 `Engine::enable_backup_journal` 会执行 6→7；创建数据库和普通写入仍保持 format 6。format 7 增加 journal codec 1，没有原地降级；需要回到不理解 format 7 的二进制时，应从启用前的 logical backup 恢复到新路径。
 
+升级或切换维护版本前，活跃增量链应先执行 `backup incremental export` 和 `backup incremental verify`。需要限制 archive 历史时，先 checkpoint，再 preview/confirm prune；不要直接删除 manifest 引用的文件。停止增量记录时使用 `backup incremental disable`。存在未导出提交时应先 export；只有明确接受这些 sequence 不可恢复时才使用 `--discard-unexported --confirm`。停用不会把 format 7 原地降回 format 6。
+
+Before upgrading or switching maintenance binaries, export and verify any active incremental chain. To bound archive history, checkpoint first and then preview/confirm prune; never delete manifest-referenced files directly. Use incremental disable to stop journaling. Export an unsealed tail unless its restore points are deliberately abandoned with `--discard-unexported --confirm`. Disabling does not downgrade storage format 7 to format 6.
+
 ### 从 v0.3.0 升级
 
 v0.4.0 不改变任何持久格式或协议版本，v0.3.0 format-6 数据库可直接打开。先在副本上运行 `doctor`、`check` 和应用读写。若应用使用静态查询生成物，应使用 v0.4.0 binary 对当前 schema 与全部 `.uid` 查询重新运行 `query rust`，提交新的 digest，并重新编译客户端；不要把旧 bundle 复制到新 schema identity 下继续使用。

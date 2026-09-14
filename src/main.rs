@@ -71,6 +71,39 @@ enum IncrementalBackupCommand {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Replace retained history with a verified baseline at the current head.
+    Checkpoint {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Preview or remove retired artifacts before a retained sequence.
+    Prune {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        before_sequence: u64,
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Seal an incremental archive and disable its database journal.
+    Disable {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        discard_unexported: bool,
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -994,6 +1027,33 @@ fn run(args: Args) -> Result<(), String> {
                 IncrementalBackupCommand::Verify { repo, format } => {
                     cli::incremental_backup_verify(repo, matches!(format, Format::Json))
                 }
+                IncrementalBackupCommand::Checkpoint { db, repo, format } => {
+                    cli::incremental_backup_checkpoint(db, repo, matches!(format, Format::Json))
+                }
+                IncrementalBackupCommand::Prune {
+                    repo,
+                    before_sequence,
+                    confirm,
+                    format,
+                } => cli::incremental_backup_prune(
+                    repo,
+                    before_sequence,
+                    confirm,
+                    matches!(format, Format::Json),
+                ),
+                IncrementalBackupCommand::Disable {
+                    db,
+                    repo,
+                    discard_unexported,
+                    confirm,
+                    format,
+                } => cli::incremental_backup_disable(
+                    db,
+                    repo,
+                    discard_unexported,
+                    confirm,
+                    matches!(format, Format::Json),
+                ),
             },
         },
         Command::Restore {

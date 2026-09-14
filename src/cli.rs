@@ -393,6 +393,92 @@ pub fn incremental_backup_restore(
     Ok(())
 }
 
+pub fn incremental_backup_checkpoint(db: PathBuf, repo: PathBuf, json: bool) -> Result<(), String> {
+    let report = backup::incremental::checkpoint(db, repo, Default::default())
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "checkpoint advanced recovery floor {} -> {}; {} retired artifact(s), {} bytes",
+            report.previous_first_sequence,
+            report.recoverable_first_sequence,
+            report.retired_artifacts,
+            report.retired_bytes
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_prune(
+    repo: PathBuf,
+    before_sequence: u64,
+    confirm: bool,
+    json: bool,
+) -> Result<(), String> {
+    let report = backup::incremental::prune(repo, before_sequence, confirm, Default::default())
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{} {} retired artifact(s), {} bytes; retained sequences {}..{}",
+            if report.applied {
+                "pruned"
+            } else {
+                "would prune"
+            },
+            report.selected_files.len(),
+            report.selected_bytes,
+            report.recoverable_first_sequence,
+            report.recoverable_last_sequence
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_disable(
+    db: PathBuf,
+    repo: PathBuf,
+    discard_unexported: bool,
+    confirm: bool,
+    json: bool,
+) -> Result<(), String> {
+    let report = backup::incremental::disable(db, repo, discard_unexported, confirm)
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else if !report.applied {
+        println!(
+            "would discard unexported sequences {}..{}; rerun with --confirm",
+            report.lost_first_sequence.unwrap_or(0),
+            report.lost_last_sequence.unwrap_or(0)
+        );
+    } else {
+        println!(
+            "incremental archive sealed at sequence {}{}",
+            report.recoverable_last_sequence,
+            report
+                .lost_first_sequence
+                .map_or(String::new(), |first| format!(
+                    "; discarded unexported sequences {}..{}",
+                    first,
+                    report.lost_last_sequence.unwrap_or(first)
+                ))
+        );
+    }
+    Ok(())
+}
+
 pub fn import_legacy(
     snapshot: Option<PathBuf>,
     wal: Option<PathBuf>,

@@ -1605,10 +1605,12 @@ impl RedbStore {
     }
 
     pub(crate) fn incremental_baseline_source(&self, chain_id: &str) -> Result<BaselineSource> {
-        if self.committed.journal.is_some() {
+        if self.committed.journal.as_ref().is_some_and(|journal| {
+            journal.commit_count != 0 || journal.exported_sequence != self.committed.meta.sequence
+        }) {
             return Err(Error::new(
                 "E_BACKUP_CHAIN",
-                "an active backup chain already exists",
+                "checkpoint baseline requires the journal to be exported through the database head",
             ));
         }
         let transaction = self

@@ -12,9 +12,11 @@ pub use journal::{
     HARD_JOURNAL_MAX_COMMITS,
 };
 pub use workflow::{
-    INCREMENTAL_BACKUP_REPORT_VERSION, IncrementalExportOptions, IncrementalExportReport,
-    IncrementalInitOptions, IncrementalInitReport, IncrementalListReport, IncrementalRestoreReport,
-    IncrementalVerifyReport, export, init, list, restore, verify,
+    INCREMENTAL_BACKUP_REPORT_VERSION, IncrementalCheckpointOptions, IncrementalCheckpointReport,
+    IncrementalDisableReport, IncrementalExportOptions, IncrementalExportReport,
+    IncrementalInitOptions, IncrementalInitReport, IncrementalListReport, IncrementalPruneReport,
+    IncrementalRestoreReport, IncrementalVerifyReport, checkpoint, disable, export, init, list,
+    prune, restore, verify,
 };
 
 use std::fs::OpenOptions;
@@ -104,6 +106,10 @@ pub struct ArchiveManifest {
     pub recoverable_last_sequence: u64,
     pub stored_bytes: u64,
     pub expanded_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_max_commits: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_max_bytes: Option<u64>,
     pub checksum: String,
 }
 
@@ -121,6 +127,10 @@ struct ManifestPayload<'a> {
     recoverable_last_sequence: u64,
     stored_bytes: u64,
     expanded_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_max_commits: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    journal_max_bytes: Option<u64>,
 }
 
 impl Compression {
@@ -619,6 +629,8 @@ fn manifest_payload_bytes(manifest: &ArchiveManifest) -> Result<Vec<u8>> {
         recoverable_last_sequence: manifest.recoverable_last_sequence,
         stored_bytes: manifest.stored_bytes,
         expanded_bytes: manifest.expanded_bytes,
+        journal_max_commits: manifest.journal_max_commits,
+        journal_max_bytes: manifest.journal_max_bytes,
     })
     .map_err(|error| archive_error(format!("encode archive manifest payload: {error}")))
 }
@@ -1047,6 +1059,8 @@ mod tests {
             recoverable_last_sequence: 9,
             stored_bytes: 120,
             expanded_bytes: 240,
+            journal_max_commits: None,
+            journal_max_bytes: None,
             checksum: String::new(),
         }
     }
