@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::ExecutionControl;
 use crate::db::QueryRowSink;
+use crate::metrics::{MetricOperation, MetricsRegistry, MetricsSnapshot};
+use crate::observability::{
+    EventInput, ObserverConfig, ObserverRegistry, RequestObserver, RequestOperation,
+    duration_micros,
+};
 use crate::protocol::{
     MAX_INTROSPECTION_BYTES, MAX_REQUEST_ID_BYTES, ReceiptOperation, ReceiptOperationResult,
     Request as ProtocolRequest, Response as ProtocolResponse, VERSION, supported_version,
@@ -29,7 +34,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(25);
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerStats {
     pub accepted_connections: usize,
     pub rejected_connections: usize,
@@ -38,7 +43,7 @@ pub struct ServerStats {
     pub concurrency: ConcurrencyStats,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConcurrencyStats {
     pub active_reads: usize,
     pub queued_reads: usize,
@@ -83,6 +88,8 @@ struct ConcurrentEngineInner {
     write_queue_wait_micros: AtomicU64,
     max_write_queue_wait_micros: AtomicU64,
     operations: Mutex<OperationRegistry>,
+    metrics: MetricsRegistry,
+    observer: Option<ObserverRegistry>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,12 +150,16 @@ pub struct ReadOperation {
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
     shutdown: Option<Arc<AtomicBool>>,
+    metrics_started: Instant,
 }
 
 struct OperationGuard {
     engine: ConcurrentEngine,
     id: String,
     finished: bool,
+    metrics_started: Instant,
+    request_id: String,
+    protocol_version: u32,
 }
 
 pub(crate) struct StreamReadExecution {
@@ -158,11 +169,41 @@ pub(crate) struct StreamReadExecution {
     pub(crate) response: ProtocolResponse,
     control: ExecutionControl,
     terminal: OperationGuard,
+    emission_started: Option<Instant>,
+}
+
+struct ProtocolObservationContext<'a> {
+    request_id: Option<&'a str>,
+    protocol_version: Option<u32>,
+    operation: RequestOperation,
+    elapsed: Duration,
+    partial: bool,
+    emission_micros: Option<u64>,
 }
 
 impl ConcurrentEngine {
     pub fn new(engine: Engine) -> Self {
-        Self {
+        Self::build(engine, None).expect("default observer configuration is valid")
+    }
+
+    /// Construct an engine that emits value-free terminal and slow-query events.
+    pub fn with_observer(
+        engine: Engine,
+        config: ObserverConfig,
+        observer: Arc<dyn RequestObserver>,
+    ) -> Result<Self, Error> {
+        Self::build(engine, Some((config, observer)))
+    }
+
+    fn build(
+        engine: Engine,
+        observer: Option<(ObserverConfig, Arc<dyn RequestObserver>)>,
+    ) -> Result<Self, Error> {
+        let receipts = engine.idempotency_status().ok();
+        let observer = observer
+            .map(|(config, observer)| ObserverRegistry::new(config, observer))
+            .transpose()?;
+        Ok(Self {
             inner: Arc::new(ConcurrentEngineInner {
                 engine: Mutex::new(engine),
                 read_slots: Mutex::new(0),
@@ -180,8 +221,10 @@ impl ConcurrentEngine {
                 write_queue_wait_micros: AtomicU64::new(0),
                 max_write_queue_wait_micros: AtomicU64::new(0),
                 operations: Mutex::new(OperationRegistry::default()),
+                metrics: MetricsRegistry::new(receipts.as_ref()),
+                observer,
             }),
-        }
+        })
     }
 
     pub fn register_read(
@@ -197,6 +240,44 @@ impl ConcurrentEngine {
         request: ProtocolRequest,
         deadline: Instant,
         shutdown: Option<Arc<AtomicBool>>,
+    ) -> Result<ReadOperation, Error> {
+        let started = Instant::now();
+        let request_id = request.request_id.clone();
+        let version = request.version;
+        let result = self.try_register_read_with_shutdown(request, deadline, shutdown, started);
+        if let Err(error) = &result {
+            self.inner.metrics.record(
+                MetricOperation::Stream,
+                started.elapsed(),
+                Some(&error.code),
+            );
+            self.observe(EventInput {
+                request_id: Some(&request_id),
+                protocol_version: Some(version),
+                operation: RequestOperation::StreamQuery,
+                schema_revision: None,
+                elapsed: started.elapsed(),
+                execution: None,
+                query_phases: None,
+                analysis: None,
+                mutation: None,
+                returned_rows: 0,
+                plan: None,
+                error_code: Some(&error.code),
+                storage_outcome_uncertain: false,
+                partial: false,
+                emission_micros: None,
+            });
+        }
+        result
+    }
+
+    fn try_register_read_with_shutdown(
+        &self,
+        request: ProtocolRequest,
+        deadline: Instant,
+        shutdown: Option<Arc<AtomicBool>>,
+        metrics_started: Instant,
     ) -> Result<ReadOperation, Error> {
         let statements = validate_read_operation(&request)?;
         let mut registry = self
@@ -237,10 +318,57 @@ impl ConcurrentEngine {
             deadline,
             cancelled,
             shutdown,
+            metrics_started,
         })
     }
 
     pub fn cancel(&self, operation_id: &str) -> Result<CancelResult, Error> {
+        self.cancel_with_context(operation_id, None, None)
+    }
+
+    pub(crate) fn cancel_protocol(
+        &self,
+        operation_id: &str,
+        request_id: &str,
+        protocol_version: u32,
+    ) -> Result<CancelResult, Error> {
+        self.cancel_with_context(operation_id, Some(request_id), Some(protocol_version))
+    }
+
+    fn cancel_with_context(
+        &self,
+        operation_id: &str,
+        request_id: Option<&str>,
+        protocol_version: Option<u32>,
+    ) -> Result<CancelResult, Error> {
+        let started = Instant::now();
+        let result = self.try_cancel(operation_id);
+        self.inner.metrics.record(
+            MetricOperation::Stream,
+            started.elapsed(),
+            result.as_ref().err().map(|error| error.code.as_str()),
+        );
+        self.observe(EventInput {
+            request_id,
+            protocol_version,
+            operation: RequestOperation::StreamCancel,
+            schema_revision: None,
+            elapsed: started.elapsed(),
+            execution: None,
+            query_phases: None,
+            analysis: None,
+            mutation: None,
+            returned_rows: 0,
+            plan: None,
+            error_code: result.as_ref().err().map(|error| error.code.as_str()),
+            storage_outcome_uncertain: false,
+            partial: false,
+            emission_micros: None,
+        });
+        result
+    }
+
+    fn try_cancel(&self, operation_id: &str) -> Result<CancelResult, Error> {
         validate_operation_id(operation_id)?;
         let mut registry = self
             .inner
@@ -377,6 +505,11 @@ impl ConcurrentEngine {
         }
     }
 
+    /// Snapshot bounded, value-free metrics accumulated by this engine handle.
+    pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        self.inner.metrics.snapshot(self.stats())
+    }
+
     pub fn execute(&self, source: &str) -> QueryResponse {
         self.execute_until(source, Instant::now() + EXECUTION_TIMEOUT, None)
     }
@@ -387,7 +520,13 @@ impl ConcurrentEngine {
         deadline: Instant,
         shutdown: Option<&AtomicBool>,
     ) -> QueryResponse {
-        if source_is_read_only(source) {
+        let started = Instant::now();
+        let operation = if source_is_read_only(source) {
+            MetricOperation::Read
+        } else {
+            MetricOperation::Write
+        };
+        let response = if matches!(operation, MetricOperation::Read) {
             match self.with_read_snapshot(deadline, shutdown, |snapshot| {
                 snapshot.execute_with_params_until(
                     source,
@@ -408,7 +547,21 @@ impl ConcurrentEngine {
                     deadline,
                 )
             })
-        }
+        };
+        self.inner.metrics.record(
+            operation,
+            started.elapsed(),
+            response.error.as_ref().map(|error| error.code.as_str()),
+        );
+        self.observe_query_response(
+            None,
+            None,
+            request_operation(operation),
+            started.elapsed(),
+            &response,
+            None,
+        );
+        response
     }
 
     pub fn execute_protocol_request(&self, request: ProtocolRequest) -> ProtocolResponse {
@@ -430,13 +583,58 @@ impl ConcurrentEngine {
         self.with_writer(operation)
     }
 
+    /// Run an observed maintenance operation under exclusive engine access.
+    pub fn with_maintenance<T>(
+        &self,
+        operation: impl FnOnce(&mut Engine) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let started = Instant::now();
+        let (result, schema_revision, mutation, uncertain) = self.with_writer(|engine| {
+            let result = operation(engine);
+            (
+                result,
+                Some(engine.schema_info().revision),
+                engine.last_mutation_profile(),
+                engine.durable_outcome_uncertain(),
+            )
+        });
+        self.inner.metrics.record(
+            MetricOperation::Maintenance,
+            started.elapsed(),
+            result.as_ref().err().map(|_| "E_MAINTENANCE"),
+        );
+        let error_code = result.as_ref().err().map(|_| "E_MAINTENANCE");
+        self.observe(EventInput {
+            request_id: None,
+            protocol_version: None,
+            operation: RequestOperation::Maintenance,
+            schema_revision,
+            elapsed: started.elapsed(),
+            execution: None,
+            query_phases: None,
+            analysis: None,
+            mutation,
+            returned_rows: 0,
+            plan: None,
+            error_code,
+            storage_outcome_uncertain: uncertain,
+            partial: false,
+            emission_micros: None,
+        });
+        result
+    }
+
     fn execute_protocol_request_until_shutdown(
         &self,
         request: ProtocolRequest,
         deadline: Instant,
         shutdown: Option<&AtomicBool>,
     ) -> ProtocolResponse {
-        if protocol_request_is_read_only(&request) {
+        let started = Instant::now();
+        let operation = metric_operation_for_request(&request);
+        let request_id = request.request_id.clone();
+        let protocol_version = request.version;
+        let response = if protocol_request_is_read_only(&request) {
             let request_id = request.request_id.clone();
             let version = request.version;
             match self.with_read_snapshot(deadline, shutdown, |snapshot| {
@@ -452,7 +650,82 @@ impl ConcurrentEngine {
             }
         } else {
             self.with_writer(|engine| execute_protocol_request_until(engine, request, deadline))
+        };
+        self.inner.metrics.record(
+            operation,
+            started.elapsed(),
+            response.error.as_ref().map(|error| error.code.as_str()),
+        );
+        self.observe_protocol_response(
+            ProtocolObservationContext {
+                request_id: Some(&request_id),
+                protocol_version: Some(protocol_version),
+                operation: request_operation(operation),
+                elapsed: started.elapsed(),
+                partial: false,
+                emission_micros: None,
+            },
+            &response,
+        );
+        response
+    }
+
+    fn observe(&self, input: EventInput<'_>) {
+        if let Some(observer) = &self.inner.observer {
+            observer.record(input);
         }
+    }
+
+    fn observe_query_response(
+        &self,
+        request_id: Option<&str>,
+        protocol_version: Option<u32>,
+        operation: RequestOperation,
+        elapsed: Duration,
+        response: &QueryResponse,
+        emission_micros: Option<u64>,
+    ) {
+        self.observe(EventInput {
+            request_id,
+            protocol_version,
+            operation,
+            schema_revision: response.schema.as_ref().map(|schema| schema.revision),
+            elapsed,
+            execution: response.execution,
+            query_phases: response.execution_phases,
+            analysis: response.analysis,
+            mutation: None,
+            returned_rows: response.execution_rows.unwrap_or(response.rows.len()),
+            plan: response.execution_plan.clone(),
+            error_code: response.error.as_ref().map(|error| error.code.as_str()),
+            storage_outcome_uncertain: false,
+            partial: false,
+            emission_micros,
+        });
+    }
+
+    fn observe_protocol_response(
+        &self,
+        context: ProtocolObservationContext<'_>,
+        response: &ProtocolResponse,
+    ) {
+        self.observe(EventInput {
+            request_id: context.request_id,
+            protocol_version: context.protocol_version,
+            operation: context.operation,
+            schema_revision: response.schema.as_ref().map(|schema| schema.revision),
+            elapsed: context.elapsed,
+            execution: response.execution,
+            query_phases: response.execution_phases,
+            analysis: response.analysis,
+            mutation: response.mutation_profile,
+            returned_rows: response.execution_rows.unwrap_or(response.rows.len()),
+            plan: response.execution_plan.clone(),
+            error_code: response.error.as_ref().map(|error| error.code.as_str()),
+            storage_outcome_uncertain: response.storage_outcome_uncertain,
+            partial: context.partial,
+            emission_micros: context.emission_micros,
+        });
     }
 
     fn schema_info(&self) -> crate::SchemaInfo {
@@ -492,7 +765,12 @@ impl ConcurrentEngine {
             }
         }
         let _active = ActiveWrite(&self.inner.active_writes);
-        execute(&mut engine)
+        let result = execute(&mut engine);
+        if engine.idempotency_receipt_count() != self.inner.metrics.receipt_count() {
+            let receipts = engine.idempotency_status().ok();
+            self.inner.metrics.update_receipts(receipts.as_ref());
+        }
+        result
     }
 
     fn with_read_snapshot<T>(
@@ -703,6 +981,9 @@ impl ReadOperation {
             engine: self.engine.clone(),
             id: self.id.clone(),
             finished: false,
+            metrics_started: self.metrics_started,
+            request_id: request.request_id.clone(),
+            protocol_version: request.version,
         };
         let request_id = request.request_id.clone();
         let version = request.version;
@@ -738,6 +1019,7 @@ impl ReadOperation {
             response,
             control,
             terminal,
+            emission_started: None,
         }
     }
 
@@ -751,6 +1033,9 @@ impl ReadOperation {
             engine: self.engine.clone(),
             id: self.id.clone(),
             finished: false,
+            metrics_started: self.metrics_started,
+            request_id: request.request_id.clone(),
+            protocol_version: request.version,
         };
         let request_id = request.request_id.clone();
         let version = request.version;
@@ -759,6 +1044,7 @@ impl ReadOperation {
             Arc::clone(&self.cancelled),
             self.shutdown.clone(),
         );
+        let mut emission_started = None;
         let result = self
             .engine
             .operation_phase(&self.id, OperationPhase::Queued)
@@ -768,6 +1054,7 @@ impl ReadOperation {
                     .with_controlled_read_snapshot(&self.id, &control, |snapshot| {
                         self.engine
                             .operation_phase(&self.id, OperationPhase::Emitting)?;
+                        emission_started = Some(Instant::now());
                         snapshot.execute_read_stream_controlled(
                             statements,
                             parameters,
@@ -790,6 +1077,7 @@ impl ReadOperation {
             response,
             control,
             terminal,
+            emission_started,
         }
     }
 }
@@ -829,6 +1117,26 @@ impl StreamReadExecution {
             );
             self.response.version = self.version;
         }
+        self.terminal.engine.inner.metrics.record(
+            MetricOperation::Stream,
+            self.terminal.metrics_started.elapsed(),
+            self.response
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+        );
+        self.terminal.engine.observe_protocol_response(
+            ProtocolObservationContext {
+                request_id: Some(&self.request_id),
+                protocol_version: Some(self.version),
+                operation: RequestOperation::StreamQuery,
+                elapsed: self.terminal.metrics_started.elapsed(),
+                partial: self.response.error.is_some()
+                    && self.response.execution_rows.unwrap_or(0) > 0,
+                emission_micros: None,
+            },
+            &self.response,
+        );
         self.response
     }
 
@@ -836,8 +1144,43 @@ impl StreamReadExecution {
         self.control.checkpoint()
     }
 
-    pub(crate) fn finish(&mut self, outcome: OperationOutcome) -> OperationOutcome {
-        self.terminal.finish(outcome)
+    pub(crate) fn finish(
+        &mut self,
+        outcome: OperationOutcome,
+        error_code: Option<&str>,
+    ) -> OperationOutcome {
+        let outcome = self.terminal.finish(outcome);
+        let effective_error = match outcome {
+            OperationOutcome::Completed => None,
+            OperationOutcome::Cancelled => Some("E_CANCELLED"),
+            OperationOutcome::Failed => Some(error_code.unwrap_or("E_INTERNAL")),
+        };
+        self.terminal.engine.inner.metrics.record(
+            MetricOperation::Stream,
+            self.terminal.metrics_started.elapsed(),
+            effective_error,
+        );
+        let elapsed = self.terminal.metrics_started.elapsed();
+        self.terminal.engine.observe(EventInput {
+            request_id: Some(&self.request_id),
+            protocol_version: Some(self.version),
+            operation: RequestOperation::StreamQuery,
+            schema_revision: self.response.schema.as_ref().map(|schema| schema.revision),
+            elapsed,
+            execution: self.response.execution,
+            query_phases: self.response.execution_phases,
+            analysis: self.response.analysis,
+            mutation: None,
+            returned_rows: self.response.execution_rows.unwrap_or(0),
+            plan: self.response.execution_plan.clone(),
+            error_code: effective_error,
+            storage_outcome_uncertain: false,
+            partial: effective_error.is_some() && self.response.execution_rows.unwrap_or(0) > 0,
+            emission_micros: self
+                .emission_started
+                .map(|started| duration_micros(started.elapsed())),
+        });
+        outcome
     }
 
     pub(crate) fn cancel_local(&self) {
@@ -856,15 +1199,43 @@ impl OperationGuard {
 impl Drop for OperationGuard {
     fn drop(&mut self) {
         if !self.finished {
-            self.engine
+            let outcome = self
+                .engine
                 .finish_operation(&self.id, OperationOutcome::Failed);
+            let error_code = match outcome {
+                OperationOutcome::Cancelled => "E_CANCELLED",
+                OperationOutcome::Failed => "E_OPERATION_DROPPED",
+                OperationOutcome::Completed => return,
+            };
+            self.engine.inner.metrics.record(
+                MetricOperation::Stream,
+                self.metrics_started.elapsed(),
+                Some(error_code),
+            );
+            self.engine.observe(EventInput {
+                request_id: Some(&self.request_id),
+                protocol_version: Some(self.protocol_version),
+                operation: RequestOperation::StreamQuery,
+                schema_revision: None,
+                elapsed: self.metrics_started.elapsed(),
+                execution: None,
+                query_phases: None,
+                analysis: None,
+                mutation: None,
+                returned_rows: 0,
+                plan: None,
+                error_code: Some(error_code),
+                storage_outcome_uncertain: false,
+                partial: false,
+                emission_micros: None,
+            });
         }
     }
 }
 
 impl Drop for ReadOperation {
     fn drop(&mut self) {
-        if self.request.is_some() {
+        if let Some(request) = &self.request {
             let mut registry = self
                 .engine
                 .inner
@@ -872,6 +1243,29 @@ impl Drop for ReadOperation {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry.active.remove(&self.id);
+            drop(registry);
+            self.engine.inner.metrics.record(
+                MetricOperation::Stream,
+                self.metrics_started.elapsed(),
+                Some("E_OPERATION_DROPPED"),
+            );
+            self.engine.observe(EventInput {
+                request_id: Some(&request.request_id),
+                protocol_version: Some(request.version),
+                operation: RequestOperation::StreamQuery,
+                schema_revision: None,
+                elapsed: self.metrics_started.elapsed(),
+                execution: None,
+                query_phases: None,
+                analysis: None,
+                mutation: None,
+                returned_rows: 0,
+                plan: None,
+                error_code: Some("E_OPERATION_DROPPED"),
+                storage_outcome_uncertain: false,
+                partial: false,
+                emission_micros: None,
+            });
         }
     }
 }
@@ -976,6 +1370,29 @@ fn protocol_request_is_read_only(request: &ProtocolRequest) -> bool {
         Some(ReceiptOperation::Status | ReceiptOperation::Prune { .. }) => true,
         None if request.introspect.is_some() => true,
         None => source_is_read_only(&request.query),
+    }
+}
+
+fn metric_operation_for_request(request: &ProtocolRequest) -> MetricOperation {
+    if request.receipts.is_some() {
+        MetricOperation::Receipt
+    } else if request.introspect.is_some() {
+        MetricOperation::Introspection
+    } else if protocol_request_is_read_only(request) {
+        MetricOperation::Read
+    } else {
+        MetricOperation::Write
+    }
+}
+
+fn request_operation(operation: MetricOperation) -> RequestOperation {
+    match operation {
+        MetricOperation::Read => RequestOperation::Read,
+        MetricOperation::Write => RequestOperation::Write,
+        MetricOperation::Introspection => RequestOperation::Introspection,
+        MetricOperation::Receipt => RequestOperation::Receipt,
+        MetricOperation::Stream => RequestOperation::StreamQuery,
+        MetricOperation::Maintenance => RequestOperation::Maintenance,
     }
 }
 
@@ -1152,23 +1569,26 @@ pub fn serve_until_concurrent(
                 if stats.active.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
                     stats.active.fetch_sub(1, Ordering::AcqRel);
                     stats.rejected.fetch_add(1, Ordering::Relaxed);
+                    engine.inner.metrics.connection_rejected();
                     if let Err(error) = reject_busy(stream) {
                         eprintln!("reject client: {error}");
                     }
                     continue;
                 }
                 stats.accepted.fetch_add(1, Ordering::Relaxed);
+                engine.inner.metrics.connection_accepted();
                 let engine = engine.clone();
                 let stats = Arc::clone(&stats);
                 let shutdown = Arc::clone(&shutdown);
                 std::thread::spawn(move || {
-                    struct Connection(Arc<RuntimeStats>);
+                    struct Connection(Arc<RuntimeStats>, ConcurrentEngine);
                     impl Drop for Connection {
                         fn drop(&mut self) {
                             self.0.active.fetch_sub(1, Ordering::AcqRel);
+                            self.1.inner.metrics.connection_closed();
                         }
                     }
-                    let _connection = Connection(Arc::clone(&stats));
+                    let _connection = Connection(Arc::clone(&stats), engine.clone());
                     if let Err(error) = handle(stream, engine, shutdown, stats) {
                         eprintln!("client error: {error}");
                     }
@@ -1654,6 +2074,12 @@ pub fn execute_protocol_request_until(
     let version = request.version;
     let mut response = execute_versioned_request(engine, request, deadline);
     response.version = version;
+    response.storage_outcome_uncertain = response
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "E_STORAGE")
+        && engine.durable_outcome_uncertain();
+    response.mutation_profile = engine.last_mutation_profile();
     response
 }
 

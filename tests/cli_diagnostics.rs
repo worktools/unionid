@@ -35,7 +35,7 @@ fn version_and_doctor_have_stable_machine_readable_shapes() {
     assert_eq!(version["stream_protocol_versions"], serde_json::json!([1]));
     assert_eq!(
         version["readable_storage_formats"],
-        serde_json::json!([1, 2, 3, 4, 5, 6])
+        serde_json::json!([1, 2, 3, 4, 5, 6, 7])
     );
     assert_eq!(
         version["readable_backup_formats"],
@@ -43,6 +43,7 @@ fn version_and_doctor_have_stable_machine_readable_shapes() {
     );
     assert_eq!(version["current_storage"]["format"], 6);
     assert_eq!(version["current_storage"]["maintenance_codec"], 1);
+    assert_eq!(version["current_storage"]["journal_codec"], 0);
     assert!(version["target"].as_str().unwrap().contains('-'));
 
     let dir = TempDir::new();
@@ -89,6 +90,8 @@ fn compact_cli_reports_success_and_stable_state_errors() {
     let plain = String::from_utf8(plain.stdout).unwrap();
     for field in [
         "redb compaction completed",
+        "fast no-op false",
+        "proof persisted true",
         "before bytes ",
         "after bytes ",
         "reclaimed bytes ",
@@ -110,8 +113,10 @@ fn compact_cli_reports_success_and_stable_state_errors() {
     assert!(json_output.status.success());
     assert!(json_output.stderr.is_empty());
     let json_output = json(&json_output);
-    assert_eq!(json_output["version"], 1);
-    assert!(json_output["changed"].is_boolean());
+    assert_eq!(json_output["version"], 2);
+    assert_eq!(json_output["changed"], false);
+    assert_eq!(json_output["fast_no_op"], true);
+    assert_eq!(json_output["proof_persisted"], true);
     assert!(json_output["before_bytes"].is_u64());
     assert!(json_output["after_bytes"].is_u64());
     assert!(json_output["reclaimed_bytes"].is_u64());

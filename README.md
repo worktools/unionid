@@ -109,6 +109,14 @@ returning {id, state}
 
 `filter`, `select`, `sort`, `take`, `page`, `derive`, `group`, `aggregate`, and query-local `let` are composable stages. Stable cross-request traversal uses `sort {-priority, id} | page 100` and resumes with the opaque response cursor; the order must end in the primary key. `explain from tasks | filter id == 1` reports a plan without reading result rows; `explain analyze ...` executes on the same read snapshot and returns value-free timing, work, and memory observations. See [QUERY.md](docs/QUERY.md) for the complete executable surface.
 
+服务观测可读取有版本、有限 cardinality 的 `ConcurrentEngine::metrics_snapshot()`；可选 `metrics` feature 只渲染 Prometheus 文本，不自动公开网络 endpoint。完整部署边界见 [METRICS.md](docs/METRICS.md)。
+
+Service observability uses the versioned, cardinality-bounded `ConcurrentEngine::metrics_snapshot()`. The optional `metrics` feature only renders Prometheus text and never exposes a network endpoint automatically. See [METRICS.md](docs/METRICS.md) for deployment boundaries.
+
+需要定位单个请求时，可显式配置值无关的 terminal/slow-query observer；request ID 默认省略，也可选择输出 HMAC 摘要。事件、阈值、采样和保留边界见 [OBSERVABILITY.md](docs/OBSERVABILITY.md)。
+
+For individual-request diagnosis, applications can explicitly configure value-free terminal and slow-query observers. Request IDs stay absent by default and may be represented by an opt-in HMAC digest. See [OBSERVABILITY.md](docs/OBSERVABILITY.md) for event, threshold, sampling, and retention rules.
+
 ## 快速开始 / Quick start
 
 需要 Rust 1.94 或更高版本。v0.4.0 发布后可直接从 crates.io 安装；发布前请从对应候选提交构建。

@@ -24,6 +24,14 @@ impl ExecutionObservation {
     }
 }
 
+/// Value-free timing split for a successfully executed query pipeline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct QueryPhaseObservation {
+    pub prepare_micros: u64,
+    pub plan_micros: u64,
+    pub execution_micros: u64,
+}
+
 /// Timings and cardinalities captured while opening a durable redb database.
 ///
 /// The profile is published only after a successful open and never contains
@@ -110,6 +118,8 @@ pub enum DurableCommitMode {
 /// commit, and `sync_micros` covers the synchronous commit call.
 /// `encoded_change_bytes` measures keys, expected before-images, and new
 /// encodings retained by the delta plan; it is not a physical I/O counter.
+/// `journal_micros` and `journal_bytes` are zero unless an explicitly enabled
+/// format-7 backup chain records the commit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DurableCommitProfile {
     pub mode: DurableCommitMode,
@@ -120,10 +130,31 @@ pub struct DurableCommitProfile {
     pub diff_micros: u64,
     pub transaction_apply_micros: u64,
     pub sync_micros: u64,
+    #[serde(default)]
+    pub journal_micros: u64,
+    #[serde(default)]
+    pub journal_bytes: u64,
     pub catalog_changes: usize,
     pub row_changes: usize,
     pub index_changes: usize,
     pub migration_changes: usize,
     pub receipt_changes: usize,
     pub encoded_change_bytes: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DurableCommitProfile;
+
+    #[test]
+    fn durable_commit_profile_reads_pre_journal_json() {
+        let mut value = serde_json::to_value(DurableCommitProfile::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("journal_micros");
+        object.remove("journal_bytes");
+
+        let decoded: DurableCommitProfile = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.journal_micros, 0);
+        assert_eq!(decoded.journal_bytes, 0);
+    }
 }

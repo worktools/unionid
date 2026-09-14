@@ -32,12 +32,14 @@ unionid compact --db app.redb
 unionid compact --db app.redb --format json
 ```
 
-命令本身就是执行授权，不再增加交互确认。它只接受已存在的 redb 文件，不创建空数据库。plain 输出说明是否实际移动页面、压缩前后文件大小、回收字节、schema identity 和 storage format。JSON 使用 version 1 结构：
+命令本身就是执行授权，不再增加交互确认。它只接受已存在的 redb 文件，不创建空数据库。plain 输出区分 changed、native no-op 和 fast no-op，并报告 proof 状态、压缩前后文件大小、回收字节、schema identity 和 storage format。JSON 使用 version 2 结构：
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "changed": true,
+  "fast_no_op": false,
+  "proof_persisted": true,
   "before_bytes": 781025280,
   "after_bytes": 112000000,
   "reclaimed_bytes": 669025280,
@@ -114,6 +116,14 @@ redb 的 `Database::compact()` 返回时文件长度小于其持久化 region �
 
 因此实现按以下顺序执行：native compact → 释放旧句柄并重开同一路径（触发 repair）→ post-check → 发布新的 committed view。这样 repair 发生在同一次维护操作内部，`after_bytes` 等于重开后的 durable 大小；由于 redb 可能把文件向上取整到 region 边界，`changed` 只在文件实际变小时为 true，durable 大小不变即返回 `changed=false`、`reclaimed_bytes=0`。重开仍要求独占，失败按不确定错误处理并要求重开检查。reopen/repair 会完整遍历文件，所以 no-op 也可能有秒级成本，不能当作廉价轮询。
 
+### 9. 实现补充：经过认证的 fast no-op proof
+
+只有 native compact、重开 repair、完整 post-check、committed view 重建和逻辑身份比较全部成功后，unionid 才原子发布 `<database>.unionid-compact-proof.json`。版本化 payload 绑定 database instance ID、commit sequence、schema identity、全部 storage/codec versions、当前 proof token，以及 Unix 文件长度/device/inode 身份；使用数据库已有 cursor secret 计算 HMAC-SHA256，secret 本身不会进入 proof 或 report。redb 在 open/close 时可保留或释放一个有界的 64 KiB region，因此同一认证文件的长度比较只允许这一个固定差额，其他 identity 与 token 比较仍精确。
+
+后续调用完整匹配时，在 full check、row digest、native compact 和 reopen 之前返回 version 2 fast no-op。任何写入都会改变 sequence，文件替换会改变文件或数据库身份。proof 缺失、过大、格式错误、版本未知、认证失败或身份不符都只视为 cache miss，并执行完整路径。proof 只在全部后置条件通过后发布，因此中断不会为未完成的 compact 提供有效证明。没有 Unix device/inode 元数据的平台退化为认证的逻辑身份；当前发布验证覆盖 Linux 和 macOS。
+
+proof 是可丢失的运维元数据，不由 logical backup 复制，不是 restore 的前提，不进入 schema 或 database identity，可随时删除。proof 发布失败时，已经成功的 native 结果仍返回，但 `proof_persisted=false`，下一次调用执行完整路径。
+
 ## English Description
 
 ### 1. Problem and evidence
@@ -130,7 +140,7 @@ Native in-place compaction follows redb's allocator and page rules, preserves ev
 
 ### 3. Interface and report
 
-`unionid compact --db app.redb [--format json]` operates only on an existing writable redb database. The explicit command is sufficient authorization and has no interactive confirmation. Plain and version-1 JSON output report whether pages or file size changed, before/after/reclaimed bytes, schema identity, sequence, storage/codec versions, and `identity_preserved`. Reports omit paths, business values, receipt keys, database instance IDs, and cursor secrets.
+`unionid compact --db app.redb [--format json]` operates only on an existing writable redb database. The explicit command is sufficient authorization and has no interactive confirmation. Plain output distinguishes changed, native no-op, and fast no-op results. Version-2 JSON adds `fast_no_op` and `proof_persisted` to the byte counts, schema identity, sequence, storage/codec versions, and `identity_preserved`. Reports omit paths, business values, receipt keys, database instance IDs, and cursor secrets.
 
 `changed` is true only when the durable file actually got smaller. `reclaimed_bytes` is saturating `before_bytes - after_bytes`. A successful no-op is valid. `after_bytes` is the durable size seen on the next open, not the transient length at which native compact returned; the implementation reopens the database after compact and before the post-check, as described in section 8. File reduction is an observation rather than a guaranteed ratio.
 
@@ -165,3 +175,11 @@ Implementation is split into the core RedbStore/Engine operation, CLI/report/doc
 redb's `Database::compact()` returns while the file is shorter than its persisted region layout. As soon as `check_integrity`, a read transaction, or an ordinary open/close follows on the same handle, the next `Database::open` runs repair and rounds the file up to a region boundary. Reporting the transient length at compact return would make the file look larger on the next open and would report a non-durable reduction on every fresh compact, preventing a stable no-op.
 
 The implementation therefore runs: native compact -> release the old handle and reopen the same path (triggering repair) -> post-check -> publish the new committed view. Repair happens inside the same maintenance operation, and `after_bytes` equals the durable post-reopen size. Because redb may round the file up to a region boundary, `changed` is true only when the file actually got smaller; an unchanged durable size yields `changed=false` and `reclaimed_bytes=0`. Reopen still requires exclusive access and is treated as an uncertain, reopen-required failure if it cannot complete. Reopen/repair traverses the whole file, so even a no-op can cost seconds and is not cheap polling.
+
+### 9. Implementation addendum: authenticated fast no-op proof
+
+After native compaction, reopen repair, the complete post-check, committed-view rebuild, and logical identity comparison all succeed, unionid atomically publishes `<database>.unionid-compact-proof.json`. The versioned payload binds the database instance ID, commit sequence, schema identity, all storage/codec versions, the current proof token, and Unix file length/device/inode identity. It is authenticated with HMAC-SHA256 using the database's existing cursor secret; the secret itself is never written to the proof or report. redb can retain or release one bounded 64 KiB region across open/close, so a matching authenticated file permits only that fixed difference; every other identity and token comparison remains exact.
+
+On a later invocation, a complete match returns a version-2 fast no-op before the full check, row digest, native compact, or reopen. Any write changes the sequence. Replacement changes the file or database identity. Missing, oversized, malformed, unknown-version, unauthenticated, or mismatched proof data is treated as a cache miss and runs the complete path. Publishing happens only after all postconditions pass, so interruption cannot certify an incomplete compaction. On platforms without Unix device/inode metadata, the authenticated logical identity remains the conservative key; current release verification covers Linux and macOS.
+
+The proof is disposable operational metadata. It is not copied by logical backup, is not needed by restore, does not enter schema or database identity, and may be deleted at any time. Failure to publish it leaves a successful native result with `proof_persisted=false`; the next invocation performs the complete path.

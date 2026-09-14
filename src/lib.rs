@@ -18,8 +18,12 @@ pub mod idempotency;
 pub mod introspection;
 mod local;
 mod matching;
+pub mod metrics;
+#[cfg(feature = "metrics")]
+mod metrics_export;
 pub mod migration;
 pub mod model;
+pub mod observability;
 mod ordered_key;
 mod pagination;
 mod params;
@@ -41,15 +45,21 @@ pub mod syntax;
 pub mod wal;
 
 pub use backup::BackupInfo;
+pub use backup::incremental::{
+    BACKUP_JOURNAL_STATUS_VERSION, BackupJournalConfig, BackupJournalState, BackupJournalStatus,
+    DEFAULT_JOURNAL_MAX_BYTES, DEFAULT_JOURNAL_MAX_COMMITS, HARD_JOURNAL_MAX_BYTES,
+    HARD_JOURNAL_MAX_COMMITS,
+};
 #[cfg(feature = "http-client")]
 pub use client::http::{HttpClient, HttpStream};
 #[cfg(feature = "asynchronous")]
 pub use client::{AsyncTcpClient, AsyncTcpStream};
 pub use client::{MAX_RESPONSE_BYTES, TcpClient, TypedStreamEvent};
 pub use db::{
-    IndexRangePlan, IndexTraversal, LookupPlan, PageAccessKind, PageInfo, PageOrder, PagePlan,
-    QueryAccessKind, QueryAccessPlan, QueryAnalysis, QueryPlan, QueryPlanStage, QueryResponse,
-    QueryStageKind, SchemaInfo, TypedPage, UpsertAction,
+    ExecutionPlanObservation, IndexRangePlan, IndexTraversal, LookupPlan,
+    MAX_EXECUTION_PLAN_STAGES, PageAccessKind, PageInfo, PageOrder, PagePlan, QueryAccessKind,
+    QueryAccessPlan, QueryAnalysis, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind,
+    SchemaInfo, TypedPage, UpsertAction,
 };
 pub use engine::{
     Engine, MutationProfile, PreparedQuery, StorageCompaction, StorageIntegrity, StorageUpgrade,
@@ -61,18 +71,29 @@ pub use idempotency::{
     IdempotencyReceipt, IdempotencyStatus, IdempotentExecution,
 };
 pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
+pub use metrics::{
+    ConnectionMetrics, ErrorMetric, LATENCY_BUCKETS_MICROS, LatencyBucket, LatencyHistogram,
+    MAX_METRIC_ERROR_CODES, METRICS_VERSION, MetricsSnapshot, OperationMetrics, OperationsMetrics,
+    ReceiptMetrics,
+};
 pub use migration::{
     MigrationAbort, MigrationApply, MigrationFile, MigrationMaintenance, MigrationMaintenancePhase,
     MigrationPlan, MigrationProgress, MigrationStatus,
 };
 pub use model::{RowId, Value};
+#[cfg(feature = "tracing")]
+pub use observability::TracingObserver;
+pub use observability::{
+    OBSERVABILITY_VERSION, ObservabilityEvent, ObserverConfig, RequestEvent, RequestObserver,
+    RequestOperation, RequestPhaseTimings, RequestTerminal, RequestWork, ResourceLimit,
+};
 pub use portable::{
     CompatibilityAxis, CompatibilityFinding, CompatibilityLevel, EvolutionReport, PortableContract,
     PortableSchemaIdentity, SchemaDescription,
 };
 pub use profile::{
     DurableCommitMode, DurableCommitProfile, ExecutionObservation, MigrationProfile,
-    StorageCheckProfile, StorageOpenProfile,
+    QueryPhaseObservation, StorageCheckProfile, StorageOpenProfile,
 };
 pub use protocol::{
     IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,

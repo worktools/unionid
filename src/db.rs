@@ -898,10 +898,25 @@ pub enum QueryStageKind {
     Page,
 }
 
+pub const MAX_EXECUTION_PLAN_STAGES: usize = 256;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueryPlanStage {
     pub position: usize,
     pub kind: QueryStageKind,
+}
+
+/// Value-free plan shape retained for request observability.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionPlanObservation {
+    pub access: QueryAccessKind,
+    pub stages: Vec<QueryStageKind>,
+    pub stages_truncated: bool,
+    pub lookup_count: usize,
+    pub estimated_rows: usize,
+    pub table_rows: usize,
+    pub sort_satisfied: bool,
+    pub page_seek: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1042,6 +1057,15 @@ pub struct QueryResponse {
     /// part of the JSON/TCP response format.
     #[serde(skip)]
     pub execution: Option<ExecutionObservation>,
+    /// Plan shape without table, field, index, value, or cursor identity.
+    #[serde(skip)]
+    pub execution_plan: Option<ExecutionPlanObservation>,
+    /// Produced row count, including rows written to a streaming sink.
+    #[serde(skip)]
+    pub execution_rows: Option<usize>,
+    /// Successful query phase timings, excluded from response serialization.
+    #[serde(skip)]
+    pub execution_phases: Option<crate::QueryPhaseObservation>,
 }
 
 pub(crate) trait QueryRowSink {
@@ -1103,6 +1127,9 @@ impl QueryResponse {
             page: None,
             analysis: None,
             execution: None,
+            execution_plan: None,
+            execution_rows: None,
+            execution_phases: None,
         }
     }
 
@@ -1122,6 +1149,9 @@ impl QueryResponse {
             page: None,
             analysis: None,
             execution: None,
+            execution_plan: None,
+            execution_rows: None,
+            execution_phases: None,
         }
     }
 
@@ -4256,28 +4286,16 @@ impl Database {
                 ty: self.catalog.describe(&column.ty),
             })
             .collect();
-        let stages = pipeline
+        let stages: Vec<QueryPlanStage> = pipeline
             .stages
             .iter()
             .enumerate()
             .map(|(position, stage)| QueryPlanStage {
                 position: position + 1,
-                kind: match stage {
-                    Stage::Let(_) => QueryStageKind::Let,
-                    Stage::Filter(_) => QueryStageKind::Filter,
-                    Stage::FilterMatch(_) => QueryStageKind::FilterMatch,
-                    Stage::Derive(_) => QueryStageKind::Derive,
-                    Stage::DeriveMatch(_) => QueryStageKind::DeriveMatch,
-                    Stage::Lookup(_) => QueryStageKind::Lookup,
-                    Stage::Aggregate(_) => QueryStageKind::Aggregate,
-                    Stage::Select(_) => QueryStageKind::Select,
-                    Stage::Sort(_) => QueryStageKind::Sort,
-                    Stage::Take { .. } => QueryStageKind::Take,
-                    Stage::Page(_) => QueryStageKind::Page,
-                },
+                kind: query_stage_kind(stage),
             })
             .collect();
-        let lookups = pipeline
+        let lookups: Vec<LookupPlan> = pipeline
             .stages
             .iter()
             .enumerate()
@@ -4322,6 +4340,20 @@ impl Database {
             candidate_rows: access.estimated_rows,
             read_limit: page.spec.limit.saturating_add(1),
             max_cursor_bytes: crate::pagination::MAX_CURSOR_BYTES,
+        });
+        response.execution_plan = Some(ExecutionPlanObservation {
+            access: access.kind,
+            stages: stages
+                .iter()
+                .take(MAX_EXECUTION_PLAN_STAGES)
+                .map(|stage| stage.kind)
+                .collect(),
+            stages_truncated: stages.len() > MAX_EXECUTION_PLAN_STAGES,
+            lookup_count: lookups.len(),
+            estimated_rows: access.estimated_rows,
+            table_rows: access.table_rows,
+            sort_satisfied: access.sort_satisfied,
+            page_seek: access.page_seek,
         });
         response.plan = Some(QueryPlan {
             table: pipeline.from,
@@ -4829,10 +4861,34 @@ impl Database {
         mut sink: Option<&mut dyn QueryRowSink>,
     ) -> Result<QueryResponse> {
         check_deadline(control)?;
+        let prepare_started = Instant::now();
         let schema = self.prepare_pipeline(&mut pipeline)?;
         let prepared_page = self.prepare_page(&pipeline)?;
+        let prepare_micros = instant_elapsed_micros(prepare_started);
+        let plan_started = Instant::now();
         let stats = source.table_stats(&pipeline.from)?;
-        let access = self.plan_access(source, &pipeline, prepared_page.as_ref(), false)?;
+        let access = self.plan_access(source, &pipeline, prepared_page.as_ref(), true)?;
+        let plan_micros = instant_elapsed_micros(plan_started);
+        let execution_started = Instant::now();
+        let execution_plan = ExecutionPlanObservation {
+            access: access.plan.kind,
+            stages: pipeline
+                .stages
+                .iter()
+                .take(MAX_EXECUTION_PLAN_STAGES)
+                .map(query_stage_kind)
+                .collect(),
+            stages_truncated: pipeline.stages.len() > MAX_EXECUTION_PLAN_STAGES,
+            lookup_count: pipeline
+                .stages
+                .iter()
+                .filter(|stage| matches!(stage, Stage::Lookup(_)))
+                .count(),
+            estimated_rows: access.plan.estimated_rows,
+            table_rows: access.plan.table_rows,
+            sort_satisfied: access.plan.sort_satisfied,
+            page_seek: access.plan.page_seek,
+        };
         let mut observation = ExecutionObservation::default();
         let candidates = self.materialize_access_candidates(
             source,
@@ -5173,6 +5229,13 @@ impl Database {
             page: page_info,
             analysis: None,
             execution: Some(observation),
+            execution_plan: Some(execution_plan),
+            execution_rows: Some(row_count),
+            execution_phases: Some(crate::QueryPhaseObservation {
+                prepare_micros,
+                plan_micros,
+                execution_micros: instant_elapsed_micros(execution_started),
+            }),
         })
     }
 
@@ -6405,6 +6468,26 @@ impl Database {
         }
         lines.join("\n")
     }
+}
+
+fn query_stage_kind(stage: &Stage) -> QueryStageKind {
+    match stage {
+        Stage::Let(_) => QueryStageKind::Let,
+        Stage::Filter(_) => QueryStageKind::Filter,
+        Stage::FilterMatch(_) => QueryStageKind::FilterMatch,
+        Stage::Derive(_) => QueryStageKind::Derive,
+        Stage::DeriveMatch(_) => QueryStageKind::DeriveMatch,
+        Stage::Lookup(_) => QueryStageKind::Lookup,
+        Stage::Aggregate(_) => QueryStageKind::Aggregate,
+        Stage::Select(_) => QueryStageKind::Select,
+        Stage::Sort(_) => QueryStageKind::Sort,
+        Stage::Take { .. } => QueryStageKind::Take,
+        Stage::Page(_) => QueryStageKind::Page,
+    }
+}
+
+fn instant_elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 fn type_reaches(catalog: &Catalog, ty: &ScalarType, target: u64, seen: &mut BTreeSet<u64>) -> bool {

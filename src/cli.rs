@@ -98,7 +98,7 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
         );
     } else {
         println!(
-            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance codecs {}/{}/{}/{}/{}/{}\nlogical check {}\nrows/indexes checked {}/{}\npoint lookups {}\nworking peak bytes {}\ntotal/backend/logical micros {}/{}/{}",
+            "redb integrity verified ({})\nschema revision {}\nschema hash {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance/journal codecs {}/{}/{}/{}/{}/{}/{}\nlogical check {}\nrows/indexes checked {}/{}\npoint lookups {}\nworking peak bytes {}\ntotal/backend/logical micros {}/{}/{}",
             if report.backend_clean {
                 "backend was clean"
             } else {
@@ -113,6 +113,7 @@ pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(),
             report.versions.migration_codec,
             report.versions.receipt_codec,
             report.versions.maintenance_codec,
+            report.versions.journal_codec,
             if report.profile.bounded {
                 "bounded"
             } else {
@@ -139,8 +140,16 @@ pub fn compact_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(
         );
     } else {
         println!(
-            "redb compaction completed ({})\nbefore bytes {}\nafter bytes {}\nreclaimed bytes {}\nschema revision {}\nschema hash {}\nsequence {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance codecs {}/{}/{}/{}/{}/{}",
-            if report.changed { "changed" } else { "no-op" },
+            "redb compaction completed ({})\nfast no-op {}\nproof persisted {}\nbefore bytes {}\nafter bytes {}\nreclaimed bytes {}\nschema revision {}\nschema hash {}\nsequence {}\nstorage format {}\ncatalog/value/index/migration/receipt/maintenance/journal codecs {}/{}/{}/{}/{}/{}/{}",
+            if report.changed {
+                "changed"
+            } else if report.fast_no_op {
+                "fast no-op"
+            } else {
+                "native no-op"
+            },
+            report.fast_no_op,
+            report.proof_persisted,
             report.before_bytes,
             report.after_bytes,
             report.reclaimed_bytes,
@@ -154,6 +163,7 @@ pub fn compact_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(
             report.storage.migration_codec,
             report.storage.receipt_codec,
             report.storage.maintenance_codec,
+            report.storage.journal_codec,
         );
     }
     Ok(())
@@ -261,6 +271,126 @@ pub fn backup_create(db: PathBuf, output: PathBuf, json: bool) -> Result<(), Str
 pub fn backup_restore(backup_path: PathBuf, db: PathBuf, json: bool) -> Result<(), String> {
     let info = backup::restore(backup_path, db).map_err(|error| error.to_string())?;
     print_lifecycle(&info, "backup restored", json)
+}
+
+pub fn incremental_backup_init(
+    db: PathBuf,
+    repo: PathBuf,
+    options: backup::incremental::IncrementalInitOptions,
+    json: bool,
+) -> Result<(), String> {
+    let report = backup::incremental::init(db, repo, options).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "incremental backup active: baseline sequence {}, storage format {} -> {}, chain {}{}",
+            report.baseline_sequence,
+            report.previous_storage_format,
+            report.current_storage_format,
+            report.chain_id,
+            if report.resumed { " (resumed)" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_export(
+    db: PathBuf,
+    repo: PathBuf,
+    options: backup::incremental::IncrementalExportOptions,
+    json: bool,
+) -> Result<(), String> {
+    let report =
+        backup::incremental::export(db, repo, options).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else if report.no_op {
+        println!(
+            "incremental backup already exported through sequence {}",
+            report.last_sequence
+        );
+    } else {
+        println!(
+            "exported {} commit(s) in {} segment(s), sequences {}..{}",
+            report.exported_commits,
+            report.created_segments,
+            report.first_sequence.unwrap_or(report.last_sequence),
+            report.last_sequence
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_list(repo: PathBuf, json: bool) -> Result<(), String> {
+    let report = backup::incremental::list(repo).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{} archive: sequences {}..{}, {} segment(s), {} stored bytes",
+            report.chain_id,
+            report.recoverable_first_sequence,
+            report.recoverable_last_sequence,
+            report.segments.len(),
+            report.stored_bytes
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_verify(repo: PathBuf, json: bool) -> Result<(), String> {
+    let report =
+        backup::incremental::verify(repo, Default::default()).map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "verified {} artifact(s), sequences {}..{}, {} orphan(s)",
+            report.artifact_count,
+            report.verified_first_sequence,
+            report.verified_last_sequence,
+            report.orphan_files.len()
+        );
+    }
+    Ok(())
+}
+
+pub fn incremental_backup_restore(
+    repo: PathBuf,
+    db: PathBuf,
+    at_sequence: u64,
+    json: bool,
+) -> Result<(), String> {
+    let report = backup::incremental::restore(repo, db, at_sequence, Default::default())
+        .map_err(|error| error.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "restored incremental sequence {} (schema revision {}, {} row(s), {} receipt(s))",
+            report.restored_sequence,
+            report.schema_revision,
+            report.row_count,
+            report.receipt_count
+        );
+    }
+    Ok(())
 }
 
 pub fn import_legacy(
@@ -1421,6 +1551,7 @@ fn print_introspection(
                 println!("migration codec {}", versions.migration_codec);
                 println!("receipt codec {}", versions.receipt_codec);
                 println!("maintenance codec {}", versions.maintenance_codec);
+                println!("journal codec {}", versions.journal_codec);
                 println!("backup codec {}", versions.backup_codec);
             }
             println!("migrations {}", introspection.migration_count);
@@ -1441,6 +1572,30 @@ fn print_introspection(
                 println!("maintenance indexes {}", maintenance.index_entries_written);
                 println!("maintenance bytes {}", maintenance.logical_bytes);
                 println!("maintenance actions {}", maintenance.actions.join(","));
+            }
+            if let Some(journal) = &introspection.backup_journal {
+                println!("backup journal {:?}", journal.state);
+                println!("backup journal head sequence {}", journal.head_sequence);
+                println!("backup journal commits {}", journal.commit_count);
+                println!("backup journal bytes {}", journal.expanded_bytes);
+                if let Some(chain_id) = &journal.chain_id {
+                    println!("backup journal chain {chain_id}");
+                }
+                if let (Some(first), Some(last)) = (
+                    journal.first_retained_sequence,
+                    journal.last_retained_sequence,
+                ) {
+                    println!("backup journal retained {first}..{last}");
+                }
+                if journal.max_commits > 0 {
+                    println!(
+                        "backup journal capacity {}/{} commits, {}/{} bytes",
+                        journal.commit_count,
+                        journal.max_commits,
+                        journal.expanded_bytes,
+                        journal.max_bytes
+                    );
+                }
             }
         }
     }

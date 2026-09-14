@@ -16,6 +16,8 @@ default = []
 asynchronous = ["dep:tokio", "tokio/io-util", "tokio/net", "tokio/sync", "tokio/time"]
 http = ["asynchronous", "dep:axum", "dep:futures-core", "tokio/sync"]
 http-client = ["asynchronous", "dep:reqwest"]
+metrics = []
+tracing = ["dep:tracing"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -28,8 +30,10 @@ rustyline = { version = "17.0", default-features = false }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.10"
+zstd = { version = "0.13", default-features = false }
 imbl = { version = "7.0.1", features = ["serde"] }
 tokio = { version = "1", features = ["rt"], optional = true }
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 axum = { version = "0.8", optional = true }
 futures-core = { version = "0.3", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
@@ -63,3 +67,7 @@ required-features = ["http", "http-client"]
 [[example]]
 name = "http_service"
 required-features = ["http"]
+
+[[example]]
+name = "metrics"
+required-features = ["metrics"]

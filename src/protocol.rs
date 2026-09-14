@@ -469,6 +469,22 @@ pub struct Response {
     pub page: Option<PageInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analysis: Option<QueryAnalysis>,
+    /// Adapter-local diagnostics; never serialized on the wire.
+    #[serde(skip)]
+    pub execution: Option<crate::ExecutionObservation>,
+    /// Adapter-local value-free plan shape; never serialized on the wire.
+    #[serde(skip)]
+    pub execution_plan: Option<crate::ExecutionPlanObservation>,
+    #[serde(skip)]
+    pub execution_rows: Option<usize>,
+    /// Whether a failed durable operation has an uncertain outcome.
+    #[serde(skip)]
+    pub storage_outcome_uncertain: bool,
+    /// Adapter-local successful mutation phase profile; never serialized.
+    #[serde(skip)]
+    pub mutation_profile: Option<crate::MutationProfile>,
+    #[serde(skip)]
+    pub execution_phases: Option<crate::QueryPhaseObservation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -533,6 +549,10 @@ impl Response {
     }
 
     pub fn from_query(request_id: impl Into<String>, response: QueryResponse) -> Self {
+        let execution = response.execution;
+        let execution_plan = response.execution_plan.clone();
+        let execution_rows = response.execution_rows;
+        let execution_phases = response.execution_phases;
         Self {
             version: VERSION,
             request_id: request_id.into(),
@@ -557,6 +577,12 @@ impl Response {
             plan: response.plan,
             page: response.page,
             analysis: response.analysis,
+            execution,
+            execution_plan,
+            execution_rows,
+            storage_outcome_uncertain: false,
+            mutation_profile: None,
+            execution_phases,
             introspection: None,
             idempotency: None,
             receipts: None,
@@ -600,6 +626,12 @@ impl Response {
             receipts: None,
             page: None,
             analysis: None,
+            execution: None,
+            execution_plan: None,
+            execution_rows: None,
+            storage_outcome_uncertain: false,
+            mutation_profile: None,
+            execution_phases: None,
         }
     }
 

@@ -12,6 +12,8 @@ unionid server --db ./data/app.redb --read-only
 
 ## 有界资源
 
+进程内请求、并发、连接、错误、延迟和 receipt 容量可通过 `ConcurrentEngine::metrics_snapshot()` 读取；默认关闭的 Prometheus 文本、指标语义与安全挂载方式见 [有界服务指标](METRICS.md)。单次请求关联、脱敏 plan/work 画像和慢查询阈值见 [结构化请求与慢查询事件](OBSERVABILITY.md)。exporter 与 observer 都不自动启动或注册 endpoint。
+
 | 资源 | 当前边界 | 超限行为 |
 | --- | --- | --- |
 | 活动 TCP 连接 | 64 | 新连接收到 <code>E_BUSY</code> 后关闭；拒绝处理不创建 worker |
