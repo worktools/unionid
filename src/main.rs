@@ -657,6 +657,15 @@ impl Args {
                                 } | IncrementalBackupCommand::Verify {
                                     format: Format::Json,
                                     ..
+                                } | IncrementalBackupCommand::Checkpoint {
+                                    format: Format::Json,
+                                    ..
+                                } | IncrementalBackupCommand::Prune {
+                                    format: Format::Json,
+                                    ..
+                                } | IncrementalBackupCommand::Disable {
+                                    format: Format::Json,
+                                    ..
                                 }
                             }
                         )
@@ -1315,5 +1324,28 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn incremental_lifecycle_commands_select_json_error_output() {
+        for command in ["checkpoint", "prune", "disable"] {
+            let mut arguments = vec![
+                "unionid",
+                "backup",
+                "incremental",
+                command,
+                "--repo",
+                "backups",
+                "--format",
+                "json",
+            ];
+            if command != "prune" {
+                arguments.extend(["--db", "app.redb"]);
+            } else {
+                arguments.extend(["--before-sequence", "1"]);
+            }
+            let args = Args::try_parse_from(arguments).unwrap();
+            assert!(args.error_output().json, "{command}");
+        }
     }
 }

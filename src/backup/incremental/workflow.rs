@@ -302,6 +302,8 @@ pub fn init(
         expanded_bytes: artifact.expanded_bytes,
         journal_max_commits: None,
         journal_max_bytes: None,
+        checkpoint_previous_first_sequence: None,
+        checkpoint_retired_artifacts: Vec::new(),
         checksum: String::new(),
     };
     let prepared_bytes = publish_manifest(&repo, None, prepared.clone())?;
@@ -586,8 +588,13 @@ pub fn checkpoint(
     prepared.expanded_bytes = prepared.baseline.expanded_bytes;
     prepared.journal_max_commits = Some(status.max_commits);
     prepared.journal_max_bytes = Some(status.max_bytes);
+    prepared.checkpoint_previous_first_sequence = Some(old.recoverable_first_sequence);
+    prepared.checkpoint_retired_artifacts = std::iter::once(old.baseline.clone())
+        .chain(old.segments.iter().cloned())
+        .filter(|artifact| artifact.path != prepared.baseline.path)
+        .collect();
     publish_manifest(&repo, Some(&previous_bytes), prepared.clone())?;
-    finish_checkpoint(&mut engine, &repo, prepared, &options.limits, old)
+    finish_checkpoint(&mut engine, &repo, prepared, &options.limits)
 }
 
 pub fn prune(
@@ -700,21 +707,7 @@ fn resume_checkpoint(
 ) -> Result<IncrementalCheckpointReport> {
     verify_manifest_artifacts(repo, &prepared, limits)?;
     let mut engine = Engine::open_redb(db.to_path_buf())?;
-    let status = engine.backup_journal_status()?;
-    let old_first = status
-        .baseline_sequence
-        .unwrap_or(prepared.baseline.first_sequence);
-    finish_checkpoint(
-        &mut engine,
-        repo,
-        prepared.clone(),
-        limits,
-        ArchiveManifest {
-            recoverable_first_sequence: old_first,
-            ..prepared
-        },
-    )
-    .map(|mut report| {
+    finish_checkpoint(&mut engine, repo, prepared, limits).map(|mut report| {
         report.resumed = true;
         report
     })
@@ -725,7 +718,6 @@ fn finish_checkpoint(
     repo: &Path,
     mut prepared: ArchiveManifest,
     limits: &ArchiveLimits,
-    old: ArchiveManifest,
 ) -> Result<IncrementalCheckpointReport> {
     verify_manifest_artifacts(repo, &prepared, limits)?;
     let status = engine.backup_journal_status()?;
@@ -746,24 +738,27 @@ fn finish_checkpoint(
         engine.enable_backup_journal(checkpoint_journal_config(&prepared)?)?;
     }
     reconcile_identity(&prepared, &engine.backup_journal_status()?)?;
+    let previous_first_sequence = prepared
+        .checkpoint_previous_first_sequence
+        .unwrap_or(prepared.recoverable_first_sequence);
+    let retired_artifacts = prepared.checkpoint_retired_artifacts.len() as u64;
+    let retired_bytes = prepared
+        .checkpoint_retired_artifacts
+        .iter()
+        .fold(0u64, |total, artifact| {
+            total.saturating_add(artifact.stored_bytes)
+        });
     let previous = encode_manifest(prepared.clone())?;
     prepared.state = ManifestState::Active;
     prepared.journal_max_commits = None;
     prepared.journal_max_bytes = None;
+    prepared.checkpoint_previous_first_sequence = None;
+    prepared.checkpoint_retired_artifacts.clear();
     publish_manifest(repo, Some(&previous), prepared.clone())?;
-    let current_path = prepared.baseline.path.as_str();
-    let retired = std::iter::once(&old.baseline)
-        .chain(old.segments.iter())
-        .filter(|artifact| artifact.path != current_path)
-        .collect::<Vec<_>>();
-    let retired_artifacts = retired.len() as u64;
-    let retired_bytes = retired.iter().fold(0u64, |total, artifact| {
-        total.saturating_add(artifact.stored_bytes)
-    });
     Ok(IncrementalCheckpointReport {
         version: INCREMENTAL_BACKUP_REPORT_VERSION,
         chain_id: prepared.chain_id,
-        previous_first_sequence: old.recoverable_first_sequence,
+        previous_first_sequence,
         recoverable_first_sequence: prepared.recoverable_first_sequence,
         recoverable_last_sequence: prepared.recoverable_last_sequence,
         retired_artifacts,
@@ -1862,6 +1857,8 @@ mod tests {
             expanded_bytes: artifact.expanded_bytes,
             journal_max_commits: None,
             journal_max_bytes: None,
+            checkpoint_previous_first_sequence: None,
+            checkpoint_retired_artifacts: Vec::new(),
             checksum: String::new(),
         };
         publish_manifest(&repo, None, manifest.clone()).unwrap();
@@ -2014,11 +2011,25 @@ mod tests {
         prepared.expanded_bytes = prepared.baseline.expanded_bytes;
         prepared.journal_max_commits = Some(status.max_commits);
         prepared.journal_max_bytes = Some(status.max_bytes);
+        let retired = std::iter::once(old.baseline.clone())
+            .chain(old.segments.iter().cloned())
+            .filter(|artifact| artifact.path != prepared.baseline.path)
+            .collect::<Vec<_>>();
+        prepared.checkpoint_previous_first_sequence = Some(old.recoverable_first_sequence);
+        prepared.checkpoint_retired_artifacts = retired.clone();
         publish_manifest(&repo, Some(&encode_manifest(old).unwrap()), prepared).unwrap();
         drop(engine);
 
         let report = checkpoint(&db, &repo, Default::default()).unwrap();
         assert!(report.resumed);
+        assert_eq!(report.retired_artifacts, retired.len() as u64);
+        assert_eq!(
+            report.retired_bytes,
+            retired
+                .iter()
+                .map(|artifact| artifact.stored_bytes)
+                .sum::<u64>()
+        );
         assert_eq!(read_manifest(&repo).unwrap().state, ManifestState::Active);
         let status = Engine::open_redb(db)
             .unwrap()

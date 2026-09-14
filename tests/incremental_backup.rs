@@ -232,7 +232,9 @@ fn restore_replays_each_declared_sequence_to_a_fresh_database() {
     )
     .unwrap();
     let mut middle = Engine::open_redb(middle_target).unwrap();
-    assert!(middle.execute("from items | filter label == \"two\"").ok);
+    let response = middle.execute("from items | filter label == \"two\"");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 1);
 
     let cli_target = temp.path().join("cli.redb");
     let final_sequence_text = final_sequence.to_string();
@@ -385,11 +387,32 @@ fn checkpoint_prune_and_confirmed_disable_bound_retained_history() {
         unionid::backup::incremental::ManifestState::Sealed
     );
     assert_eq!(
-        Engine::open_redb(db)
+        Engine::open_redb(&db)
             .unwrap()
             .backup_journal_status()
             .unwrap()
             .state,
         unionid::backup::incremental::BackupJournalState::Disabled
+    );
+
+    let no_op = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "backup",
+            "incremental",
+            "disable",
+            "--db",
+            db.to_str().unwrap(),
+            "--repo",
+            repo.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(no_op.status.success());
+    assert_eq!(
+        String::from_utf8(no_op.stdout).unwrap(),
+        format!(
+            "incremental archive already sealed at sequence {}\n",
+            checkpoint.recoverable_last_sequence
+        )
     );
 }

@@ -110,6 +110,10 @@ pub struct ArchiveManifest {
     pub journal_max_commits: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_previous_first_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoint_retired_artifacts: Vec<ManifestArtifact>,
     pub checksum: String,
 }
 
@@ -131,6 +135,10 @@ struct ManifestPayload<'a> {
     journal_max_commits: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     journal_max_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_previous_first_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "<[ManifestArtifact]>::is_empty")]
+    checkpoint_retired_artifacts: &'a [ManifestArtifact],
 }
 
 impl Compression {
@@ -631,6 +639,8 @@ fn manifest_payload_bytes(manifest: &ArchiveManifest) -> Result<Vec<u8>> {
         expanded_bytes: manifest.expanded_bytes,
         journal_max_commits: manifest.journal_max_commits,
         journal_max_bytes: manifest.journal_max_bytes,
+        checkpoint_previous_first_sequence: manifest.checkpoint_previous_first_sequence,
+        checkpoint_retired_artifacts: &manifest.checkpoint_retired_artifacts,
     })
     .map_err(|error| archive_error(format!("encode archive manifest payload: {error}")))
 }
@@ -1061,6 +1071,8 @@ mod tests {
             expanded_bytes: 240,
             journal_max_commits: None,
             journal_max_bytes: None,
+            checkpoint_previous_first_sequence: None,
+            checkpoint_retired_artifacts: Vec::new(),
             checksum: String::new(),
         }
     }

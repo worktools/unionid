@@ -458,11 +458,14 @@ pub fn incremental_backup_disable(
             serde_json::to_string(&report).map_err(|error| error.to_string())?
         );
     } else if !report.applied {
-        println!(
-            "would discard unexported sequences {}..{}; rerun with --confirm",
-            report.lost_first_sequence.unwrap_or(0),
-            report.lost_last_sequence.unwrap_or(0)
-        );
+        if let (Some(first), Some(last)) = (report.lost_first_sequence, report.lost_last_sequence) {
+            println!("would discard unexported sequences {first}..{last}; rerun with --confirm");
+        } else {
+            println!(
+                "incremental archive already sealed at sequence {}",
+                report.recoverable_last_sequence
+            );
+        }
     } else {
         println!(
             "incremental archive sealed at sequence {}{}",
