@@ -2,6 +2,12 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      run_v05_backup_evaluator:
+        description: Run the 10k/100k incremental-backup release-candidate evaluator
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*"
@@ -46,6 +52,7 @@ jobs:
             tools/service-load-eval/Cargo.toml \
             tools/churn-eval/Cargo.toml \
             tools/compaction-eval/Cargo.toml \
+            tools/incremental-backup-eval/Cargo.toml \
             tools/adt-interop-eval/Cargo.toml
           do
             cargo fmt --check --manifest-path "$manifest"
@@ -60,7 +67,17 @@ jobs:
           cargo run --release --locked --manifest-path tools/churn-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-churn" 1100 3 20260910 100
           cp "${RUNNER_TEMP}/unionid-churn.redb" "${RUNNER_TEMP}/unionid-compact.redb"
           cargo run --release --locked --manifest-path tools/compaction-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-compact.redb"
+          cargo run --release --locked --manifest-path tools/incremental-backup-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-incremental-backup-smoke" 100 5 50 > "${RUNNER_TEMP}/unionid-incremental-backup-smoke.json"
+          cat "${RUNNER_TEMP}/unionid-incremental-backup-smoke.json"
           python3 scripts/verify-adt-interop-eval.py --rows 100 --samples 1
+      - name: Run v0.5 incremental-backup release-candidate evaluation
+        if: github.event_name == 'workflow_dispatch' && inputs.run_v05_backup_evaluator
+        shell: bash
+        run: |
+          cargo run --release --locked --manifest-path tools/incremental-backup-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-incremental-backup-10k" 10000 30 1000 > "${RUNNER_TEMP}/unionid-incremental-backup-10k.json"
+          cargo run --release --locked --manifest-path tools/incremental-backup-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-incremental-backup-100k" 100000 30 3000 > "${RUNNER_TEMP}/unionid-incremental-backup-100k.json"
+          cat "${RUNNER_TEMP}/unionid-incremental-backup-10k.json"
+          cat "${RUNNER_TEMP}/unionid-incremental-backup-100k.json"
       - name: Check derive crate
         run: |
           cargo fmt --check --manifest-path derive/Cargo.toml
@@ -110,6 +127,7 @@ jobs:
           path: |
             dist/*
             ${{ runner.temp }}/unionid-v*-acceptance.json
+            ${{ runner.temp }}/unionid-incremental-backup-*.json
           if-no-files-found: error
 
   crate-derive:
