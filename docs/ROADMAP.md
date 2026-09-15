@@ -2,7 +2,7 @@
 
 规划日期：2026-09-12。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
-当前验收：[v0.3 #268](https://github.com/worktools/unionid/issues/268) · [v0.4 #269](https://github.com/worktools/unionid/issues/269) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
+当前验收：[v0.5 #320](https://github.com/worktools/unionid/issues/320) · [v0.4 #269](https://github.com/worktools/unionid/issues/269) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
 
 [2026-09-12 ADT 与语言互通评估](assessments/adt-adoption-2026-09-12.md)记录当前实现、独立消费探针、业界对照及采用建议；它是评估快照，不替代 issues 的实时范围与完成状态。 / The dated assessment records implementation evidence, consumer probes, industry comparisons, and adoption proposals; issues remain the source of current scope and status.
 
@@ -231,13 +231,14 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 
 ### v0.5.0 · 可观测、备份与运维 / Observability, backup, and operations
 
-[Milestone 13](https://github.com/worktools/unionid/milestone/13)；独立正确性或安全修复可带证据提前安排。 / Independent correctness or security fixes may be scheduled earlier with evidence.
+[Milestone 13](https://github.com/worktools/unionid/milestone/13)；功能范围已经冻结。v0.5 的位置是约 10k 舒适工作集、单写者、本地嵌入或独立服务的可试用 ADT 数据库；运维能力只支撑安装、typed 应用、重启、诊断、备份恢复和受控部署主链。 / Functionality is frozen. v0.5 is an evaluable ADT database for a comfortable working set around 10k rows, one writer, and embedded or standalone-service use. Operations features support the install, typed-application, restart, diagnosis, backup/restore, and controlled-deployment journey.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#249](https://github.com/worktools/unionid/issues/249) | Metrics、tracing、slow query 与 explain analyze | P1 |
-| [#250](https://github.com/worktools/unionid/issues/250) | 增量/物理备份与 compact no-op / incremental or physical backup and compact no-op | P1 |
-| [#251](https://github.com/worktools/unionid/issues/251) | 认证与 TLS 方案 / authentication and TLS | P1 |
+| [#249](https://github.com/worktools/unionid/issues/249) | Metrics、tracing、slow query 与 explain analyze | 已交付 / Delivered |
+| [#250](https://github.com/worktools/unionid/issues/250) | 增量备份/sequence restore 与 compact no-op / incremental backup/sequence restore and compact no-op | 已交付，待 RC 证据 / Delivered, RC evidence pending |
+| [#251](https://github.com/worktools/unionid/issues/251) | Envoy mTLS 受控网络路径 / Envoy mTLS controlled-network path | 已交付 / Delivered |
+| [#320](https://github.com/worktools/unionid/issues/320) | 版本、用户旅程与候选发布 / version, user journey, and release candidate | 当前 / Current |
 
 ### v0.6.0 · 场景驱动的查询与类型扩展 / Scenario-driven query and type extensions
 
@@ -274,7 +275,7 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 
 ## 当前执行顺序
 
-M0–M9、v0.3.0 与 v0.4.0 的功能 issues 已完成。v0.3.0 候选已通过双平台验收，本地 tag 已准备，正式推送和发布等待最终授权；v0.4.0 由 [#269](https://github.com/worktools/unionid/issues/269) 冻结两个 crate、发布契约、查询生成物、用户文档和独立应用验收，随后运行一次完整 Ubuntu/macOS Release workflow。两个版本的 tag 与公开发布都不能由普通功能 PR 代替。
+M0–M9、v0.3.0、v0.4.0 与 v0.5.0 的功能 issues 已完成。当前只执行 [#320](https://github.com/worktools/unionid/issues/320)：对账文档与 issue、冻结两个 crate 和 release contract，以现有任务类 typed application 验证核心体验，再运行一次 Ubuntu/macOS Release workflow；Linux 同时保留 Envoy 与增量备份 RC 证据。此阶段不增加查询、类型、备份策略或网络功能。tag 与公开发布不能由普通功能 PR 代替。
 
 ## 维护约定
 

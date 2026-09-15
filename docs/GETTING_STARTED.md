@@ -3,7 +3,7 @@
 这份教程从空目录开始，用同一组无分号 ADT 脚本完成建库、查询、更新、关闭重开和完整性检查。发布包内含 `bin/unionid` 和 `tutorial/`。解压后先进入包目录并把二进制加入当前 shell 的 PATH：
 
 ```bash
-cd unionid-v0.4.0-<target>
+cd unionid-v0.5.0-<target>
 export PATH="$PWD/bin:$PATH"
 ```
 
@@ -87,7 +87,20 @@ unionid check --db tasks.redb
 
 最终查询返回两行，并通过 `derive worker = match state` 解构 ADT 产生新列。`doctor` 不改动原文件，只通过临时副本报告存储版本、schema identity 和 ledger 摘要；`check` 则打开原数据库，先执行 redb 完整性检查，再验证 catalog、schema hash、row、稳定 RowId、索引和 migration ledger 的逻辑一致性。
 
-## 5. 改用 TCP 服务
+## 5. 备份并还原
+
+先生成带 checksum 的 logical backup，再还原到不存在的新路径：
+
+```bash
+unionid backup --db tasks.redb --output tasks.backup.json --format json
+unionid restore --backup tasks.backup.json --db restored.redb --format json
+unionid run --db restored.redb --file ../tutorial/04_reopen.uid
+unionid check --db restored.redb
+```
+
+还原库保留 schema、typed rows、稳定 ID、migration ledger 与幂等回执。命令不会覆盖已有目标；增量 archive 与按 sequence 恢复见[备份说明](BACKUP.md)。
+
+## 6. 改用 TCP 服务
 
 服务与本地命令共享同一个 `Engine` 语义。在一个终端启动：
 
@@ -146,7 +159,7 @@ python3 tutorial/validate.py \
 
 ## English walkthrough
 
-The four files under `tutorial/` form one executable five-minute journey. Start with `unionid version --format json`, run `01_setup.uid` against a new `--db` path, query the `Running` variant with `02_running.uid`, atomically change the pending row with `03_update.uid`, then launch a new process with `04_reopen.uid`. Finish with `unionid doctor --db tasks.redb --format json` and `unionid check --db tasks.redb`: doctor reports compatibility and schema/ledger summaries from a private copy without changing the source, while check opens and verifies the actual database. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
+The four files under `tutorial/` form one executable five-minute journey. Start with `unionid version --format json`, run `01_setup.uid` against a new `--db` path, query the `Running` variant with `02_running.uid`, atomically change the pending row with `03_update.uid`, then launch a new process with `04_reopen.uid`. Finish with `doctor`, a full `check`, logical backup, restore to a new path, and the same typed query against the restored database before repeating the journey through TCP. Doctor reports compatibility and schema/ledger summaries from a private copy without changing the source, while check opens and verifies the actual database. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
 
 The TCP commands above execute the same files through `unionid cli --addr`. The Rust example calls `Engine::open_redb` with those same sources. `tutorial/validate.py` runs both paths from an empty directory and compares their typed rows, columns, and schema identity.
 

@@ -120,6 +120,10 @@ jobs:
         shell: bash
         run: |
           version="$(python3 -c 'import json; print(json.load(open("release/contract.json"))["software_version"])')"
+          network_args=()
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            network_args+=(--controlled-network-journey)
+          fi
           python3 scripts/record-release-acceptance.py \
             --dist dist \
             --expected-sha256 "${{ steps.release-digest.outputs.sha256 }}" \
@@ -128,6 +132,7 @@ jobs:
             --workflow-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --runner-os "${{ runner.os }}" \
             --runner-arch "${{ runner.arch }}" \
+            "${network_args[@]}" \
             --output "${RUNNER_TEMP}/unionid-v${version}-acceptance.json"
       - uses: actions/upload-artifact@v7
         with:

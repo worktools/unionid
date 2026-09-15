@@ -9,18 +9,23 @@ import time
 
 
 def run(command):
+    """Run one JSON CLI command and return its decoded response."""
     result = subprocess.run(command, text=True, capture_output=True)
     if result.returncode:
-        raise RuntimeError(f"command failed ({' '.join(map(str, command))}):\n{result.stderr}")
+        raise RuntimeError(
+            f"command failed ({' '.join(map(str, command))}):\n{result.stderr}"
+        )
     return json.loads(result.stdout)
 
 
 def assert_result(response, expected_rows):
+    """Require a successful query response with the expected row count."""
     if not response.get("ok") or len(response.get("rows", [])) != expected_rows:
         raise RuntimeError(f"unexpected response: {json.dumps(response, ensure_ascii=False)}")
 
 
 def main():
+    """Validate the packaged local, recovery, and TCP tutorial journey."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, type=pathlib.Path)
     parser.add_argument("--work-dir", required=True, type=pathlib.Path)
@@ -28,23 +33,119 @@ def main():
     args = parser.parse_args()
     binary = args.binary.resolve()
     work = args.work_dir.resolve()
-    tutorial = (args.tutorial_dir or pathlib.Path(__file__).resolve().parent.parent / "examples" / "getting-started").resolve()
+    tutorial = (
+        args.tutorial_dir
+        or pathlib.Path(__file__).resolve().parent.parent
+        / "examples"
+        / "getting-started"
+    ).resolve()
     if work.exists() and any(work.iterdir()):
         raise RuntimeError(f"work directory must be empty: {work}")
     work.mkdir(parents=True, exist_ok=True)
 
     local_db = work / "local.redb"
-    run([binary, "run", "--db", local_db, "--file", tutorial / "01_setup.uid", "--format", "json"])
-    before = run([binary, "run", "--db", local_db, "--file", tutorial / "02_running.uid", "--format", "json"])
+    run(
+        [
+            binary,
+            "run",
+            "--db",
+            local_db,
+            "--file",
+            tutorial / "01_setup.uid",
+            "--format",
+            "json",
+        ]
+    )
+    before = run(
+        [
+            binary,
+            "run",
+            "--db",
+            local_db,
+            "--file",
+            tutorial / "02_running.uid",
+            "--format",
+            "json",
+        ]
+    )
     assert_result(before, 1)
-    update = run([binary, "run", "--db", local_db, "--file", tutorial / "03_update.uid", "--format", "json"])
+    update = run(
+        [
+            binary,
+            "run",
+            "--db",
+            local_db,
+            "--file",
+            tutorial / "03_update.uid",
+            "--format",
+            "json",
+        ]
+    )
     if update.get("affected_rows") != 1:
         raise RuntimeError("tutorial update did not affect exactly one row")
-    local = run([binary, "run", "--db", local_db, "--file", tutorial / "04_reopen.uid", "--format", "json"])
+    local = run(
+        [
+            binary,
+            "run",
+            "--db",
+            local_db,
+            "--file",
+            tutorial / "04_reopen.uid",
+            "--format",
+            "json",
+        ]
+    )
     assert_result(local, 2)
     integrity = run([binary, "check", "--db", local_db, "--format", "json"])
     if integrity.get("backend") != "redb" or not integrity.get("backend_clean"):
         raise RuntimeError("local redb integrity check failed")
+    diagnosis = run([binary, "doctor", "--db", local_db, "--format", "json"])
+    if diagnosis.get("database", {}).get("storage") != "redb":
+        raise RuntimeError("doctor did not identify the tutorial redb database")
+
+    logical_backup = work / "local.backup.json"
+    restored_db = work / "restored.redb"
+    run(
+        [
+            binary,
+            "backup",
+            "--db",
+            local_db,
+            "--output",
+            logical_backup,
+            "--format",
+            "json",
+        ]
+    )
+    run(
+        [
+            binary,
+            "restore",
+            "--backup",
+            logical_backup,
+            "--db",
+            restored_db,
+            "--format",
+            "json",
+        ]
+    )
+    restored = run(
+        [
+            binary,
+            "run",
+            "--db",
+            restored_db,
+            "--file",
+            tutorial / "04_reopen.uid",
+            "--format",
+            "json",
+        ]
+    )
+    assert_result(restored, 2)
+    for key in ["columns", "rows", "schema"]:
+        if restored[key] != local[key]:
+            raise RuntimeError(f"restored typed {key} differ from the source")
+    run([binary, "check", "--db", restored_db, "--format", "json"])
 
     tcp_db = work / "tcp.redb"
     server = subprocess.Popen(
@@ -82,7 +183,16 @@ def main():
                 server.kill()
                 server.wait()
     run([binary, "check", "--db", tcp_db, "--format", "json"])
-    print(json.dumps({"ok": True, "rows": len(local["rows"]), "schema": local["schema"]}))
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "rows": len(local["rows"]),
+                "restored_rows": len(restored["rows"]),
+                "schema": local["schema"],
+            }
+        )
+    )
 
 
 if __name__ == "__main__":
