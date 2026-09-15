@@ -66,7 +66,7 @@ fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
     let migrations = dir.0.join("migrations");
     std::fs::create_dir(&migrations).unwrap();
     std::fs::write(
-        migrations.join("m0001_enabled.uid"),
+        migrations.join("m0001_enabled.unid"),
         "migration m0001_enabled\n  add field Item.enabled bool = true\n",
     )
     .unwrap();
@@ -361,7 +361,7 @@ fn migration_cli_creates_plans_applies_and_reports_status() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    let first_path = migrations.join("0001_initial_tasks.uid");
+    let first_path = migrations.join("0001_initial_tasks.unid");
     std::fs::write(
         &first_path,
         "migration m0001_initial_tasks\n  add type Task =\n    id int\n    title text\n  add table tasks Task key id\n",
@@ -382,7 +382,7 @@ fn migration_cli_creates_plans_applies_and_reports_status() {
         "{}",
         String::from_utf8_lossy(&second.stderr)
     );
-    let second_path = migrations.join("0002_task_priority.uid");
+    let second_path = migrations.join("0002_task_priority.unid");
     let generated = std::fs::read_to_string(&second_path).unwrap();
     assert!(generated.contains("parent m0001_initial_tasks"));
     std::fs::write(
@@ -1975,5 +1975,88 @@ fn migration_rehearse_applies_to_a_copy_and_leaves_the_source_untouched() {
         std::fs::read(&database).unwrap(),
         source_before_failure,
         "a failed rehearsal must not touch the source database"
+    );
+}
+
+#[test]
+fn source_extension_unid_is_canonical_and_uid_warns() {
+    let dir = TempDir::new();
+    let database = dir.0.join("extensions.redb");
+    let migrations = dir.0.join("migrations");
+    std::fs::create_dir(&migrations).unwrap();
+    std::fs::write(
+        migrations.join("0001_initial.unid"),
+        "migration m0001_initial\n  add type Item =\n    id int\n  add table items Item key id\n",
+    )
+    .unwrap();
+
+    let plan = |path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args([
+                "migration",
+                "plan",
+                "--db",
+                database.to_str().unwrap(),
+                "--dir",
+                path.to_str().unwrap(),
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let unid = plan(&migrations);
+    assert!(
+        unid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unid.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&unid.stderr).contains("deprecated"),
+        "{}",
+        String::from_utf8_lossy(&unid.stderr)
+    );
+    let parsed: MigrationPlan = serde_json::from_slice(&unid.stdout).unwrap();
+    assert_eq!(parsed.pending.len(), 1);
+
+    // The legacy extension still works but warns.
+    std::fs::rename(
+        migrations.join("0001_initial.unid"),
+        migrations.join("0001_initial.uid"),
+    )
+    .unwrap();
+    let uid = plan(&migrations);
+    assert!(
+        uid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&uid.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&uid.stderr).contains("deprecated .uid"),
+        "{}",
+        String::from_utf8_lossy(&uid.stderr)
+    );
+    let parsed: MigrationPlan = serde_json::from_slice(&uid.stdout).unwrap();
+    assert_eq!(parsed.pending.len(), 1);
+
+    // `run --file` warns for a legacy script too.
+    let legacy_script = dir.0.join("legacy.uid");
+    std::fs::write(&legacy_script, "create table t (id int)").unwrap();
+    let run = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--file",
+            legacy_script.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("deprecated .uid"),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
     );
 }

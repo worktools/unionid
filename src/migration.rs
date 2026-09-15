@@ -160,7 +160,10 @@ pub fn load_directory(path: impl AsRef<Path>) -> Result<Vec<MigrationFile>> {
                 .map_err(|error| Error::new("E_IO", format!("read migration entry: {error}")))
         })
         .collect::<Result<Vec<_>>>()?;
-    paths.retain(|path| path.extension().is_some_and(|extension| extension == "uid"));
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(crate::syntax::is_source_extension)
+    });
     paths.sort();
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {

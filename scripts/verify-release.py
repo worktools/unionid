@@ -155,8 +155,8 @@ def main():
             root / "deploy" / "envoy" / "render.py",
             root / "deploy" / "envoy" / "verify.sh",
             root / "tutorial" / "validate.py",
-            root / "tutorial" / "01_setup.uid",
-            root / "tutorial" / "04_reopen.uid",
+            root / "tutorial" / "01_setup.unid",
+            root / "tutorial" / "04_reopen.unid",
         ]
         if not all(path.is_file() for path in required):
             raise RuntimeError("release layout is incomplete")

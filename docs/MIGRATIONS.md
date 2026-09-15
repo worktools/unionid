@@ -1,6 +1,6 @@
 # Schema migration 语言
 
-本页描述当前可执行的 schema migration 语言和版本化 runner。每个 `.uid` 文件包含一个 migration block；文件按名称排序，`parent` 把它们连成不可分叉的单链。runner 计算规范化源码的 SHA-256 checksum，并把 ID、parent、checksum、应用时间和提交后的 schema revision/hash 持久化到 redb ledger。
+本页描述当前可执行的 schema migration 语言和版本化 runner。每个 `.unid` 文件包含一个 migration block（兼容窗口内也接受 `.uid`）；文件按名称排序，`parent` 把它们连成不可分叉的单链。runner 计算规范化源码的 SHA-256 checksum，并把 ID、parent、checksum、应用时间和提交后的 schema revision/hash 持久化到 redb ledger。
 
 storage format 6 使用可恢复的 shadow generation 应用单个文件。runner 保持 active generation 可读，以最多 1,024 条／16 MiB 的源批次转换数据，再用不超过 32 MiB 的事务持久化目标 rows、indexes 和 checkpoint。目标完成并通过有界完整性检查后，一个同步 two-phase transaction 原子切换 active generation、schema identity、sequence 和 ledger；随后分批回收旧 generation。多个待执行文件仍逐个切换：后续文件失败时，之前成功的文件保持已应用状态。没有隐式 down migration；回退通过新的前向 migration 或备份还原完成。
 
@@ -86,7 +86,7 @@ drop key table
 
 ```text
 unionid migration new add_task_priority
-unionid migration diff --db app.redb --schema schema.uid --name add_task_priority
+unionid migration diff --db app.redb --schema schema.unid --name add_task_priority
 unionid migration plan --db app.redb
 unionid migration apply --db app.redb
 unionid migration advance --db app.redb --max-steps 8 --step-delay-ms 250
@@ -94,7 +94,7 @@ unionid migration status --db app.redb
 unionid migration abort --db app.redb
 ```
 
-`new` 生成下一个带序号的 `.uid` 文件和正确 parent，并留下需要编辑的注释占位。保存至少一个 schema 操作后，文件才是有效 migration。例如：
+`new` 生成下一个带序号的 `.unid` 文件和正确 parent，并留下需要编辑的注释占位。保存至少一个 schema 操作后，文件才是有效 migration。例如：
 
 ```text
 migration m0002_add_task_priority

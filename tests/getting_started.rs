@@ -4,10 +4,10 @@ use common::{Server, TempDir};
 use std::process::Command;
 use unionid::{Engine, QueryResponse};
 
-const SETUP: &str = include_str!("../examples/getting-started/01_setup.uid");
-const BEFORE: &str = include_str!("../examples/getting-started/02_running.uid");
-const UPDATE: &str = include_str!("../examples/getting-started/03_update.uid");
-const REOPEN: &str = include_str!("../examples/getting-started/04_reopen.uid");
+const SETUP: &str = include_str!("../examples/getting-started/01_setup.unid");
+const BEFORE: &str = include_str!("../examples/getting-started/02_running.unid");
+const UPDATE: &str = include_str!("../examples/getting-started/03_update.unid");
+const REOPEN: &str = include_str!("../examples/getting-started/04_reopen.unid");
 
 fn success(response: QueryResponse) -> QueryResponse {
     assert!(response.error.is_none(), "{:?}", response.error);
@@ -43,10 +43,10 @@ fn getting_started_is_consistent_across_embedded_local_and_tcp_paths() {
     let dir = TempDir::new();
     let db = dir.0.join("local.redb");
     let db_arg = db.to_str().unwrap();
-    let setup = "examples/getting-started/01_setup.uid";
-    let before = "examples/getting-started/02_running.uid";
-    let update = "examples/getting-started/03_update.uid";
-    let reopen = "examples/getting-started/04_reopen.uid";
+    let setup = "examples/getting-started/01_setup.unid";
+    let before = "examples/getting-started/02_running.unid";
+    let update = "examples/getting-started/03_update.unid";
+    let reopen = "examples/getting-started/04_reopen.unid";
     success(run_cli(&[
         "run", "--db", db_arg, "--file", setup, "--format", "json",
     ]));

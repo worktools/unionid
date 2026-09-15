@@ -464,7 +464,7 @@ enum QueryCommand {
         db: Option<PathBuf>,
         #[arg(long, conflicts_with = "dir", required_unless_present = "dir")]
         file: Option<PathBuf>,
-        /// Recursively generate one shared-model bundle from every `.uid` file.
+        /// Recursively generate one shared-model bundle from every `.unid` file.
         #[arg(long, conflicts_with = "file")]
         dir: Option<PathBuf>,
         /// Public Rust function name; defaults to the query file stem.
@@ -477,10 +477,16 @@ enum QueryCommand {
 
 fn source(query: Option<String>, file: Option<PathBuf>) -> Result<Option<String>, String> {
     match file {
-        Some(path) => cli::read_source(
-            std::fs::File::open(&path).map_err(|e| format!("open '{}': {e}", path.display()))?,
-        )
-        .map(Some),
+        Some(path) => {
+            if let Some(warning) = unionid::syntax::legacy_extension_warning(&path) {
+                eprintln!("warning: {warning}");
+            }
+            cli::read_source(
+                std::fs::File::open(&path)
+                    .map_err(|e| format!("open '{}': {e}", path.display()))?,
+            )
+            .map(Some)
+        }
         None => Ok(query),
     }
 }

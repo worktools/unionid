@@ -260,7 +260,7 @@ Rust 客户端可以调用 `unionid::input_status(source)`，在执行前得到 
 
 `unionid::format_source(source)` 先解析完整脚本，再输出确定的无分号源码。顶层语句用一个空行分隔，缩进固定为两个空格，pipeline 每个 stage 独占一行，select 和多键 sort 使用 `{}`，兼容的 `=`/`limit` 会归一为 `==`/`take`。formatter 按 bool 与算术 precedence 生成必要括号；嵌套函数、ADT pattern/value、migration transform 和 explain 都可再次解析。格式化后的第二次输出保持字节不变，schema-only 脚本保持 schema identity。
 
-`unionid fmt --file path.uid` 把结果写到 stdout，不修改源文件；不提供 `--file` 时读取 stdin。`unionid fmt --file path.uid --check` 只校验，格式漂移或语法错误返回非零，语法错误保留 span。注释文本会保留；当前 parser AST 不保存 trivia 的精确节点归属，因此 inline 或 block 内注释会稳定移动到随后的顶层语句边界，文件尾注释保留在末尾。
+`unionid fmt --file path.unid` 把结果写到 stdout，不修改源文件；不提供 `--file` 时读取 stdin。`unionid fmt --file path.unid --check` 只校验，格式漂移或语法错误返回非零，语法错误保留 span。注释文本会保留；当前 parser AST 不保存 trivia 的精确节点归属，因此 inline 或 block 内注释会稳定移动到随后的顶层语句边界，文件尾注释保留在末尾。
 
 一次 `Engine.execute`、一次 `run` 或一个 TCP 请求是一个原子批次：先解析全部源码，再在候选状态中执行；任一步失败则不发布此次请求的任何修改。成功返回最后一条语句的结果，批次中的查询可以看到前面的写入。当前通过复制内存数据库实现写批次隔离，适合小工作集，尚未优化大批量写入的内存成本。
 

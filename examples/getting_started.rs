@@ -17,12 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let mut engine = Engine::open_redb(&path)?;
-        require_ok(engine.execute(include_str!("getting-started/01_setup.uid")))?;
-        require_ok(engine.execute(include_str!("getting-started/02_running.uid")))?;
-        require_ok(engine.execute(include_str!("getting-started/03_update.uid")))?;
+        require_ok(engine.execute(include_str!("getting-started/01_setup.unid")))?;
+        require_ok(engine.execute(include_str!("getting-started/02_running.unid")))?;
+        require_ok(engine.execute(include_str!("getting-started/03_update.unid")))?;
     }
     let mut reopened = Engine::open_redb(&path)?;
-    let response = require_ok(reopened.execute(include_str!("getting-started/04_reopen.uid")))?;
+    let response = require_ok(reopened.execute(include_str!("getting-started/04_reopen.unid")))?;
     println!("{}", serde_json::to_string_pretty(&response.rows)?);
     Ok(())
 }

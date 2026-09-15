@@ -24,9 +24,19 @@ v0.5 发布包同时携带 `RELEASE.json` 和独立的 `release/contract.json`�
 
 Before upgrading or switching maintenance binaries, export and verify any active incremental chain. To bound archive history, checkpoint first and then preview/confirm prune; never delete manifest-referenced files directly. Use incremental disable to stop journaling. Export an unsealed tail unless its restore points are deliberately abandoned with `--discard-unexported --confirm`. Disabling does not downgrade storage format 7 to format 6.
 
+## 源文件后缀：`.uid` → `.unid`
+
+`.unid` 是 Unionid 源文件（schema、query、migration）的规范后缀，`.uid` 进入兼容窗口：
+
+- `run`/`cli --file`、`schema check`、`fmt`、`query rust` 以及 migration/query 目录扫描同时接受 `.unid` 和 `.uid`。
+- 使用 `.uid` 时 stderr 输出稳定的弃用提示 `'<path>' uses the deprecated .uid extension; rename it to .unid`；文件内容与执行语义不变。
+- `migration new` 生成 `.unid`。
+- migration checksum 只基于文件内容、不包含路径，因此把已有 migration 文件从 `.uid` 重命名为 `.unid` 不会改变已应用的 ledger，也不会触发重复应用。
+- 迁移步骤：`git mv schema.uid schema.unid`（以及同目录其余 `.uid` 文件），把应用、脚本和生成命令中的路径改为 `.unid`，再运行 `unionid migration status` 确认 applied/pending 不变。兼容窗口会在后续较大版本边界移除，届时只接受 `.unid`。
+
 ### 从 v0.3.0 或 v0.4.0 升级
 
-v0.5.0 可直接打开 v0.3.0/v0.4.0 的 format-6 数据库。先在副本上运行 `doctor`、`check` 和应用读写。若应用使用静态查询生成物，应使用 v0.5.0 binary 对当前 schema 与全部 `.uid` 查询重新运行 `query rust`，提交新的 digest，并重新编译客户端。启用增量备份前先保留 logical backup；一旦进入 format 7，旧二进制会明确拒绝打开。
+v0.5.0 可直接打开 v0.3.0/v0.4.0 的 format-6 数据库。先在副本上运行 `doctor`、`check` 和应用读写。若应用使用静态查询生成物，应使用 v0.5.0 binary 对当前 schema 与全部 `.unid`（或兼容 `.uid`）查询重新运行 `query rust`，提交新的 digest，并重新编译客户端。启用增量备份前先保留 logical backup；一旦进入 format 7，旧二进制会明确拒绝打开。
 
 ### 从公开 v0.1.0 升级
 
@@ -97,9 +107,13 @@ The current binary reads storage formats 1–7. New databases start at format 6 
 
 Only `backup incremental init` / `Engine::enable_backup_journal` performs 6-to-7; database creation and ordinary writes remain on format 6. Format 7 adds journal codec 1 and has no in-place downgrade. To return to a binary that does not understand format 7, restore the logical backup made before enablement into a new path.
 
+### Source file extension: `.uid` to `.unid`
+
+`.unid` is the canonical extension for Unionid source files (schema, query, migration); `.uid` is in a compatibility window. `run`/`cli --file`, `schema check`, `fmt`, `query rust`, and migration/query directory scans accept both. A `.uid` path prints a stable deprecation on stderr (`'<path>' uses the deprecated .uid extension; rename it to .unid`) without changing content or semantics, and `migration new` writes `.unid`. Migration checksums are content-only and do not include the path, so renaming an existing migration from `.uid` to `.unid` preserves the applied ledger and never re-applies it. To migrate, `git mv schema.uid schema.unid` (and the remaining `.uid` files), update application/script/generated paths to `.unid`, then confirm `migration status` is unchanged. The compatibility window closes at a later major boundary, after which only `.unid` is accepted.
+
 ### Upgrading from v0.3.0 or v0.4.0
 
-v0.5.0 directly opens v0.3.0/v0.4.0 format-6 databases. Run doctor, check, and application reads/writes on a copy first. Applications using generated static queries must rerun `query rust` with v0.5.0 over the current schema and every `.uid` query, commit the new digests, and recompile the client. Keep a logical backup before enabling incremental backup; after the database enters format 7, older binaries reject it explicitly.
+v0.5.0 directly opens v0.3.0/v0.4.0 format-6 databases. Run doctor, check, and application reads/writes on a copy first. Applications using generated static queries must rerun `query rust` with v0.5.0 over the current schema and every `.unid` (or compatible `.uid`) query, commit the new digests, and recompile the client. Keep a logical backup before enabling incremental backup; after the database enters format 7, older binaries reject it explicitly.
 
 ### Upgrading from the public v0.1.0
 

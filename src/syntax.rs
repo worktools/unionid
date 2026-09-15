@@ -17,6 +17,32 @@ use crate::query::{
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 
+/// Canonical extension for Unionid source files (schema, query, migration).
+pub const SOURCE_EXTENSION: &str = "unid";
+/// Legacy extension accepted during the compatibility window.
+pub const LEGACY_SOURCE_EXTENSION: &str = "uid";
+
+/// True when `extension` names a supported Unionid source file.
+pub fn is_source_extension(extension: &std::ffi::OsStr) -> bool {
+    extension == SOURCE_EXTENSION || extension == LEGACY_SOURCE_EXTENSION
+}
+
+/// True when `extension` is the legacy extension that triggers a deprecation.
+pub fn is_legacy_source_extension(extension: &std::ffi::OsStr) -> bool {
+    extension == LEGACY_SOURCE_EXTENSION
+}
+
+/// A stable, actionable deprecation warning for a legacy `.uid` path.
+pub fn legacy_extension_warning(path: &std::path::Path) -> Option<String> {
+    let extension = path.extension()?;
+    is_legacy_source_extension(extension).then(|| {
+        format!(
+            "'{}' uses the deprecated .uid extension; rename it to .unid",
+            path.display()
+        )
+    })
+}
+
 /// Syntactic readiness of a source buffer, without schema or type checking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "error", rename_all = "snake_case")]
