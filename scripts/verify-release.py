@@ -14,6 +14,7 @@ CONTRACT_PATH = ROOT / "release" / "contract.json"
 
 
 def reported_capabilities(report):
+    """Normalize packaged runtime capabilities for contract verification."""
     storage = report["current_storage"]
     return {
         "version_report_schema": report["schema_version"],
@@ -34,6 +35,7 @@ def reported_capabilities(report):
 
 
 def main():
+    """Verify archive integrity, contract identity, and packaged user journeys."""
     parser = argparse.ArgumentParser(description="Verify a unionid release archive and tutorial")
     parser.add_argument("--dist", required=True, type=pathlib.Path)
     parser.add_argument(

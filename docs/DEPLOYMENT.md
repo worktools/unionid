@@ -49,6 +49,7 @@ install -d -m 0700 /etc/unionid
 python3 deploy/envoy/render.py \
   --listen-address 10.20.0.15 \
   --listen-port 8443 \
+  --client-uri-san spiffe://unionid.internal/writer \
   --output /etc/unionid/envoy.yaml
 export UNIONID_ENVOY_CONFIG=/etc/unionid/envoy.yaml
 export UNIONID_ENVOY_UID="$(id -u envoy)"
@@ -72,9 +73,9 @@ printf '%s\n' '{"version":1,"request_id":"gateway-read","query":"from tasks | ta
     -key "$certificate_dir/client/client.key"
 ```
 
-生产证书的 SAN 应使用真实网关名称，并把 `-servername` 改成该名称。参考配置只信任 CA；如果同一 CA 还签发其他用途的客户端证书，应在 `validation_context` 增加 `match_typed_subject_alt_names`，或为 Unionid 使用独立 CA。
+生产 server 证书的 SAN 应使用真实网关名称，并把 `-servername` 改成该名称。渲染后的配置同时验证客户端 CA、精确 URI SAN 和 `/certs/ca.crl`；`--client-uri-san` 必须与获准客户端证书一致。建议为每个只读/可写实例使用独立 URI SAN 与 CA。签发或吊销证书后生成新的 PEM CRL，以临时文件写入、校验后原子替换 `ca.crl`，再滚动重启/热重载 Envoy；过期 CRL 也必须在证书到期前更新。
 
-从源码仓库可执行完整验收。它使用隔离的临时 redb 和两天证书，验证有证书读取、无证书拒绝、Envoy 审计身份、`SIGTERM` 优雅关闭、重开完整检查，以及 `--read-only` 后写入返回 `E_READ_ONLY`：
+从源码仓库可执行完整验收。它使用隔离的临时 redb 和两天证书，验证精确 URI SAN 的证书可读取、无证书和同 CA 错误 SAN 证书均被拒绝、Envoy 审计身份、`SIGTERM` 优雅关闭、重开完整检查，以及 `--read-only` 后写入返回 `E_READ_ONLY`：
 
 ```bash
 cargo build --locked --bin unionid
@@ -114,7 +115,8 @@ raw TCP 网关无法传递逐请求 deadline；Unionid 的 25 秒执行 deadline
 | 超过 64 个网关连接 | Envoy connection-limit filter 关闭新增连接 | 客户端退避；检查连接泄漏和服务指标 |
 | 请求执行超过 25 秒 | Unionid 返回 `E_TIMEOUT`，候选写入不提交 | 缩小工作集或增加 indexed filter |
 | 网关 idle timeout | 连接在 35 秒无活动后关闭 | 重连；幂等写使用相同 key 和完整请求 |
-| 证书被盗或错误签发 | 该证书获得对应实例的完整权限 | 吊销/轮换证书与 CA，检查网关和 Unionid 审计 |
+| 证书被盗或错误签发 | 匹配该实例 URI SAN 的证书获得完整权限 | 吊销 serial、原子发布新 CRL 并重载 Envoy；必要时轮换 CA，检查审计 |
+| CRL 缺失、损坏或过期 | Envoy 启动/客户端验证失败并保持 fail closed | 从受控 CA 发布已校验的新 CRL，再重载网关 |
 
 参考字段来自 Envoy 官方的 [mTLS 指南](https://www.envoyproxy.io/docs/envoy/v1.39.1/start/quick-start/securing.html#use-mutual-tls-mtls-to-enforce-client-certificate-authentication)、[connection-limit filter](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/listeners/network_filters/connection_limit_filter)、[XFCC 处理](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/http/http_conn_man/headers#x-forwarded-client-cert)与 [access-log formatter](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/advanced/substitution_formatter)。部署时应跟进 Envoy 安全修复，并在升级镜像后重新运行验收。
 
@@ -139,11 +141,11 @@ docker compose --project-directory deploy/envoy \
 
 The generator separates `authority/`, `gateway/`, and `client/`. Compose mounts only the `0700` gateway directory, which contains neither the CA private key nor the client private key, and runs Envoy with that directory owner's explicit UID/GID. `server.key` remains `0400`.
 
-Start Unionid separately with `unionid server --db /var/lib/unionid/app.redb --addr 127.0.0.1:7878`. The Compose reference uses Linux host networking so Envoy can reach host loopback without mounting the database, and the checked-in config listens only on `127.0.0.1:8443`. Render an explicit controlled address with `python3 deploy/envoy/render.py --listen-address 10.20.0.15 --listen-port 8443 --output /etc/unionid/envoy.yaml`, export that absolute path as `UNIONID_ENVOY_CONFIG`, and restrict sources with host and upstream network policy. The renderer rejects unspecified addresses. On non-Linux hosts, run native Envoy with the same rendered config; do not expose Unionid on `0.0.0.0:7878` to make Docker bridge networking work.
+Start Unionid separately with `unionid server --db /var/lib/unionid/app.redb --addr 127.0.0.1:7878`. The Compose reference uses Linux host networking so Envoy can reach host loopback without mounting the database, and the checked-in config listens only on `127.0.0.1:8443`. Render an explicit controlled address and exact authorized client identity with `python3 deploy/envoy/render.py --listen-address 10.20.0.15 --listen-port 8443 --client-uri-san spiffe://unionid.internal/writer --output /etc/unionid/envoy.yaml`, export that absolute path as `UNIONID_ENVOY_CONFIG`, and restrict sources with host and upstream network policy. The renderer rejects unspecified addresses and unsafe URI input. On non-Linux hosts, run native Envoy with the same rendered config; do not expose Unionid on `0.0.0.0:7878` to make Docker bridge networking work.
 
 Production keys should be owned by dedicated identities with `0700` certificate directories and `0400` private keys; never place the CA or client private key on the gateway host.
 
-Use a production server certificate whose SAN matches the gateway name. The checked-in config trusts the complete client CA; add `match_typed_subject_alt_names` or use a dedicated Unionid CA if that CA issues certificates for other purposes. A client sends the unchanged JSON Lines protocol through the authenticated TLS tunnel, as in the `openssl s_client` command in the Chinese walkthrough.
+Use a production server certificate whose SAN matches the gateway name. The rendered configuration validates the client CA, an exact URI SAN selected with `--client-uri-san`, and `/certs/ca.crl`; use distinct URI SANs and preferably distinct CAs for read-only and writable instances. After issuance or revocation, produce a new PEM CRL through a temporary file, validate it, atomically replace `ca.crl`, and roll or hot-reload Envoy. Refresh the CRL before it expires. A client sends the unchanged JSON Lines protocol through the authenticated TLS tunnel, as in the `openssl s_client` command in the Chinese walkthrough.
 
 Run the real journey with:
 
@@ -152,7 +154,7 @@ cargo build --locked --bin unionid
 deploy/envoy/verify.sh target/debug/unionid
 ```
 
-It verifies an authenticated read, rejection without a client certificate, audited certificate identity, graceful `SIGTERM`, a full database check after reopen, and `E_READ_ONLY` for a write through a restarted read-only service. It requires Linux, Docker Compose v2, OpenSSL, and Python 3 and occupies local ports `7878` and `8443`; use `bin/unionid` as the argument inside a release package. Daily Ubuntu CI checks only the reference invariants; the container journey runs in the Linux release job and never adds a routine macOS job.
+It verifies a read with the exact authorized URI SAN, rejection without a certificate and with a wrong-SAN certificate from the same CA, audited certificate identity, graceful `SIGTERM`, a full database check after reopen, and `E_READ_ONLY` for a write through a restarted read-only service. It requires Linux, Docker Compose v2, OpenSSL, and Python 3 and occupies local ports `7878` and `8443`; use `bin/unionid` as the argument inside a release package. Daily Ubuntu CI checks only the reference invariants; the container journey runs in the Linux release job and never adds a routine macOS job.
 
 Treat schema/data mutations, migrations, and receipt pruning as write authority. Receipt status exposes retry-window and commit-sequence metadata and also belongs behind an operations identity. The Envoy log records the peer address, certificate subject and SHA-256 fingerprint, TLS version, byte counts, and response flags. It deliberately excludes payloads, queries, parameters, rows, idempotency keys, and stream capabilities.
 
@@ -162,6 +164,6 @@ For HTTP mTLS, configure `HttpConnectionManager` with `forward_client_cert_detai
 
 The L4 gateway cannot propagate a per-request deadline. Unionid's 25 seconds remains authoritative, while Envoy's 35-second idle timeout leaves time for a structured `E_TIMEOUT`. An embedded HTTP service should set `Config::request_timeout` below its outer HTTP-gateway timeout. During maintenance, stop new load-balancer traffic, drain Envoy, send `SIGTERM` to Unionid, wait for accepted work to finish or reach its deadline and for the redb lock to be released, then stop the gateway. A disconnected client does not undo a committed write; safe retry still requires the identical request and `idempotency_key`.
 
-Expected failures are explicit: invalid or absent certificates fail the TLS handshake; unavailable loopback upstreams produce an Envoy upstream failure; excess connections are closed by the 64-connection filter; Unionid returns `E_TIMEOUT` at 25 seconds; idle tunnels close after 35 seconds. A stolen trusted certificate has the full authority of its instance and requires certificate/CA rotation plus an audit review.
+Expected failures are explicit: invalid, revoked, wrong-SAN, or absent certificates fail the TLS handshake; a missing, corrupt, or expired CRL keeps validation fail closed; unavailable loopback upstreams produce an Envoy upstream failure; excess connections are closed by the 64-connection filter; Unionid returns `E_TIMEOUT` at 25 seconds; idle tunnels close after 35 seconds. A stolen matching certificate has the full authority of its instance: revoke its serial, publish and reload a new CRL, rotate the CA if needed, and review the audit trail.
 
 The reference follows Envoy's official [mTLS guide](https://www.envoyproxy.io/docs/envoy/v1.39.1/start/quick-start/securing.html#use-mutual-tls-mtls-to-enforce-client-certificate-authentication), [connection-limit filter](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/listeners/network_filters/connection_limit_filter), [XFCC handling](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/http/http_conn_man/headers#x-forwarded-client-cert), and [access-log formatter](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/advanced/substitution_formatter). Track Envoy security releases and rerun the journey after image upgrades.

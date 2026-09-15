@@ -18,6 +18,12 @@ static_resources:
                 validation_context:
                   trusted_ca:
                     filename: /certs/ca.crt
+                  crl:
+                    filename: /certs/ca.crl
+                  match_typed_subject_alt_names:
+                    - san_type: URI
+                      matcher:
+                        exact: "spiffe://unionid.dev/client"
                 tls_certificates:
                   - certificate_chain:
                       filename: /certs/server.crt

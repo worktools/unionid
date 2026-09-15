@@ -68,6 +68,8 @@ if [[ -e "$UNIONID_CERT_DIR/ca.key" || -e "$UNIONID_CERT_DIR/client.key" ]]; the
   echo "gateway certificate directory contains a CA or client private key" >&2
   exit 1
 fi
+openssl crl -in "$UNIONID_CERT_DIR/ca.crl" -noout -verify \
+  -CAfile "$UNIONID_CERT_DIR/ca.crt" >/dev/null 2>&1
 python3 "$repository_root/deploy/envoy/render.py" \
   --listen-port "$gateway_port" --output "$envoy_config"
 setup='create table tasks (id int, title text)
@@ -99,6 +101,11 @@ if [[ "${ready:-false}" != true ]]; then
 fi
 python3 "$repository_root/deploy/envoy/probe.py" reject \
   --port "$gateway_port" --ca "$certificate_dir/client/ca.crt"
+python3 "$repository_root/deploy/envoy/probe.py" reject-identity \
+  --port "$gateway_port" \
+  --ca "$certificate_dir/client/ca.crt" \
+  --cert "$certificate_dir/client/other-client.crt" \
+  --key "$certificate_dir/client/other-client.key"
 
 stop_server
 "$unionid_binary" check --db "$database" >/dev/null
@@ -127,4 +134,4 @@ if ! grep -q 'unionid-development-client' "$compose_log"; then
   exit 1
 fi
 
-echo '{"ok":true,"mtls":true,"anonymous_rejected":true,"read_only":true,"graceful_shutdown":true,"audit_identity":true}'
+echo '{"ok":true,"mtls":true,"anonymous_rejected":true,"wrong_identity_rejected":true,"read_only":true,"graceful_shutdown":true,"audit_identity":true}'

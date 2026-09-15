@@ -15,10 +15,12 @@ CONTRACT_PATH = ROOT / "release" / "contract.json"
 
 
 def command(*args):
+    """Run a repository command and return its trimmed standard output."""
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
 
 
 def add_bytes(archive, name, data, mode=0o644):
+    """Add deterministic in-memory content to a release archive."""
     info = tarfile.TarInfo(name)
     info.size = len(data)
     info.mode = mode
@@ -31,6 +33,7 @@ def add_bytes(archive, name, data, mode=0o644):
 
 
 def reported_capabilities(report):
+    """Normalize runtime capabilities for comparison with the release contract."""
     storage = report["current_storage"]
     return {
         "version_report_schema": report["schema_version"],
@@ -51,6 +54,7 @@ def reported_capabilities(report):
 
 
 def main():
+    """Build a deterministic native release archive and its metadata."""
     parser = argparse.ArgumentParser(description="Build a deterministic unionid release archive")
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "dist")
     parser.add_argument("--target")

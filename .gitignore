@@ -8,6 +8,5 @@
 /tools/churn-eval/target
 /tools/compaction-eval/target
 /tools/adt-interop-eval/target
-/tools/incremental-backup-eval/target
 /derive/target
 /dist

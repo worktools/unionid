@@ -7,6 +7,7 @@ import sys
 
 
 def request(args, query, with_client_certificate=True):
+    """Send one bounded JSON Lines request through the TLS gateway."""
     context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=args.ca)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
     if with_client_certificate:
@@ -28,13 +29,17 @@ def request(args, query, with_client_certificate=True):
 
 
 def validate_response_identity(response, request_id):
+    """Require the protocol version and request identity used by the probe."""
     if response.get("version") != 1 or response.get("request_id") != request_id:
         raise RuntimeError(f"response identity mismatch: {response!r}")
 
 
 def main():
+    """Run one authenticated or expected-rejection gateway probe."""
     parser = argparse.ArgumentParser(description="Probe the Unionid Envoy mTLS reference")
-    parser.add_argument("mode", choices=("read", "reject", "read-only"))
+    parser.add_argument(
+        "mode", choices=("read", "reject", "reject-identity", "read-only")
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--ca", required=True)
@@ -44,13 +49,22 @@ def main():
     if args.mode != "reject" and (not args.cert or not args.key):
         parser.error("--cert and --key are required for authenticated probes")
 
-    if args.mode == "reject":
+    if args.mode in {"reject", "reject-identity"}:
         try:
-            response = request(args, "from tasks", with_client_certificate=False)
+            response = request(
+                args,
+                "from tasks",
+                with_client_certificate=args.mode == "reject-identity",
+            )
         except (ConnectionError, OSError, ssl.SSLError, TimeoutError):
-            print(json.dumps({"ok": True, "client_certificate_rejected": True}))
+            print(json.dumps({"ok": True, f"{args.mode}_rejected": True}))
             return
-        raise RuntimeError(f"gateway accepted a client without a certificate: {response!r}")
+        rejected_identity = (
+            "without a certificate"
+            if args.mode == "reject"
+            else "with an unauthorized identity"
+        )
+        raise RuntimeError(f"gateway accepted a client {rejected_identity}: {response!r}")
 
     if args.mode == "read":
         response = request(args, "from tasks\nsort id")

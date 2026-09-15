@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def require(path, fragments):
+    """Read a repository file and require every expected invariant marker."""
     text = (ROOT / path).read_text()
     for fragment in fragments:
         if fragment not in text:
@@ -19,11 +20,15 @@ def require(path, fragments):
 
 
 def main():
+    """Verify the static security and packaging invariants of the deployment."""
     config = require(
         "deploy/envoy/envoy.yaml",
         [
             "require_client_certificate: true",
             "tls_minimum_protocol_version: TLSv1_3",
+            "filename: /certs/ca.crl",
+            "match_typed_subject_alt_names:",
+            'exact: "spiffe://unionid.dev/client"',
             "envoy.filters.network.connection_limit",
             "max_connections: 64",
             "per_connection_buffer_limit_bytes: 1048576",
@@ -66,6 +71,7 @@ def main():
         "deploy/envoy/verify.sh",
         [
             "probe.py\" reject",
+            "probe.py\" reject-identity",
             "--read-only",
             "kill -TERM",
             "check --db",
@@ -79,8 +85,10 @@ def main():
     render_path = ROOT / "deploy/envoy/render.py"
     ast.parse(render_path.read_text(), filename=str(render_path))
     template = (ROOT / "deploy/envoy/envoy.yaml.template").read_text()
-    expected = template.replace("__LISTEN_ADDRESS__", "127.0.0.1").replace(
-        "__LISTEN_PORT__", "8443"
+    expected = (
+        template.replace("__LISTEN_ADDRESS__", "127.0.0.1")
+        .replace("__LISTEN_PORT__", "8443")
+        .replace("__CLIENT_URI_SAN_JSON__", '"spiffe://unionid.dev/client"')
     )
     if config != expected:
         raise RuntimeError("checked-in Envoy config does not match the safe rendered default")
@@ -108,6 +116,21 @@ def main():
         )
         if rejected.returncode == 0:
             raise RuntimeError("renderer accepts an unspecified public listen address")
+        rejected_san = subprocess.run(
+            [
+                sys.executable,
+                render_path,
+                "--client-uri-san",
+                "spiffe://unionid.dev/client\ninjected: true",
+                "--output",
+                output,
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if rejected_san.returncode == 0:
+            raise RuntimeError("renderer accepts an unsafe client URI SAN")
     docs = require(
         "docs/DEPLOYMENT.md",
         [
@@ -120,6 +143,10 @@ def main():
             "25 seconds",
             "127.0.0.1:7878",
             "forward_client_cert_details: SANITIZE_SET",
+            "--client-uri-san",
+            "ca.crl",
+            "错误 SAN",
+            "wrong-SAN",
         ],
     )
     if docs.count("UNIONID_CERT_DIR") < 2:
