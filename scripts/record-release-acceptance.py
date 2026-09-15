@@ -12,6 +12,7 @@ CONTRACT_PATH = ROOT / "release" / "contract.json"
 
 
 def read_json_member(archive, name):
+    """Read one bounded JSON member and return its value and digest."""
     matches = [member for member in archive.getmembers() if member.name == name]
     if len(matches) != 1 or not matches[0].isfile() or matches[0].size > 1024 * 1024:
         raise RuntimeError(f"expected one bounded regular archive member: {name}")
@@ -23,6 +24,7 @@ def read_json_member(archive, name):
 
 
 def main():
+    """Record deterministic evidence for one release-candidate platform."""
     parser = argparse.ArgumentParser(description="Record one platform's release acceptance")
     parser.add_argument("--dist", required=True, type=pathlib.Path)
     parser.add_argument("--expected-sha256", required=True)
@@ -99,6 +101,8 @@ def main():
             {"name": "http_protocol_stream_adt", "status": "passed"},
             {"name": "upgrade_migration_recovery_read_only", "status": "passed"},
             {"name": "idempotency_cursor_cancel_limits", "status": "passed"},
+            {"name": "incremental_backup_sequence_restore", "status": "passed"},
+            {"name": "controlled_network_mtls", "status": "passed"},
             {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
         ],
         "evidence": {
@@ -117,6 +121,14 @@ def main():
             "http_protocol_stream_adt": "examples/todolist.rs and tests/interfaces.rs",
             "upgrade_migration_recovery_read_only": "tests/released_v010_upgrade.rs, tests/migration.rs, tests/storage.rs, tests/backup.rs, and tests/interfaces.rs",
             "idempotency_cursor_cancel_limits": "tests/protocol.rs, tests/pagination.rs, tests/concurrency.rs, and tests/interfaces.rs",
+            "incremental_backup_sequence_restore": (
+                "tests/incremental_backup.rs, tools/incremental-backup-eval, and "
+                "docs/BACKUP.md"
+            ),
+            "controlled_network_mtls": (
+                "deploy/envoy/verify.sh, scripts/verify-envoy-deployment.py, and "
+                "docs/DEPLOYMENT.md"
+            ),
             "capacity_and_known_limits": (
                 "docs/benchmarks/m7-acceptance-2026-09-10.md and "
                 f"docs/RELEASE-v{release['version']}.md"

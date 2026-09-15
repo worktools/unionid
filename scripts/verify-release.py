@@ -26,6 +26,7 @@ def reported_capabilities(report):
         "migration_codec": storage["migration_codec"],
         "receipt_codec": storage["receipt_codec"],
         "maintenance_codec": storage["maintenance_codec"],
+        "journal_codec": storage["journal_codec"],
         "backup_format": storage["backup_codec"],
         "backup_formats_readable": report["readable_backup_formats"],
         "protocol": max(report["protocol_versions"]),
