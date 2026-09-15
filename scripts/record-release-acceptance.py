@@ -33,6 +33,7 @@ def main():
     parser.add_argument("--workflow-url", required=True)
     parser.add_argument("--runner-os", required=True)
     parser.add_argument("--runner-arch", required=True)
+    parser.add_argument("--controlled-network-journey", action="store_true")
     parser.add_argument("--output", required=True, type=pathlib.Path)
     args = parser.parse_args()
 
@@ -72,6 +73,28 @@ def main():
     if release["source_commit"] != args.candidate.lower() or release["source_dirty"] is not False:
         raise RuntimeError("release provenance does not match the clean candidate commit")
 
+    validation_results = [
+        {"name": "locked_release_build", "status": "passed"},
+        {"name": "formatter", "status": "passed"},
+        {"name": "locked_check", "status": "passed"},
+        {"name": "strict_clippy", "status": "passed"},
+        {"name": "full_test_suite", "status": "passed"},
+        {"name": "rust_engine_local_cli_tcp_adt", "status": "passed"},
+        {"name": "packaged_independent_rust_consumer", "status": "passed"},
+        {"name": "typed_query_binding_application_evolution", "status": "passed"},
+        {"name": "paired_sqlite_sqlx_evaluation", "status": "passed"},
+        {"name": "http_protocol_stream_adt", "status": "passed"},
+        {"name": "upgrade_migration_recovery_read_only", "status": "passed"},
+        {"name": "idempotency_cursor_cancel_limits", "status": "passed"},
+        {"name": "incremental_backup_sequence_restore", "status": "passed"},
+        {"name": "controlled_network_configuration", "status": "passed"},
+        {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
+    ]
+    if args.controlled_network_journey:
+        validation_results.append(
+            {"name": "controlled_network_mtls_journey", "status": "passed"}
+        )
+
     report = {
         "schema_version": 1,
         "candidate_commit": args.candidate.lower(),
@@ -88,23 +111,7 @@ def main():
             "contract_sha256": contract_digest,
         },
         "release": release,
-        "validation_results": [
-            {"name": "locked_release_build", "status": "passed"},
-            {"name": "formatter", "status": "passed"},
-            {"name": "locked_check", "status": "passed"},
-            {"name": "strict_clippy", "status": "passed"},
-            {"name": "full_test_suite", "status": "passed"},
-            {"name": "rust_engine_local_cli_tcp_adt", "status": "passed"},
-            {"name": "packaged_independent_rust_consumer", "status": "passed"},
-            {"name": "typed_query_binding_application_evolution", "status": "passed"},
-            {"name": "paired_sqlite_sqlx_evaluation", "status": "passed"},
-            {"name": "http_protocol_stream_adt", "status": "passed"},
-            {"name": "upgrade_migration_recovery_read_only", "status": "passed"},
-            {"name": "idempotency_cursor_cancel_limits", "status": "passed"},
-            {"name": "incremental_backup_sequence_restore", "status": "passed"},
-            {"name": "controlled_network_mtls", "status": "passed"},
-            {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
-        ],
+        "validation_results": validation_results,
         "evidence": {
             "rust_engine_local_cli_tcp_adt": "tests/getting_started.rs",
             "packaged_independent_rust_consumer": (
@@ -125,7 +132,10 @@ def main():
                 "tests/incremental_backup.rs, tools/incremental-backup-eval, and "
                 "docs/BACKUP.md"
             ),
-            "controlled_network_mtls": (
+            "controlled_network_configuration": (
+                "scripts/verify-envoy-deployment.py and docs/DEPLOYMENT.md"
+            ),
+            "controlled_network_mtls_journey": (
                 "deploy/envoy/verify.sh, scripts/verify-envoy-deployment.py, and "
                 "docs/DEPLOYMENT.md"
             ),
@@ -135,6 +145,8 @@ def main():
             ),
         },
     }
+    if not args.controlled_network_journey:
+        report["evidence"].pop("controlled_network_mtls_journey")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"ok": True, "output": str(args.output), "target": release["target"]}))
