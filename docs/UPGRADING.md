@@ -36,7 +36,7 @@ Before upgrading or switching maintenance binaries, export and verify any active
 
 ### 从 v0.3.0 或 v0.4.0 升级
 
-v0.5.0 可直接打开 v0.3.0/v0.4.0 的 format-6 数据库。先在副本上运行 `doctor`、`check` 和应用读写。若应用使用静态查询生成物，应使用 v0.5.0 binary 对当前 schema 与全部 `.uid` 查询重新运行 `query rust`，提交新的 digest，并重新编译客户端。启用增量备份前先保留 logical backup；一旦进入 format 7，旧二进制会明确拒绝打开。
+v0.5.0 可直接打开 v0.3.0/v0.4.0 的 format-6 数据库。先在副本上运行 `doctor`、`check` 和应用读写。若应用使用静态查询生成物，应使用 v0.5.0 binary 对当前 schema 与全部 `.unid`（或兼容 `.uid`）查询重新运行 `query rust`，提交新的 digest，并重新编译客户端。启用增量备份前先保留 logical backup；一旦进入 format 7，旧二进制会明确拒绝打开。
 
 ### 从公开 v0.1.0 升级
 
@@ -113,7 +113,7 @@ Only `backup incremental init` / `Engine::enable_backup_journal` performs 6-to-7
 
 ### Upgrading from v0.3.0 or v0.4.0
 
-v0.5.0 directly opens v0.3.0/v0.4.0 format-6 databases. Run doctor, check, and application reads/writes on a copy first. Applications using generated static queries must rerun `query rust` with v0.5.0 over the current schema and every `.uid` query, commit the new digests, and recompile the client. Keep a logical backup before enabling incremental backup; after the database enters format 7, older binaries reject it explicitly.
+v0.5.0 directly opens v0.3.0/v0.4.0 format-6 databases. Run doctor, check, and application reads/writes on a copy first. Applications using generated static queries must rerun `query rust` with v0.5.0 over the current schema and every `.unid` (or compatible `.uid`) query, commit the new digests, and recompile the client. Keep a logical backup before enabling incremental backup; after the database enters format 7, older binaries reject it explicitly.
 
 ### Upgrading from the public v0.1.0
 
