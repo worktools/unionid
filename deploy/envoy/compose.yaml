@@ -11,6 +11,7 @@ services:
       - --drain-time-s
       - "5"
     network_mode: host
+    user: "${UNIONID_ENVOY_UID:?set UNIONID_ENVOY_UID to the certificate owner UID}:${UNIONID_ENVOY_GID:?set UNIONID_ENVOY_GID to the certificate owner GID}"
     volumes:
       - ${UNIONID_ENVOY_CONFIG:-./envoy.yaml}:/etc/envoy/envoy.yaml:ro
       - ${UNIONID_CERT_DIR:?set UNIONID_CERT_DIR to an absolute certificate directory}:/certs:ro

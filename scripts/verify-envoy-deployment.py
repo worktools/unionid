@@ -56,6 +56,8 @@ def main():
             "read_only: true",
             "no-new-privileges:true",
             "network_mode: host",
+            "UNIONID_ENVOY_UID",
+            "UNIONID_ENVOY_GID",
         ],
     )
     if not re.search(r"envoyproxy/envoy:v\d+\.\d+\.\d+", compose):
@@ -69,6 +71,7 @@ def main():
             "check --db",
             "unionid-development-client",
             'UNIONID_CERT_DIR/ca.key',
+            'UNIONID_ENVOY_UID="$(id -u)"',
         ],
     )
     probe_path = ROOT / "deploy/envoy/probe.py"

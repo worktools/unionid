@@ -37,7 +37,8 @@ jobs:
           python3 scripts/verify-query-bindings.py
           python3 scripts/verify-typed-application.py
           python3 scripts/verify-envoy-deployment.py
-          bash -n deploy/envoy/generate-dev-certs.sh deploy/envoy/verify.sh
+          bash -n deploy/envoy/generate-dev-certs.sh
+          bash -n deploy/envoy/verify.sh
       - name: Verify Envoy mTLS controlled-network journey
         if: runner.os == 'Linux'
         run: |

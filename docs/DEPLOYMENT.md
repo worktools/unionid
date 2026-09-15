@@ -20,9 +20,11 @@ Unionid 的推荐远程部署是让数据库服务继续只监听 `127.0.0.1:787
 certificate_dir="$(mktemp -d /tmp/unionid-certs.XXXXXX)"
 deploy/envoy/generate-dev-certs.sh "$certificate_dir"
 export UNIONID_CERT_DIR="$certificate_dir/gateway"
+export UNIONID_ENVOY_UID="$(id -u)"
+export UNIONID_ENVOY_GID="$(id -g)"
 ```
 
-输出按 `authority/`、`gateway/`、`client/` 分离；Compose 只挂载 `gateway/`，其中没有 CA 私钥或客户端私钥。
+输出按 `authority/`、`gateway/`、`client/` 分离；Compose 只挂载 `0700` 的 `gateway/`，其中没有 CA 私钥或客户端私钥。Envoy 以该目录所有者的 UID/GID 运行，`server.key` 保持 `0400`。
 
 在宿主机仅启动 loopback 服务：
 
@@ -49,6 +51,8 @@ python3 deploy/envoy/render.py \
   --listen-port 8443 \
   --output /etc/unionid/envoy.yaml
 export UNIONID_ENVOY_CONFIG=/etc/unionid/envoy.yaml
+export UNIONID_ENVOY_UID="$(id -u envoy)"
+export UNIONID_ENVOY_GID="$(id -g envoy)"
 docker compose --project-directory deploy/envoy \
   -f deploy/envoy/compose.yaml up -d
 ```
@@ -126,12 +130,14 @@ Generate short-lived development certificates and start the default loopback-onl
 certificate_dir="$(mktemp -d /tmp/unionid-certs.XXXXXX)"
 deploy/envoy/generate-dev-certs.sh "$certificate_dir"
 export UNIONID_CERT_DIR="$certificate_dir/gateway"
+export UNIONID_ENVOY_UID="$(id -u)"
+export UNIONID_ENVOY_GID="$(id -g)"
 export UNIONID_ENVOY_CONFIG="$PWD/deploy/envoy/envoy.yaml"
 docker compose --project-directory deploy/envoy \
   -f deploy/envoy/compose.yaml up -d
 ```
 
-The generator separates `authority/`, `gateway/`, and `client/`; Compose mounts only `gateway/`, which contains neither the CA private key nor the client private key.
+The generator separates `authority/`, `gateway/`, and `client/`. Compose mounts only the `0700` gateway directory, which contains neither the CA private key nor the client private key, and runs Envoy with that directory owner's explicit UID/GID. `server.key` remains `0400`.
 
 Start Unionid separately with `unionid server --db /var/lib/unionid/app.redb --addr 127.0.0.1:7878`. The Compose reference uses Linux host networking so Envoy can reach host loopback without mounting the database, and the checked-in config listens only on `127.0.0.1:8443`. Render an explicit controlled address with `python3 deploy/envoy/render.py --listen-address 10.20.0.15 --listen-port 8443 --output /etc/unionid/envoy.yaml`, export that absolute path as `UNIONID_ENVOY_CONFIG`, and restrict sources with host and upstream network policy. The renderer rejects unspecified addresses. On non-Linux hosts, run native Envoy with the same rendered config; do not expose Unionid on `0.0.0.0:7878` to make Docker bridge networking work.
 

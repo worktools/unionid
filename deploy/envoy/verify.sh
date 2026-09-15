@@ -15,6 +15,8 @@ export COMPOSE_PROJECT_NAME="unionid-gateway-$$"
 export UNIONID_CERT_DIR="$certificate_dir/gateway"
 export UNIONID_GATEWAY_PORT="$gateway_port"
 export UNIONID_ENVOY_CONFIG="$envoy_config"
+export UNIONID_ENVOY_UID="$(id -u)"
+export UNIONID_ENVOY_GID="$(id -g)"
 
 compose() {
   docker compose --project-directory "$repository_root/deploy/envoy" \

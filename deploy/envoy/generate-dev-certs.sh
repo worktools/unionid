@@ -72,10 +72,11 @@ rm "$authority_dir/server.csr" "$authority_dir/server.ext" \
 openssl verify -CAfile "$authority_dir/ca.crt" \
   "$gateway_dir/server.crt" "$client_dir/client.crt" >/dev/null
 
-# The generated material is short-lived and deleted by verify.sh. The Envoy
-# container runs as a non-root user and needs read access through the bind mount.
-chmod 0755 "$gateway_dir"
+# The generated material is short-lived and deleted by verify.sh. Compose runs
+# Envoy with this host owner's UID/GID so the bind mount needs no broad access.
+chmod 0700 "$gateway_dir"
 chmod 0444 "$gateway_dir/ca.crt" "$gateway_dir/server.crt" \
-  "$gateway_dir/server.key" "$client_dir/ca.crt" "$client_dir/client.crt"
-chmod 0400 "$authority_dir/ca.key" "$client_dir/client.key"
+  "$client_dir/ca.crt" "$client_dir/client.crt"
+chmod 0400 "$gateway_dir/server.key" "$authority_dir/ca.key" \
+  "$client_dir/client.key"
 echo "generated two-day development certificates in $certificate_dir"
