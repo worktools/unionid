@@ -14,6 +14,7 @@ CONTRACT_PATH = ROOT / "release" / "contract.json"
 
 
 def reported_capabilities(report):
+    """Normalize packaged runtime capabilities for contract verification."""
     storage = report["current_storage"]
     return {
         "version_report_schema": report["schema_version"],
@@ -34,6 +35,7 @@ def reported_capabilities(report):
 
 
 def main():
+    """Verify archive integrity, contract identity, and packaged user journeys."""
     parser = argparse.ArgumentParser(description="Verify a unionid release archive and tutorial")
     parser.add_argument("--dist", required=True, type=pathlib.Path)
     parser.add_argument(
@@ -135,6 +137,7 @@ def main():
             binary,
             root / "README.md",
             root / "docs" / "GETTING_STARTED.md",
+            root / "docs" / "DEPLOYMENT.md",
             root / "docs" / "HTTP.md",
             root / "docs" / "MIGRATIONS.md",
             root / "docs" / "PROTOCOL.md",
@@ -143,6 +146,13 @@ def main():
             root / "release" / "contract.json",
             root / "examples" / "tasks.uid",
             root / "examples" / "todolist.rs",
+            root / "deploy" / "envoy" / "compose.yaml",
+            root / "deploy" / "envoy" / "envoy.yaml",
+            root / "deploy" / "envoy" / "envoy.yaml.template",
+            root / "deploy" / "envoy" / "generate-dev-certs.sh",
+            root / "deploy" / "envoy" / "probe.py",
+            root / "deploy" / "envoy" / "render.py",
+            root / "deploy" / "envoy" / "verify.sh",
             root / "tutorial" / "validate.py",
             root / "tutorial" / "01_setup.uid",
             root / "tutorial" / "04_reopen.uid",

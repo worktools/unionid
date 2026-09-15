@@ -1,0 +1,77 @@
+static_resources:
+  listeners:
+    - name: unionid_mtls
+      address:
+        socket_address:
+          address: __LISTEN_ADDRESS__
+          port_value: __LISTEN_PORT__
+      per_connection_buffer_limit_bytes: 1048576
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_3
+                validation_context:
+                  trusted_ca:
+                    filename: /certs/ca.crt
+                  crl:
+                    filename: /certs/ca.crl
+                  match_typed_subject_alt_names:
+                    - san_type: URI
+                      matcher:
+                        exact: __CLIENT_URI_SAN_JSON__
+                tls_certificates:
+                  - certificate_chain:
+                      filename: /certs/server.crt
+                    private_key:
+                      filename: /certs/server.key
+          transport_socket_connect_timeout: 5s
+          filters:
+            - name: envoy.filters.network.connection_limit
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.connection_limit.v3.ConnectionLimit
+                stat_prefix: unionid_gateway
+                max_connections: 64
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: unionid_tcp
+                cluster: unionid_loopback
+                idle_timeout: 35s
+                access_log:
+                  - name: envoy.access_loggers.file
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+                      path: /dev/stdout
+                      log_format:
+                        json_format:
+                          timestamp: "%START_TIME%"
+                          event: unionid_tcp_connection
+                          client_address: "%DOWNSTREAM_REMOTE_ADDRESS%"
+                          client_subject: "%DOWNSTREAM_PEER_SUBJECT%"
+                          client_certificate_sha256: "%DOWNSTREAM_PEER_FINGERPRINT_256%"
+                          tls_version: "%DOWNSTREAM_TLS_VERSION%"
+                          bytes_received: "%BYTES_RECEIVED%"
+                          bytes_sent: "%BYTES_SENT%"
+                          response_flags: "%RESPONSE_FLAGS_LONG%"
+  clusters:
+    - name: unionid_loopback
+      type: STATIC
+      connect_timeout: 2s
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 64
+      load_assignment:
+        cluster_name: unionid_loopback
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 7878
