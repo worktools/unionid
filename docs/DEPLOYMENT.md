@@ -115,6 +115,7 @@ raw TCP 网关无法传递逐请求 deadline；Unionid 的 25 秒执行 deadline
 | 超过 64 个网关连接 | Envoy connection-limit filter 关闭新增连接 | 客户端退避；检查连接泄漏和服务指标 |
 | 请求执行超过 25 秒 | Unionid 返回 `E_TIMEOUT`，候选写入不提交 | 缩小工作集或增加 indexed filter |
 | 网关 idle timeout | 连接在 35 秒无活动后关闭 | 重连；幂等写使用相同 key 和完整请求 |
+| TLS 握手未完成 | Envoy 在 5 秒后关闭连接 | 检查受控网络来源与握手失败指标；持续攻击时在上游网络限流 |
 | 证书被盗或错误签发 | 匹配该实例 URI SAN 的证书获得完整权限 | 吊销 serial、原子发布新 CRL 并重载 Envoy；必要时轮换 CA，检查审计 |
 | CRL 缺失、损坏或过期 | Envoy 启动/客户端验证失败并保持 fail closed | 从受控 CA 发布已校验的新 CRL，再重载网关 |
 
@@ -164,6 +165,6 @@ For HTTP mTLS, configure `HttpConnectionManager` with `forward_client_cert_detai
 
 The L4 gateway cannot propagate a per-request deadline. Unionid's 25 seconds remains authoritative, while Envoy's 35-second idle timeout leaves time for a structured `E_TIMEOUT`. An embedded HTTP service should set `Config::request_timeout` below its outer HTTP-gateway timeout. During maintenance, stop new load-balancer traffic, drain Envoy, send `SIGTERM` to Unionid, wait for accepted work to finish or reach its deadline and for the redb lock to be released, then stop the gateway. A disconnected client does not undo a committed write; safe retry still requires the identical request and `idempotency_key`.
 
-Expected failures are explicit: invalid, revoked, wrong-SAN, or absent certificates fail the TLS handshake; a missing, corrupt, or expired CRL keeps validation fail closed; unavailable loopback upstreams produce an Envoy upstream failure; excess connections are closed by the 64-connection filter; Unionid returns `E_TIMEOUT` at 25 seconds; idle tunnels close after 35 seconds. A stolen matching certificate has the full authority of its instance: revoke its serial, publish and reload a new CRL, rotate the CA if needed, and review the audit trail.
+Expected failures are explicit: invalid, revoked, wrong-SAN, or absent certificates fail the TLS handshake; incomplete TLS negotiation closes after 5 seconds; a missing, corrupt, or expired CRL keeps validation fail closed; unavailable loopback upstreams produce an Envoy upstream failure; excess connections are closed by the 64-connection filter; Unionid returns `E_TIMEOUT` at 25 seconds; idle tunnels close after 35 seconds. A stolen matching certificate has the full authority of its instance: revoke its serial, publish and reload a new CRL, rotate the CA if needed, and review the audit trail.
 
 The reference follows Envoy's official [mTLS guide](https://www.envoyproxy.io/docs/envoy/v1.39.1/start/quick-start/securing.html#use-mutual-tls-mtls-to-enforce-client-certificate-authentication), [connection-limit filter](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/listeners/network_filters/connection_limit_filter), [XFCC handling](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/http/http_conn_man/headers#x-forwarded-client-cert), and [access-log formatter](https://www.envoyproxy.io/docs/envoy/v1.39.1/configuration/advanced/substitution_formatter). Track Envoy security releases and rerun the journey after image upgrades.

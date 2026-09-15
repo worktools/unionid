@@ -101,11 +101,13 @@ if [[ "${ready:-false}" != true ]]; then
 fi
 python3 "$repository_root/deploy/envoy/probe.py" reject \
   --port "$gateway_port" --ca "$certificate_dir/client/ca.crt"
+python3 "$repository_root/deploy/envoy/probe.py" read "${probe_args[@]}" >/dev/null
 python3 "$repository_root/deploy/envoy/probe.py" reject-identity \
   --port "$gateway_port" \
   --ca "$certificate_dir/client/ca.crt" \
   --cert "$certificate_dir/client/other-client.crt" \
   --key "$certificate_dir/client/other-client.key"
+python3 "$repository_root/deploy/envoy/probe.py" read "${probe_args[@]}" >/dev/null
 
 stop_server
 "$unionid_binary" check --db "$database" >/dev/null

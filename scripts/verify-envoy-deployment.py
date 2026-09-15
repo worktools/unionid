@@ -29,6 +29,7 @@ def main():
             "filename: /certs/ca.crl",
             "match_typed_subject_alt_names:",
             'exact: "spiffe://unionid.dev/client"',
+            "transport_socket_connect_timeout: 5s",
             "envoy.filters.network.connection_limit",
             "max_connections: 64",
             "per_connection_buffer_limit_bytes: 1048576",
@@ -80,6 +81,9 @@ def main():
             'UNIONID_ENVOY_UID="$(id -u)"',
         ],
     )
+    verify = (ROOT / "deploy/envoy/verify.sh").read_text()
+    if verify.count('probe.py" read "${probe_args[@]}" >/dev/null') != 2:
+        raise RuntimeError("each rejected identity must be followed by a healthy authorized probe")
     probe_path = ROOT / "deploy/envoy/probe.py"
     ast.parse(probe_path.read_text(), filename=str(probe_path))
     render_path = ROOT / "deploy/envoy/render.py"

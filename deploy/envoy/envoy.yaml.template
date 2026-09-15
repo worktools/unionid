@@ -29,6 +29,7 @@ static_resources:
                       filename: /certs/server.crt
                     private_key:
                       filename: /certs/server.key
+          transport_socket_connect_timeout: 5s
           filters:
             - name: envoy.filters.network.connection_limit
               typed_config:
