@@ -111,18 +111,24 @@ fn run() -> AnyResult<()> {
                 rows.parse()?,
             )
         }
-        [_, directory, rows] => evaluate(
-            Path::new(directory),
-            rows.parse()?,
-            DEFAULT_SAMPLES,
-            DEFAULT_BATCH_ROWS,
-        ),
-        [_, directory, rows, samples] => evaluate(
-            Path::new(directory),
-            rows.parse()?,
-            samples.parse()?,
-            DEFAULT_BATCH_ROWS,
-        ),
+        [_, directory, rows] => {
+            let rows = rows.parse()?;
+            evaluate(
+                Path::new(directory),
+                rows,
+                DEFAULT_SAMPLES,
+                DEFAULT_BATCH_ROWS.min(rows),
+            )
+        }
+        [_, directory, rows, samples] => {
+            let rows = rows.parse()?;
+            evaluate(
+                Path::new(directory),
+                rows,
+                samples.parse()?,
+                DEFAULT_BATCH_ROWS.min(rows),
+            )
+        }
         [_, directory, rows, samples, batch_rows] => evaluate(
             Path::new(directory),
             rows.parse()?,
