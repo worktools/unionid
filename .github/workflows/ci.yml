@@ -49,7 +49,8 @@ jobs:
             tools/workload-eval/Cargo.toml \
             tools/service-load-eval/Cargo.toml \
             tools/churn-eval/Cargo.toml \
-            tools/compaction-eval/Cargo.toml
+            tools/compaction-eval/Cargo.toml \
+            tools/incremental-backup-eval/Cargo.toml
           do
             cargo fmt --check --manifest-path "$manifest"
             cargo check --locked --manifest-path "$manifest"
