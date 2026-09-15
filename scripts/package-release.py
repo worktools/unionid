@@ -139,6 +139,11 @@ def main():
         if source.is_file():
             relative = source.relative_to(ROOT).as_posix()
             files[f"{package}/{relative}"] = (source.read_bytes(), 0o644)
+    for source in sorted((ROOT / "deploy").rglob("*")):
+        if source.is_file():
+            relative = source.relative_to(ROOT).as_posix()
+            mode = 0o755 if source.suffix in {".py", ".sh"} else 0o644
+            files[f"{package}/{relative}"] = (source.read_bytes(), mode)
     for source in sorted((ROOT / "examples/getting-started").glob("*.uid")):
         files[f"{package}/tutorial/{source.name}"] = (source.read_bytes(), 0o644)
     release = {

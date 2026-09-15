@@ -150,6 +150,10 @@ unionid server --db ./data/app.redb --read-only --addr 127.0.0.1:7878
 
 只读模式只打开已有 redb，并在进入持久事务前以 `E_READ_ONLY` 拒绝整个 mutation 批次。Read-only mode opens an existing redb database and rejects the complete mutation batch with `E_READ_ONLY` before entering a durable transaction.
 
+跨主机使用时保持 Unionid 监听 loopback，并通过仓库维护的 Envoy mTLS 参考部署开放到受控网络；默认网关同样只绑定 `127.0.0.1`。完整证书、权限、审计、deadline 与关闭旅程见 [DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+
+For cross-host access, keep Unionid on loopback and use the maintained Envoy mTLS reference to expose it on a controlled network. The gateway also binds only to `127.0.0.1` by default. See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for the certificate, authority, audit, deadline, and shutdown journey.
+
 ## Rust typed API
 
 Rust 应用可以把自己的 `struct`、`enum`、`Option`、tuple 和 `Vec` 直接绑定到 prepared operation，再把结果解码回应用类型。
@@ -225,9 +229,9 @@ Remote calls can use the synchronous `TcpClient`. With the `asynchronous` featur
 
 ## 当前边界 / Current boundaries
 
-v0.4.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。format-5 Legacy0 和 format-6 active generation 的普通 open、indexed/page read、融合 full pipeline、完整 check 与 logical backup 使用有界 row source。最新 100k M7 复验中 open p95 为 12.02 ms、主键查询 p95 为 24 µs、完整 check 为 1.54 s／96.33 MiB；完整 shadow migration p95 为 16.51 s／427.98 MiB，仍应按维护操作安排。详见 [M7 验收记录](docs/benchmarks/m7-acceptance-2026-09-10.md)。当前不提供内置认证、TLS、通用扁平 join、window 或分布式执行。
+v0.4.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。format-5 Legacy0 和 format-6 active generation 的普通 open、indexed/page read、融合 full pipeline、完整 check 与 logical backup 使用有界 row source。最新 100k M7 复验中 open p95 为 12.02 ms、主键查询 p95 为 24 µs、完整 check 为 1.54 s／96.33 MiB；完整 shadow migration p95 为 16.51 s／427.98 MiB，仍应按维护操作安排。详见 [M7 验收记录](docs/benchmarks/m7-acceptance-2026-09-10.md)。当前不提供内置认证/TLS、通用扁平 join、window 或分布式执行；受控网络通过官方维护的 Envoy mTLS 部署路径接入。
 
-v0.4.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound rather than the routine target. Ordinary format-5 Legacy0 and format-6 active-generation open, indexed/page reads, fused full pipelines, explicit checks, and logical backups use bounded row sources. In the final 100k M7 run, open p95 was 12.02 ms, primary-key query p95 was 24 µs, and full check took 1.54 seconds and 96.33 MiB. Complete shadow-migration p95 was 16.51 seconds with 427.98 MiB peak RSS, so it remains a planned maintenance operation. See the [M7 acceptance record](docs/benchmarks/m7-acceptance-2026-09-10.md). Built-in authentication, TLS, general flattened joins, windows, and distributed execution are currently out of scope.
+v0.4.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound rather than the routine target. Ordinary format-5 Legacy0 and format-6 active-generation open, indexed/page reads, fused full pipelines, explicit checks, and logical backups use bounded row sources. In the final 100k M7 run, open p95 was 12.02 ms, primary-key query p95 was 24 µs, and full check took 1.54 seconds and 96.33 MiB. Complete shadow-migration p95 was 16.51 seconds with 427.98 MiB peak RSS, so it remains a planned maintenance operation. See the [M7 acceptance record](docs/benchmarks/m7-acceptance-2026-09-10.md). Built-in authentication/TLS, general flattened joins, windows, and distributed execution remain out of scope; controlled networks use the officially maintained Envoy mTLS deployment path.
 
 ## 文档 / Documentation
 
@@ -237,7 +241,7 @@ v0.4.0 targets a single machine, one database owner, and a comfortable working s
 | 当前语言与 query stage / Current language and query stages | [LANGUAGE.md](docs/LANGUAGE.md) · [QUERY.md](docs/QUERY.md) |
 | Rust、TCP 与 HTTP 数据协议 / Rust, TCP, and HTTP data protocol | [PROTOCOL.md](docs/PROTOCOL.md) · [HTTP.md](docs/HTTP.md) |
 | Schema 身份与 migration / Schema identity and migrations | [SCHEMA.md](docs/SCHEMA.md) · [MIGRATIONS.md](docs/MIGRATIONS.md) |
-| 持久化、备份与生产边界 / Storage, backup, and production boundaries | [STORAGE.md](docs/STORAGE.md) · [BACKUP.md](docs/BACKUP.md) · [SERVICE.md](docs/SERVICE.md) |
+| 持久化、备份与生产边界 / Storage, backup, and production boundaries | [STORAGE.md](docs/STORAGE.md) · [BACKUP.md](docs/BACKUP.md) · [SERVICE.md](docs/SERVICE.md) · [DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | v0.4 版本契约与发布说明 / v0.4 contract and release notes | [contract.json](release/contract.json) · [RELEASE-v0.4.0.md](docs/RELEASE-v0.4.0.md) · [UPGRADING.md](docs/UPGRADING.md) |
 | 实际场景与后续计划 / Real scenarios and roadmap | [SCENARIOS.md](docs/SCENARIOS.md) · [ROADMAP.md](docs/ROADMAP.md) |
 | 实现与验证记录 / Implementation and validation history | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |

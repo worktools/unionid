@@ -36,6 +36,13 @@ jobs:
           cargo test --locked --features asynchronous --test asynchronous --test async_client
           python3 scripts/verify-query-bindings.py
           python3 scripts/verify-typed-application.py
+          python3 scripts/verify-envoy-deployment.py
+          bash -n deploy/envoy/generate-dev-certs.sh deploy/envoy/verify.sh
+      - name: Verify Envoy mTLS controlled-network journey
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked --bin unionid
+          deploy/envoy/verify.sh target/debug/unionid
       - name: Check and exercise standalone evaluation tools
         shell: bash
         run: |

@@ -1,6 +1,6 @@
 # 服务运行边界
 
-unionid server 面向本机受信应用：默认监听 <code>127.0.0.1:7878</code>，使用自己的 JSON Lines 协议，不兼容 Redis wire protocol。当前不提供用户认证或 TLS；若要跨主机暴露，应由受控网络或具备认证和 TLS 的代理保护。
+unionid server 面向本机受信应用：默认监听 <code>127.0.0.1:7878</code>，使用自己的 JSON Lines 协议，不兼容 Redis wire protocol。当前不提供内置用户认证或 TLS；跨主机时使用仓库维护的 [Envoy mTLS 受控网络部署](DEPLOYMENT.md)，其中包含可执行配置、信任边界、审计和失败旅程。服务与参考网关都默认只绑定 loopback。
 
 生产中的查询副本或受限应用可以从已有 redb 启动只读执行边界：
 
