@@ -2,6 +2,8 @@
 
 `unionid cli` 可以连接 TCP 服务，也可以通过 `--memory` 或 `--db <path>` 直接使用本地 Engine。文件和重定向 stdin 会作为一个原子脚本执行；终端输入进入带历史、补全和多行状态提示的 REPL。
 
+`.unid` 是 Unionid 源文件（schema、query、migration）的规范后缀；`.uid` 在兼容窗口内仍被接受，但 stderr 会输出 `uses the deprecated .uid extension; rename it to .unid`。迁移与兼容期限见 [UPGRADING.md](UPGRADING.md)。
+
 ```bash
 unionid cli --memory
 unionid cli --db app.redb
@@ -51,21 +53,21 @@ Stop the server or other local owner first, retain a verified logical backup, an
 
 ## Schema 与 Rust 绑定 / Schema and Rust bindings
 
-`schema check --file <schema.uid>` 校验声明式 schema 并输出规范形式，`schema print --db <db.redb>` 输出数据库内保存的 schema。`schema rust` 从 schema 文件或已有数据库生成 Rust `struct`/`enum` 绑定，类型映射与递归 boxing 规则见 [RFC 0012](rfc/0012-schema-rust-bindings.md)：
+`schema check --file <schema.unid>` 校验声明式 schema 并输出规范形式，`schema print --db <db.redb>` 输出数据库内保存的 schema。`schema rust` 从 schema 文件或已有数据库生成 Rust `struct`/`enum` 绑定，类型映射与递归 boxing 规则见 [RFC 0012](rfc/0012-schema-rust-bindings.md)：
 
 ```bash
-unionid schema rust --file schema.uid
+unionid schema rust --file schema.unid
 unionid schema rust --db app.redb --output src/schema.rs
 ```
 
 生成结果只依赖 `serde` 与 `unionid::scalars`，字段名中的 Rust 关键字加 `_` 后缀；schema 文件仍只允许 type/table/index 声明，完整脚本会返回 `E_SCHEMA`。
 
-`schema check --file <schema.uid>` validates a declarative schema and prints its normalized form, and `schema print --db <db.redb>` prints the schema stored in a database. `schema rust` generates Rust `struct`/`enum` bindings from a schema file or an existing database; type mapping and recursion boxing follow RFC 0012. The output depends only on `serde` and `unionid::scalars`, Rust keyword field names get a `_` suffix, and schema files still accept only type/table/index declarations (a full script returns `E_SCHEMA`).
+`schema check --file <schema.unid>` validates a declarative schema and prints its normalized form, and `schema print --db <db.redb>` prints the schema stored in a database. `schema rust` generates Rust `struct`/`enum` bindings from a schema file or an existing database; type mapping and recursion boxing follow RFC 0012. The output depends only on `serde` and `unionid::scalars`, Rust keyword field names get a `_` suffix, and schema files still accept only type/table/index declarations (a full script returns `E_SCHEMA`).
 
 `schema describe` 输出 [RFC 0014](rfc/0014-portable-adt-contract.md) 的 version 1 JSON，供查询绑定生成器和未来宿主语言 adapter 使用。文件模式从声明建立独立 catalog；数据库模式描述 live catalog 的逐字节私有副本，使 redb 的恢复 bookkeeping 不会改变请求的原文件，同时保留 migration 后的稳定 ID。ID 是十进制字符串且只在一个数据库 lineage 内有意义：
 
 ```bash
-unionid schema describe --file schema.uid
+unionid schema describe --file schema.unid
 unionid schema describe --db app.redb --output schema.contract.json
 ```
 
@@ -78,9 +80,9 @@ unionid schema describe --db app.redb --output schema.contract.json
 `query describe` 使用当前 parser、binder 和 type IR，离线检查一个静态查询文件，并输出 [RFC 0015](rfc/0015-static-query-contract.md) 的 version 1 JSON。一个查询文件只包含一个 prepared operation；schema 文件仍只接受声明：
 
 ```bash
-unionid query describe --schema schema.uid --file queries/find_task.uid
-unionid query describe --db app.redb --file queries/find_task.uid
-unionid query describe --schema schema.uid --file queries/create_task.uid --output generated/create_task.json
+unionid query describe --schema schema.unid --file queries/find_task.unid
+unionid query describe --db app.redb --file queries/find_task.unid
+unionid query describe --schema schema.unid --file queries/create_task.unid --output generated/create_task.json
 ```
 
 `--schema` 适用于声明文件作为权威来源；`--db` 从数据库的私有副本读取 live catalog，保留 migration 建立的稳定 ID 和真实 revision/hash。两者必须且只能选择一个。输出包含 schema identity、规范化源码及其 SHA-256、operation、按名称排序的参数类型、结果字段类型、`none` / `exactly_one` / `at_most_one` / `many` cardinality，以及是否返回 affected-row metadata。字段、payload、参数统一失败和非穷尽 match 会在离线绑定时失败并带源码 span。digest 忽略等价的空格/换行布局，但投影或语义变化会改变 digest；运行时仍由 `PreparedQuery` 精确核对 schema revision/hash。
@@ -90,18 +92,18 @@ unionid query describe --schema schema.uid --file queries/create_task.uid --outp
 `query rust` 从同一契约生成一个可直接编译的 Rust 文件，其中包含 schema ADT、查询 `Params`、结果 row 和 Engine 调用函数。默认函数名取查询文件名，也可显式使用 `--name`。调用函数逐字段把参数转换为 typed `Value`，按 cardinality 返回 `T`、`Option<T>` 或 `Vec<T>`；mutation 同时返回 affected rows。它在 prepare 前核对生成时的 schema revision/hash，因此数据库漂移会明确返回 `E_SCHEMA_CHANGED`：
 
 ```bash
-unionid query rust --schema schema.uid --file queries/find_task.uid --output generated/find_task.rs
-unionid query rust --db app.redb --file queries/find_task.uid --output generated/find_task.rs
-unionid query rust --schema schema.uid --file queries/create_task.uid --name create_task
-unionid query rust --schema schema.uid --dir queries --output generated/queries.rs
+unionid query rust --schema schema.unid --file queries/find_task.unid --output generated/find_task.rs
+unionid query rust --db app.redb --file queries/find_task.unid --output generated/find_task.rs
+unionid query rust --schema schema.unid --file queries/create_task.unid --name create_task
+unionid query rust --schema schema.unid --dir queries --output generated/queries.rs
 unionid query rust --db app.redb --dir queries --output generated/queries.rs
 ```
 
-`--dir` 会递归读取目录中的 `.uid` 文件并一次生成 bundle。schema ADT 只生成一份，每个查询位于按相对路径命名的公开子 module 中，因此 mutation 参数和 query 结果共享同一份领域类型。文件按规范化相对路径排序；空目录、非 `.uid` 路径、生成名称冲突或任一绑定错误都会使整个命令失败，且不会覆盖已有输出。目录模式不接受 `--name`。
+`--dir` 会递归读取目录中的 `.unid` 文件并一次生成 bundle。schema ADT 只生成一份，每个查询位于按相对路径命名的公开子 module 中，因此 mutation 参数和 query 结果共享同一份领域类型。文件按规范化相对路径排序；空目录、非 `.unid` 路径、生成名称冲突或任一绑定错误都会使整个命令失败，且不会覆盖已有输出。目录模式不接受 `--name`。
 
 `query rust` generates a directly compilable Rust file from the same contract, including schema ADTs, query `Params`, a result row, and an Engine call function. The function name defaults to the query file stem and can be set with `--name`. It converts each parameter to a typed `Value`, returns `T`, `Option<T>`, or `Vec<T>` according to cardinality, and includes affected rows for mutations. The call checks the generated schema revision/hash before prepare, so drift fails explicitly with `E_SCHEMA_CHANGED`.
 
-`--dir` recursively reads `.uid` files and emits one bundle. Schema ADTs appear once and every query lives in a public submodule named from its relative path, so mutation parameters and query results share the same domain types. Files are sorted by normalized relative path. An empty directory, a non-`.uid` path, a generated-name collision, or any binding error fails the whole command without replacing an existing output. Directory mode does not accept `--name`.
+`--dir` recursively reads `.unid` files and emits one bundle. Schema ADTs appear once and every query lives in a public submodule named from its relative path, so mutation parameters and query results share the same domain types. Files are sorted by normalized relative path. An empty directory, a non-`.unid` path, a generated-name collision, or any binding error fails the whole command without replacing an existing output. Directory mode does not accept `--name`.
 
 ## JSON 错误与退出码
 

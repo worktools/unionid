@@ -51,7 +51,7 @@ def main():
             "--db",
             local_db,
             "--file",
-            tutorial / "01_setup.uid",
+            tutorial / "01_setup.unid",
             "--format",
             "json",
         ]
@@ -63,7 +63,7 @@ def main():
             "--db",
             local_db,
             "--file",
-            tutorial / "02_running.uid",
+            tutorial / "02_running.unid",
             "--format",
             "json",
         ]
@@ -76,7 +76,7 @@ def main():
             "--db",
             local_db,
             "--file",
-            tutorial / "03_update.uid",
+            tutorial / "03_update.unid",
             "--format",
             "json",
         ]
@@ -90,7 +90,7 @@ def main():
             "--db",
             local_db,
             "--file",
-            tutorial / "04_reopen.uid",
+            tutorial / "04_reopen.unid",
             "--format",
             "json",
         ]
@@ -136,7 +136,7 @@ def main():
             "--db",
             restored_db,
             "--file",
-            tutorial / "04_reopen.uid",
+            tutorial / "04_reopen.unid",
             "--format",
             "json",
         ]
@@ -167,9 +167,9 @@ def main():
             raise RuntimeError("server did not report its address")
         address = line.strip().rsplit(" ", 1)[-1]
         base = [binary, "cli", "--addr", address]
-        run(base + ["--file", tutorial / "01_setup.uid", "--format", "json"])
-        run(base + ["--file", tutorial / "03_update.uid", "--format", "json"])
-        remote = run(base + ["--file", tutorial / "04_reopen.uid", "--format", "json"])
+        run(base + ["--file", tutorial / "01_setup.unid", "--format", "json"])
+        run(base + ["--file", tutorial / "03_update.unid", "--format", "json"])
+        remote = run(base + ["--file", tutorial / "04_reopen.unid", "--format", "json"])
         assert_result(remote, 2)
         for key in ["columns", "rows", "schema"]:
             if remote[key] != local[key]:

@@ -23,7 +23,7 @@ unionid doctor --format json
 ```bash
 mkdir unionid-demo
 cd unionid-demo
-unionid run --db tasks.redb --file ../tutorial/01_setup.uid
+unionid run --db tasks.redb --file ../tutorial/01_setup.unid
 ```
 
 这个脚本声明两个积类型 `Contact`、`Task` 和一个和类型 `State`，再建立有主键的 `tasks` 表并写入嵌套数据：
@@ -48,7 +48,7 @@ table tasks Task
 ## 2. 查询和类型化解构
 
 ```bash
-unionid run --db tasks.redb --file ../tutorial/02_running.uid
+unionid run --db tasks.redb --file ../tutorial/02_running.unid
 ```
 
 查询使用换行 pipeline。braced `match` 穷尽匹配 `State`，`select` 保留嵌套字段：
@@ -70,7 +70,7 @@ sort id
 ## 3. 原子更新
 
 ```bash
-unionid run --db tasks.redb --file ../tutorial/03_update.uid
+unionid run --db tasks.redb --file ../tutorial/03_update.unid
 ```
 
 这次更新按主键找到第二条任务，并把 `Pending` 替换为带 record payload 的 `Running`。完整语句要么提交，要么不改变数据库。
@@ -80,7 +80,7 @@ unionid run --db tasks.redb --file ../tutorial/03_update.uid
 每次 `run --db` 都在新进程中打开和关闭数据库。再次运行查询就验证了持久恢复：
 
 ```bash
-unionid run --db tasks.redb --file ../tutorial/04_reopen.uid
+unionid run --db tasks.redb --file ../tutorial/04_reopen.unid
 unionid doctor --db tasks.redb --format json
 unionid check --db tasks.redb
 ```
@@ -94,7 +94,7 @@ unionid check --db tasks.redb
 ```bash
 unionid backup --db tasks.redb --output tasks.backup.json --format json
 unionid restore --backup tasks.backup.json --db restored.redb --format json
-unionid run --db restored.redb --file ../tutorial/04_reopen.uid
+unionid run --db restored.redb --file ../tutorial/04_reopen.unid
 unionid check --db restored.redb
 ```
 
@@ -111,9 +111,9 @@ unionid server --addr 127.0.0.1:7878 --db server.redb
 另一个终端通过 TCP 执行同样的脚本：
 
 ```bash
-unionid cli --addr 127.0.0.1:7878 --file ../tutorial/01_setup.uid
-unionid cli --addr 127.0.0.1:7878 --file ../tutorial/03_update.uid
-unionid cli --addr 127.0.0.1:7878 --file ../tutorial/04_reopen.uid
+unionid cli --addr 127.0.0.1:7878 --file ../tutorial/01_setup.unid
+unionid cli --addr 127.0.0.1:7878 --file ../tutorial/03_update.unid
+unionid cli --addr 127.0.0.1:7878 --file ../tutorial/04_reopen.unid
 ```
 
 省略 `--query` 和 `--file` 可进入 REPL；Tab 补全类型、表和字段，`.schema`、`.tables`、`.types`、`.storage` 查看当前 catalog。
@@ -134,12 +134,12 @@ Rust API、本地 CLI 和 TCP 在同一 schema 下返回相同的 typed rows、�
 
 ```bash
 unionid query rust \
-  --schema schema.uid \
+  --schema schema.unid \
   --dir queries \
   --output generated/queries.rs
 ```
 
-bundle 只生成一份共享 ADT，每个 `.uid` 查询位于一个公开子 module。应用通过生成的 `find_task::FindTaskParams` 调用 `find_task::find_task(&mut engine, params)`，无需手工构造 `Value`、结果 DTO 或在查询之间转换重复的领域类型。单个查询仍可使用 `--file`。返回类型根据查询保证为 row、`Option<row>` 或 `Vec<row>`；运行时 schema 漂移明确返回 `E_SCHEMA_CHANGED`。详细契约见 [静态查询 RFC](rfc/0015-static-query-contract.md)。
+bundle 只生成一份共享 ADT，每个 `.unid` 查询（兼容 `.uid`）位于一个公开子 module。应用通过生成的 `find_task::FindTaskParams` 调用 `find_task::find_task(&mut engine, params)`，无需手工构造 `Value`、结果 DTO 或在查询之间转换重复的领域类型。单个查询仍可使用 `--file`。返回类型根据查询保证为 row、`Option<row>` 或 `Vec<row>`；运行时 schema 漂移明确返回 `E_SCHEMA_CHANGED`。详细契约见 [静态查询 RFC](rfc/0015-static-query-contract.md)。
 
 完整的独立应用验收见[类型化应用记录](assessments/typed-application-2026-09-13.md)：它覆盖嵌套 option、精确标量、derive、aggregate、lookup、returning、redb 重开和两版 migration/客户端演进。
 
@@ -159,13 +159,13 @@ python3 tutorial/validate.py \
 
 ## English walkthrough
 
-The four files under `tutorial/` form one executable five-minute journey. Start with `unionid version --format json`, run `01_setup.uid` against a new `--db` path, query the `Running` variant with `02_running.uid`, atomically change the pending row with `03_update.uid`, then launch a new process with `04_reopen.uid`. Finish with `doctor`, a full `check`, logical backup, restore to a new path, and the same typed query against the restored database before repeating the journey through TCP. Doctor reports compatibility and schema/ledger summaries from a private copy without changing the source, while check opens and verifies the actual database. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
+The four files under `tutorial/` form one executable five-minute journey. Start with `unionid version --format json`, run `01_setup.unid` against a new `--db` path, query the `Running` variant with `02_running.unid`, atomically change the pending row with `03_update.unid`, then launch a new process with `04_reopen.unid`. Finish with `doctor`, a full `check`, logical backup, restore to a new path, and the same typed query against the restored database before repeating the journey through TCP. Doctor reports compatibility and schema/ledger summaries from a private copy without changing the source, while check opens and verifies the actual database. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
 
 The TCP commands above execute the same files through `unionid cli --addr`. The Rust example calls `Engine::open_redb` with those same sources. `tutorial/validate.py` runs both paths from an empty directory and compares their typed rows, columns, and schema identity.
 
 When Rust types are the schema source of truth, depend on both `unionid` and `unionid-derive`, derive `UnionidSchema` for structs and enums, and assemble an executable schema with `SchemaBuilder`. `#[unionid(table = "jobs", key = "id")]` declares a table; field-level `default = "0"`, `index`, and `unique` declare database defaults and single-field indexes. `build()` checks dependency order and validates the complete schema before startup. Defaults allow insert input to omit a field, while rows returned through `typed_rows` remain complete. See the [Rust schema bindings RFC](rfc/0012-schema-rust-bindings.md) for the support matrix.
 
-When schema and query files are the source of truth, `unionid query rust --schema schema.uid --dir queries --output generated/queries.rs` emits one shared ADT model plus a public submodule for each query. Applications pass the generated `find_task::FindTaskParams` to `find_task::find_task(&mut engine, params)` without assembling `Value` maps, result DTOs, or conversions between duplicate domain types. Use `--file` for a single query. Return types follow query cardinality, and runtime schema drift fails with `E_SCHEMA_CHANGED`. See the [static query RFC](rfc/0015-static-query-contract.md).
+When schema and query files are the source of truth, `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs` emits one shared ADT model plus a public submodule for each query. Applications pass the generated `find_task::FindTaskParams` to `find_task::find_task(&mut engine, params)` without assembling `Value` maps, result DTOs, or conversions between duplicate domain types. Use `--file` for a single query. Return types follow query cardinality, and runtime schema drift fails with `E_SCHEMA_CHANGED`. See the [static query RFC](rfc/0015-static-query-contract.md).
 
 The [typed application record](assessments/typed-application-2026-09-13.md) runs the complete independent journey across nested options, exact scalars, derivation, aggregation, lookup, returning, redb reopen, and two-version migration/client evolution.
 

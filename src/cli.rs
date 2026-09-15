@@ -774,12 +774,17 @@ fn query_bundle_sources(directory: &Path) -> Result<Vec<(String, String)>, Strin
                 continue;
             }
             if !file_type.is_file()
-                || path.extension().and_then(|value| value.to_str()) != Some("uid")
+                || !path
+                    .extension()
+                    .is_some_and(crate::syntax::is_source_extension)
             {
                 return Err(format!(
-                    "query directory contains non-.uid path '{}'",
+                    "query directory contains non-.unid path '{}'",
                     path.display()
                 ));
+            }
+            if let Some(warning) = crate::syntax::legacy_extension_warning(&path) {
+                eprintln!("warning: {warning}");
             }
             let relative = path
                 .strip_prefix(root)
@@ -803,7 +808,7 @@ fn query_bundle_sources(directory: &Path) -> Result<Vec<(String, String)>, Strin
     visit(directory, directory, &mut queries)?;
     if queries.is_empty() {
         return Err(format!(
-            "query directory '{}' contains no .uid files",
+            "query directory '{}' contains no .unid files",
             directory.display()
         ));
     }
@@ -893,6 +898,7 @@ fn next_migration(
 ) -> Result<(PathBuf, String, Option<String>), String> {
     std::fs::create_dir_all(directory)
         .map_err(|error| format!("create '{}': {error}", directory.display()))?;
+    warn_deprecated_source_directory(directory);
     let existing = load_directory(directory).map_err(|error| error.to_string())?;
     let number = existing
         .iter()
@@ -912,7 +918,7 @@ fn next_migration(
         .ok_or_else(|| "migration number exhausted".to_string())?;
     let slug = migration_slug(name)?;
     Ok((
-        directory.join(format!("{number:04}_{slug}.uid")),
+        directory.join(format!("{number:04}_{slug}.unid")),
         format!("m{number:04}_{slug}"),
         existing.last().map(|file| file.id.clone()),
     ))
@@ -934,12 +940,24 @@ fn print_schema_check(checked: &SchemaCheck, json: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Emit deprecation warnings for legacy `.uid` files directly inside `directory`.
+pub fn warn_deprecated_source_directory(directory: &Path) {
+    if let Ok(entries) = std::fs::read_dir(directory) {
+        for entry in entries.flatten() {
+            if let Some(warning) = crate::syntax::legacy_extension_warning(&entry.path()) {
+                eprintln!("warning: {warning}");
+            }
+        }
+    }
+}
+
 pub fn migration_plan(
     db: impl Into<PathBuf>,
     directory: impl AsRef<Path>,
     json: bool,
 ) -> Result<(), String> {
     let db = db.into();
+    warn_deprecated_source_directory(directory.as_ref());
     let files = load_directory(directory).map_err(|error| error.to_string())?;
     let engine = if db.exists() {
         Engine::open_redb(db).map_err(|error| error.to_string())?
@@ -957,6 +975,7 @@ pub fn migration_apply(
     directory: impl AsRef<Path>,
     json: bool,
 ) -> Result<(), String> {
+    warn_deprecated_source_directory(directory.as_ref());
     let files = load_directory(directory).map_err(|error| error.to_string())?;
     let mut engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
     let result = engine
@@ -978,6 +997,7 @@ pub fn migration_advance(
             "E_LIMIT: migration step delay cannot exceed {MAX_STEP_DELAY_MS} milliseconds"
         ));
     }
+    warn_deprecated_source_directory(directory.as_ref());
     let files = load_directory(directory).map_err(|error| error.to_string())?;
     let mut engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
     if step_delay_ms == 0 {
@@ -1018,6 +1038,7 @@ pub fn migration_status(
 ) -> Result<(), String> {
     let db = db.into();
     require_existing_database(&db)?;
+    warn_deprecated_source_directory(directory.as_ref());
     let files = load_directory(directory).map_err(|error| error.to_string())?;
     let engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
     let status = engine
@@ -1049,6 +1070,7 @@ pub fn migration_rehearse(
 ) -> Result<(), String> {
     let source = db.into();
     require_existing_database(&source)?;
+    warn_deprecated_source_directory(directory.as_ref());
     let files = load_directory(directory).map_err(|error| error.to_string())?;
     let source_bytes = std::fs::metadata(&source)
         .map_err(|error| error.to_string())?
