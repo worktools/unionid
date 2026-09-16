@@ -92,10 +92,11 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             row_type,
             key,
         } => {
-            line(output, depth, &format!("table {table} {row_type}"));
+            line(output, depth, &format!("table {table}: {row_type} {{"));
             if let Some(key) = key {
                 line(output, depth + 1, &format!("key {key}"));
             }
+            line(output, depth, "}");
         }
         Statement::CreateIndex {
             table,
@@ -200,10 +201,6 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
                         match_value_arms(output, &prefix, value, assignment_depth)
                     }
                 }
-                if grouped {
-                    output.pop();
-                    output.push_str(",\n");
-                }
             }
             if grouped {
                 line(output, depth, "}");
@@ -222,13 +219,14 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             parent,
             steps,
         } => {
-            line(output, depth, &format!("migration {name}"));
+            line(output, depth, &format!("migration {name} {{"));
             if let Some(parent) = parent {
                 line(output, depth + 1, &format!("parent {parent}"));
             }
             for step in steps {
                 migration_step(output, step, depth + 1);
             }
+            line(output, depth, "}");
         }
         Statement::Explain(pipeline) => {
             line(output, depth, "explain");
@@ -287,7 +285,7 @@ fn many_write(output: &mut String, operation: &str, table: &str, value: &Value, 
     }
     line(output, depth, &format!("{operation} many {table} ["));
     for row in rows {
-        line(output, depth + 1, &format!("{},", row.source_text()));
+        line(output, depth + 1, &row.source_text());
     }
     line(output, depth, "]");
 }
@@ -299,11 +297,11 @@ fn record_lines(
 ) {
     for (name, value) in fields {
         if let Value::Record(nested) = value {
-            line(output, depth, &format!("{name} = {{"));
+            line(output, depth, &format!("{name}: {{"));
             record_lines(output, nested, depth + 1);
-            line(output, depth, "},");
+            line(output, depth, "}");
         } else {
-            line(output, depth, &format!("{name} = {},", value.source_text()));
+            line(output, depth, &format!("{name}: {}", value.source_text()));
         }
     }
 }
@@ -311,30 +309,36 @@ fn record_lines(
 fn type_definition(output: &mut String, prefix: &str, name: &str, ty: &ScalarType, depth: usize) {
     match ty {
         ScalarType::Record(fields) => {
-            line(output, depth, &format!("{prefix} {name} = {{"));
+            let keyword = if prefix == "type" {
+                "struct"
+            } else {
+                "add struct"
+            };
+            line(output, depth, &format!("{keyword} {name} {{"));
             for field in fields {
-                line(output, depth + 1, &format!("{},", column(field)));
+                line(output, depth + 1, &column(field));
             }
             line(output, depth, "}");
         }
         ScalarType::Enum(EnumType { variants }) => {
-            line(output, depth, &format!("{prefix} {name} ="));
-            for (index, variant) in variants.iter().enumerate() {
-                let lead = if index == 0 { "" } else { "| " };
+            let keyword = if prefix == "type" { "enum" } else { "add enum" };
+            line(output, depth, &format!("{keyword} {name} {{"));
+            for variant in variants {
                 if let [ScalarType::Record(fields)] = variant.args.as_slice() {
-                    line(output, depth + 1, &format!("{lead}{} {{", variant.name));
+                    line(output, depth + 1, &format!("{} {{", variant.name));
                     for field in fields {
-                        line(output, depth + 2, &format!("{},", column(field)));
+                        line(output, depth + 2, &column(field));
                     }
                     line(output, depth + 1, "}");
                 } else {
                     line(
                         output,
                         depth + 1,
-                        &format!("{lead}{}{}", variant.name, variant_arguments(&variant.args)),
+                        &format!("{}{}", variant.name, variant_arguments(&variant.args)),
                     );
                 }
             }
+            line(output, depth, "}");
         }
         _ => line(
             output,
@@ -375,8 +379,6 @@ fn pipeline_text(output: &mut String, pipeline: &Pipeline, depth: usize) {
                         } else {
                             line(output, depth + 1, field);
                         }
-                        output.pop();
-                        output.push_str(",\n");
                     }
                     line(output, depth, "}");
                     position = end + 1;
@@ -387,8 +389,6 @@ fn pipeline_text(output: &mut String, pipeline: &Pipeline, depth: usize) {
                 line(output, depth, "derive {");
                 for stage in &pipeline.stages[position..end] {
                     derived_assignment(output, stage, depth + 1);
-                    output.pop();
-                    output.push_str(",\n");
                 }
                 line(output, depth, "}");
                 position = end;
@@ -468,7 +468,11 @@ fn stage_text(output: &mut String, stage: &Stage, depth: usize) {
             let range = if *offset == 0 {
                 limit.to_string()
             } else {
-                format!("{}..{}", offset + 1, offset.saturating_add(*limit))
+                format!(
+                    "{}..{}",
+                    offset + 1,
+                    offset.saturating_add(*limit).saturating_add(1)
+                )
             };
             line(output, depth, &format!("take {range}"));
         }
@@ -494,9 +498,9 @@ fn expression(output: &mut String, depth: usize, prefix: &str, value: &BoolExpre
         line(output, depth, &format!("{prefix}{inline}"));
         return;
     }
-    line(output, depth, &format!("{prefix}("));
+    line(output, depth, &format!("{prefix}{{"));
     boolean_lines(output, depth + 1, value);
-    line(output, depth, ")");
+    line(output, depth, "}");
 }
 
 fn boolean_lines(output: &mut String, depth: usize, value: &BoolExpression) {
@@ -534,7 +538,7 @@ fn boolean_lines(output: &mut String, depth: usize, value: &BoolExpression) {
 fn boolean_chain(output: &mut String, depth: usize, value: &BoolExpression, and: bool) {
     let mut values = Vec::new();
     collect_boolean_chain(value, and, &mut values);
-    let operator = if and { "and" } else { "or" };
+    let operator = if and { "&&" } else { "||" };
     let precedence = if and { 2 } else { 1 };
     for (index, value) in values.into_iter().enumerate() {
         let prefix = if index == 0 {
@@ -594,7 +598,7 @@ fn collect_boolean_chain<'a>(
 fn local_binding(binding: &LocalBinding) -> String {
     let mut text = format!("let {}", binding.name);
     if let Some(annotation) = &binding.annotation {
-        text.push(' ');
+        text.push_str(": ");
         text.push_str(&type_text(annotation));
     }
     text.push_str(" = ");
@@ -611,7 +615,7 @@ fn local_binding(binding: &LocalBinding) -> String {
                     .iter()
                     .map(|parameter| match &parameter.annotation {
                         Some(annotation) => {
-                            format!("{} {}", parameter.name, type_text(annotation))
+                            format!("{}: {}", parameter.name, type_text(annotation))
                         }
                         None => parameter.name.clone(),
                     })
@@ -626,21 +630,23 @@ fn local_binding(binding: &LocalBinding) -> String {
 }
 
 fn match_predicate(output: &mut String, predicate: &MatchPredicate, depth: usize) {
-    line(output, depth, "filter (");
-    line(output, depth + 1, &format!("match {} {{", predicate.column));
+    line(
+        output,
+        depth,
+        &format!("filter match {} {{", predicate.column),
+    );
     for arm in &predicate.arms {
         line(
             output,
-            depth + 2,
+            depth + 1,
             &format!(
-                "{} => {},",
+                "{} => {}",
                 pattern(&arm.pattern, false),
                 boolean(&arm.condition, 0, false)
             ),
         );
     }
-    line(output, depth + 1, "}");
-    line(output, depth, ")");
+    line(output, depth, "}");
 }
 
 fn derive_match(output: &mut String, derive: &DeriveMatch, depth: usize) {
@@ -654,7 +660,7 @@ fn derive_match(output: &mut String, derive: &DeriveMatch, depth: usize) {
             output,
             depth + 1,
             &format!(
-                "{} => {},",
+                "{} => {}",
                 pattern(&arm.pattern, false),
                 match_value(&arm.result, false)
             ),
@@ -670,7 +676,7 @@ fn match_value_arms(output: &mut String, prefix: &str, value: &DeriveMatch, dept
             output,
             depth + 1,
             &format!(
-                "{} => {},",
+                "{} => {}",
                 pattern(&arm.pattern, false),
                 match_value(&arm.result, false)
             ),
@@ -689,7 +695,7 @@ fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
         } else {
             format!("{{{}}}", aggregate.group_by.join(", "))
         };
-        line(output, depth, &format!("group {keys} ("));
+        line(output, depth, &format!("group {keys} {{"));
         line(output, depth + 1, "aggregate {");
         (depth + 2, depth + 1)
     };
@@ -708,12 +714,12 @@ fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
         line(
             output,
             assignment_depth,
-            &format!("{} = {function}{input},", assignment.name),
+            &format!("{} = {function}{input}", assignment.name),
         );
     }
     line(output, closing_depth, "}");
     if !aggregate.group_by.is_empty() {
-        line(output, depth, ")");
+        line(output, depth, "}");
     }
 }
 
@@ -727,16 +733,13 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
             table,
             row_type,
             key,
-        } => line(
-            output,
-            depth,
-            &format!(
-                "add table {table} {row_type}{}",
-                key.as_ref()
-                    .map(|key| format!(" key {key}"))
-                    .unwrap_or_default()
-            ),
-        ),
+        } => {
+            line(output, depth, &format!("add table {table}: {row_type} {{"));
+            if let Some(key) = key {
+                line(output, depth + 1, &format!("key {key}"));
+            }
+            line(output, depth, "}");
+        }
         SchemaMigration::DropTable { table } => line(output, depth, &format!("drop table {table}")),
         SchemaMigration::RenameTable { from, to } => {
             line(output, depth, &format!("rename table {from} to {to}"))
@@ -789,7 +792,7 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
         SchemaMigration::AddVariant { owner, name, args } => line(
             output,
             depth,
-            &format!("add variant {owner}.{name}{}", variant_arguments(args)),
+            &format!("add variant {owner}::{name}{}", variant_arguments(args)),
         ),
         SchemaMigration::DropVariant {
             owner,
@@ -799,7 +802,7 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
             output,
             depth,
             &format!(
-                "drop variant {owner}.{variant}{}",
+                "drop variant {owner}::{variant}{}",
                 transform
                     .as_ref()
                     .map(|transform| format!(" {}", transform_text(transform)))
@@ -809,7 +812,7 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
         SchemaMigration::RenameVariant { owner, from, to } => line(
             output,
             depth,
-            &format!("rename variant {owner}.{from} to {to}"),
+            &format!("rename variant {owner}::{from} to {to}"),
         ),
         SchemaMigration::ChangeVariant {
             owner,
@@ -820,7 +823,7 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
             output,
             depth,
             &format!(
-                "change variant {owner}.{variant} to{} {}",
+                "change variant {owner}::{variant} to{} {}",
                 variant_arguments(args),
                 transform_text(transform)
             ),
@@ -992,14 +995,14 @@ fn boolean(value: &BoolExpression, parent: u8, right: bool) -> String {
         ),
         BoolExpression::IsSome(value) => format!("is_some {}", scalar_argument(value)),
         BoolExpression::IsNone(value) => format!("is_none {}", scalar_argument(value)),
-        BoolExpression::Not(value) => format!("not {}", boolean(value, precedence, false)),
+        BoolExpression::Not(value) => format!("!{}", boolean(value, precedence, false)),
         BoolExpression::And(left, right_value) => format!(
-            "{} and {}",
+            "{} && {}",
             boolean(left, precedence, false),
             boolean(right_value, precedence, true)
         ),
         BoolExpression::Or(left, right_value) => format!(
-            "{} or {}",
+            "{} || {}",
             boolean(left, precedence, false),
             boolean(right_value, precedence, true)
         ),
@@ -1085,17 +1088,22 @@ fn pattern(value: &MatchPattern, argument: bool) -> String {
         MatchPattern::Wildcard => "_".into(),
         MatchPattern::Binding(name) => name.clone(),
         MatchPattern::Constructor { name, payload, .. } => match payload {
-            MatchPayload::Unit => name.clone(),
+            MatchPayload::Unit => constructor_path(name),
             MatchPayload::Record { fields, rest } => {
-                format!("{name} {}", pattern_fields(fields, *rest))
+                format!(
+                    "{} {}",
+                    constructor_path(name),
+                    pattern_fields(fields, *rest)
+                )
             }
             MatchPayload::Positional(values) => format!(
-                "{name} {}",
+                "{}({})",
+                constructor_path(name),
                 values
                     .iter()
-                    .map(|value| pattern(value, true))
+                    .map(|value| pattern(value, false))
                     .collect::<Vec<_>>()
-                    .join(" ")
+                    .join(", ")
             ),
         },
         MatchPattern::Record { fields, rest } => pattern_fields(fields, *rest),
@@ -1130,7 +1138,7 @@ fn pattern_fields(fields: &[MatchField], rest: bool) -> String {
             if matches!(&field.pattern, MatchPattern::Binding(name) if name == &field.field) {
                 field.field.clone()
             } else {
-                format!("{} = {}", field.field, pattern(&field.pattern, false))
+                format!("{}: {}", field.field, pattern(&field.pattern, false))
             }
         })
         .collect::<Vec<_>>();
@@ -1146,17 +1154,18 @@ fn match_value(value: &MatchValue, argument: bool) -> String {
         MatchValue::Literal(value) => value.source_text(),
         MatchValue::Expression(value) => boolean(value, 0, false),
         MatchValue::Constructor { name, payload } => match payload {
-            MatchValuePayload::Unit => name.clone(),
+            MatchValuePayload::Unit => constructor_path(name),
             MatchValuePayload::Record(fields) => {
-                format!("{name} {}", match_value_fields(fields))
+                format!("{} {}", constructor_path(name), match_value_fields(fields))
             }
             MatchValuePayload::Positional(values) => format!(
-                "{name} {}",
+                "{}({})",
+                constructor_path(name),
                 values
                     .iter()
-                    .map(|value| match_value(value, true))
+                    .map(|value| match_value(value, false))
                     .collect::<Vec<_>>()
-                    .join(" ")
+                    .join(", ")
             ),
         },
         MatchValue::Record(fields) => match_value_fields(fields),
@@ -1197,10 +1206,14 @@ fn match_value_fields(fields: &[MatchValueField]) -> String {
         "{{{}}}",
         fields
             .iter()
-            .map(|field| format!("{} = {}", field.name, match_value(&field.value, false)))
+            .map(|field| format!("{}: {}", field.name, match_value(&field.value, false)))
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn constructor_path(name: &str) -> String {
+    name.replace('.', "::")
 }
 
 fn type_text(value: &ScalarType) -> String {
@@ -1214,12 +1227,12 @@ fn type_text(value: &ScalarType) -> String {
         ScalarType::Timestamp => "timestamp".into(),
         ScalarType::Duration => "duration".into(),
         ScalarType::Bytes => "bytes".into(),
-        ScalarType::Decimal { precision, scale } => format!("decimal {precision} {scale}"),
+        ScalarType::Decimal { precision, scale } => format!("Decimal<{precision}, {scale}>"),
 
         ScalarType::Named(name) => name.clone(),
         ScalarType::Ref(id) => format!("type#{id}"),
-        ScalarType::Option(value) => format!("option {}", type_argument(value)),
-        ScalarType::List(value) => format!("list {}", type_argument(value)),
+        ScalarType::Option(value) => format!("Option<{}>", type_text(value)),
+        ScalarType::List(value) => format!("List<{}>", type_text(value)),
         ScalarType::Tuple(values) => format!(
             "({})",
             values.iter().map(type_text).collect::<Vec<_>>().join(", ")
@@ -1236,27 +1249,20 @@ fn type_text(value: &ScalarType) -> String {
     }
 }
 
-fn type_argument(value: &ScalarType) -> String {
-    if matches!(value, ScalarType::Option(_) | ScalarType::List(_)) {
-        format!("({})", type_text(value))
-    } else {
-        type_text(value)
-    }
-}
-
 fn variant_arguments(values: &[ScalarType]) -> String {
     match values {
         [] => String::new(),
-        [value] if !matches!(value, ScalarType::Tuple(_)) => format!(" {}", type_text(value)),
+        [ScalarType::Record(fields)] => format!(" {{{}}}", columns_text(fields)),
+        [value] if !matches!(value, ScalarType::Tuple(_)) => format!("({})", type_text(value)),
         values => format!(
-            " ({})",
+            "({})",
             values.iter().map(type_text).collect::<Vec<_>>().join(", ")
         ),
     }
 }
 
 fn column(value: &Column) -> String {
-    let mut output = format!("{} {}", value.name, type_text(&value.ty));
+    let mut output = format!("{}: {}", value.name, type_text(&value.ty));
     if let Some(default) = &value.default {
         output.push_str(" = ");
         output.push_str(&default.source_text());

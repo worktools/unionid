@@ -1,4 +1,5 @@
-migration m0002_add_priority
+migration m0002_add_priority {
   parent m0001_initial
-  add field Task.priority int = 0
+  add field Task.priority: int = 0
   add index tasks.priority
+}

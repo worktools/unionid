@@ -89,7 +89,7 @@ fn nested_config_survives_deep_adt_migration_and_restore() {
 }
 update configs
 filter id == "prod"
-set source = Remote {url = "https://new.example", retry = {attempts = 5, delay_ms = 1000}}
+set source = Remote {url = "https://new.example", retry = {attempts: 5, delay_ms = 1000}}
 from configs
 filter match source
   Remote {url, retry} => url == "https://new.example" and retry.attempts == 5
@@ -98,7 +98,7 @@ filter match source
         restart_query: r#"from configs
 filter source == Remote {
   url = "https://new.example"
-  retry = {attempts = 5, delay_ms = 1000}
+  retry = {attempts: 5, delay_ms = 1000}
 }
 "#,
         upgrade_migration: r#"migration m0002_http_source
@@ -106,7 +106,7 @@ filter source == Remote {
   add field Retry.backoff_ms int = 250
   rename variant Source.Remote to Http
   change variant Source.Http to {url text, retry Retry, headers list text}
-    using old -> {url = old.url, retry = old.retry, headers = []}
+    using old -> {url = old.url, retry = old.retry, headers: []}
 "#,
         final_query: r#"from configs
 filter match source
@@ -118,8 +118,8 @@ select {id, source, tags}
         explain_query: r#"explain from configs
 filter source == Http {
   url = "https://new.example"
-  retry = {attempts = 5, delay_ms = 1000, backoff_ms = 250}
-  headers = []
+  retry = {attempts: 5, delay_ms = 1000, backoff_ms: 250}
+  headers: []
 }
 "#,
         expected_access: QueryAccessKind::SecondaryIndexLookup,
@@ -513,7 +513,7 @@ fn assert_config_before(response: &QueryResponse) {
     assert_text(row, "id", "prod");
     let source = row["source"].source_text();
     assert!(source.starts_with("Remote"), "{source}");
-    assert!(source.contains("attempts = 5"), "{source}");
+    assert!(source.contains("attempts: 5"), "{source}");
 }
 
 fn assert_config_after(response: &QueryResponse) {
@@ -521,8 +521,8 @@ fn assert_config_after(response: &QueryResponse) {
     assert_text(row, "id", "prod");
     let source = row["source"].source_text();
     assert!(source.starts_with("Http"), "{source}");
-    assert!(source.contains("backoff_ms = 250"), "{source}");
-    assert!(source.contains("headers = []"), "{source}");
+    assert!(source.contains("backoff_ms: 250"), "{source}");
+    assert!(source.contains("headers: []"), "{source}");
 }
 
 fn assert_session_before(response: &QueryResponse) {

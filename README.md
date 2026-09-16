@@ -61,35 +61,37 @@ The executable language also supports native `uuid`, `bytes`, `date`, `timestamp
 The schema below combines the product type `Task` with the sum type `State`. Each of `Running`, `Done`, and `Failed` has a distinct payload; fields that do not belong to a variant do not exist.
 
 ```text
-type State =
+enum State {
   Pending
-  | Running {
-    worker text,
-    attempt int,
+  Running {
+    worker: text
+    attempt: int
   }
-  | Done {
-    result text,
+  Done {
+    result: text
   }
-  | Failed {
-    message text,
-    retryable bool,
+  Failed {
+    message: text
+    retryable: bool
   }
-
-type Task = {
-  id int,
-  title text,
-  tags list text,
-  state State,
 }
 
-table tasks Task
+struct Task {
+  id: int
+  title: text
+  tags: List<text>
+  state: State
+}
+
+table tasks: Task {
   key id
+}
 
 insert tasks {
-  id = 1,
-  title = "sync directory",
-  tags = ["sync", "local"],
-  state = Running {worker = "worker-1", attempt = 2},
+  id: 1
+  title: "sync directory"
+  tags: ["sync", "local"]
+  state: State::Running {worker: "worker-1", attempt: 2}
 }
 ```
 
@@ -99,18 +101,16 @@ Queries compose from top to bottom and destructure `State` directly. A match mus
 
 ```text
 from tasks
-filter (
-  match state {
-    Running {attempt, ..} => attempt >= 2,
-    Failed {retryable, ..} => retryable,
-    _ => false,
-  }
-)
+filter match state {
+  State::Running {attempt, ..} => attempt >= 2
+  State::Failed {retryable, ..} => retryable
+  _ => false
+}
 derive state_label = match state {
-  Pending => "pending",
-  Running {worker, ..} => worker,
-  Done {result} => result,
-  Failed {message, ..} => message,
+  State::Pending => "pending"
+  State::Running {worker, ..} => worker
+  State::Done {result} => result
+  State::Failed {message, ..} => message
 }
 select {id, title, state, state_label}
 sort id
@@ -121,13 +121,11 @@ take 20
 
 ```text
 update tasks
-filter (
-  match state {
-    Pending => true,
-    _ => false,
-  }
-)
-set state = Running {worker = "worker-1", attempt = 1}
+filter match state {
+  State::Pending => true
+  _ => false
+}
+set state = State::Running {worker: "worker-1", attempt: 1}
 returning {id, state}
 ```
 
@@ -168,16 +166,18 @@ struct Task {
 }
 
 let mut db = Engine::memory();
-db.execute(r#"type State =
+db.execute(r#"enum State {
   Pending
-  | Running {worker text, attempt int}
-type Task = {
-  id int,
-  title text,
-  state State,
+  Running {worker: text, attempt: int}
 }
-table tasks Task
-  key id"#);
+struct Task {
+  id: int
+  title: text
+  state: State
+}
+table tasks: Task {
+  key id
+}"#);
 
 let row = Task {
     id: 1,
@@ -200,13 +200,13 @@ Version 1 mutation 请求可通过 `with_idempotency_key` 获得跨 TCP/HTTP 重
 
 关联读可用 `Engine::fetch_by_key` / `typed_fetch_by_key` 按主键或已索引列批量取回，结果与输入键等长同序、缺失键为 `None`，并基于一次一致快照；每个键在运行时校验唯一性，未索引键或非唯一命中分别返回 `E_RELATION_KEY` / `E_RELATION_NOT_UNIQUE`。设计见 [RFC 0013](docs/rfc/0013-minimal-relational-reads.md)。
 
-查询语言也支持有界的一对多展开：`lookup lines from order_lines on order_id == id take 100` 为每个 driver row 增加 typed `list Line`，缺失关联为 `[]`。目标 key 必须有索引，逐行上限必须显式给出；分页时把 lookup 放在 `page` 后面，先限制 driver rows 再组装嵌套 ADT。
+查询语言也支持有界的一对多展开：`lookup lines from order_lines on order_id == id take 100` 为每个 driver row 增加 typed `List<Line>`，缺失关联为 `[]`。目标 key 必须有索引，逐行上限必须显式给出；分页时把 lookup 放在 `page` 后面，先限制 driver rows 再组装嵌套 ADT。
 
 Version-1 mutation requests can use `with_idempotency_key` for exactly-once effects across TCP/HTTP retries, with first-commit or replay metadata in the response. Receipts never expire automatically; inspect and explicitly prune a bounded preview with `unionid receipts status/prune`.
 
 Batched relational reads use `Engine::fetch_by_key` / `typed_fetch_by_key` against a primary key or an indexed column: results match the input keys in length and order, missing keys are `None`, and the call runs over one consistent snapshot. Each key is validated for uniqueness at runtime; a non-indexed key or a non-unique match returns `E_RELATION_KEY` or `E_RELATION_NOT_UNIQUE`. See [RFC 0013](docs/rfc/0013-minimal-relational-reads.md).
 
-The query language also supports bounded one-to-many expansion: `lookup lines from order_lines on order_id == id take 100` adds a typed `list Line` to each driver row, with `[]` for no match. The target key must be indexed and the per-row bound is explicit. In paginated queries, lookup follows `page`, so driver rows are bounded before nested ADTs are assembled.
+The query language also supports bounded one-to-many expansion: `lookup lines from order_lines on order_id == id take 100` adds a typed `List<Line>` to each driver row, with `[]` for no match. The target key must be indexed and the per-row bound is explicit. In paginated queries, lookup follows `page`, so driver rows are bounded before nested ADTs are assembled.
 
 可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、typed cursor 分页、真实客户端断开、丢响应后的幂等重试、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
 

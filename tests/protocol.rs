@@ -257,7 +257,7 @@ fn prepared_bulk_insert_infers_row_lists_and_honors_deadlines() {
         .prepare("insert many tasks $rows\nreturning id, state")
         .unwrap();
     assert_eq!(prepared.parameters(), &["rows"]);
-    assert_eq!(prepared.parameter_types()["rows"], "list Task");
+    assert_eq!(prepared.parameter_types()["rows"], "List<Task>");
 
     let task = |id, title: &str| {
         Value::Record(BTreeMap::from([
@@ -366,7 +366,7 @@ fn prepared_dml_infers_types_and_executes_atomically() {
     assert_eq!(changed.affected_rows, Some(1));
     assert_eq!(
         changed.rows[0]["state"].source_text(),
-        "Running {attempt = 3, worker = \"prepared\"}"
+        "Running {attempt: 3, worker: \"prepared\"}"
     );
 
     let expired = engine.execute_prepared_until(
@@ -381,7 +381,7 @@ fn prepared_dml_infers_types_and_executes_atomically() {
     assert_eq!(expired.error.unwrap().code, "E_TIMEOUT");
     assert_eq!(
         engine.execute("from tasks | filter id == 1").rows[0]["state"].source_text(),
-        "Running {attempt = 3, worker = \"prepared\"}"
+        "Running {attempt: 3, worker: \"prepared\"}"
     );
 
     let delete = engine
@@ -583,7 +583,7 @@ fn prepared_bulk_upsert_infers_row_lists_actions_and_deadlines() {
     let prepared = engine
         .prepare("upsert many items $rows\nreturning id, note")
         .unwrap();
-    assert_eq!(prepared.parameter_types()["rows"], "list Item");
+    assert_eq!(prepared.parameter_types()["rows"], "List<Item>");
 
     let values = Value::List(vec![row(1, "updated"), row(2, "inserted")]);
     let response =

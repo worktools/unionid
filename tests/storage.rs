@@ -1085,7 +1085,7 @@ table jobs Job
   key id
 
 create index jobs (state)
-insert jobs {id = 1, priority = 1, state = Queued {attempt = 0}}
+insert jobs {id = 1, priority = 1, state = Queued {attempt: 0}}
 insert jobs {id = 2, priority = 2, state = Queued {attempt = 4}}"#,
         );
         assert!(setup.ok, "{}", setup.message);
@@ -1105,7 +1105,7 @@ returning id, state"#,
         assert!(updated.rows[0]["id"].cmp_eq(&Value::Int(2)));
         assert_eq!(
             updated.rows[0]["state"].source_text(),
-            "Running {attempt = 5, worker = \"disk\"}"
+            "Running {attempt: 5, worker: \"disk\"}"
         );
     }
 
@@ -1119,7 +1119,7 @@ returning id, state"#,
     assert!(untouched.ok, "{}", untouched.message);
     assert_eq!(
         untouched.rows[0]["state"].source_text(),
-        "Queued {attempt = 0}"
+        "Queued {attempt: 0}"
     );
     let plan = reopened.execute(&format!("explain from jobs | filter state == {value}"));
     assert!(plan.ok, "{}", plan.message);
@@ -1589,7 +1589,7 @@ insert tasks {id = 1, state = Failed {message = "broken"}}"#,
         );
         assert!(created.ok, "{}", created.message);
         let migrated = engine.execute(
-            "migration task_state_v2\n  rename field Task.id to task_id\n  add field Task.priority int = 0\n  rename variant State.Failed to Rejected\n  change variant State.Rejected to {code int, message text}\n    using old -> {code = 500, message = old.message}",
+            "migration task_state_v2\n  rename field Task.id to task_id\n  add field Task.priority int = 0\n  rename variant State.Failed to Rejected\n  change variant State.Rejected to {code int, message text}\n    using old -> {code: 500, message = old.message}",
         );
         assert!(migrated.ok, "{}", migrated.message);
         migrated_schema = engine.schema_info();
@@ -1607,7 +1607,7 @@ insert tasks {id = 1, state = Failed {message = "broken"}}"#,
     assert!(
         response.rows[0]["state"]
             .source_text()
-            .contains("code = 500")
+            .contains("code: 500")
     );
 }
 

@@ -55,7 +55,7 @@ fn field_set_swaps_and_adt_parameters_survive_redb_reopen() {
         assert!(result.rows[0]["right"].cmp_eq(&Value::Int(10)));
         assert_eq!(
             result.rows[0]["state"].source_text(),
-            "Running {attempt = 3}"
+            "Running {attempt: 3}"
         );
     }
     drop(durable);
@@ -107,7 +107,7 @@ fn field_set_formatter_and_repl_have_explicit_boundaries() {
     let formatted = format_source(legacy).unwrap();
     assert_eq!(
         formatted,
-        "update items\nset {\n  left = right,\n  right = left,\n}\nreturning {left, right}\n"
+        "update items\nset {\n  left = right\n  right = left\n}\nreturning {left, right}\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
     assert_eq!(
@@ -137,7 +137,7 @@ fn field_set_formatter_and_repl_have_explicit_boundaries() {
         ),
         (
             "update items | set {left = 1 right = 2}",
-            "expected ',' between set assignments",
+            "expected a newline or comma between set assignments",
         ),
         (
             "update items | set {left = 1, left = 2}",

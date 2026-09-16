@@ -124,7 +124,7 @@ fn migration_apply_commits_files_individually_and_can_resume() {
     let path = dir.0.join("resume.redb");
     let first = initial_file();
     let broken = MigrationFile::parse(
-        "migration m0002_add_priority\n  parent m0001_initial\n  add field Missing.priority int = 0\n",
+        "migration m0002_add_priority\n  parent m0001_initial\n  add field Missing.priority: int = 0\n",
     )
     .unwrap();
     let mut engine = Engine::open_redb(&path).unwrap();
@@ -136,14 +136,14 @@ fn migration_apply_commits_files_individually_and_can_resume() {
     drop(engine);
 
     let fixed = MigrationFile::parse(
-        "migration m0002_add_priority\n  parent m0001_initial\n  add field Task.priority int = 0\n",
+        "migration m0002_add_priority\n  parent m0001_initial\n  add field Task.priority: int = 0\n",
     )
     .unwrap();
     let mut engine = Engine::open_redb(&path).unwrap();
     let resumed = engine.apply_migrations(&[first, fixed]).unwrap();
     assert_eq!(resumed.skipped, ["m0001_initial"]);
     assert_eq!(resumed.applied, ["m0002_add_priority"]);
-    assert!(engine.schema().contains("priority int = 0"));
+    assert!(engine.schema().contains("priority: int = 0"));
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn executable_schema_migration_example() {
     assert!(
         response.rows[0]["state"]
             .source_text()
-            .contains("code = 500")
+            .contains("code: 500")
     );
 }
 
@@ -364,17 +364,17 @@ insert boxed {task = {id = 3, state = Pending}}"#,
 
     let migrated = ok(
         &mut engine,
-        "migration task_state_v2\n  rename type State to JobState\n  rename variant JobState.Failed to Rejected\n  rename field Task.id to task_id\n  add field Task.priority int = 0",
+        "migration task_state_v2\n  rename type State to JobState\n  rename variant JobState.Failed to Rejected\n  rename field Task.id to task_id\n  add field Task.priority: int = 0",
     );
     assert_eq!(
         migrated.schema.as_ref().unwrap().revision,
         before.revision + 1
     );
     let schema = engine.schema();
-    assert!(schema.contains("type JobState"));
+    assert!(schema.contains("enum JobState"));
     assert!(schema.contains("Rejected"));
-    assert!(schema.contains("task_id int"));
-    assert!(schema.contains("priority int = 0"));
+    assert!(schema.contains("task_id: int"));
+    assert!(schema.contains("priority: int = 0"));
 
     let active = ok(
         &mut engine,
@@ -384,7 +384,7 @@ insert boxed {task = {id = 3, state = Pending}}"#,
     assert!(active.rows[0]["priority"].cmp_eq(&Value::Int(0)));
     assert_eq!(
         active.rows[0]["state"].source_text(),
-        "Rejected {message = \"broken\"}"
+        "Rejected {message: \"broken\"}"
     );
     assert_eq!(
         ok(&mut engine, "from archive | filter state == Pending")
@@ -428,7 +428,7 @@ insert archive {id = 2, state = Failed {message = "b"}}"#,
     );
     ok(
         &mut engine,
-        "migration failed_payload_v2\n  rename variant State.Failed to Rejected\n  change variant State.Rejected to {code int, message text}\n    using old -> {code = 0, message = old.message}",
+        "migration failed_payload_v2\n  rename variant State.Failed to Rejected\n  change variant State.Rejected to {code int, message text}\n    using old -> {code: 0, message = old.message}",
     );
 
     for table in ["active", "archive"] {
@@ -439,7 +439,7 @@ insert archive {id = 2, state = Failed {message = "b"}}"#,
             ),
         );
         assert_eq!(response.rows.len(), 1);
-        assert!(response.rows[0]["state"].source_text().contains("code = 0"));
+        assert!(response.rows[0]["state"].source_text().contains("code: 0"));
     }
 }
 
@@ -557,7 +557,7 @@ insert items {id = 1, payload = {meta = {attempts = 3}}}"#,
     assert!(
         response.rows[0]["payload"]
             .source_text()
-            .contains("label = \"preserved\"")
+            .contains("label: \"preserved\"")
     );
 }
 
@@ -576,17 +576,17 @@ fn type_add_and_drop_obey_reference_integrity() {
     );
     let before = engine.schema_info();
     let failed = engine
-        .execute("migration invalid_drop\n  add field Task.note text = \"x\"\n  drop type State");
+        .execute("migration invalid_drop\n  add field Task.note: text = \"x\"\n  drop type State");
     assert!(!failed.ok);
     assert_eq!(failed.error.unwrap().code, "E_MIGRATION");
     assert_eq!(engine.schema_info(), before);
-    assert!(!engine.schema().contains("note text"));
+    assert!(!engine.schema().contains("note: text"));
 
     ok(
         &mut engine,
-        "migration recursive_type\n  add field Task.child option Task = None",
+        "migration recursive_type\n  add field Task.child: Option<Task> = None",
     );
-    assert!(engine.schema().contains("child option Task = None"));
+    assert!(engine.schema().contains("child: Option<Task> = None"));
 }
 
 #[test]
@@ -611,7 +611,7 @@ insert chains
         &mut engine,
         r#"migration chain_v2
   rename field Chain.value to number
-  add field Chain.note text = "added""#,
+  add field Chain.note: text = "added""#,
     );
     let rows = ok(
         &mut engine,
@@ -644,7 +644,7 @@ table links LinkRow"#,
     assert!(!failed.ok);
     assert_eq!(failed.error.unwrap().code, "E_SCHEMA");
     assert_eq!(sum.schema_info(), before);
-    assert!(sum.schema().contains("| End"));
+    assert!(sum.schema().contains("  End"));
 
     let mut mutual = Engine::memory();
     ok(
@@ -657,11 +657,11 @@ type Child =
     );
     let before = mutual.schema_info();
     let failed =
-        mutual.execute("migration mutual_cycle\n  add field Parent.child option Child = None");
+        mutual.execute("migration mutual_cycle\n  add field Parent.child: Option<Child> = None");
     assert!(!failed.ok);
     assert_eq!(failed.error.unwrap().code, "E_SCHEMA");
     assert_eq!(mutual.schema_info(), before);
-    assert!(!mutual.schema().contains("child option Child"));
+    assert!(!mutual.schema().contains("child: Option<Child>"));
 }
 
 #[test]
@@ -673,7 +673,7 @@ fn migration_updates_defaults_variants_keys_and_indexes_explicitly() {
 type Item =
   id int
   name text
-  note text = "old"
+  note: text = "old"
   status Status
 table items Item
   key id
@@ -713,7 +713,7 @@ insert items {id = 1, name = "first", status = Active}"#,
         &mut engine,
         "migration remove_note\n  drop index items.note\n  drop field Item.note",
     );
-    assert!(!engine.schema().contains("note text"));
+    assert!(!engine.schema().contains("note: text"));
     assert!(!engine.execute("from items | filter note == \"new\"").ok);
 }
 
@@ -771,7 +771,7 @@ fn migration_plan_reports_affected_rows_and_indexes() {
         );
     }
     let add_field = MigrationFile::parse(
-        "migration m0002_note\n  parent m0001_initial\n  add field Task.note text = \"\"\n",
+        "migration m0002_note\n  parent m0001_initial\n  add field Task.note: text = \"\"\n",
     )
     .unwrap();
     let plan = engine.plan_migrations(&[initial, add_field]).unwrap();

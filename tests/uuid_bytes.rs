@@ -69,7 +69,7 @@ sort digest"#,
     assert!(extrema.ok, "{}", extrema.message);
     assert_eq!(
         extrema.rows[0]["first"].source_text(),
-        "Some (uuid \"00000000-0000-0000-0000-000000000001\")"
+        "Some(uuid \"00000000-0000-0000-0000-000000000001\")"
     );
 
     let explain = engine.execute("explain from artifacts | filter digest == bytes \"00ff\"");

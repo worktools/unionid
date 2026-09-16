@@ -65,6 +65,7 @@ enum Kind {
     Close(char),
     Comma,
     Colon,
+    DoubleColon,
     Dot,
     Pipe,
     Plus,
@@ -264,7 +265,12 @@ fn lex_source(source: &str) -> Result<LexOutput> {
                 }
                 ':' => {
                     pos += 1;
-                    Kind::Colon
+                    if chars.get(pos) == Some(&':') {
+                        pos += 1;
+                        Kind::DoubleColon
+                    } else {
+                        Kind::Colon
+                    }
                 }
                 '.' => {
                     pos += 1;
@@ -272,7 +278,21 @@ fn lex_source(source: &str) -> Result<LexOutput> {
                 }
                 '|' => {
                     pos += 1;
-                    Kind::Pipe
+                    if chars.get(pos) == Some(&'|') {
+                        pos += 1;
+                        Kind::Op("||".into())
+                    } else {
+                        Kind::Pipe
+                    }
+                }
+                '&' => {
+                    pos += 1;
+                    if chars.get(pos) == Some(&'&') {
+                        pos += 1;
+                        Kind::Op("&&".into())
+                    } else {
+                        return Err(syntax("use '&&' for boolean conjunction", span));
+                    }
                 }
                 '+' => {
                     pos += 1;
@@ -492,6 +512,16 @@ impl Parser {
     fn newlines(&mut self) {
         while self.eat(Kind::Newline) {}
     }
+    fn separated_newlines(&mut self) -> bool {
+        let separated = matches!(
+            self.tokens
+                .get(self.pos.saturating_sub(1))
+                .map(|token| &token.kind),
+            Some(Kind::Newline)
+        ) || self.eat(Kind::Newline);
+        self.newlines();
+        separated
+    }
     fn depth(&self, depth: usize) -> Result<()> {
         if depth >= MAX_DEPTH {
             Err(Error::new("E_LIMIT", "type/value nesting is too deep").at(self.token().span))
@@ -518,7 +548,11 @@ impl Parser {
         self.newlines();
         while *self.kind() != Kind::End {
             let span = self.token().span;
-            let statement = if self.word("type") {
+            let statement = if self.word("struct") {
+                self.define_struct()?
+            } else if self.word("enum") {
+                self.define_enum()?
+            } else if self.word("type") {
                 self.define_type()?
             } else if self.word("table") {
                 self.table()?
@@ -540,7 +574,7 @@ impl Parser {
                 self.pipeline()?
             } else {
                 return Err(self.error(
-                    "expected type / table / insert / upsert / update / delete / migration / explain / from (or legacy create table/index)",
+                    "expected struct / enum / type / table / insert / upsert / update / delete / migration / explain / from (or legacy create table/index)",
                 ));
             };
             out.push(LocatedStatement { statement, span });
@@ -620,6 +654,79 @@ impl Parser {
         Ok(Statement::DefineType { name, ty })
     }
 
+    fn named_type(&mut self, keyword: &str) -> Result<String> {
+        self.expect_word(keyword)?;
+        let name = self.identifier()?;
+        if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return Err(self.error("type names must start with an uppercase letter"));
+        }
+        Ok(name)
+    }
+
+    fn define_struct(&mut self) -> Result<Statement> {
+        let name = self.named_type("struct")?;
+        self.expect(Kind::Open('{'))?;
+        let fields = self.fields(Kind::Close('}'), 0)?;
+        Ok(Statement::DefineType {
+            name,
+            ty: ScalarType::Record(fields),
+        })
+    }
+
+    fn define_enum(&mut self) -> Result<Statement> {
+        let name = self.named_type("enum")?;
+        self.expect(Kind::Open('{'))?;
+        let ty = self.rust_variants(0)?;
+        Ok(Statement::DefineType { name, ty })
+    }
+
+    fn rust_variants(&mut self, depth: usize) -> Result<ScalarType> {
+        self.depth(depth)?;
+        let mut variants = Vec::new();
+        let mut seen = BTreeSet::new();
+        self.newlines();
+        while *self.kind() != Kind::Close('}') {
+            let name = self.identifier()?;
+            if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return Err(self.error("variant names must start with an uppercase letter"));
+            }
+            if !seen.insert(name.clone()) {
+                return Err(self.error(format!("duplicate variant '{name}'")));
+            }
+            let args = if self.eat(Kind::Open('{')) {
+                vec![ScalarType::Record(
+                    self.fields(Kind::Close('}'), depth + 1)?,
+                )]
+            } else if self.eat(Kind::Open('(')) {
+                let mut args = Vec::new();
+                self.newlines();
+                while *self.kind() != Kind::Close(')') {
+                    args.push(self.ty(depth + 1)?);
+                    self.newlines();
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                    self.newlines();
+                }
+                self.expect(Kind::Close(')'))?;
+                args
+            } else {
+                Vec::new()
+            };
+            variants.push(EnumVariantDef { name, args, id: 0 });
+            let separated = self.eat(Kind::Comma) || self.eat(Kind::Newline);
+            self.newlines();
+            if *self.kind() != Kind::Close('}') && !separated {
+                return Err(self.error("expected a newline or comma between enum variants"));
+            }
+        }
+        self.expect(Kind::Close('}'))?;
+        if variants.is_empty() {
+            return Err(self.error("enum requires at least one variant"));
+        }
+        Ok(ScalarType::Enum(EnumType { variants }))
+    }
+
     fn fields(&mut self, end: Kind, depth: usize) -> Result<Vec<Column>> {
         self.depth(depth)?;
         let mut out = Vec::new();
@@ -630,6 +737,7 @@ impl Parser {
             if !seen.insert(name.clone()) {
                 return Err(self.error(format!("duplicate field '{name}'")));
             }
+            self.eat(Kind::Colon);
             let ty = self.ty(depth + 1)?;
             let default = if self.eat(Kind::Op("=".into())) {
                 Some(if *self.kind() == Kind::Newline {
@@ -692,6 +800,46 @@ impl Parser {
             return Ok(first);
         }
         let name = self.identifier()?;
+        if matches!(name.as_str(), "Option" | "List") {
+            self.expect(Kind::Op("<".into()))?;
+            let inner = self.ty(depth + 1)?;
+            self.expect(Kind::Op(">".into()))?;
+            return Ok(if name == "Option" {
+                ScalarType::Option(Box::new(inner))
+            } else {
+                ScalarType::List(Box::new(inner))
+            });
+        }
+        if name == "Decimal" {
+            self.expect(Kind::Op("<".into()))?;
+            let precision_token = self.bump();
+            let Kind::Number(precision) = precision_token.kind else {
+                return Err(syntax(
+                    "decimal precision must be an integer",
+                    precision_token.span,
+                ));
+            };
+            self.expect(Kind::Comma)?;
+            let scale_token = self.bump();
+            let Kind::Number(scale) = scale_token.kind else {
+                return Err(syntax("decimal scale must be an integer", scale_token.span));
+            };
+            self.expect(Kind::Op(">".into()))?;
+            let precision = precision.parse::<u8>().map_err(|_| {
+                syntax(
+                    "decimal precision must be 1 through 38",
+                    precision_token.span,
+                )
+            })?;
+            let scale = scale.parse::<u8>().map_err(|_| {
+                syntax(
+                    "decimal scale must be 0 through precision",
+                    scale_token.span,
+                )
+            })?;
+            crate::scalars::validate_decimal_type(precision, scale)?;
+            return Ok(ScalarType::Decimal { precision, scale });
+        }
         Ok(match name.as_str() {
             "int" | "i64" | "integer" => ScalarType::Int,
             "float" | "f64" | "double" => ScalarType::Float,
@@ -803,9 +951,19 @@ impl Parser {
     fn table(&mut self) -> Result<Statement> {
         self.expect_word("table")?;
         let table = self.identifier()?;
+        self.eat(Kind::Colon);
         let row_type = self.identifier()?;
         let mut key = None;
-        if *self.kind() == Kind::Newline {
+        if self.eat(Kind::Open('{')) {
+            self.newlines();
+            if self.word("key") {
+                self.bump();
+                key = Some(self.path()?);
+                self.eat(Kind::Comma);
+                self.newlines();
+            }
+            self.expect(Kind::Close('}'))?;
+        } else if *self.kind() == Kind::Newline {
             self.newlines();
             if self.eat(Kind::Indent) {
                 self.expect_word("key")?;
@@ -850,7 +1008,17 @@ impl Parser {
     fn migration(&mut self) -> Result<Statement> {
         self.expect_word("migration")?;
         let name = self.identifier()?;
-        self.block()?;
+        let braced = self.eat(Kind::Open('{'));
+        if braced {
+            self.newlines();
+        } else {
+            self.block()?;
+        }
+        let end = if braced {
+            Kind::Close('}')
+        } else {
+            Kind::Dedent
+        };
         let parent = if self.word("parent") {
             self.bump();
             let parent = self.identifier()?;
@@ -861,9 +1029,9 @@ impl Parser {
             None
         };
         let mut steps = Vec::new();
-        while *self.kind() != Kind::Dedent {
+        while *self.kind() != end {
             steps.push(self.migration_step()?);
-            if *self.kind() == Kind::Dedent {
+            if *self.kind() == end {
                 break;
             }
             let after_block = self.tokens[self.pos.saturating_sub(1)].kind == Kind::Dedent;
@@ -872,7 +1040,7 @@ impl Parser {
             }
             self.newlines();
         }
-        self.expect(Kind::Dedent)?;
+        self.expect(end)?;
         if steps.is_empty() {
             return Err(self.error("migration requires at least one schema operation"));
         }
@@ -886,7 +1054,17 @@ impl Parser {
     fn migration_step(&mut self) -> Result<SchemaMigration> {
         if self.word("add") {
             self.bump();
-            if self.word("type") {
+            if self.word("struct") {
+                let Statement::DefineType { name, ty } = self.define_struct()? else {
+                    unreachable!()
+                };
+                Ok(SchemaMigration::AddType { name, ty })
+            } else if self.word("enum") {
+                let Statement::DefineType { name, ty } = self.define_enum()? else {
+                    unreachable!()
+                };
+                Ok(SchemaMigration::AddType { name, ty })
+            } else if self.word("type") {
                 let Statement::DefineType { name, ty } = self.define_type()? else {
                     unreachable!()
                 };
@@ -894,8 +1072,21 @@ impl Parser {
             } else if self.word("table") {
                 self.bump();
                 let table = self.identifier()?;
+                self.eat(Kind::Colon);
                 let row_type = self.identifier()?;
-                let key = if self.word("key") {
+                let key = if self.eat(Kind::Open('{')) {
+                    self.newlines();
+                    let key = if self.word("key") {
+                        self.bump();
+                        Some(self.path()?)
+                    } else {
+                        None
+                    };
+                    self.eat(Kind::Comma);
+                    self.newlines();
+                    self.expect(Kind::Close('}'))?;
+                    key
+                } else if self.word("key") {
                     self.bump();
                     Some(self.path()?)
                 } else {
@@ -909,6 +1100,7 @@ impl Parser {
             } else if self.word("field") {
                 self.bump();
                 let (owner, name) = self.migration_member("field")?;
+                self.eat(Kind::Colon);
                 let ty = self.ty(0)?;
                 self.expect(Kind::Op("=".into()))?;
                 let default = self.value(0)?;
@@ -1125,7 +1317,9 @@ impl Parser {
 
     fn migration_member(&mut self, kind: &str) -> Result<(String, String)> {
         let owner = self.identifier()?;
-        self.expect(Kind::Dot)?;
+        if !self.eat(Kind::Dot) {
+            self.expect(Kind::DoubleColon)?;
+        }
         let member = self.identifier()?;
         if self.eat(Kind::Dot) {
             return Err(self.error(format!(
@@ -1361,12 +1555,14 @@ impl Parser {
                     if !braced {
                         break;
                     }
-                    self.newlines();
+                    let newline = self.separated_newlines();
                     if self.eat(Kind::Close('}')) {
                         break;
                     }
-                    if !self.eat(Kind::Comma) {
-                        return Err(self.error("expected ',' between set assignments"));
+                    if !self.eat(Kind::Comma) && !newline {
+                        return Err(
+                            self.error("expected a newline or comma between set assignments")
+                        );
                     }
                     self.newlines();
                     if self.eat(Kind::Close('}')) {
@@ -1450,6 +1646,12 @@ impl Parser {
                 self.expect(Kind::Close(')'))?;
             }
             Ok(Stage::FilterMatch(predicate))
+        } else if self.eat(Kind::Open('{')) {
+            self.newlines();
+            let expression = self.bool_expression(0, true)?;
+            self.newlines();
+            self.expect(Kind::Close('}'))?;
+            Ok(Stage::Filter(expression))
         } else {
             let nested = *self.kind() == Kind::Newline;
             if nested {
@@ -1554,8 +1756,8 @@ impl Parser {
                 return Err(self.error(format!("expected closing '{close}'")));
             }
             values.push(self.value(depth + 1)?);
-            self.newlines();
-            if !self.eat(Kind::Comma) {
+            let newline = self.separated_newlines();
+            if !self.eat(Kind::Comma) && !newline {
                 break;
             }
             self.newlines();
@@ -1637,7 +1839,7 @@ impl Parser {
                 Value::Decimal(crate::scalars::Decimal::infer(&source)?)
             }
             Kind::Ident(mut name) => {
-                while self.eat(Kind::Dot) {
+                while self.eat(Kind::Dot) || self.eat(Kind::DoubleColon) {
                     name.push('.');
                     name.push_str(&self.identifier()?);
                 }
@@ -1709,7 +1911,8 @@ impl Parser {
                 self.bump();
                 let group_by = self.path_list("group", "group field")?;
                 let parenthesized = self.eat(Kind::Open('('));
-                if parenthesized {
+                let braced = !parenthesized && self.eat(Kind::Open('{'));
+                if parenthesized || braced {
                     self.newlines();
                 } else {
                     self.block()?;
@@ -1721,6 +1924,8 @@ impl Parser {
                 self.newlines();
                 self.expect(if parenthesized {
                     Kind::Close(')')
+                } else if braced {
+                    Kind::Close('}')
                 } else {
                     Kind::Dedent
                 })?;
@@ -1843,12 +2048,14 @@ impl Parser {
     }
 
     fn field_set_end(&mut self, context: &str) -> Result<bool> {
-        self.newlines();
+        let newline = self.separated_newlines();
         if self.eat(Kind::Close('}')) {
             return Ok(true);
         }
-        if !self.eat(Kind::Comma) {
-            return Err(self.error(format!("expected ',' between {context} fields")));
+        if !self.eat(Kind::Comma) && !newline {
+            return Err(self.error(format!(
+                "expected a newline or comma between {context} fields"
+            )));
         }
         self.newlines();
         Ok(self.eat(Kind::Close('}')))
@@ -1913,8 +2120,22 @@ impl Parser {
         let Kind::Number(n) = token.kind else {
             return Err(syntax("expected a nonnegative row count", token.span));
         };
-        let normalized = n.replace('_', "");
-        if let Some((start, end)) = normalized.split_once("..") {
+        let mut normalized = n.replace('_', "");
+        let inclusive = normalized.ends_with("..")
+            && matches!(self.kind(), Kind::Op(operator) if operator == "=");
+        if inclusive {
+            self.bump();
+            let end_token = self.bump();
+            let Kind::Number(end) = end_token.kind else {
+                return Err(syntax(
+                    "expected an inclusive take range end",
+                    end_token.span,
+                ));
+            };
+            normalized.push('=');
+            normalized.push_str(&end.replace('_', ""));
+        }
+        if let Some((start, end)) = normalized.split_once("..=") {
             let start = start
                 .parse::<usize>()
                 .map_err(|_| syntax("invalid take range start", token.span))?;
@@ -1927,6 +2148,24 @@ impl Parser {
             let limit = end
                 .checked_sub(start)
                 .and_then(|distance| distance.checked_add(1))
+                .ok_or_else(|| syntax("take range end must not precede its start", token.span))?;
+            return Ok(Stage::Take {
+                offset: start - 1,
+                limit,
+            });
+        }
+        if let Some((start, end)) = normalized.split_once("..") {
+            let start = start
+                .parse::<usize>()
+                .map_err(|_| syntax("invalid take range start", token.span))?;
+            let end = end
+                .parse::<usize>()
+                .map_err(|_| syntax("invalid take range end", token.span))?;
+            if start == 0 {
+                return Err(syntax("take ranges start at 1", token.span));
+            }
+            let limit = end
+                .checked_sub(start)
                 .ok_or_else(|| syntax("take range end must not precede its start", token.span))?;
             Ok(Stage::Take {
                 offset: start - 1,
@@ -2057,12 +2296,12 @@ impl Parser {
                 output_type: None,
             });
             if braced {
-                self.newlines();
+                let newline = self.separated_newlines();
                 if *self.kind() == end {
                     break;
                 }
-                if !self.eat(Kind::Comma) {
-                    return Err(self.error("expected ',' between aggregate fields"));
+                if !self.eat(Kind::Comma) && !newline {
+                    return Err(self.error("expected a newline or comma between aggregate fields"));
                 }
                 self.newlines();
             } else {
@@ -2093,6 +2332,7 @@ impl Parser {
         let annotation = if matches!(self.kind(), Kind::Op(operator) if operator == "=") {
             None
         } else {
+            self.eat(Kind::Colon);
             Some(self.ty(0)?)
         };
         self.expect(Kind::Op("=".into()))?;
@@ -2143,6 +2383,7 @@ impl Parser {
             let annotation = if matches!(self.kind(), Kind::Comma | Kind::Close(')')) {
                 None
             } else {
+                self.eat(Kind::Colon);
                 Some(self.ty(0)?)
             };
             parameters.push(LocalParameter { name, annotation });
@@ -2245,12 +2486,12 @@ impl Parser {
             };
             arms.push(MatchArm { pattern, condition });
             if braced {
-                self.newlines();
+                let newline = self.separated_newlines();
                 if *self.kind() == end {
                     break;
                 }
-                if !self.eat(Kind::Comma) {
-                    return Err(self.error("expected ',' between match branches"));
+                if !self.eat(Kind::Comma) && !newline {
+                    return Err(self.error("expected a newline or comma between match branches"));
                 }
                 self.newlines();
                 if *self.kind() == end {
@@ -2332,16 +2573,35 @@ impl Parser {
     }
 
     fn constructor_pattern(&mut self, mut name: String, depth: usize) -> Result<MatchPattern> {
-        while self.eat(Kind::Dot) {
+        while self.eat(Kind::Dot) || self.eat(Kind::DoubleColon) {
             name.push('.');
             name.push_str(&self.identifier()?);
         }
         let payload = if self.eat(Kind::Open('{')) {
             let (fields, rest) = self.match_record_pattern(depth + 1)?;
             MatchPayload::Record { fields, rest }
+        } else if self.eat(Kind::Open('(')) {
+            let mut patterns = Vec::new();
+            self.newlines();
+            while *self.kind() != Kind::Close(')') {
+                patterns.push(self.nested_match_pattern(depth + 1)?);
+                self.newlines();
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+                self.newlines();
+            }
+            self.expect(Kind::Close(')'))?;
+            MatchPayload::Positional(patterns)
         } else {
             let mut patterns = Vec::new();
-            while matches!(self.kind(), Kind::Ident(_) | Kind::Open('(')) {
+            while !matches!(
+                self.tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|token| &token.kind),
+                Some(Kind::Newline)
+            ) && matches!(self.kind(), Kind::Ident(_) | Kind::Open('('))
+            {
                 patterns.push(self.nested_match_pattern(depth + 1)?);
             }
             if patterns.is_empty() {
@@ -2371,7 +2631,7 @@ impl Parser {
                 rest = true;
             } else {
                 let field = self.identifier()?;
-                let pattern = if self.eat(Kind::Op("=".into())) {
+                let pattern = if self.eat(Kind::Op("=".into())) || self.eat(Kind::Colon) {
                     self.nested_match_pattern(depth + 1)?
                 } else {
                     MatchPattern::Binding(field.clone())
@@ -2423,12 +2683,12 @@ impl Parser {
             };
             arms.push(MatchValueArm { pattern, result });
             if braced {
-                self.newlines();
+                let newline = self.separated_newlines();
                 if *self.kind() == end {
                     break;
                 }
-                if !self.eat(Kind::Comma) {
-                    return Err(self.error("expected ',' between match branches"));
+                if !self.eat(Kind::Comma) && !newline {
+                    return Err(self.error("expected a newline or comma between match branches"));
                 }
                 self.newlines();
                 if *self.kind() == end {
@@ -2522,8 +2782,8 @@ impl Parser {
                 self.newlines();
                 while *self.kind() != Kind::Close(']') {
                     values.push(self.match_value_expression_value(depth + 1, multiline)?);
-                    self.newlines();
-                    if !self.eat(Kind::Comma) {
+                    let newline = self.separated_newlines();
+                    if !self.eat(Kind::Comma) && !newline {
                         break;
                     }
                     self.newlines();
@@ -2563,15 +2823,33 @@ impl Parser {
         depth: usize,
         multiline: bool,
     ) -> Result<MatchValue> {
-        while self.eat(Kind::Dot) {
+        while self.eat(Kind::Dot) || self.eat(Kind::DoubleColon) {
             name.push('.');
             name.push_str(&self.identifier()?);
         }
         let payload = if self.eat(Kind::Open('{')) {
             MatchValuePayload::Record(self.match_value_fields(depth + 1, multiline)?)
+        } else if self.eat(Kind::Open('(')) {
+            let mut values = Vec::new();
+            self.newlines();
+            while *self.kind() != Kind::Close(')') {
+                values.push(self.match_value_expression_value(depth + 1, multiline)?);
+                self.newlines();
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+                self.newlines();
+            }
+            self.expect(Kind::Close(')'))?;
+            MatchValuePayload::Positional(values)
         } else {
             let mut values = Vec::new();
-            while matches!(
+            while !matches!(
+                self.tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|token| &token.kind),
+                Some(Kind::Newline)
+            ) && matches!(
                 self.kind(),
                 Kind::Ident(_)
                     | Kind::Parameter(_)
@@ -2606,7 +2884,9 @@ impl Parser {
             if !seen.insert(name.clone()) {
                 return Err(self.error(format!("duplicate value field '{name}'")));
             }
-            self.expect(Kind::Op("=".into()))?;
+            if !self.eat(Kind::Colon) {
+                self.expect(Kind::Op("=".into()))?;
+            }
             let value = self.match_value_expression_value(depth + 1, multiline)?;
             fields.push(MatchValueField { name, value });
             if *self.kind() == Kind::Close('}') {
@@ -2631,7 +2911,7 @@ impl Parser {
         let mut expression = self.bool_and(depth, multiline)?;
         let mut expression_depth = depth;
         self.expression_newlines(multiline);
-        while self.word("or") {
+        while self.word("or") || matches!(self.kind(), Kind::Op(op) if op == "||") {
             self.bump();
             self.expression_newlines(multiline);
             expression_depth += 1;
@@ -2650,7 +2930,7 @@ impl Parser {
         let mut expression = self.bool_not(depth, multiline)?;
         let mut expression_depth = depth;
         self.expression_newlines(multiline);
-        while self.word("and") {
+        while self.word("and") || matches!(self.kind(), Kind::Op(op) if op == "&&") {
             self.bump();
             self.expression_newlines(multiline);
             expression_depth += 1;
@@ -2666,7 +2946,7 @@ impl Parser {
 
     fn bool_not(&mut self, depth: usize, multiline: bool) -> Result<BoolExpression> {
         self.depth(depth)?;
-        if self.word("not") {
+        if self.word("not") || matches!(self.kind(), Kind::Op(op) if op == "!") {
             self.bump();
             self.expression_newlines(multiline);
             Ok(BoolExpression::Not(Box::new(
@@ -2679,6 +2959,18 @@ impl Parser {
 
     fn bool_primary(&mut self, depth: usize) -> Result<BoolExpression> {
         self.depth(depth)?;
+        if *self.kind() == Kind::Open('{') && !self.brace_starts_record() {
+            let checkpoint = self.pos;
+            self.bump();
+            self.newlines();
+            if let Ok(expression) = self.bool_expression(depth + 1, true) {
+                self.newlines();
+                if self.eat(Kind::Close('}')) {
+                    return Ok(expression);
+                }
+            }
+            self.pos = checkpoint;
+        }
         if self.word("contains") {
             self.bump();
             return Ok(BoolExpression::Contains {
@@ -2744,6 +3036,33 @@ impl Parser {
         self.finish_bool_scalar(left, depth)
     }
 
+    fn brace_starts_record(&self) -> bool {
+        let mut position = self.pos + 1;
+        while matches!(
+            self.tokens.get(position).map(|token| &token.kind),
+            Some(Kind::Newline)
+        ) {
+            position += 1;
+        }
+        if matches!(
+            self.tokens.get(position).map(|token| &token.kind),
+            Some(Kind::Close('}'))
+        ) {
+            return true;
+        }
+        if !matches!(
+            self.tokens.get(position).map(|token| &token.kind),
+            Some(Kind::Ident(_))
+        ) {
+            return false;
+        }
+        match self.tokens.get(position + 1).map(|token| &token.kind) {
+            Some(Kind::Colon) => true,
+            Some(Kind::Op(operator)) => operator == "=",
+            _ => false,
+        }
+    }
+
     fn finish_bool_scalar(
         &mut self,
         left: ScalarExpression,
@@ -2771,7 +3090,11 @@ impl Parser {
                 collection: self.scalar_expression(depth, false)?,
                 negated,
             })
-        } else if matches!(self.kind(), Kind::Op(_)) {
+        } else if matches!(
+            self.kind(),
+            Kind::Op(operator)
+                if matches!(operator.as_str(), "=" | "==" | "!=" | ">" | ">=" | "<" | "<=")
+        ) {
             let op = self.comparison_operator()?;
             Ok(BoolExpression::Compare {
                 left,

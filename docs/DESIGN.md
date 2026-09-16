@@ -35,66 +35,65 @@ SQLite 的本地应用定位与 Redis 的可选持久化分别提供使用方式
 
 ## 3. 目标语言体验
 
-以下是完整目标的提案示例，其中包含当前尚未实现的部分高级能力，不能直接作为完整脚本执行。普通 filter、match condition、普通／match derive、typed set 和 migration conversion 已共享有类型 int/float 算术与完整 bool 表达式；`derive x = match ...` 可递归解构 ADT，并从 binding、算术或布尔结果构造 typed 值，查询局部 `let` 已支持常量与非递归纯函数，`aggregate` 和 `group ... aggregate` 已支持 count/sum/min/max，`$name` 参数已可通过 Rust API 与版本化协议绑定。准确限制以 [QUERY.md](QUERY.md) 为准。类型定义和查询采用一致的 PRQL 风格：以换行组织操作，空格表达参数应用，尽量让文字承担含义。**无分号是确定的设计约束；花括号、圆括号、方括号和逗号按结构与消歧需要使用**。目标是去掉没有语义的信息，不是机械追求符号数量最少。下面的字段声明与 ADT 分支是本轮推荐草案，具体布局规则由 [语言 issue #2](https://github.com/worktools/unionid/issues/2) 验证后冻结。
+以下示例以 [RFC 0017](rfc/0017-rust-shaped-prql-language.md) 为准：查询保留 PRQL pipeline，类型、值、pattern、布尔运算符和 range 对齐 Rust 的常见形状。**无分号是确定的设计约束；花括号、圆括号、方括号、冒号和必要的逗号负责表达结构与消歧**。多行集合通过换行分项，紧凑单行集合使用逗号。
 
-PRQL 本身使用空格调用函数，并允许换行连接 pipeline；我们借鉴这些习惯。[PRQL 函数调用与 pipeline](https://prql-lang.org/book/reference/syntax/function-calls.html) PRQL 的类型设计页也讨论 sum/product 组合，但下面的 `field type`、缩进声明和带 tag 的构造器是 unionid 的提案，不能当作现有 PRQL 语法或编译器能力。[PRQL 类型设计](https://prql-lang.org/book/reference/spec/type-system.html)
+PRQL 本身使用空格调用函数，并允许换行连接 pipeline；我们借鉴这些习惯。[PRQL 函数调用与 pipeline](https://prql-lang.org/book/reference/syntax/function-calls.html) PRQL 的类型设计页也讨论 sum/product 组合，但 unionid 的 Rust-shaped ADT 声明是自身设计，不能当作现有 PRQL 语法或编译器能力。[PRQL 类型设计](https://prql-lang.org/book/reference/spec/type-system.html)
 
-- 字段写成 `email text`；类型应用写成 `option text`、`list text`，嵌套时写成 `option (list text)`。
-- record、projection 和 field set 使用 `{ ... }` 明确起止位置；相邻项以逗号分隔，可保留 trailing comma。字段后的冒号和语句末尾分号不承担必要语义。旧缩进 record 继续作为兼容输入，canonical formatter 输出 braces。
-- 和类型用 `|` 表示分支；这是区分“任选其一”和“同时包含字段”的必要符号。
+- 字段写成 `email: text`；类型应用写成 `Option<text>`、`List<text>`，嵌套时写成 `Option<List<text>>`。
+- `struct`、`enum`、record value、projection 和 field set 使用 `{ ... }` 明确起止位置。旧缩进 record/sum 继续作为 durable compatibility 输入，canonical formatter 输出 Rust 形状。
+- enum 每行一个 variant，不再用 ML 风格的前导 `|`。
 - 多行查询每行一个 transform；单行查询可用 `|`，不再引入 `|>`。类型与表达式由语法上下文区分。
-- 值字段与派生列统一用 `=`，函数与构造器用空格应用。圆括号表达 precedence、tuple、嵌套调用或 group inner pipeline，花括号表达 record/projection/field set 的边界，方括号表达 list，逗号分隔 delimiter 内的相邻项。注释使用 `#`。
-- 复杂表达式优先按逻辑项换行；混用 `and` 与 `or` 时用括号明确分组。括号、record/list/tuple 边界等能直接消除歧义的符号属于可读性设计的一部分，不以机械减少符号数量为目标。
+- 值字段使用 `:`，派生和赋值使用 `=`。限定构造器用 `::`，位置负载用 `()`。注释使用 `#`。
+- bool operator 使用 `!`、`&&`、`||`。复杂表达式放进 `{}` 换行；需要改变优先级时使用 `()`。
+- 查询局部闭包保留 `value -> expression` 与 `(left: T, right: U) -> expression`，不采用 `|value|`，避免与单行 pipeline 的 `|` 混淆。
 
 ```text
-type Contact = {
-  email text,
-  nickname option text = None,
+struct Contact {
+  email: text
+  nickname: Option<text> = None
 }
 
-type State =
+enum State {
   Pending
-  | Running {worker text, attempt int}
-  | Done {result text}
-  | Failed {message text, retryable bool}
-
-type Task = {
-  id int,
-  title text,
-  owner Contact,
-  tags list text,
-  state State,
+  Running {worker: text, attempt: int}
+  Done {result: text}
+  Failed {message: text, retryable: bool}
 }
 
-table tasks Task
+struct Task {
+  id: int
+  title: text
+  owner: Contact
+  tags: List<text>
+  state: State
+}
+
+table tasks: Task {
   key id
+}
 
 insert tasks {
-  id = 1,
-  title = "同步目录",
-  owner = {
-    email = "alice@example.com",
-  },
-  tags = ["local", "sync"],
-  state = Running {worker = "local", attempt = 2},
+  id: 1
+  title: "同步目录"
+  owner: Contact {email: "alice@example.com"}
+  tags: ["local", "sync"]
+  state: State::Running {worker: "local", attempt: 2}
 }
 ```
 
-命名类型可复用于多张表和嵌套字段。表是“以 record 为行”的集合，积类型不止表这一层：还支持 `type Point = (float, float)`，以及变体中的 record／tuple 负载。需要展开变体负载时，也可在 `| Running` 下面缩进书写 `worker text`、`attempt int`；内联与多行布局必须生成同一 AST，格式化器只选择一套规范输出。
+命名类型可复用于多张表和嵌套字段。表是“以 struct 为行”的集合，积类型不止表这一层：还支持 `type Point = (float, float)`，以及变体中的 record／tuple 负载。内联与多行布局生成同一 AST，formatter 选择一套规范输出。
 
 ```text
 from tasks
-filter (
-  match state {
-    Running {attempt, ..} => attempt >= $min_attempt,
-    _ => false,
-  }
-)
+filter match state {
+  State::Running {attempt, ..} => attempt >= $min_attempt
+  _ => false
+}
 derive summary = match state {
-  Pending => "pending",
-  Running {worker, ..} => worker,
-  Done {result} => result,
-  Failed {message, ..} => message,
+  State::Pending => "pending"
+  State::Running {worker, ..} => worker
+  State::Done {result} => result
+  State::Failed {message, ..} => message
 }
 select {id, title, summary}
 sort id
@@ -105,17 +104,17 @@ take 20
 
 ```text
 let retryable = s -> match s {
-  State.Failed {retryable, ..} => retryable,
-  _ => false,
+  State::Failed {retryable, ..} => retryable
+  _ => false
 }
 
 from tasks
-filter (retryable state)
+filter retryable state
 select {id, title}
 
 update tasks
 filter id == $id
-set state = Done {result = $result}
+set state = State::Done {result: $result}
 
 delete tasks | filter id == $id
 
@@ -123,7 +122,7 @@ delete tasks | filter id == $id
 upsert tasks $task
 ```
 
-首版 `let` 已支持查询内绑定和有类型的非递归纯函数，能从字段驱动的使用位置确定类型时省略注解；不能确定时使用 `let missing option int = None` 或 `(value option int) -> ...` 的字段式最小注解。定义只调用更早函数，按词法环境展开，不存函数值，也不开放文件、网络、时钟或随机副作用。通用高阶函数、用户定义泛型与递归函数放在独立后续设计中。`option T`、`list T` 先作为内建类型构造器，不能据此宣称已支持任意泛型。
+首版 `let` 已支持查询内绑定和有类型的非递归纯函数，能从字段驱动的使用位置确定类型时省略注解；不能确定时使用 `let missing: Option<int> = None` 或 `(value: Option<int>) -> ...` 的最小注解。定义只调用更早函数，按词法环境展开，不存函数值，也不开放文件、网络、时钟或随机副作用。通用高阶函数、用户定义泛型与递归函数放在独立后续设计中。`Option<T>`、`List<T>` 是内建类型构造器，不能据此宣称已支持任意泛型。
 
 ### 无分号的边界规则
 
@@ -134,9 +133,9 @@ upsert tasks $task
 ## 4. 类型语义必须先明确
 
 - 命名 ADT／record 采用名义身份，字段形状相同的两个命名类型不会自动互换；匿名查询结果 record 采用结构类型。
-- 构造器由预期类型解析；有歧义时使用限定名，如 `State.Pending`。非法构造器、参数数目或字段类型均为写入前错误。
-- 普通字段必填；缺值通过 `option T` 显式表达。默认值采用 `field type = value`，在 schema 声明时类型检查并存成完整 typed value；遗漏字段只在有声明默认值时逐层补齐，不把遗漏、`None`、空字符串和未知字段混为一谈。首版默认值是纯字面量，不依赖其他字段、参数、时钟或函数。旧版 `null` 由兼容导入规则处理。
-- v1 原子类型先收敛到 `int`（i64）、`float`（有限 f64）、`bool`、`text`。时间、UUID、Decimal、Bytes 先评估真实样例再扩展；金额示例用整数最小单位，不暗示 Float 提供十进制定点精度。
+- 构造器由预期类型解析；有歧义时使用限定名，如 `State::Pending`。非法构造器、参数数目或字段类型均为写入前错误。
+- 普通字段必填；缺值通过 `Option<T>` 显式表达。默认值采用 `field: Type = value`，在 schema 声明时类型检查并存成完整 typed value；遗漏字段只在有声明默认值时逐层补齐，不把遗漏、`None`、空字符串和未知字段混为一谈。
+- 原子类型包括 `int`、`float`、`bool`、`text`、`uuid`、`bytes`、`date`、`timestamp`、`duration` 与 `Decimal<P, S>`；具体运算边界见语言参考。
 - Int 精确比较；混合 Int／Float 运算和转换使用明确规则，不能统一转 f64。建议 v1 默认要求显式转换，字面量可按上下文检查。
 - Float 不采用 epsilon 相等；拒绝 NaN／Infinity，统一 `-0.0` 与 `0.0` 的相等、索引键和分组语义。
 - record／tuple／sum／Option／List 提供结构相等与由静态类型驱动的 total order。sum 相等包括类型身份、变体身份和负载，排序先比较稳定 variant ID 再比较 payload；record 按稳定 field ID，Option 使用 `None < Some`，list 使用短前缀优先的词典序。该顺序同时用于 filter、sort、min/max 与 cursor boundary，并作为有序索引 codec 的语义基准。

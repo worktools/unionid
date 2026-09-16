@@ -1,18 +1,16 @@
 from tasks
-filter (
-  match state {
-    Running {worker, attempt} => attempt >= 1,
-    _ => false,
-  }
-)
+filter match state {
+  Running {worker, attempt} => attempt >= 1
+  _ => false
+}
 select {
-  id,
-  title,
-  owner.email,
-  state,
+  id
+  title
+  owner.email
+  state
   worker = match state {
-    Running {worker, ..} => worker,
-    _ => "",
-  },
+    Running {worker, ..} => worker
+    _ => ""
+  }
 }
 sort id
