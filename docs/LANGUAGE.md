@@ -4,6 +4,8 @@
 
 当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys { aggregate {...} }`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`!`/`&&`/`||`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
+LLM 或代码生成器可通过 `unionid docs query` 读取当前二进制内置的紧凑参考与可运行示例，或用 `--format json` 取得分离的 reference/examples。生成真实查询时还应提供 `unionid schema print --db <path> --format json` 的 exact schema，并用 `query describe` 在执行前绑定检查。完整 prompt-oriented 内容见 [LLM_QUERY.md](LLM_QUERY.md)。
+
 ## 类型、表与值
 
 ```text

@@ -1,0 +1,37 @@
+enum State {
+  Pending
+  Running {
+    worker: text
+    attempt: int
+  }
+  Done {
+    result: text
+  }
+}
+
+struct Task {
+  id: int
+  attempts: int
+  state: State
+}
+
+table tasks: Task {
+  key id
+}
+
+insert tasks {
+  attempts: 0
+  id: 1
+  state: Pending
+}
+
+update tasks
+filter id == 1
+set {
+  attempts = attempts + 1
+  state = match state {
+    Pending => Running {worker: "worker-1", attempt: 1}
+    current => current
+  }
+}
+returning {id, attempts, state}

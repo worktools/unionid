@@ -16,6 +16,7 @@ mod expression;
 pub mod formatter;
 pub mod idempotency;
 pub mod introspection;
+pub mod llm_docs;
 mod local;
 mod matching;
 pub mod metrics;
@@ -72,6 +73,10 @@ pub use idempotency::{
     IdempotencyReceipt, IdempotencyStatus, IdempotentExecution,
 };
 pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
+pub use llm_docs::{
+    LLM_QUERY_DOCS_VERSION, LlmQueryDocs, LlmQueryExample, QUERY_LANGUAGE_VERSION, query_docs,
+    render_query_docs_markdown,
+};
 pub use metrics::{
     ConnectionMetrics, ErrorMetric, LATENCY_BUCKETS_MICROS, LatencyBucket, LatencyHistogram,
     MAX_METRIC_ERROR_CODES, METRICS_VERSION, MetricsSnapshot, OperationMetrics, OperationsMetrics,

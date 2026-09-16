@@ -1,0 +1,45 @@
+enum State {
+  Pending
+  Running {
+    worker: text
+    attempt: int
+  }
+  Done {
+    result: text
+  }
+}
+
+struct Task {
+  id: int
+  title: text
+  priority: int
+  tags: List<text>
+  state: State
+}
+
+table tasks: Task {
+  key id
+}
+
+insert tasks {
+  id: 1
+  priority: 8
+  state: Running {attempt: 2, worker: "worker-1"}
+  tags: ["release", "urgent"]
+  title: "ship release"
+}
+
+from tasks
+filter contains tags "urgent"
+filter match state {
+  Running {attempt, ..} => attempt < 3
+  _ => false
+}
+derive label = match state {
+  Pending => "pending"
+  Running {worker, ..} => worker
+  Done {result} => result
+}
+sort {-priority, id}
+select {id, title, state, label}
+take 20

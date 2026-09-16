@@ -41,6 +41,35 @@ Use `project check` for source contracts before a database exists. Use `doctor -
 
 数据库创建前用 `project check` 检查源码契约；已有数据库的非修改兼容性摘要用 `doctor --db`；需要对离线原数据库执行完整物理与逻辑完整性检查时用 `check --db`。
 
+## LLM 查询上下文 / Query context for LLMs
+
+`docs query` 把与当前二进制版本匹配的紧凑查询语言参考和三份可运行示例直接写到 stdout，不访问网络，也不打开数据库。默认 Markdown 带稳定 front matter，可直接加入 LLM prompt；`--format json` 返回 version 1 object，将 `reference` 与 `examples` 分开：
+
+`docs query` writes a compact query-language reference and three runnable examples matched to the current binary directly to stdout. It does not use the network or open a database. The default Markdown has stable front matter and can be placed directly in an LLM prompt. `--format json` emits a version-1 object with separate `reference` and `examples` fields:
+
+```bash
+unionid docs query > unionid-query-context.md
+unionid docs query --format json > unionid-query-context.json
+```
+
+JSON 顶层字段为 `schema_version`、`software_version`、`language_version`、`topic`、`reference` 和 `examples`。每个 example 包含稳定的 `name`、英文 `description` 和规范化、可执行的 `source`。version 1 可以增加字段，但不会更改或删除这些字段的含义。
+
+The JSON top-level fields are `schema_version`, `software_version`, `language_version`, `topic`, `reference`, and `examples`. Every example has a stable `name`, an English `description`, and canonical executable `source`. Version 1 may add fields but will not change or remove the meaning of these fields.
+
+内置文档有意不猜测用户 schema。给 LLM 生成真实查询时，应同时提供 exact schema，再用静态 binder 检查结果：
+
+The bundled document intentionally does not guess the user's schema. Supply the exact schema when asking an LLM for a real query, then validate the result with the static binder:
+
+```bash
+unionid schema print --db app.redb --format json > schema.json
+unionid query describe --db app.redb --file generated-query.unid
+unionid fmt --file generated-query.unid --check
+```
+
+该能力的版本化内容见 [LLM_QUERY.md](LLM_QUERY.md)，内置示例也以普通 `.unid` 文件保存在 [`examples/llm`](../examples/llm)，因此 release archive、源码 checkout 和安装后的 CLI 使用同一份语义。
+
+The versioned source is [LLM_QUERY.md](LLM_QUERY.md), and the bundled examples are ordinary `.unid` files under [`examples/llm`](../examples/llm). Release archives, source checkouts, and the installed CLI therefore expose the same semantics.
+
 ## 版本与部署诊断
 
 部署脚本不需要解析面向人的句子。`version` 报告当前二进制及它明确支持的协议、存储和 codec；`doctor` 还可检查一个已经存在的数据库：

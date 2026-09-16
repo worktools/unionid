@@ -133,6 +133,19 @@ returning {id, state}
 
 `filter`, `select`, `sort`, `take`, `page`, `derive`, `group`, `aggregate`, and query-local `let` are composable stages. Stable cross-request traversal uses `sort {-priority, id} | page 100` and resumes with the opaque response cursor; the order must end in the primary key. `explain from tasks | filter id == 1` reports a plan without reading result rows; `explain analyze ...` executes on the same read snapshot and returns value-free timing, work, and memory observations. See [QUERY.md](docs/QUERY.md) for the complete executable surface.
 
+LLM 和代码生成工具可以直接从当前二进制取得版本匹配、离线可用的查询参考与可运行示例。默认 Markdown 可直接放入 prompt，version 1 JSON 将 reference 与 examples 分开，便于工具读取。生成查询前再用 `schema print` 提供实际数据库 schema；保存后的查询可用 `query describe` 在不执行的情况下绑定检查：
+
+LLMs and code generators can read a version-matched, offline query reference and runnable examples directly from the current binary. The default Markdown is prompt-ready; version-1 JSON separates the reference and examples for tools. Pair it with the database's actual schema before generation, then bind a saved query without executing it:
+
+```bash
+unionid docs query
+unionid docs query --format json
+unionid schema print --db app.redb --format json
+unionid query describe --db app.redb --file query.unid
+```
+
+The bundled reference is also available in [LLM_QUERY.md](docs/LLM_QUERY.md); it documents the Rust-shaped contextual enum shorthand, arrow closures, pipeline ordering, bounded reads, mutations, and a generation checklist.
+
 服务观测可读取有版本、有限 cardinality 的 `ConcurrentEngine::metrics_snapshot()`；可选 `metrics` feature 只渲染 Prometheus 文本，不自动公开网络 endpoint。完整部署边界见 [METRICS.md](docs/METRICS.md)。
 
 Service observability uses the versioned, cardinality-bounded `ConcurrentEngine::metrics_snapshot()`. The optional `metrics` feature only renders Prometheus text and never exposes a network endpoint automatically. See [METRICS.md](docs/METRICS.md) for deployment boundaries.
