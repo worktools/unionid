@@ -94,7 +94,7 @@ jobs:
           cargo test --locked --manifest-path derive/Cargo.toml
       - name: Exercise examples and current consumer
         run: |
-          cargo run --locked -- run --file examples/tasks.uid
+          cargo run --locked -- run --file examples/tasks.unid
           cargo run --locked --example getting_started -- "${RUNNER_TEMP}/unionid-embedded.redb"
           cargo test --locked --example cold_content
           cargo run --locked --example cold_content -- "${RUNNER_TEMP}/unionid-cold-content.redb"

@@ -183,7 +183,7 @@ fn backup_restore_preserves_recursive_named_values() {
     let expected_schema;
     {
         let mut engine = Engine::open_redb(&source).unwrap();
-        let response = engine.execute(include_str!("../examples/recursive_tree.uid"));
+        let response = engine.execute(include_str!("../examples/recursive_tree.unid"));
         assert!(response.ok, "{}", response.message);
         expected_schema = engine.schema_info();
     }

@@ -145,7 +145,7 @@ def main():
             root / "docs" / "UPGRADING.md",
             root / release["release_notes"],
             root / "release" / "contract.json",
-            root / "examples" / "tasks.uid",
+            root / "examples" / "tasks.unid",
             root / "examples" / "todolist.rs",
             root / "deploy" / "envoy" / "compose.yaml",
             root / "deploy" / "envoy" / "envoy.yaml",

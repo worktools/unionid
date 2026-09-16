@@ -9,7 +9,7 @@ use unionid::{Engine, Value, codegen};
 
 #[test]
 fn generates_rust_bindings_for_example_schema() {
-    let generated = codegen::rust(include_str!("../examples/schema.uid")).unwrap();
+    let generated = codegen::rust(include_str!("../examples/schema.unid")).unwrap();
     assert!(generated.contains("pub enum State {"));
     assert!(generated.contains("    Pending,"));
     assert!(generated.contains("    Running,"));

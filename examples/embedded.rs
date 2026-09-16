@@ -2,7 +2,7 @@ use unionid::Engine;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut database = Engine::memory();
-    let result = database.execute(include_str!("tasks.uid"));
+    let result = database.execute(include_str!("tasks.unid"));
     if let Some(error) = result.error {
         return Err(error.into());
     }

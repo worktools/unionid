@@ -7,7 +7,7 @@ unionid 的正式持久入口使用 redb 4.1。内存模式适合语言试验和
 执行脚本并保存结果：
 
 ```bash
-cargo run -- run --db ./data/unionid.redb --file examples/tasks.uid
+cargo run -- run --db ./data/unionid.redb --file examples/tasks.unid
 cargo run -- run --db ./data/unionid.redb --query 'from tasks | filter id == 1'
 ```
 

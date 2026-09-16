@@ -1043,7 +1043,7 @@ fn recursive_adt_rows_indexes_and_schema_survive_redb_reopen() {
     let schema;
     {
         let mut engine = Engine::open_redb(&path).unwrap();
-        let result = engine.execute(include_str!("../examples/recursive_tree.uid"));
+        let result = engine.execute(include_str!("../examples/recursive_tree.unid"));
         assert!(result.ok, "{}", result.message);
         assert_eq!(result.rows.len(), 2);
         schema = engine.schema_info();
@@ -1552,7 +1552,7 @@ fn redb_atomic_adt_batches_survive_reopen() {
     let expected_schema;
     {
         let mut engine = Engine::open_redb(path.clone()).unwrap();
-        let response = engine.execute(include_str!("../examples/tasks.uid"));
+        let response = engine.execute(include_str!("../examples/tasks.unid"));
         assert!(response.ok, "{}", response.message);
         assert!(engine.execute("create index tasks (owner.email)").ok);
         expected_schema = engine.schema_info();
@@ -2389,7 +2389,7 @@ fn typed_atomic_batches_survive_reopen() {
     let wal = dir.0.join("db.wal");
     {
         let mut e = Engine::open(Some(wal.clone()), None, 0).unwrap();
-        assert!(e.execute(include_str!("../examples/tasks.uid")).ok);
+        assert!(e.execute(include_str!("../examples/tasks.unid")).ok);
         assert!(e.execute("create index tasks (owner.email)").ok);
         assert!(!e.execute("insert tasks {id = 3}").ok);
     }

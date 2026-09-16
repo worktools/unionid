@@ -1,6 +1,6 @@
 # 声明式 Schema 与 Diff
 
-应用可以把期望结构保存在普通 `.unid` schema 文件中（兼容窗口内也接受 `.uid`）。文件只包含 `type`、`table`、`create index` 和 `create unique index` 声明，沿用数据库语言的无分号、缩进式语法；不能包含数据写入、查询或 migration。为保证规范输出能以相同身份顺序重建，声明依次放置 named types、tables、secondary indexes。示例见 [`examples/schema.uid`](../examples/schema.uid)。
+应用可以把期望结构保存在普通 `.unid` schema 文件中（兼容窗口内也接受 `.uid`）。文件只包含 `type`、`table`、`create index` 和 `create unique index` 声明，沿用数据库语言的无分号、缩进式语法；不能包含数据写入、查询或 migration。为保证规范输出能以相同身份顺序重建，声明依次放置 named types、tables、secondary indexes。示例见 [`examples/schema.unid`](../examples/schema.unid)。
 
 ```text
 type State = Pending | Running | Complete

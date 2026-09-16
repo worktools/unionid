@@ -16,7 +16,7 @@ fn rows(engine: &mut Engine, source: &str) -> serde_json::Value {
 #[test]
 fn executable_examples() {
     let mut engine = Engine::memory();
-    let r = ok(&mut engine, include_str!("../examples/tasks.uid"));
+    let r = ok(&mut engine, include_str!("../examples/tasks.unid"));
     assert_eq!(r.rows.len(), 1);
     assert_eq!(
         r.columns
@@ -31,7 +31,7 @@ fn executable_examples() {
     assert_eq!(engine.tables(), ["tasks"]);
 
     let mut config = Engine::memory();
-    let r = ok(&mut config, include_str!("../examples/config.uid"));
+    let r = ok(&mut config, include_str!("../examples/config.unid"));
     assert_eq!(r.rows.len(), 1);
     assert_eq!(
         r.columns
@@ -44,7 +44,7 @@ fn executable_examples() {
     assert!(r.rows[0]["endpoint.host"].cmp_eq(&Value::Text("worker.internal".into())));
 
     let mut events = Engine::memory();
-    let r = ok(&mut events, include_str!("../examples/events.uid"));
+    let r = ok(&mut events, include_str!("../examples/events.unid"));
     assert_eq!(r.rows.len(), 1);
     assert_eq!(
         r.columns
@@ -57,7 +57,7 @@ fn executable_examples() {
     assert!(r.rows[0]["event_kind"].cmp_eq(&Value::Text("purchase".into())));
 
     let mut jobs = Engine::memory();
-    let r = ok(&mut jobs, include_str!("../examples/job_queue.uid"));
+    let r = ok(&mut jobs, include_str!("../examples/job_queue.unid"));
     assert_eq!(r.rows.len(), 2);
     assert!(r.rows[0]["id"].cmp_eq(&Value::Text("job-c".into())));
     assert!(r.rows[1]["id"].cmp_eq(&Value::Text("job-a".into())));
@@ -75,7 +75,7 @@ fn executable_examples() {
     );
 
     let mut sync = Engine::memory();
-    let r = ok(&mut sync, include_str!("../examples/sync_conflicts.uid"));
+    let r = ok(&mut sync, include_str!("../examples/sync_conflicts.unid"));
     assert_eq!(r.rows.len(), 3);
     assert!(r.rows[0]["id"].cmp_eq(&Value::Text("docs".into())));
     assert!(r.rows[0]["local_change"].cmp_eq(&Value::Text("modified".into())));
@@ -85,7 +85,7 @@ fn executable_examples() {
     let mut content = Engine::memory();
     let r = ok(
         &mut content,
-        include_str!("../examples/content_metadata.uid"),
+        include_str!("../examples/content_metadata.unid"),
     );
     assert_eq!(r.rows.len(), 1);
     assert!(r.rows[0]["preview_octets"].cmp_eq(&Value::Int(4)));
@@ -93,20 +93,20 @@ fn executable_examples() {
     let mut sessions = Engine::memory();
     let r = ok(
         &mut sessions,
-        include_str!("../examples/session_events.uid"),
+        include_str!("../examples/session_events.unid"),
     );
     assert_eq!(r.rows.len(), 1);
     assert_eq!(r.rows[0]["lifetime"].source_text(), "30minutes");
 
     let mut invoices = Engine::memory();
-    let r = ok(&mut invoices, include_str!("../examples/invoices.uid"));
+    let r = ok(&mut invoices, include_str!("../examples/invoices.unid"));
     assert_eq!(r.rows.len(), 1);
     assert_eq!(r.rows[0]["total"].source_text(), "decimal \"200.00\"");
 
     let mut mutations = Engine::memory();
     let r = ok(
         &mut mutations,
-        include_str!("../examples/task_mutations.uid"),
+        include_str!("../examples/task_mutations.unid"),
     );
     assert_eq!(r.rows.len(), 1);
     assert!(r.rows[0]["id"].cmp_eq(&Value::Int(1)));
@@ -115,7 +115,7 @@ fn executable_examples() {
     let mut recursive = Engine::memory();
     let result = ok(
         &mut recursive,
-        include_str!("../examples/recursive_tree.uid"),
+        include_str!("../examples/recursive_tree.unid"),
     );
     assert_eq!(result.rows.len(), 2);
     assert!(result.rows[0]["root_label"].cmp_eq(&Value::Text("root".into())));
@@ -576,7 +576,7 @@ fn stage_order_and_projection_paths_are_preserved() {
     assert!(ok(&mut e, "from t | take 1 | filter n > 1").rows.is_empty());
     assert_eq!(ok(&mut e, "from t | filter n > 1 | take 1").rows.len(), 1);
     assert!(ok(&mut e, "from t | sort -n | take 1").rows[0]["n"].cmp_eq(&Value::Int(3)));
-    ok(&mut e, include_str!("../examples/tasks.uid"));
+    ok(&mut e, include_str!("../examples/tasks.unid"));
     assert_eq!(
         ok(
             &mut e,
@@ -1633,7 +1633,7 @@ fn float_zero_and_nested_enum_equality_keys_are_consistent() {
 #[test]
 fn indexes_on_nested_records_preserve_results() {
     let mut e = Engine::memory();
-    ok(&mut e, include_str!("../examples/tasks.uid"));
+    ok(&mut e, include_str!("../examples/tasks.unid"));
     let before = rows(
         &mut e,
         "from tasks | filter owner.email == \"alice@example.com\"",
@@ -2229,7 +2229,7 @@ fn boolean_literals_do_not_shadow_user_defined_constructors() {
 #[test]
 fn match_filters_sum_variants_and_record_payloads() {
     let mut e = Engine::memory();
-    ok(&mut e, include_str!("../examples/tasks.uid"));
+    ok(&mut e, include_str!("../examples/tasks.unid"));
     let result = ok(
         &mut e,
         "from tasks\nfilter match state\n  State.Pending => false\n  State.Running {worker, attempt} => worker == \"local\"\n  State.Done {result} => result == \"ok\"\n  State.Failed {retryable, ..} => retryable\nselect {id}\nsort id",
