@@ -2749,7 +2749,29 @@ impl Parser {
         left: ScalarExpression,
         depth: usize,
     ) -> Result<BoolExpression> {
-        if matches!(self.kind(), Kind::Op(_)) {
+        let negated = if self.word("not") {
+            let checkpoint = self.pos;
+            self.bump();
+            if self.word("in") {
+                self.bump();
+                Some(true)
+            } else {
+                self.pos = checkpoint;
+                None
+            }
+        } else if self.word("in") {
+            self.bump();
+            Some(false)
+        } else {
+            None
+        };
+        if let Some(negated) = negated {
+            Ok(BoolExpression::Membership {
+                item: left,
+                collection: self.scalar_expression(depth, false)?,
+                negated,
+            })
+        } else if matches!(self.kind(), Kind::Op(_)) {
             let op = self.comparison_operator()?;
             Ok(BoolExpression::Compare {
                 left,
@@ -2889,6 +2911,8 @@ impl Parser {
                 word.as_str(),
                 "and"
                     | "or"
+                    | "in"
+                    | "not"
                     | "filter"
                     | "let"
                     | "derive"
@@ -2971,6 +2995,7 @@ fn bool_is_computed(expression: &BoolExpression) -> bool {
         BoolExpression::Value(expression) => scalar_is_computed(expression),
         BoolExpression::Compare { .. }
         | BoolExpression::Contains { .. }
+        | BoolExpression::Membership { .. }
         | BoolExpression::Any { .. }
         | BoolExpression::All { .. }
         | BoolExpression::IsSome(_)

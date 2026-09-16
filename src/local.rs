@@ -247,6 +247,11 @@ impl LocalScope {
             | BoolExpression::Contains {
                 collection: left,
                 item: right,
+            }
+            | BoolExpression::Membership {
+                item: left,
+                collection: right,
+                ..
             } => {
                 *left = self.expand_scalar_in(
                     catalog,
@@ -847,6 +852,11 @@ fn validate_definition(
         | BoolExpression::Contains {
             collection: left,
             item: right,
+        }
+        | BoolExpression::Membership {
+            item: left,
+            collection: right,
+            ..
         } => {
             scalar(left, shadowed)?;
             scalar(right, shadowed)

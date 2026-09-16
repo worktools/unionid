@@ -466,6 +466,11 @@ pub enum BoolExpression {
         collection: ScalarExpression,
         item: ScalarExpression,
     },
+    Membership {
+        item: ScalarExpression,
+        collection: ScalarExpression,
+        negated: bool,
+    },
     Any {
         collection: ScalarExpression,
         binding: String,

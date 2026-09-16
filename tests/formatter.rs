@@ -67,6 +67,16 @@ fn composite_index_layouts_share_one_canonical_shape() {
 }
 
 #[test]
+fn membership_expressions_keep_infix_canonical_syntax() {
+    let source = "from jobs | filter id not in $ignored and state in [Queued, Running {worker = \"local\"}] | derive selected = id in [1, 2]";
+    let formatted = format_source(source).unwrap();
+    assert!(formatted.contains("id not in $ignored"));
+    assert!(formatted.contains("state in [Queued, Running {worker = \"local\"}]"));
+    assert!(formatted.contains("selected = id in [1, 2]"));
+    assert_eq!(format_source(&formatted).unwrap(), formatted);
+}
+
+#[test]
 fn composite_index_parser_rejects_ambiguous_or_oversized_shapes() {
     for source in [
         "create index tasks ()",

@@ -186,6 +186,56 @@ fn bind_in_scope(
             bind_scalar(catalog, scope, item, Some(&item_ty), reference_kind)?;
             Ok(())
         }
+        BoolExpression::Membership {
+            item, collection, ..
+        } => {
+            let inferred_item = infer_scalar(catalog, scope, item, reference_kind)?;
+            let inferred_collection = infer_scalar(catalog, scope, collection, reference_kind)?;
+            let collection_item_ty = if let Some(collection_ty) = &inferred_collection {
+                let ScalarType::List(item_ty) = catalog.underlying(collection_ty)? else {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        format!(
+                            "'in' expects a list on the right, got {}",
+                            catalog.describe(collection_ty)
+                        ),
+                    ));
+                };
+                Some(item_ty.as_ref().clone())
+            } else {
+                None
+            };
+            let contextual_collection = matches!(
+                collection,
+                ScalarExpression::Literal(_) | ScalarExpression::Parameter { ty: None, .. }
+            );
+            let item_ty = if contextual_collection {
+                inferred_item.or(collection_item_ty)
+            } else {
+                collection_item_ty.or(inferred_item)
+            }
+            .ok_or_else(|| {
+                Error::new(
+                    "E_TYPE",
+                    "cannot infer 'in' element type from two untyped values",
+                )
+            })?;
+            let collection_ty = if contextual_collection {
+                ScalarType::List(Box::new(item_ty.clone()))
+            } else {
+                inferred_collection
+                    .expect("non-constant membership collection type was inferred above")
+            };
+            bind_scalar(catalog, scope, item, Some(&item_ty), reference_kind)?;
+            bind_scalar(
+                catalog,
+                scope,
+                collection,
+                Some(&collection_ty),
+                reference_kind,
+            )?;
+            Ok(())
+        }
         BoolExpression::Any {
             collection,
             binding,
@@ -982,6 +1032,33 @@ fn evaluate_resolved(
                 }
                 _ => false,
             })
+        }
+        BoolExpression::Membership {
+            item,
+            collection,
+            negated,
+        } => {
+            let Some(item) = evaluate_scalar(catalog, item, values)? else {
+                return Ok(false);
+            };
+            let Some(collection) = evaluate_scalar(catalog, collection, values)? else {
+                return Ok(false);
+            };
+            let Value::List(items) = collection.as_value().unwrapped() else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    "bound 'in' expression received a non-list value",
+                ));
+            };
+            let mut matched = false;
+            for candidate in items {
+                budget.consume_collection_predicate()?;
+                if candidate.cmp_eq(item.as_value()) {
+                    matched = true;
+                    break;
+                }
+            }
+            Ok(if *negated { !matched } else { matched })
         }
         BoolExpression::Any {
             collection,

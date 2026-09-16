@@ -251,7 +251,7 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 | [#326](https://github.com/worktools/unionid/issues/326) | `unionid init` 安全项目骨架 / safe project scaffold | 已交付 / Delivered |
 | [#327](https://github.com/worktools/unionid/issues/327) | 项目级 schema/query/migration 检查 / project-level contract checking | 已交付 / Delivered |
 | [#328](https://github.com/worktools/unionid/issues/328) | 无需 checkout 的首用旅程 / no-checkout first-use journey | 已交付 / Delivered |
-| [#329](https://github.com/worktools/unionid/issues/329) | v0.6 契约与候选发布 / v0.6 contract and release candidate | 当前 / Current |
+| [#329](https://github.com/worktools/unionid/issues/329) | v0.6 契约与候选发布 / v0.6 contract and release candidate | 已交付 / Delivered |
 
 ### v0.7.0 · 场景驱动的查询与类型扩展 / Scenario-driven query and type extensions
 
@@ -261,7 +261,7 @@ Move general expressiveness work from the former v0.4 plan to keep near-term rel
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#244](https://github.com/worktools/unionid/issues/244) | 子查询、IN/EXISTS 与集合运算 / subqueries and set operations | P1 |
+| [#244](https://github.com/worktools/unionid/issues/244) | 子查询、IN/EXISTS 与集合运算 / subqueries and set operations | P1 · `in`/`not in` 已交付，EXISTS/集合运算待续 / membership delivered, EXISTS/set operations pending |
 | [#245](https://github.com/worktools/unionid/issues/245) | 聚合扩展与基础窗口 / aggregates and basic windows | P1 |
 | [#246](https://github.com/worktools/unionid/issues/246) | Typed map 或显式 JSON 逃生通道 / typed map or explicit JSON escape hatch | P1 |
 | [#247](https://github.com/worktools/unionid/issues/247) | Decimal 与 calendar 算术 / decimal and calendar arithmetic | P1 |
