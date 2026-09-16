@@ -702,8 +702,11 @@ impl Parser {
                 self.newlines();
                 while *self.kind() != Kind::Close(')') {
                     args.push(self.ty(depth + 1)?);
-                    self.newlines();
-                    if !self.eat(Kind::Comma) {
+                    let newline = self.separated_newlines();
+                    if *self.kind() == Kind::Close(')') {
+                        break;
+                    }
+                    if !self.eat(Kind::Comma) && !newline {
                         break;
                     }
                     self.newlines();
@@ -781,13 +784,17 @@ impl Parser {
         if self.eat(Kind::Open('(')) {
             self.newlines();
             let first = self.ty(depth + 1)?;
-            if self.eat(Kind::Comma) {
+            let newline = self.separated_newlines();
+            if self.eat(Kind::Comma) || newline && *self.kind() != Kind::Close(')') {
                 let mut ts = vec![first];
                 self.newlines();
                 while *self.kind() != Kind::Close(')') {
                     ts.push(self.ty(depth + 1)?);
-                    self.newlines();
-                    if !self.eat(Kind::Comma) {
+                    let newline = self.separated_newlines();
+                    if *self.kind() == Kind::Close(')') {
+                        break;
+                    }
+                    if !self.eat(Kind::Comma) && !newline {
                         break;
                     }
                     self.newlines();
@@ -908,8 +915,11 @@ impl Parser {
                 self.newlines();
                 while *self.kind() != Kind::Close(')') {
                     args.push(self.ty(depth + 1)?);
-                    self.newlines();
-                    if !self.eat(Kind::Comma) {
+                    let newline = self.separated_newlines();
+                    if *self.kind() == Kind::Close(')') {
+                        break;
+                    }
+                    if !self.eat(Kind::Comma) && !newline {
                         break;
                     }
                     self.newlines();
@@ -1338,8 +1348,11 @@ impl Parser {
             let mut args = Vec::new();
             while *self.kind() != Kind::Close(')') {
                 args.push(self.ty(0)?);
-                self.newlines();
-                if !self.eat(Kind::Comma) {
+                let newline = self.separated_newlines();
+                if *self.kind() == Kind::Close(')') {
+                    break;
+                }
+                if !self.eat(Kind::Comma) && !newline {
                     break;
                 }
                 self.newlines();
@@ -1702,12 +1715,22 @@ impl Parser {
                 return Err(self.error(format!("duplicate returning field '{field}'")));
             }
             fields.push(field);
-            self.newlines();
-            if !self.eat(Kind::Comma) {
+            if !braced {
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+                self.newlines();
+                continue;
+            }
+            let newline = self.separated_newlines();
+            if *self.kind() == Kind::Close('}') {
+                break;
+            }
+            if !self.eat(Kind::Comma) && !newline {
                 break;
             }
             self.newlines();
-            if braced && *self.kind() == Kind::Close('}') {
+            if *self.kind() == Kind::Close('}') {
                 break;
             }
         }
@@ -2099,8 +2122,11 @@ impl Parser {
             if !braced {
                 break;
             }
-            self.newlines();
-            if !self.eat(Kind::Comma) {
+            let newline = self.separated_newlines();
+            if *self.kind() == Kind::Close('}') {
+                break;
+            }
+            if !self.eat(Kind::Comma) && !newline {
                 break;
             }
             self.newlines();
@@ -2228,8 +2254,11 @@ impl Parser {
             if !braced {
                 break;
             }
-            self.newlines();
-            if !self.eat(Kind::Comma) {
+            let newline = self.separated_newlines();
+            if *self.kind() == Kind::Close('}') {
+                break;
+            }
+            if !self.eat(Kind::Comma) && !newline {
                 break;
             }
             self.newlines();
@@ -2380,15 +2409,19 @@ impl Parser {
             if !seen.insert(name.clone()) {
                 return Err(self.error(format!("duplicate local parameter '{name}'")));
             }
-            let annotation = if matches!(self.kind(), Kind::Comma | Kind::Close(')')) {
-                None
-            } else {
-                self.eat(Kind::Colon);
-                Some(self.ty(0)?)
-            };
+            let annotation =
+                if matches!(self.kind(), Kind::Comma | Kind::Newline | Kind::Close(')')) {
+                    None
+                } else {
+                    self.eat(Kind::Colon);
+                    Some(self.ty(0)?)
+                };
             parameters.push(LocalParameter { name, annotation });
-            self.newlines();
-            if !self.eat(Kind::Comma) {
+            let newline = self.separated_newlines();
+            if *self.kind() == Kind::Close(')') {
+                break;
+            }
+            if !self.eat(Kind::Comma) && !newline {
                 break;
             }
             self.newlines();
@@ -2545,8 +2578,8 @@ impl Parser {
                 self.bump();
                 self.newlines();
                 let first = self.nested_match_pattern(depth + 1)?;
-                self.newlines();
-                if !self.eat(Kind::Comma) {
+                let newline = self.separated_newlines();
+                if !(self.eat(Kind::Comma) || newline && *self.kind() != Kind::Close(')')) {
                     self.expect(Kind::Close(')'))?;
                     return Ok(first);
                 }
@@ -2554,8 +2587,11 @@ impl Parser {
                 self.newlines();
                 while *self.kind() != Kind::Close(')') {
                     items.push(self.nested_match_pattern(depth + 1)?);
-                    self.newlines();
-                    if !self.eat(Kind::Comma) {
+                    let newline = self.separated_newlines();
+                    if *self.kind() == Kind::Close(')') {
+                        break;
+                    }
+                    if !self.eat(Kind::Comma) && !newline {
                         break;
                     }
                     self.newlines();
@@ -2585,8 +2621,11 @@ impl Parser {
             self.newlines();
             while *self.kind() != Kind::Close(')') {
                 patterns.push(self.nested_match_pattern(depth + 1)?);
-                self.newlines();
-                if !self.eat(Kind::Comma) {
+                let newline = self.separated_newlines();
+                if *self.kind() == Kind::Close(')') {
+                    break;
+                }
+                if !self.eat(Kind::Comma) && !newline {
                     break;
                 }
                 self.newlines();
@@ -2638,8 +2677,11 @@ impl Parser {
                 };
                 fields.push(MatchField { field, pattern });
             }
-            self.newlines();
-            if !self.eat(Kind::Comma) {
+            let newline = self.separated_newlines();
+            if *self.kind() == Kind::Close('}') {
+                break;
+            }
+            if !self.eat(Kind::Comma) && !newline {
                 break;
             }
             self.newlines();
@@ -2795,8 +2837,8 @@ impl Parser {
                 self.bump();
                 self.newlines();
                 let first = self.match_value_expression_value(depth + 1, multiline)?;
-                self.newlines();
-                if !self.eat(Kind::Comma) {
+                let newline = self.separated_newlines();
+                if !(self.eat(Kind::Comma) || newline && *self.kind() != Kind::Close(')')) {
                     self.expect(Kind::Close(')'))?;
                     return Ok(first);
                 }
@@ -2804,8 +2846,11 @@ impl Parser {
                 self.newlines();
                 while *self.kind() != Kind::Close(')') {
                     values.push(self.match_value_expression_value(depth + 1, multiline)?);
-                    self.newlines();
-                    if !self.eat(Kind::Comma) {
+                    let newline = self.separated_newlines();
+                    if *self.kind() == Kind::Close(')') {
+                        break;
+                    }
+                    if !self.eat(Kind::Comma) && !newline {
                         break;
                     }
                     self.newlines();
@@ -2834,8 +2879,11 @@ impl Parser {
             self.newlines();
             while *self.kind() != Kind::Close(')') {
                 values.push(self.match_value_expression_value(depth + 1, multiline)?);
-                self.newlines();
-                if !self.eat(Kind::Comma) {
+                let newline = self.separated_newlines();
+                if *self.kind() == Kind::Close(')') {
+                    break;
+                }
+                if !self.eat(Kind::Comma) && !newline {
                     break;
                 }
                 self.newlines();

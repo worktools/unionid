@@ -39,11 +39,11 @@ insert tasks {
 ```
 
 - 无分号。花括号用于 struct、enum、record value、projection、match branches 和多项 stage 等明确结构边界的地方，圆括号表达 precedence、tuple、位置负载和嵌套调用，方括号表达 list。多行结构以换行分项且不写逗号；紧凑单行结构使用逗号。类型名和变体名以大写字母开头；当前标识符为 ASCII 字母、数字与下划线，首字符不能是数字；文本值支持 UTF-8。
-- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid`、`date`、`timestamp`、`duration`、`decimal P S` 和 `bytes`。decimal precision 为 1..38、scale 为 0..precision，字面量写作 `decimal "19.90"` 并按目标 scale 精确补零，绝不舍入。date 写作 `@2026-09-08`；timestamp 必须带 `Z` 或 numeric offset；duration 使用 `30seconds` 等整数精确单位。UUID 使用 typed string，bytes 使用小写偶数长度 hex。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。
+- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid`、`date`、`timestamp`、`duration`、`Decimal<P, S>` 和 `bytes`。旧 `decimal P S` 只作为兼容输入；formatter 输出泛型形式。decimal precision 为 1..38、scale 为 0..precision，字面量写作 `decimal "19.90"` 并按目标 scale 精确补零，绝不舍入。date 写作 `@2026-09-08`；timestamp 必须带 `Z` 或 numeric offset；duration 使用 `30seconds` 等整数精确单位。UUID 使用 typed string，bytes 使用小写偶数长度 hex。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。
 
 - duration 支持 checked `+`、`-`、一元负号和 `sum`；`timestamp +/- duration` 得到 timestamp，`timestamp - timestamp` 得到 duration。溢出返回 `E_ARITH`。date 不做 calendar 算术，也没有隐式当前时间、本地时区或 DST 规则。旧 text 数据可在 migration 中用 `date_parse`、`timestamp_parse` 和 `duration_parse` 精确转换。
 
-- 相同 `decimal P S` 支持 checked `+`、`-`、一元负号和 `sum`，每个中间结果都按目标 precision 检查。乘法、除法、avg 和任何舍入保持未实现；旧 text 用 `decimal_parse old P S`，已有 decimal 用 `decimal_rescale old P S` 精确迁移，丢弃非零位时返回 `E_DECIMAL_RANGE`。
+- 相同 `Decimal<P, S>` 支持 checked `+`、`-`、一元负号和 `sum`，每个中间结果都按目标 precision 检查。乘法、除法、avg 和任何舍入保持未实现；旧 text 用 `decimal_parse old P S`，已有 decimal 用 `decimal_rescale old P S` 精确迁移，丢弃非零位时返回 `E_DECIMAL_RANGE`。
 - 支持命名 struct/enum、嵌套积类型、tuple，以及内建 `Option<T>`、`List<T>`，例如 `type Point = (float, float)`、`Option<List<Contact>>`。
 - product type 规范写成 `struct Name { field: Type }`；enum 的 record payload 同样使用 `{}`。旧 `type` record/sum 继续作为 migration、WAL 和已有脚本的兼容输入，formatter 只输出 Rust 形状。
 - record 值使用 `field: value`；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载需要额外一层括号，如 `Pair((1, "x"))`。

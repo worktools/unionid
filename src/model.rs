@@ -902,11 +902,7 @@ impl Catalog {
                     Value::Enum(value)
                         if value.args.len() == 1
                             && matches!(value.args[0], Value::Record(_))
-                            && value
-                                .variant
-                                .rsplit_once('.')
-                                .map_or(value.variant.as_str(), |(_, name)| name)
-                                == definition.name =>
+                            && value.variant == definition.name =>
                     {
                         &value.args[0]
                     }

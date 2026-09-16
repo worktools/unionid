@@ -30,7 +30,7 @@ take 20
 | 能力 | 当前形式 | 状态 | 后续任务 |
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
-| 布尔过滤 | `filter id in $ids` | 已实现括号、`!`/`&&`/`||`、有类型算术、字段间比较、`in`/`not in`、Option 辅助函数与集合谓词 | — |
+| 布尔过滤 | `filter id in $ids` | 已实现括号、`!`/`&&`/`\|\|`、有类型算术、字段间比较、`in`/`not in`、Option 辅助函数与集合谓词 | — |
 | sum/option 模式过滤 | `filter match field {...}` | 已实现 braced branches、unit/record/位置负载、递归 record/tuple/sum/option pattern，以及完整嵌套穷尽与不可达检查 | — |
 | 投影 | `select {field, nested.field}` | 已实现并可选择普通或 ADT 派生列 | — |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | — |
@@ -40,7 +40,7 @@ take 20
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` / `upsert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91/#97 |
 | ADT 派生列 | `derive x = match field {...}` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
-| 布尔表达式与集合函数 | `&&`/`||`/`!`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于 filter、普通／match derive、typed set 和 migration conversion；bytes 支持连续子序列 contains 与 octet length | #100/#138 |
+| 布尔表达式与集合函数 | `&&`/`\|\|`/`!`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于 filter、普通／match derive、typed set 和 migration conversion；bytes 支持连续子序列 contains 与 octet length | #100/#138 |
 | 其他派生列 | `derive score = priority + bonus` | 已实现 scalar 与 bool expression、typed 参数及后续 stage 作用域 | — |
 | 分组与汇总 | `aggregate {...}` / `group {key} { aggregate {...} }` | 已实现 count/sum/min/max、typed 空输入语义与资源上限 | — |
 | 查询局部定义 | `let retryable = attempt -> attempt < 3` | 已实现常量、单/多参数非递归纯函数、有限推断、词法遮蔽与展开预算 | — |
@@ -84,7 +84,7 @@ stage             = local-binding | value-filter | match-filter | derive-express
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
-set-stage         = (newline | "|") "set" (set-assignment | "{" set-assignment separator* "}")
+set-stage         = (newline | "|") "set" (set-assignment | "{" set-assignment (separator+ set-assignment)* separator* "}")
 set-assignment    = field-path "=" (result-expression | match-expression)
 delete            = "delete" table delete-stage*
 delete-stage      = newline filter-stage | "|" filter-stage
@@ -93,32 +93,32 @@ upsert            = "upsert" (table (record-value | parameter) | "many" table (l
 
 value-filter      = "filter" nested-bool-expression
 local-binding     = "let" identifier type? "=" (local-parameters "->")? nested-bool-expression
-local-parameters  = binding | "(" local-parameter ("," local-parameter)* ")"
+local-parameters  = binding | "(" local-parameter (separator+ local-parameter)* separator* ")"
 local-parameter   = binding type?
 match-filter      = "filter" match-predicate
-match-predicate   = "match" field-path "{" match-arm separator* "}"
+match-predicate   = "match" field-path "{" match-arm (separator+ match-arm)* separator* "}"
 match-arm         = arm-pattern "=>" bool-expression
 derive-match      = "derive" identifier "=" nested-match-expression
-derive-expression = "derive" (derived-field | "{" derived-field separator* "}")
+derive-expression = "derive" (derived-field | "{" derived-field (separator+ derived-field)* separator* "}")
 derived-field     = identifier "=" (nested-bool-expression | match-expression)
 lookup            = "lookup" identifier "from" table "on" field-path "==" field-path "take" positive-integer
-aggregate         = "aggregate" "{" aggregate-field separator* "}"
+aggregate         = "aggregate" "{" aggregate-field (separator+ aggregate-field)* separator* "}"
 group-aggregate   = "group" group-fields "{" aggregate "}"
-group-fields      = field-path | "{" field-path ("," field-path)* ","? "}"
+group-fields      = field-path | "{" field-path (separator+ field-path)* separator* "}"
 aggregate-field   = identifier "=" ("count" | (("sum" | "min" | "max") scalar-expression)) newline?
 nested-match-expression = match-expression
-match-expression  = "match" field-path "{" match-value-arm separator* "}"
+match-expression  = "match" field-path "{" match-value-arm (separator+ match-value-arm)* separator* "}"
 match-value-arm   = arm-pattern "=>" result-expression
 result-expression = bool-expression | match-value
 match-value       = binding-path | literal | constructor-value | record-value | tuple-value | list-value
-constructor-value = qualified-variant (record-value | "(" (match-value ("," match-value)*)? ")")?
-record-value      = "{" value-field separator* "}"
+constructor-value = qualified-variant (record-value | "(" (match-value (separator+ match-value)* separator*)? ")")?
+record-value      = "{" value-field (separator+ value-field)* separator* "}"
 value-field       = identifier ":" match-value
-tuple-value       = "(" match-value "," (match-value ("," match-value)*)? ")"
-list-value        = "[" (match-value ("," match-value)* ","?)? "]"
-select            = "select" select-field | "select" "{" select-field ("," select-field)* ","? "}"
+tuple-value       = "(" match-value separator+ match-value (separator+ match-value)* separator* ")"
+list-value        = "[" (match-value (separator+ match-value)* separator*)? "]"
+select            = "select" select-field | "select" "{" select-field (separator+ select-field)* separator* "}"
 select-field      = field-path | derived-field
-sort              = "sort" sort-key | "sort" "{" sort-key ("," sort-key)* ","? "}"
+sort              = "sort" sort-key | "sort" "{" sort-key (separator+ sort-key)* separator* "}"
 sort-key          = "-"? field-path
 take              = "take" nonnegative-integer | "take" positive-integer (".." | "..=") positive-integer
 page              = "page" positive-integer (("after" | "before") string)?
@@ -542,24 +542,24 @@ select {id, retry_at}
 from events
 filter received_at >= $since
 aggregate {
-  events = count,
-  amount = sum amount_cents,
-  earliest = min received_at,
-  latest = max received_at,
+  events = count
+  amount = sum amount_cents
+  earliest = min received_at
+  latest = max received_at
 }
 ```
 
-分组时把 aggregate 放进 group 的 parenthesized inner pipeline。单个 key 可直接写字段路径；多个 key 使用花括号明确边界：
+分组时把 aggregate 放进 group 的 braced inner pipeline。单个 key 可直接写字段路径；多个 key 使用内层花括号明确 key set：
 
 ```text
 from events
 derive day = received_at / 86400
-group {source, day} (
+group {source, day} {
   aggregate {
-    events = count,
-    amount = sum amount_cents,
+    events = count
+    amount = sum amount_cents
   }
-)
+}
 filter events >= 10
 sort {source, day}
 take 20

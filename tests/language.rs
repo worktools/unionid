@@ -393,6 +393,142 @@ fn nominal_types_do_not_share_constructor_names() {
 }
 
 #[test]
+fn qualified_names_cannot_impersonate_named_record_constructors() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "struct User {id: int}\nstruct Row {user: User}\ntable rows: Row {}",
+    );
+    for source in [
+        "insert rows {user: Other::User {id: 1}}",
+        "insert rows {user: User::User {id: 1}}",
+    ] {
+        let response = engine.execute(source);
+        assert!(!response.ok, "accepted {source}");
+        assert_eq!(response.error.unwrap().code, "E_TYPE", "{source}");
+    }
+    ok(&mut engine, "insert rows {user: User {id: 1}}");
+}
+
+#[test]
+fn multiline_delimited_items_use_newlines_without_commas() {
+    let source = r#"enum State {
+  Pending
+  Pair(
+    int
+    text
+  )
+  Tupled((
+    int
+    text
+  ))
+  Record {
+    left: int
+    right: text
+  }
+}
+
+struct Row {
+  id: int
+  pair: (
+    int
+    text
+  )
+  state: State
+}
+
+table rows: Row {
+  key id
+}
+
+insert rows {
+  id: 1
+  pair: (
+    1
+    "pair"
+  )
+  state: Pair(
+    2
+    "state"
+  )
+}
+
+from rows
+let both = (
+  left: int
+  right: int
+) -> left > 0 && right > 0
+filter both 1 2
+filter match state {
+  Pending => false
+  Pair(
+    value
+    label
+  ) => value == 2 && label == "state"
+  Tupled((
+    value
+    label
+  )) => value > 0 && label != ""
+  Record {
+    left
+    right
+  } => left > 0 && right != ""
+}
+sort {
+  -id
+  pair
+}
+select {
+  id
+  pair
+  state
+}
+
+from rows
+group {
+  state
+  pair
+} {
+  aggregate {
+    rows = count
+  }
+}
+
+update rows
+filter id == 1
+set state = match state {
+  Pair(
+    value
+    label
+  ) => Pair(
+    value + 1
+    label
+  )
+  Tupled((
+    value
+    label
+  )) => Tupled((
+    value
+    label
+  ))
+  current => current
+}
+returning {
+  id
+  pair
+  state
+}"#;
+
+    let canonical = unionid::format_source(source).unwrap();
+    assert_eq!(unionid::format_source(&canonical).unwrap(), canonical);
+
+    let mut engine = Engine::memory();
+    let response = ok(&mut engine, source);
+    assert_eq!(response.rows.len(), 1);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
 fn failed_batch_rolls_back_catalog_rows_and_indexes() {
     let mut e = Engine::memory();
     let r = e.execute("type Task =\n  id int\ntable tasks Task\n  key id\ninsert tasks {id = 1}\ninsert tasks {id = 1}");
