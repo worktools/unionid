@@ -49,6 +49,7 @@ unionid project check --dir .
 
 `init` 只接受不存在或空目录，不覆盖已有文件。生成结果包含：
 
+- `README.md`：简短的双语项目说明
 - `schema.unid`：当前声明式 schema
 - `migrations/0001_initial.unid`：可执行的初始 migration
 - `seed.unid`：两条 typed task
@@ -173,6 +174,7 @@ unionid project check --dir .
 
 `init` accepts only a missing or empty directory and never overwrites existing files. It generates:
 
+- `README.md`: a short bilingual project guide
 - `schema.unid`: the current declarative schema
 - `migrations/0001_initial.unid`: the executable initial migration
 - `seed.unid`: two typed tasks

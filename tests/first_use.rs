@@ -29,6 +29,7 @@ fn user_docs_keep_one_versioned_first_use_command_contract() {
         }
     }
     let guide = include_str!("../docs/GETTING_STARTED.md");
+    assert_eq!(guide.matches("`README.md`").count(), 2);
     assert!(guide.contains("--output data/tasks.backup.json"));
     assert!(guide.contains("--db data/restored.redb"));
 }

@@ -55,6 +55,12 @@ def require_starter_row(response):
         raise RuntimeError("starter query did not return the documented typed Running row")
 
 
+def require_clean_redb(integrity, label):
+    """Require a successful integrity report for an already-clean redb database."""
+    if integrity.get("backend") != "redb" or integrity.get("backend_clean") is not True:
+        raise RuntimeError(f"{label} database integrity check failed")
+
+
 def main():
     """Validate the no-checkout init-to-restore journey from an empty directory."""
     parser = argparse.ArgumentParser()
@@ -146,8 +152,7 @@ def main():
         [binary, "check", "--db", "data/tasks.redb", "--format", "json"],
         cwd=project,
     )
-    if integrity.get("backend") != "redb" or not integrity.get("backend_clean"):
-        raise RuntimeError("starter database integrity check failed")
+    require_clean_redb(integrity, "starter")
 
     run(
         [
@@ -198,10 +203,11 @@ def main():
     )
     if restored_diagnosis.get("database", {}).get("schema") != schema:
         raise RuntimeError("restored schema identity differs from the source")
-    run(
+    restored_integrity = run(
         [binary, "check", "--db", "data/restored.redb", "--format", "json"],
         cwd=project,
     )
+    require_clean_redb(restored_integrity, "restored")
 
     if source_digests(project) != before:
         raise RuntimeError("the first-use journey changed generated project sources")
