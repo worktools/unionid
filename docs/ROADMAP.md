@@ -2,7 +2,7 @@
 
 规划日期：2026-09-12。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
-当前验收：[v0.5 #320](https://github.com/worktools/unionid/issues/320) · [v0.4 #269](https://github.com/worktools/unionid/issues/269) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
+当前验收：[v0.6 #329](https://github.com/worktools/unionid/issues/329) · [v0.5 #320](https://github.com/worktools/unionid/issues/320) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
 
 [2026-09-12 ADT 与语言互通评估](assessments/adt-adoption-2026-09-12.md)记录当前实现、独立消费探针、业界对照及采用建议；它是评估快照，不替代 issues 的实时范围与完成状态。 / The dated assessment records implementation evidence, consumer probes, industry comparisons, and adoption proposals; issues remain the source of current scope and status.
 
@@ -192,9 +192,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 版本里程碑（v0.3.0 起） / Version milestones
 
-M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.2.0`，以下为目标版本，不表示已经发布。issue 的完整验收决定完成状态；计划整理不修改 Cargo 版本、不创建 tag，也不预设发布日期。软件版本与 storage/protocol 版本独立冻结。
+M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.5.0`，以下未发布版本仍是目标，不表示已经发布。issue 的完整验收决定完成状态；计划整理不创建 tag，也不预设发布日期。软件版本与 storage/protocol 版本独立冻结。
 
-M0–M9 retain completed-stage evidence. The latest published release is `v0.2.0`; the versions below are targets. Full issue acceptance determines completion. Planning does not bump Cargo versions, create tags or promise dates. Software, storage and protocol versions are frozen independently.
+M0–M9 retain completed-stage evidence. The latest published release is `v0.5.0`; later unreleased versions below remain targets. Full issue acceptance determines completion. Planning does not create tags or promise dates. Software, storage and protocol versions are frozen independently.
 
 ### v0.3.0 · 可靠 Rust 接入与应用闭环 / Reliable Rust integration and application workflows
 
@@ -236,11 +236,24 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
 | [#249](https://github.com/worktools/unionid/issues/249) | Metrics、tracing、slow query 与 explain analyze | 已交付 / Delivered |
-| [#250](https://github.com/worktools/unionid/issues/250) | 增量备份/sequence restore 与 compact no-op / incremental backup/sequence restore and compact no-op | 已交付，待 RC 证据 / Delivered, RC evidence pending |
+| [#250](https://github.com/worktools/unionid/issues/250) | 增量备份/sequence restore 与 compact no-op / incremental backup/sequence restore and compact no-op | 已交付 / Delivered |
 | [#251](https://github.com/worktools/unionid/issues/251) | Envoy mTLS 受控网络路径 / Envoy mTLS controlled-network path | 已交付 / Delivered |
-| [#320](https://github.com/worktools/unionid/issues/320) | 版本、用户旅程与候选发布 / version, user journey, and release candidate | 当前 / Current |
+| [#320](https://github.com/worktools/unionid/issues/320) | 版本、用户旅程与候选发布 / version, user journey, and release candidate | 已交付 / Delivered |
 
-### v0.6.0 · 场景驱动的查询与类型扩展 / Scenario-driven query and type extensions
+### v0.6.0 · 首次接入与项目工作流 / First-use and project workflow
+
+[Milestone 16](https://github.com/worktools/unionid/milestone/16)；从已安装二进制和空目录开始，用生成的规范 `.unid` 项目完成 schema、migration、typed seed/query、重开、诊断和备份还原。不改变 query、类型、storage、backup、codec 或 protocol 契约。
+
+[Milestone 16](https://github.com/worktools/unionid/milestone/16) starts from an installed binary and an empty directory, then carries a generated canonical `.unid` project through schema, migration, typed seed/query, reopen, diagnosis, backup, and restore. It changes no query, type, storage, backup, codec, or protocol contract.
+
+| Issue | 交付 / Deliverable | 优先级 / Priority |
+| --- | --- | --- |
+| [#326](https://github.com/worktools/unionid/issues/326) | `unionid init` 安全项目骨架 / safe project scaffold | 已交付 / Delivered |
+| [#327](https://github.com/worktools/unionid/issues/327) | 项目级 schema/query/migration 检查 / project-level contract checking | 已交付 / Delivered |
+| [#328](https://github.com/worktools/unionid/issues/328) | 无需 checkout 的首用旅程 / no-checkout first-use journey | 已交付 / Delivered |
+| [#329](https://github.com/worktools/unionid/issues/329) | v0.6 契约与候选发布 / v0.6 contract and release candidate | 当前 / Current |
+
+### v0.7.0 · 场景驱动的查询与类型扩展 / Scenario-driven query and type extensions
 
 [Milestone 15](https://github.com/worktools/unionid/milestone/15)；从原 v0.4 通用表达力计划移入，为近期 ADT 接入留出范围。以真实场景、typed 语义和资源预算决定切片；更早版本遇到已验证的硬性阻塞时，可单独调整归属。
 
@@ -275,7 +288,7 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 
 ## 当前执行顺序
 
-M0–M9、v0.3.0、v0.4.0 与 v0.5.0 的功能 issues 已完成。当前只执行 [#320](https://github.com/worktools/unionid/issues/320)：对账文档与 issue、冻结两个 crate 和 release contract，以现有任务类 typed application 验证核心体验，再运行一次 Ubuntu/macOS Release workflow；Linux 同时保留 Envoy 与增量备份 RC 证据。此阶段不增加查询、类型、备份策略或网络功能。tag 与公开发布不能由普通功能 PR 代替。
+M0–M9、v0.3.0、v0.4.0 与 v0.5.0 已完成。当前只执行 [#329](https://github.com/worktools/unionid/issues/329)：冻结 v0.6 两个 crate 和 release contract，从空目录联合验证 init/project check/运行/重开/诊断/备份还原，再运行一次 Ubuntu/macOS Release workflow。此阶段不增加查询、类型、存储、备份策略或网络功能。tag 与公开发布不能由普通候选 PR 代替；完成发布核对后再进入 v0.7。
 
 ## 维护约定
 
