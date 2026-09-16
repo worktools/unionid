@@ -40,19 +40,26 @@ def main() -> int:
     files = sorted(
         path for path in root.rglob("*.uid") if not skipped(path)
     )
+    renamed = 0
+    skipped = 0
     for path in files:
         target = path.with_suffix(".unid")
+        if target.exists():
+            print(f"skip {path}: destination {target} already exists")
+            skipped += 1
+            continue
         if args.dry_run:
             print(f"would rename {path} -> {target}")
         else:
             path.rename(target)
             print(f"renamed {path} -> {target}")
-    if not args.dry_run and files:
+        renamed += 1
+    if not args.dry_run and renamed:
         print(
             "Update references to the renamed paths, then run "
             "`unionid migration status` to confirm the ledger is unchanged."
         )
-    print(f"{len(files)} file(s)")
+    print(f"{renamed} file(s) renamed, {skipped} skipped")
     return 0
 
 
