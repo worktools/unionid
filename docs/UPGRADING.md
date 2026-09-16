@@ -32,7 +32,9 @@ Before upgrading or switching maintenance binaries, export and verify any active
 - 使用 `.uid` 时 stderr 输出稳定的弃用提示 `'<path>' uses the deprecated .uid extension; rename it to .unid`；文件内容与执行语义不变。
 - `migration new` 生成 `.unid`。
 - migration checksum 只基于文件内容、不包含路径，因此把已有 migration 文件从 `.uid` 重命名为 `.unid` 不会改变已应用的 ledger，也不会触发重复应用。
-- 迁移步骤：`git mv schema.uid schema.unid`（以及同目录其余 `.uid` 文件），把应用、脚本和生成命令中的路径改为 `.unid`，再运行 `unionid migration status` 确认 applied/pending 不变。兼容窗口会在后续较大版本边界移除，届时只接受 `.unid`。
+- 自动化迁移：`python3 scripts/migrate-uid-to-unid.py <目录> --dry-run` 预览、去掉 `--dry-run` 执行批量重命名（用 `--keep` 跳过需要保留 `.uid` 的兼容 fixture）。随后把应用、脚本和生成命令中的路径改为 `.unid`，再运行 `unionid migration status` 确认 applied/pending 不变。
+- 回滚：窗口内把 `.unid` 改回 `.uid` 即可，内容与 ledger 不受影响。
+- 兼容窗口计划在 **v1.0.0** 关闭；届时二进制只接受 `.unid`，未迁移的项目需要先在此窗口内完成重命名。
 
 ### 从 v0.3.0 或 v0.4.0 升级
 
@@ -109,7 +111,7 @@ Only `backup incremental init` / `Engine::enable_backup_journal` performs 6-to-7
 
 ### Source file extension: `.uid` to `.unid`
 
-`.unid` is the canonical extension for Unionid source files (schema, query, migration); `.uid` is in a compatibility window. `run`/`cli --file`, `schema check`, `fmt`, `query rust`, and migration/query directory scans accept both. A `.uid` path prints a stable deprecation on stderr (`'<path>' uses the deprecated .uid extension; rename it to .unid`) without changing content or semantics, and `migration new` writes `.unid`. Migration checksums are content-only and do not include the path, so renaming an existing migration from `.uid` to `.unid` preserves the applied ledger and never re-applies it. To migrate, `git mv schema.uid schema.unid` (and the remaining `.uid` files), update application/script/generated paths to `.unid`, then confirm `migration status` is unchanged. The compatibility window closes at a later major boundary, after which only `.unid` is accepted.
+`.unid` is the canonical extension for Unionid source files (schema, query, migration); `.uid` is in a compatibility window. `run`/`cli --file`, `schema check`, `fmt`, `query rust`, and migration/query directory scans accept both. A `.uid` path prints a stable deprecation on stderr (`'<path>' uses the deprecated .uid extension; rename it to .unid`) without changing content or semantics, and `migration new` writes `.unid`. Migration checksums are content-only and do not include the path, so renaming an existing migration from `.uid` to `.unid` preserves the applied ledger and never re-applies it. Automate the rename with `python3 scripts/migrate-uid-to-unid.py <dir> --dry-run` (drop `--dry-run` to run; use `--keep` for compatibility fixtures that must stay `.uid`), then update references and confirm `migration status` is unchanged. Renaming back is also safe during the window. The compatibility window is planned to close in **v1.0.0**, after which only `.unid` is accepted and unmigrated projects must rename first.
 
 ### Upgrading from v0.3.0 or v0.4.0
 
