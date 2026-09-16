@@ -196,7 +196,7 @@ fn project_check_detects_schema_and_migration_drift() {
     let schema = std::fs::read_to_string(&schema_path).unwrap();
     std::fs::write(
         &schema_path,
-        schema.replace("  | Done {", "  | Failed\n  | Done {"),
+        schema.replace("  Done {", "  Failed\n  Done {"),
     )
     .unwrap();
     assert_success(&run(&project, &["fmt", "--file", "schema.unid", "--check"]));

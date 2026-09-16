@@ -1,37 +1,39 @@
-type Event =
+enum Event {
   Login {
-    user text,
+    user: text
   }
-  | Purchase {
-    item int,
-    amount_cents int,
+  Purchase {
+    item: int
+    amount_cents: int
   }
-  | Failure {
-    message text,
+  Failure {
+    message: text
   }
-
-type EventRow = {
-  id int,
-  event Event,
 }
 
-table events EventRow
+struct EventRow {
+  id: int
+  event: Event
+}
+
+table events: EventRow {
   key id
+}
 
 insert many events [
-  {event = Login {user = "alice"}, id = 1},
-  {event = Purchase {amount_cents = 1990, item = 42}, id = 2},
-  {event = Failure {message = "network | timeout"}, id = 3},
+  {event: Login {user: "alice"}, id: 1}
+  {event: Purchase {amount_cents: 1990, item: 42}, id: 2}
+  {event: Failure {message: "network | timeout"}, id: 3}
 ]
 
 from events
-filter event == Purchase {amount_cents = 1990, item = 42}
+filter event == Purchase {amount_cents: 1990, item: 42}
 select {
-  id,
+  id
   event_kind = match event {
-    Login {..} => "login",
-    Purchase {..} => "purchase",
-    Failure {..} => "failure",
-  },
-  event,
+    Login {..} => "login"
+    Purchase {..} => "purchase"
+    Failure {..} => "failure"
+  }
+  event
 }

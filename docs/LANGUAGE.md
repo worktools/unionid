@@ -2,53 +2,55 @@
 
 本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.unid)、[任务修改](../examples/task_mutations.unid)、[schema migration](../examples/schema_migration.unid)、[后台队列](../examples/job_queue.unid)、[配置](../examples/config.unid)、[事件](../examples/events.unid)、[同步冲突](../examples/sync_conflicts.unid)、[有限递归树](../examples/recursive_tree.unid)、[UUID/bytes 内容元数据](../examples/content_metadata.unid)、[时间/session](../examples/session_events.unid)、[decimal 账单](../examples/invoices.unid)。
 
-当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys (aggregate {...})`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`not/and/or`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys { aggregate {...} }`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`!`/`&&`/`||`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+
+LLM 或代码生成器可通过 `unionid docs query` 读取当前二进制内置的紧凑参考与可运行示例，或用 `--format json` 取得分离的 reference/examples。生成真实查询时还应提供 `unionid schema print --db <path> --format json` 的 exact schema，并用 `query describe` 在执行前绑定检查。完整 prompt-oriented 内容见 [LLM_QUERY.md](LLM_QUERY.md)。
 
 ## 类型、表与值
 
 ```text
-type Contact = {
-  email text,
-  nickname option text = None,
+struct Contact {
+  email: text
+  nickname: Option<text> = None
 }
 
-type State =
+enum State {
   Pending
-  | Running {worker text, attempt int}
-  | Done {result text}
-
-type Task = {
-  id int,
-  owner Contact,
-  tags list text = [],
-  state State,
+  Running {worker: text, attempt: int}
+  Done {result: text}
 }
 
-table tasks Task
+struct Task {
+  id: int
+  owner: Contact
+  tags: List<text> = []
+  state: State
+}
+
+table tasks: Task {
   key id
+}
 
 insert tasks {
-  id = 1,
-  owner = {
-    email = "alice@example.com",
-  },
-  state = Running {worker = "local", attempt = 2},
+  id: 1
+  owner: Contact {email: "alice@example.com"}
+  state: Running {worker: "local", attempt: 2}
 }
 ```
 
-- 无分号。花括号用于 record、projection、match branches 和多项 sort 等明确结构边界的地方，圆括号表达 precedence、tuple、嵌套调用或 group inner pipeline，方括号表达 list；delimiter 内相邻项用逗号分隔，formatter 保留 trailing comma。类型名和变体名以大写字母开头；当前标识符为 ASCII 字母、数字与下划线，首字符不能是数字；文本值支持 UTF-8。
-- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid`、`date`、`timestamp`、`duration`、`decimal P S` 和 `bytes`。decimal precision 为 1..38、scale 为 0..precision，字面量写作 `decimal "19.90"` 并按目标 scale 精确补零，绝不舍入。date 写作 `@2026-09-08`；timestamp 必须带 `Z` 或 numeric offset；duration 使用 `30seconds` 等整数精确单位。UUID 使用 typed string，bytes 使用小写偶数长度 hex。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。
+- 无分号。花括号用于 struct、enum、record value、projection、match branches 和多项 stage 等明确结构边界的地方，圆括号表达 precedence、tuple、位置负载和嵌套调用，方括号表达 list。多行结构以换行分项且不写逗号；紧凑单行结构使用逗号。类型名和变体名以大写字母开头；当前标识符为 ASCII 字母、数字与下划线，首字符不能是数字；文本值支持 UTF-8。
+- 原子类型为 `int`（i64）、`float`（有限 f64）、`bool`、`text`、`uuid`、`date`、`timestamp`、`duration`、`Decimal<P, S>` 和 `bytes`。旧 `decimal P S` 只作为兼容输入；formatter 输出泛型形式。decimal precision 为 1..38、scale 为 0..precision，字面量写作 `decimal "19.90"` 并按目标 scale 精确补零，绝不舍入。date 写作 `@2026-09-08`；timestamp 必须带 `Z` 或 numeric offset；duration 使用 `30seconds` 等整数精确单位。UUID 使用 typed string，bytes 使用小写偶数长度 hex。其他命名类型必须先声明；类型定义可以直接引用自身。当前不支持两个或多个类型的互递归，也不支持用户自定义泛型。
 
 - duration 支持 checked `+`、`-`、一元负号和 `sum`；`timestamp +/- duration` 得到 timestamp，`timestamp - timestamp` 得到 duration。溢出返回 `E_ARITH`。date 不做 calendar 算术，也没有隐式当前时间、本地时区或 DST 规则。旧 text 数据可在 migration 中用 `date_parse`、`timestamp_parse` 和 `duration_parse` 精确转换。
 
-- 相同 `decimal P S` 支持 checked `+`、`-`、一元负号和 `sum`，每个中间结果都按目标 precision 检查。乘法、除法、avg 和任何舍入保持未实现；旧 text 用 `decimal_parse old P S`，已有 decimal 用 `decimal_rescale old P S` 精确迁移，丢弃非零位时返回 `E_DECIMAL_RANGE`。
-- 支持命名 record/sum、嵌套积类型、tuple，以及内建 `option T`、`list T`，例如 `type Point = (float, float)`、`option (list Contact)`。
-- record 类型规范写成 braced field set，如 `{email text, nickname option text}`；变体的 record payload 同样使用 `{}`。旧缩进 record 与 variant payload 继续作为 migration、WAL 和已有脚本的兼容输入，formatter 只输出 braced 形式。
-- record 值使用 `field = value`，内联字段之间用逗号；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载与多个位置参数通过括号区分。
-- 字段默认值写成 `field type = value`，例如 `nickname option text = None`、`tags list text = []`。默认值必须是可按字段类型检查的纯字面值，在 schema 声明时完成校验并存为完整 typed value；不能引用其他字段、参数、时钟或函数。
+- 相同 `Decimal<P, S>` 支持 checked `+`、`-`、一元负号和 `sum`，每个中间结果都按目标 precision 检查。乘法、除法、avg 和任何舍入保持未实现；旧 text 用 `decimal_parse old P S`，已有 decimal 用 `decimal_rescale old P S` 精确迁移，丢弃非零位时返回 `E_DECIMAL_RANGE`。
+- 支持命名 struct/enum、嵌套积类型、tuple，以及内建 `Option<T>`、`List<T>`，例如 `type Point = (float, float)`、`Option<List<Contact>>`。
+- product type 规范写成 `struct Name { field: Type }`；enum 的 record payload 同样使用 `{}`。旧 `type` record/sum 继续作为 migration、WAL 和已有脚本的兼容输入，formatter 只输出 Rust 形状。
+- record 值使用 `field: value`；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载需要额外一层括号，如 `Pair((1, "x"))`。
+- 字段默认值写成 `field: Type = value`，例如 `nickname: Option<text> = None`、`tags: List<text> = []`。默认值必须是可按字段类型检查的纯字面值，在 schema 声明时完成校验并存为完整 typed value；不能引用其他字段、参数、时钟或函数。
 - 没有默认值的字段全部必填，即使类型为 option 也必须显式写 `None`。缺失字段逐层使用它自身声明的默认值；显式值不会因为类型错误而退回默认值。重复、缺失、未知字段及错误负载均报错。
-- 命名类型保留身份；有歧义时可用 `State.Pending` 或 `State.Running {...}` 限定构造器。
-- `table tasks Task` 要求 Task 是 record；可选的缩进 `key id` 声明 indexable scalar 主键，UUID 可直接作为生产 ID，拒绝重复键。无 key 时允许重复行。
+- 命名类型保留身份。完整限定构造器写成 `State::Pending` 或 `State::Running {...}`；字段值、match 分支、set target 等位置的期望 enum 类型明确时，可简写为 `Pending` 或 `Running {...}`。独立构造或同名变体有歧义时使用限定名。
+- `table tasks: Task { key id }` 要求 Task 是 struct；`key` 声明 indexable scalar 主键，UUID 可直接作为生产 ID，拒绝重复键。无 key 时写空块 `table tasks: Task {}`。
 
 普通 secondary index 加速完整 typed value 的等值过滤；`unique` 在同一相等语义上增加约束：
 
@@ -71,29 +73,30 @@ planner 可以把连续的简单比较绑定为复合索引的 equality prefix�
 
 ```text
 insert many tasks [
-  {id = 1, owner = {email = "a@example.com"}, state = Pending},
-  {id = 2, owner = {email = "b@example.com"}, state = Pending},
+  {id: 1, owner: Contact {email: "a@example.com"}, state: Pending}
+  {id: 2, owner: Contact {email: "b@example.com"}, state: Pending}
 ]
 returning {id, state}
 ```
 
-也可写 `insert many tasks $rows`，其中 `$rows` 的期望类型是 `list Task`。`upsert many tasks <list>` 和 `upsert many tasks $rows` 使用同一行类型，但要求表声明主键。每行独立补齐默认值并检查完整 ADT record，随后整批检查主键和 unique indexes；输入顺序决定新 RowId 分配、returning 行和 `upsert_actions` 的顺序。批量 upsert 更新命中行并保留 RowId，插入未命中行；输入 list 内出现重复主键直接返回 `E_CONSTRAINT`，不使用 first/last wins。
+也可写 `insert many tasks $rows`，其中 `$rows` 的期望类型是 `List<Task>`。`upsert many tasks <list>` 和 `upsert many tasks $rows` 使用同一行类型，但要求表声明主键。每行独立补齐默认值并检查完整 ADT record，随后整批检查主键和 unique indexes；输入顺序决定新 RowId 分配、returning 行和 `upsert_actions` 的顺序。批量 upsert 更新命中行并保留 RowId，插入未命中行；输入 list 内出现重复主键直接返回 `E_CONSTRAINT`，不使用 first/last wins。
 
 空 list 成功返回 `affected_rows = 0`，使用 returning 时仍提供稳定 columns。单批最多 100,000 行；任一行、预算、deadline、主键／unique 冲突或提交失败都不会发布部分 rows、indexes 或 RowId 游标。流式导入不属于当前语法。
 
-直接自递归沿用同一套无分号声明语法，不增加 `rec` 标记。递归类型必须至少能构造一个有限值：sum 需要终止变体，record/tuple 的每个必需成员都必须可终止，`option` 的 `None` 与 `list` 的空列表可作为终止路径。例如：
+直接自递归沿用同一套无分号声明语法，不增加 `rec` 标记。递归类型必须至少能构造一个有限值：enum 需要终止变体，struct/tuple 的每个必需成员都必须可终止，`Option` 的 `None` 与 `List` 的空列表可作为终止路径。例如：
 
 ```text
-type Tree =
-  Leaf text
-  | Branch {
-    label text,
-    children list Tree,
+enum Tree {
+  Leaf(text)
+  Branch {
+    label: text
+    children: List<Tree>
   }
+}
 
-type Chain = {
-  value int,
-  next option Chain = None,
+struct Chain {
+  value: int
+  next: Option<Chain> = None
 }
 ```
 
@@ -105,16 +108,14 @@ type Chain = {
 
 ```text
 from tasks
-filter (
-  match state {
-    Running {attempt, ..} => attempt >= 2 and attempt < 5,
-    _ => false,
-  }
-)
+filter match state {
+  Running {attempt, ..} => attempt >= 2 && attempt < 5
+  _ => false
+}
 derive state_label = match state {
-  Pending => "pending",
-  Running {..} => "running",
-  Done {..} => "done",
+  Pending => "pending"
+  Running {..} => "running"
+  Done {..} => "done"
 }
 select {id, owner.email, state, state_label}
 sort id
@@ -127,24 +128,24 @@ take 20
 | --- | --- | --- |
 | 数据源 | `from tasks` | 开始查询 |
 | 布尔过滤 | `filter any attempts (attempt -> attempt.failed)` | 组合 bool、比较、Option 检查、list/text 长度、成员判断与元素字段谓词 |
-| 模式过滤 | `filter (match state {...})` | 按 sum 变体及其 record 负载判断 |
+| 模式过滤 | `filter match state {...}` | 按 sum 变体及其 record 负载判断 |
 | 普通派生 | `derive score = priority + bonus` | 产生 scalar 或 bool typed 列并加入后续 stage 作用域 |
 | ADT 派生 | `derive label = match state {...}` | 穷尽解构 sum/option，追加统一类型的结果列 |
 | 局部定义 | `let retryable = attempt -> attempt < 3` | 定义常量或有类型、非递归纯函数，供后续 stage 展开复用 |
-| 汇总 | `aggregate {...}` / `group state (aggregate {...})` | count/sum/min/max；分组键保留完整 ADT 类型和值 |
+| 汇总 | `aggregate {...}` / `group state { aggregate {...} }` | count/sum/min/max；分组键保留完整 ADT 类型和值 |
 | 投影 | `select {id, owner.email}` | 保留列，响应按声明的列顺序展示 |
 | 排序 | `sort id` / `sort {-priority, created_at, id}` | 单列或多列词典序；支持 primitive、命名类型及完整有限 ADT |
-| 截取 | `take 20` / `take 11..20` | 保留前 N 行或一基闭区间内的行 |
+| 截取 | `take 20` / `take 10..20` / `take 10..=20` | 保留前 N 行，或使用 Rust 风格半开／闭区间 |
 | 稳定分页 | `page 100` / `page 100 after "u1..."` | 以主键收尾的唯一 sort tuple、opaque cursor 和 sequence-pinned 一致性 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 与多行 pipeline 同语义 |
 | 计划 | `explain from tasks \| filter id == 1` | 只绑定查询并返回 full scan／索引 lookup、候选数、stage 顺序和结果 schema |
 | 实际剖析 | `explain analyze from tasks \| filter id == 1` | 同快照执行查询并返回 value-free 耗时、行数、索引、缓存、批次与内存统计，不返回业务行 |
 
-支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及括号、`not`、`and`、`or`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减，复杂算术可在括号内换行。运算数必须归一为同一个 int 或 float 类型；整数除法向零截断，溢出、除零或非有限 float 返回 `E_ARITH`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 提供有类型、可嵌套且有预算的元素字段谓词，`is_some`/`is_none` 显式检查 Option。函数使用空格传参。复杂条件放进跨行 `()`；match branches 放进 `{}`，分支结果也可使用括号跨行。混用 `and` 与 `or` 时规范写法加括号明确分组。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。多键排序按书写顺序比较；每个键使用绑定静态类型的 total order，sum 按稳定 variant ID、record 按稳定 field ID、option 按 `None < Some`、list 按短前缀优先的词典序比较。`page` 要求最后一个排序键是源表主键，并返回可恢复的 opaque cursor。范围 `take` 是一基闭区间，例如 `11..20` 返回当前结果的第 11 到 20 行。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。分页完整规则见[有界 keyset page](QUERY.md#有界-keyset-page)。
+支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及 Rust 风格的 `!`、`&&`、`||`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减。复杂条件可以放进跨行 `{}` 表达式块；改变优先级时使用 `()`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 使用箭头闭包，不采用竖线闭包，避免与 pipeline 的 `|` 混淆。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。`take 10..20` 是一基位置的半开区间，`take 10..=20` 包含末端，与 Rust range 对应。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。分页完整规则见[有界 keyset page](QUERY.md#有界-keyset-page)。
 
-模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some value`；record 可用 `{field = binding, ..}` 重命名绑定，也可递归写成 `{retry_at = Some at, point = (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。match condition 与普通 filter 共用布尔、集合和数值表达式。`derive name = expression` 追加或替换 scalar 或 bool 列；结果保留命名类型，typed 参数在扫描前推导，后续 filter/derive/select/sort 可立即引用。`derive name = match source {...}` 的分支可返回 binding/literal/算术或完整 bool 表达式，也可用 binding 和算术结果构造 `Some (attempt + 1)`、`State.Done`、`Summary {label = message}`、tuple、record 和 list。复杂表达式使用括号换行，formatter 会在结构边界主动展开过长的布尔表达式。
+模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some(value)`；record 可用 `{field: binding, ..}` 重命名绑定，也可递归写成 `{retry_at: Some(at), point: (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。`derive name = match source {...}` 的分支可返回 binding/literal/算术或完整 bool 表达式，也可构造 `Some(attempt + 1)`、`State::Done`、`Summary {label: message}`、tuple、record 和 list。
 
-查询局部定义使用 `let name = expression` 或 `let name = argument -> expression`。多个参数写成 `(left, right) ->`；通常从调用字段推断类型，歧义时使用 `let missing option int = None`、`let present = (value option int) -> is_some value` 这样的字段式注解。调用使用空格，嵌套调用加括号。定义只作用于当前 pipeline 的后续 stage，只能调用更早定义的函数，不支持递归、泛型或函数值；详见[查询局部 let 与纯函数](QUERY.md#查询局部-let-与纯函数)。
+查询局部定义使用 `let name = expression` 或 `let name = argument -> expression`。多个参数写成 `(left: T, right: U) ->`；通常从调用位置推断类型，歧义时使用 `let missing: Option<int> = None`、`let present = (value: Option<int>) -> is_some value`。箭头闭包是特意保留的 PRQL 风格边界；`|value|` 不属于语言。定义只作用于当前 pipeline 的后续 stage，只能调用更早定义的函数，不支持递归、泛型或函数值。
 
 `explain` 可直接放在单行查询前，也可把完整查询缩进到下一层。它执行与真实查询相同的静态绑定，返回结构化访问计划，但不读取或执行数据行。`explain analyze` 使用相同布局，在同一读快照上额外执行 pipeline 并返回 value-free `analysis`，不会返回业务 rows 或 cursor。只有开头的单纯有索引等值 filter（允许前置 let）使用 lookup；planner 不越过其他 stage。完整字段与测量规则见 [Explain、实际剖析与类型化索引计划](QUERY.md#explain实际剖析与类型化索引计划)。
 
@@ -180,20 +181,18 @@ let tasks: Vec<Task> = response.typed_rows()?;
 
 ```text
 update tasks
-filter (
-  match state {
-    Pending => true,
-    _ => false,
-  }
-)
+filter match state {
+  Pending => true
+  _ => false
+}
 sort {-attempts, id}
 take 1
 set {
-  attempts = attempts + 1,
+  attempts = attempts + 1
   state = match state {
-    Pending => Done {result = "ok"},
-    current => current,
-  },
+    Pending => Done {result: "ok"}
+    current => current
+  }
 }
 returning {id, state}
 
@@ -202,7 +201,7 @@ delete tasks | filter id == 2 | returning
 
 - `update table` 与 `delete table` 不带 filter 时作用于整张表；这是显式有效操作。
 - mutation target 接受普通 `filter`、braced match filter、`sort` 和 `take`，严格按书写顺序选择稳定 RowId；sort 并列时保持输入顺序，生产语句仍应以唯一键结束排序。`select`、`derive` 和 aggregate 不属于修改目标。
-- 所有 target stage 必须写在第一个 `set` 前。`take n` 与一基闭区间 `take start..end` 沿用查询语义。多个 `set` 同时求值：每个右侧读取该行修改前的值，因此 `set left = right` 和 `set right = left` 会交换两列。
+- 所有 target stage 必须写在第一个 `set` 前。`take n`、半开区间 `take start..end` 与闭区间 `take start..=end` 沿用查询语义。多个 `set` 同时求值：每个右侧读取该行修改前的值，因此 `set left = right` 和 `set right = left` 会交换两列。
 - `set` 右侧接受字段、literal、ADT constructor、`length`、有类型算术和完整 bool 表达式，也可写 `match source {...}`，使用与 ADT derive 相同的递归 pattern、bool 结果和 option/sum/product/list 构造。目标字段给出结果类型；bool 表达式只能写入 bool 字段。未知字段、非穷尽／不可达分支和错误结果即使目标表为空也报错。
 - 顶层小写 binding 是带类型的不可反驳 pattern，必须是最后一支；`current => current` 可保留其余 constructor 的完整原值。分支可使用 typed 参数和自己的 pattern bindings。
 - 可直接设置 record 的嵌套路径，如 `set owner.email = "new@example.com"`。路径不能穿过 sum/option；修改 variant 时设置完整值。父路径与子路径不能在同一 update 中同时赋值，避免依赖隐含顺序。
@@ -210,7 +209,7 @@ delete tasks | filter id == 2 | returning
 - 成功 insert/upsert/update/delete 的 JSON 响应包含 `affected_rows`；批量 insert/upsert 返回输入行数，update/delete 未命中时返回 0。末尾的 `returning` 返回完整受影响行，`returning {id, state}` 按给定顺序投影字段：单行／批量 insert 与 upsert 返回默认值补齐后的新行，update 返回后像，delete 返回前像。空批次或空命中仍返回稳定 columns 和空 rows。
 - returning 字段在扫描前按表 schema 检查，行数和 8 MiB typed wire 预算也在提交前检查；失败不会发布 row 或索引。内部稳定 RowId 不出现在用户 record 中，删除后不会被后续插入复用。
 
-多字段更新规范写成 `set {left = right, right = left}`，每个右侧读取旧行，可安全交换字段。单项 `set left = right` 保持可用；旧的重复 `set` 也继续执行，formatter 将其合并为一个字段集。空字段集、缺少逗号和重复路径会提供源码诊断；重复检查跨越同一 update 的所有 set。
+多字段更新规范使用花括号和换行，例如 `set { left = right, right = left }` 的多行输出不写逗号。每个右侧读取旧行，可安全交换字段。单项 `set left = right` 保持可用；重复路径会提供源码诊断。
 
 单行形式可用必要的 pipeline 分隔符，例如 `update tasks | filter id == 1 | set attempts = attempts + 1`。多项修改推荐换行，避免长表达式掩盖目标范围。
 
@@ -220,9 +219,9 @@ delete tasks | filter id == 2 | returning
 
 ```text
 upsert config {
-  name = "worker",
-  endpoint = {host = "worker.internal", port = 9000},
-  tags = ["sync", "durable"],
+  name: "worker"
+  endpoint: {host: "worker.internal", port: 9000}
+  tags: ["sync", "durable"]
 }
 ```
 
@@ -236,21 +235,22 @@ upsert config {
 
 ## Schema migration
 
-`migration name` 使用缩进 block 执行显式 schema 操作和 typed 数据转换：
+`migration name { ... }` 执行显式 schema 操作和 typed 数据转换：
 
 ```text
-migration task_state_v2
-  rename variant State.Failed to Rejected
-  add field Task.priority int = 0
-  change variant State.Rejected to {code int, message text}
-    using old -> {code = 0, message = old.message}
+migration task_state_v2 {
+  rename variant State::Failed to Rejected
+  add field Task.priority: int = 0
+  change variant State::Rejected to {code: int, message: text}
+    using old -> {code: 0, message: old.message}
+}
 ```
 
 当前支持 type/table/field/variant 的 add/drop/rename、field/variant 类型或 payload 转换、默认值变更，以及 index/primary-key 变更。命名 ADT 在所有表的嵌套路径中统一转换，保留稳定身份和 RowId；任一行或约束失败会回滚当前 migration 文件。完整语法、删除保护、版本化文件、checksum、plan/apply/status 与持久 ledger 见 [Schema migration 语言](MIGRATIONS.md)。
 
 ## 脚本边界与错误
 
-同层的 `from` / `explain` / `type` / `table` / `insert` / `upsert` / `update` / `delete` / `migration` / `create` 开始新语句；查询中的同层 `let/filter/derive/aggregate/group/select/sort/take/page/limit` 延续读取 pipeline，update 中的同层 `filter/sort/take/set/returning` 延续修改语句，delete 中的同层 `filter/sort/take/returning` 延续删除语句。`{}`、`[]` 和 `()` 明确 record/field set、list 与 expression/inner pipeline 的范围，delimiter 内换行只负责布局；逗号分隔相邻项并可 trailing。table、migration 和 explain 的外层 block 仍使用缩进。旧缩进 record/match/group 继续解析，供已有源码兼容使用；formatter 输出 delimiter 形式。缩进不能使用 tab，字符串中的管道、逗号和 `#` 不参与分隔。
+同层的 `from` / `explain` / `struct` / `enum` / `type` / `table` / `insert` / `upsert` / `update` / `delete` / `migration` / `create` 开始新语句；查询 stage 延续当前 pipeline。`{}`、`[]` 和 `()` 明确 block/record/field set、list 与 expression/tuple/call 的范围。delimiter 内的换行分隔多行项，逗号分隔紧凑单行项。旧缩进 record/match/group 继续解析，供 durable history 和已有源码兼容使用；formatter 输出 delimiter 形式。
 
 空行与 `#` 注释不改变文件中的语句边界。多行字符串暂用 JSON 转义（例如 `"first\nsecond"`），不支持跨物理行的字符串字面量。局部函数只复用当前纯 expression IR；当前不支持全局函数、递归、泛型、高阶函数或持久化闭包。`any/all` 的元素 predicate 与 let 函数都不产生可存储的函数值。
 

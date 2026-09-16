@@ -53,7 +53,7 @@ unionid project check --dir .
 - `schema.unid`：当前声明式 schema
 - `migrations/0001_initial.unid`：可执行的初始 migration
 - `seed.unid`：两条 typed task
-- `queries/list_running.unid`：直接匹配 `State.Running` 的 query
+- `queries/list_running.unid`：在明确的 `State` 上直接匹配 `Running` 的 query
 - `data/`：被 `.gitignore` 忽略的本地数据目录
 
 `project check` 不创建数据库。它按 schema → migrations → queries 的固定顺序检查规范格式、migration 最终 schema 和 query binding；三个阶段都通过才返回 0。
@@ -99,6 +99,7 @@ restore 只写入不存在的新路径。还原后的 query rows、列类型和 
 ### 下一步
 
 - 修改 schema 时新增 migration，再运行 `project check` 和 `migration plan/apply`；见[迁移说明](MIGRATIONS.md)。
+- 让 LLM 或代码生成器协助编写查询时，先运行 `unionid docs query` 取得版本匹配的规则和示例，再把 `schema print --format json` 的实际 schema 一并提供；生成结果用 `query describe` 检查后再执行。
 - 用 `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs` 生成共享 ADT、typed 参数、结果 row 和调用函数。
 - 用 `unionid server --db data/tasks.redb` 与 `unionid cli --addr 127.0.0.1:7878` 切换到 TCP；见 [CLI](CLI.md)、[协议](PROTOCOL.md)和[服务部署](DEPLOYMENT.md)。
 - Rust 应用可直接使用 `Engine::open_redb`、prepared parameters、`Value::from_serde` 和 `typed_rows`；完整类型边界见[应用数据边界](APPLICATION_DATA.md)。
@@ -178,7 +179,7 @@ unionid project check --dir .
 - `schema.unid`: the current declarative schema
 - `migrations/0001_initial.unid`: the executable initial migration
 - `seed.unid`: two typed tasks
-- `queries/list_running.unid`: a query that directly matches `State.Running`
+- `queries/list_running.unid`: a query that directly matches `Running` against a known `State`
 - `data/`: a local data directory ignored by Git
 
 `project check` creates no database. In the fixed schema → migrations → queries order, it checks canonical formatting, the migration target schema, and query binding. It exits zero only when all three phases pass.
@@ -224,6 +225,7 @@ Restore writes only to a missing destination. Query rows, column types, and sche
 ### Next steps
 
 - Add a migration when changing the schema, then run `project check` and `migration plan/apply`; see [Migrations](MIGRATIONS.md).
+- When an LLM or generator helps write a query, first run `unionid docs query` for version-matched rules and examples, provide the actual `schema print --format json` output, and validate the generated file with `query describe` before execution.
 - Generate shared ADTs, typed parameters, result rows, and call functions with `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs`.
 - Move to TCP with `unionid server --db data/tasks.redb` and `unionid cli --addr 127.0.0.1:7878`; see [CLI](CLI.md), [Protocol](PROTOCOL.md), and [Deployment](DEPLOYMENT.md).
 - Rust applications can use `Engine::open_redb`, prepared parameters, `Value::from_serde`, and `typed_rows` directly; see [Application data boundaries](APPLICATION_DATA.md).

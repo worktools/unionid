@@ -1,11 +1,15 @@
-migration m0001_initial
-  add type State =
+migration m0001_initial {
+  add enum State {
     Pending
-    | Running
-    | Complete
-  add type Task = {
-    id int,
-    title text,
-    state State,
+    Running
+    Complete
   }
-  add table tasks Task key id
+  add struct Task {
+    id: int
+    title: text
+    state: State
+  }
+  add table tasks: Task {
+    key id
+  }
+}

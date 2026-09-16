@@ -895,19 +895,22 @@ impl Catalog {
         let bad = || Error::new("E_TYPE", format!("{path}: expected {}", self.describe(ty)));
         Ok(match (value, ty) {
             (v, ScalarType::Ref(id)) => {
+                let definition = self.definition(*id)?;
                 let raw = match v {
                     Value::Named { type_id, value } if type_id == id => value.as_ref(),
                     Value::Named { .. } => return Err(bad()),
+                    Value::Enum(value)
+                        if value.args.len() == 1
+                            && matches!(value.args[0], Value::Record(_))
+                            && value.variant == definition.name =>
+                    {
+                        &value.args[0]
+                    }
                     _ => v,
                 };
                 Value::Named {
                     type_id: *id,
-                    value: Box::new(self.coerce_inner(
-                        raw,
-                        &self.definition(*id)?.ty,
-                        path,
-                        depth + 1,
-                    )?),
+                    value: Box::new(self.coerce_inner(raw, &definition.ty, path, depth + 1)?),
                 }
             }
             (Value::Int(v), ScalarType::Int) => Value::Int(*v),
@@ -1054,15 +1057,15 @@ impl Catalog {
             ScalarType::Timestamp => "timestamp".into(),
             ScalarType::Duration => "duration".into(),
             ScalarType::Bytes => "bytes".into(),
-            ScalarType::Decimal { precision, scale } => format!("decimal {precision} {scale}"),
+            ScalarType::Decimal { precision, scale } => format!("Decimal<{precision}, {scale}>"),
 
             ScalarType::Ref(id) => self
                 .definition(*id)
                 .map(|d| d.name.clone())
                 .unwrap_or_else(|_| format!("type#{id}")),
             ScalarType::Named(name) => name.clone(),
-            ScalarType::Option(t) => format!("option {}", self.describe_argument(t)),
-            ScalarType::List(t) => format!("list {}", self.describe_argument(t)),
+            ScalarType::Option(t) => format!("Option<{}>", self.describe(t)),
+            ScalarType::List(t) => format!("List<{}>", self.describe(t)),
             ScalarType::Tuple(ts) => format!(
                 "({})",
                 ts.iter()
@@ -1102,23 +1105,23 @@ impl Catalog {
         }
     }
 
-    fn describe_argument(&self, ty: &ScalarType) -> String {
-        let text = self.describe(ty);
-        if matches!(ty, ScalarType::Option(_) | ScalarType::List(_)) {
-            format!("({text})")
-        } else {
-            text
-        }
-    }
-
     pub fn describe_variant(&self, variant: &EnumVariantDef) -> String {
         match variant.args.as_slice() {
             [] => variant.name.clone(),
+            [ScalarType::Record(fields)] => format!(
+                "{} {{{}}}",
+                variant.name,
+                fields
+                    .iter()
+                    .map(|field| self.describe_column(field))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             [ty] if !matches!(ty, ScalarType::Tuple(_)) => {
-                format!("{} {}", variant.name, self.describe(ty))
+                format!("{}({})", variant.name, self.describe(ty))
             }
             args => format!(
-                "{} ({})",
+                "{}({})",
                 variant.name,
                 args.iter()
                     .map(|t| self.describe(t))
@@ -1129,7 +1132,7 @@ impl Catalog {
     }
 
     pub fn describe_column(&self, column: &Column) -> String {
-        let mut text = format!("{} {}", column.name, self.describe(&column.ty));
+        let mut text = format!("{}: {}", column.name, self.describe(&column.ty));
         if let Some(default) = &column.default {
             text.push_str(" = ");
             text.push_str(&default.source_text());
@@ -1358,7 +1361,7 @@ impl Value {
                 "{{{}}}",
                 fields
                     .iter()
-                    .map(|(name, value)| format!("{name} = {}", value.source_text()))
+                    .map(|(name, value)| format!("{name}: {}", value.source_text()))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -1379,16 +1382,20 @@ impl Value {
                     .join(", ")
             ),
             Self::Option(None) => "None".into(),
-            Self::Option(Some(value)) => format!("Some ({})", value.source_text()),
-            Self::Enum(value) if value.args.is_empty() => value.variant.clone(),
+            Self::Option(Some(value)) => format!("Some({})", value.source_text()),
+            Self::Enum(value) if value.args.is_empty() => value.variant.replace('.', "::"),
             Self::Enum(value)
                 if value.args.len() == 1 && matches!(value.args[0], Self::Record(_)) =>
             {
-                format!("{} {}", value.variant, value.args[0].source_text())
+                format!(
+                    "{} {}",
+                    value.variant.replace('.', "::"),
+                    value.args[0].source_text()
+                )
             }
             Self::Enum(value) => format!(
                 "{}({})",
-                value.variant,
+                value.variant.replace('.', "::"),
                 value
                     .args
                     .iter()

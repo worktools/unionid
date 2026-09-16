@@ -6392,20 +6392,18 @@ impl Database {
         for d in definitions {
             match &d.ty {
                 ScalarType::Record(fields) => {
-                    lines.push(format!("type {} =", d.name));
+                    lines.push(format!("struct {} {{", d.name));
                     for field in fields {
                         lines.push(format!("  {}", self.catalog.describe_column(field)));
                     }
+                    lines.push("}".into());
                 }
                 ScalarType::Enum(def) => {
-                    lines.push(format!("type {} =", d.name));
-                    for (i, variant) in def.variants.iter().enumerate() {
-                        lines.push(format!(
-                            "  {}{}",
-                            if i == 0 { "" } else { "| " },
-                            self.catalog.describe_variant(variant)
-                        ));
+                    lines.push(format!("enum {} {{", d.name));
+                    for variant in &def.variants {
+                        lines.push(format!("  {}", self.catalog.describe_variant(variant)));
                     }
+                    lines.push("}".into());
                 }
                 _ => lines.push(format!(
                     "type {} = {}",
@@ -6423,7 +6421,11 @@ impl Database {
                 .and_then(|id| self.catalog.definition(id).ok())
                 .map(|d| d.name.clone());
             if let Some(row) = row {
-                lines.push(format!("table {name} {row}"));
+                lines.push(format!("table {name}: {row} {{"));
+                if let Some(key) = &t.primary_key {
+                    lines.push(format!("  key {key}"));
+                }
+                lines.push("}".into());
             } else {
                 let columns = t
                     .schema
@@ -6432,9 +6434,6 @@ impl Database {
                     .collect::<Vec<_>>()
                     .join(", ");
                 lines.push(format!("create table {name} ({columns})"));
-            }
-            if let Some(key) = &t.primary_key {
-                lines.push(format!("  key {key}"));
             }
         }
         let mut indexes = self.schema_indexes();

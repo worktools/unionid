@@ -47,7 +47,7 @@ type Job =
 - 按调度器给出的一批主键筛选任务：`filter id in $ids` 会把 prepared 参数推导为 `list text`；`filter state not in [Succeeded {finished_at = 0}]` 可直接比较完整 sum value。`in`/`not in` 同样可用于 derive 和 update/delete target，并与 `any/all` 共享有界集合求值预算。
 - 复用业务判断：`let important = value -> value >= 10` 和 `let has_tag = (values list text, tag text) -> contains values tag` 可在当前 pipeline 后续的 filter、derive 与 aggregate 输入中重复调用，避免复制长条件。
 - 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
-- 按状态计数：`derive state_label = match state {...}` 把 sum 分支归一为状态名，再用 `group state_label (aggregate {...})` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.unid](../examples/job_queue.unid)。
+- 按状态计数：`derive state_label = match state {...}` 把 sum 分支归一为状态名，再用 `group state_label { aggregate {...} }` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.unid](../examples/job_queue.unid)。
 
 列表查询必须提供唯一的最终排序键，例如 `sort {-priority, created_at, id}`。只按 priority 分页会让相同优先级的跨请求边界不稳定。
 
@@ -120,7 +120,7 @@ type Event =
   delivery DeliveryState = Pending
 ```
 
-常见工作流包括批量接收事件、筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。`insert many events $rows` 可从 Rust/TCP 一次提交 typed `list Event`，逐行补默认 delivery 并在整批主键验证后原子写入；literal 示例见 [events.unid](../examples/events.unid)。当前 `filter (match ... {...})` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，来源统计可用 `group source (aggregate {...})`。
+常见工作流包括批量接收事件、筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。`insert many events $rows` 可从 Rust/TCP 一次提交 typed `list Event`，逐行补默认 delivery 并在整批主键验证后原子写入；literal 示例见 [events.unid](../examples/events.unid)。当前 `filter (match ... {...})` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，来源统计可用 `group source { aggregate {...} }`。
 
 ## 4. 离线同步与冲突状态
 

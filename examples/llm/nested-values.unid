@@ -1,0 +1,32 @@
+enum Contact {
+  Anonymous
+  Email(text)
+}
+
+struct Metadata {
+  owner: Option<Contact>
+  scores: List<int>
+}
+
+struct Item {
+  id: int
+  metadata: Metadata
+}
+
+table items: Item {
+  key id
+}
+
+insert items {
+  id: 1
+  metadata: Metadata {owner: Some(Email("owner@example.com")), scores: [7, 9, 10]}
+}
+
+from items
+let acceptable = (scores: List<int>, minimum: int) -> all scores (score -> score >= minimum)
+filter acceptable metadata.scores 7
+filter match metadata.owner {
+  Some(Email(address)) => address == "owner@example.com"
+  _ => false
+}
+select {id, metadata.owner}

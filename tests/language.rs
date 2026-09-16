@@ -14,6 +14,41 @@ fn rows(engine: &mut Engine, source: &str) -> serde_json::Value {
 }
 
 #[test]
+fn rust_shaped_schema_values_and_arrow_closures_execute_together() {
+    let mut engine = Engine::memory();
+    let response = ok(
+        &mut engine,
+        r#"enum State {
+  Pending
+  Ready(int)
+}
+
+struct Row {
+  id: int
+  state: State
+  values: List<int>
+}
+
+table rows: Row {
+  key id
+}
+
+insert rows {id: 1, state: Ready(4), values: [1, 4]}
+
+from rows
+let has_value = (values: List<int>, minimum: int) -> any values (value -> value >= minimum)
+filter has_value values 3
+filter match state {
+  Pending => false
+  Ready(value) => value >= 4
+}
+select id"#,
+    );
+    assert_eq!(response.rows.len(), 1);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
 fn executable_examples() {
     let mut engine = Engine::memory();
     let r = ok(&mut engine, include_str!("../examples/tasks.unid"));
@@ -26,7 +61,7 @@ fn executable_examples() {
         ["id", "title", "owner.email", "state"]
     );
     assert!(r.rows[0]["title"].cmp_eq(&Value::Text("同步目录".into())));
-    assert!(engine.schema().contains("type State"));
+    assert!(engine.schema().contains("enum State"));
     assert!(!engine.schema().contains(';'));
     assert_eq!(engine.tables(), ["tasks"]);
 
@@ -129,7 +164,7 @@ fn finite_self_recursive_types_are_strict_and_productive() {
         &mut engine,
         r#"type Chain =
   value int
-  next option Chain = None
+  next: Option<Chain> = None
 
 table chains Chain
   key value
@@ -146,7 +181,7 @@ filter match next
   Some {value, ..} => value == 2"#,
     );
     assert_eq!(nested.rows.len(), 1);
-    assert!(engine.schema().contains("next option Chain = None"));
+    assert!(engine.schema().contains("next: Option<Chain> = None"));
 
     let mut recursive_default = Engine::memory();
     let defaulted = ok(
@@ -298,11 +333,11 @@ fn input_status_distinguishes_complete_incomplete_and_invalid_source() {
     for (source, message) in [
         (
             "from tasks\nfilter (match state { Pending => true Done => false })",
-            "expected ',' between match branches",
+            "expected a newline or comma between match branches",
         ),
         (
             "from tasks\ngroup state (aggregate {rows = count total = sum score})",
-            "expected ',' between aggregate fields",
+            "expected a newline or comma between aggregate fields",
         ),
     ] {
         let InputStatus::Invalid(error) = input_status(source) else {
@@ -355,6 +390,142 @@ fn nominal_types_do_not_share_constructor_names() {
     assert!(!e.execute("insert rows {a = B.First}").ok);
     ok(&mut e, "insert rows {a = A.First}");
     assert!(!e.execute("from rows | filter a == B.First").ok);
+}
+
+#[test]
+fn qualified_names_cannot_impersonate_named_record_constructors() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "struct User {id: int}\nstruct Row {user: User}\ntable rows: Row {}",
+    );
+    for source in [
+        "insert rows {user: Other::User {id: 1}}",
+        "insert rows {user: User::User {id: 1}}",
+    ] {
+        let response = engine.execute(source);
+        assert!(!response.ok, "accepted {source}");
+        assert_eq!(response.error.unwrap().code, "E_TYPE", "{source}");
+    }
+    ok(&mut engine, "insert rows {user: User {id: 1}}");
+}
+
+#[test]
+fn multiline_delimited_items_use_newlines_without_commas() {
+    let source = r#"enum State {
+  Pending
+  Pair(
+    int
+    text
+  )
+  Tupled((
+    int
+    text
+  ))
+  Record {
+    left: int
+    right: text
+  }
+}
+
+struct Row {
+  id: int
+  pair: (
+    int
+    text
+  )
+  state: State
+}
+
+table rows: Row {
+  key id
+}
+
+insert rows {
+  id: 1
+  pair: (
+    1
+    "pair"
+  )
+  state: Pair(
+    2
+    "state"
+  )
+}
+
+from rows
+let both = (
+  left: int
+  right: int
+) -> left > 0 && right > 0
+filter both 1 2
+filter match state {
+  Pending => false
+  Pair(
+    value
+    label
+  ) => value == 2 && label == "state"
+  Tupled((
+    value
+    label
+  )) => value > 0 && label != ""
+  Record {
+    left
+    right
+  } => left > 0 && right != ""
+}
+sort {
+  -id
+  pair
+}
+select {
+  id
+  pair
+  state
+}
+
+from rows
+group {
+  state
+  pair
+} {
+  aggregate {
+    rows = count
+  }
+}
+
+update rows
+filter id == 1
+set state = match state {
+  Pair(
+    value
+    label
+  ) => Pair(
+    value + 1
+    label
+  )
+  Tupled((
+    value
+    label
+  )) => Tupled((
+    value
+    label
+  ))
+  current => current
+}
+returning {
+  id
+  pair
+  state
+}"#;
+
+    let canonical = unionid::format_source(source).unwrap();
+    assert_eq!(unionid::format_source(&canonical).unwrap(), canonical);
+
+    let mut engine = Engine::memory();
+    let response = ok(&mut engine, source);
+    assert_eq!(response.rows.len(), 1);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
 }
 
 #[test]
@@ -589,7 +760,7 @@ fn stage_order_and_projection_paths_are_preserved() {
 }
 
 #[test]
-fn multi_key_sort_and_inclusive_take_ranges_compose() {
+fn multi_key_sort_and_rust_style_take_ranges_compose() {
     let mut e = Engine::memory();
     ok(
         &mut e,
@@ -597,7 +768,7 @@ fn multi_key_sort_and_inclusive_take_ranges_compose() {
     );
     let result = ok(
         &mut e,
-        "from rows\nsort {\n  -priority,\n  meta.scheduled,\n  id,\n}\ntake 2..4\nselect {id}",
+        "from rows\nsort {\n  -priority,\n  meta.scheduled,\n  id,\n}\ntake 2..=4\nselect {id}",
     );
     assert_eq!(
         result
@@ -611,13 +782,13 @@ fn multi_key_sort_and_inclusive_take_ranges_compose() {
         [2, 4, 1]
     );
     assert_eq!(
-        ok(&mut e, "from rows | sort {id} | take 4..10").rows.len(),
+        ok(&mut e, "from rows | sort {id} | take 4..=10").rows.len(),
         2
     );
-    assert!(ok(&mut e, "from rows | take 6..10").rows.is_empty());
+    assert!(ok(&mut e, "from rows | take 6..=10").rows.is_empty());
     assert_eq!(
         rows(&mut e, "from rows | sort -id | take 2"),
-        rows(&mut e, "from rows | sort {-id} | take 1..2")
+        rows(&mut e, "from rows | sort {-id} | take 1..=2")
     );
 }
 
@@ -772,15 +943,15 @@ insert rows {id = 3, active = true, state = Running {attempt = 1}, meta = {z = 0
     );
     assert_eq!(
         aggregate.rows[0]["first_active"].source_text(),
-        "Some (false)"
+        "Some(false)"
     );
     assert_eq!(
         aggregate.rows[0]["first_state"].source_text(),
-        "Some (Waiting)"
+        "Some(Waiting)"
     );
     assert_eq!(
         aggregate.rows[0]["last_tree"].source_text(),
-        "Some (Node {children = [Leaf(1)]})"
+        "Some(Node {children: [Leaf(1)]})"
     );
 }
 
@@ -897,7 +1068,7 @@ fn typed_membership_supports_adt_lists_parameters_derives_and_mutations() {
     let prepared = e
         .prepare("update jobs\nfilter id in $ids\nset selected = true\nreturning {id, selected}")
         .unwrap();
-    assert_eq!(prepared.parameter_types()["ids"], "list int");
+    assert_eq!(prepared.parameter_types()["ids"], "List<int>");
     let updated = e.query(
         &prepared,
         [(
@@ -1175,7 +1346,7 @@ fn regular_derives_add_typed_scalar_and_boolean_columns() {
         &mut e,
         "from jobs | derive copied = history | select {id, history, copied} | sort id",
     );
-    assert_eq!(copied.columns[2].ty, "list Attempt");
+    assert_eq!(copied.columns[2].ty, "List<Attempt>");
     assert!(copied.rows[0]["copied"].cmp_eq(&copied.rows[0]["history"]));
 }
 
@@ -1269,8 +1440,8 @@ fn basic_aggregates_define_typed_results_and_empty_input() {
     assert!(label.cmp_eq(&Value::Text("first".into())));
     assert_eq!(result.columns[0].ty, "int");
     assert_eq!(result.columns[1].ty, "Amount");
-    assert_eq!(result.columns[2].ty, "option Amount");
-    assert_eq!(result.columns[5].ty, "option text");
+    assert_eq!(result.columns[2].ty, "Option<Amount>");
+    assert_eq!(result.columns[5].ty, "Option<text>");
 
     let mut empty = Engine::memory();
     ok(
@@ -2205,7 +2376,7 @@ fn reject_invalid_syntax_without_partial_changes() {
         "type R =\n  a int\n b int",
         "create table t (id int, id text)",
         "create table t (id int) garbage",
-        "type R = {id: int}",
+        "type R = {id int extra}",
         "create table t (n int)\ninsert t {n:1,n:2}",
         "type S = A | A",
         "type R =\n  n option\ntable t R",
@@ -2258,11 +2429,11 @@ fn schema_display_is_reusable_for_named_and_legacy_types() {
     let mut original = Engine::memory();
     ok(
         &mut original,
-        "type Flag =\n  Enabled\ntype Pair =\n  Wrapped((int, text))\ntype R =\n  id int\n  flag Flag = Enabled\n  pair Pair\n  note option text = None\ntable typed R\n  key id\ncreate table old (n int = 1, kind enum(A, B(float)) = A)",
+        "type Flag =\n  Enabled\ntype Pair =\n  Wrapped((int, text))\ntype R =\n  id int\n  flag Flag = Enabled\n  pair Pair\n  note: Option<text> = None\ntable typed R\n  key id\ncreate table old (n: int = 1, kind: enum(A, B(float)) = A)",
     );
     let schema = original.schema();
-    assert!(schema.contains("note option text = None"));
-    assert!(schema.contains("create table old (n int = 1, kind enum(A, B(float)) = A)"));
+    assert!(schema.contains("note: Option<text> = None"));
+    assert!(schema.contains("create table old (n: int = 1, kind: enum(A, B(float)) = A)"));
     let mut restored = Engine::memory();
     ok(&mut restored, &schema);
     assert_eq!(schema, restored.schema());
@@ -2501,7 +2672,7 @@ fn derive_match_adds_a_typed_column_for_sum_and_option_values() {
         [
             ("id", "int"),
             ("status", "text"),
-            ("retry_at", "option int"),
+            ("retry_at", "Option<int>"),
             ("owner_name", "text"),
         ]
     );
@@ -2584,7 +2755,7 @@ fn nested_patterns_destructure_sum_option_and_tuple_values() {
     );
     let result = ok(
         &mut e,
-        "from jobs\nderive retry_reason =\n  match state\n    Failed {detail = Detail.Network {code}, retry = Some (at, reason)} => reason\n    _ => \"none\"\nfilter match state\n  Failed {retry = Some (at, _), ..} => at >= 20\n  _ => false\nselect {id, retry_reason}",
+        "from jobs\nderive retry_reason =\n  match state\n    Failed {detail = Detail.Network {code}, retry = Some((at, reason))} => reason\n    _ => \"none\"\nfilter match state\n  Failed {retry = Some((at, _)), ..} => at >= 20\n  _ => false\nselect {id, retry_reason}",
     );
     assert_eq!(result.rows.len(), 1);
     assert!(result.rows[0]["id"].cmp_eq(&Value::Int(1)));
@@ -2600,11 +2771,11 @@ fn nested_patterns_are_typed_and_refutable_on_empty_tables() {
             "non-exhaustive match; missing Failed",
         ),
         (
-            "Failed {retry = Some (at, _, extra), ..} => at\n    _ => 0",
+            "Failed {retry = Some((at, _, extra)), ..} => at\n    _ => 0",
             "tuple pattern",
         ),
         (
-            "Failed {detail = Network {code = value}, retry = Some (value, _)} => value\n    _ => 0",
+            "Failed {detail = Network {code = value}, retry = Some((value, _))} => value\n    _ => 0",
             "binding 'value' is declared more than once",
         ),
         (
@@ -2683,12 +2854,12 @@ fn nested_pattern_coverage_preserves_product_correlations() {
     );
     let exhaustive = ok(
         &mut engine,
-        "from rows\nderive category =\n  match state\n    Pair (Some _, _) => \"left\"\n    Pair (None, Some _) => \"right\"\n    Pair (None, None) => \"neither\"\n    Empty => \"empty\"",
+        "from rows\nderive category =\n  match state\n    Pair((Some(_), _)) => \"left\"\n    Pair((None, Some(_))) => \"right\"\n    Pair((None, None)) => \"neither\"\n    Empty => \"empty\"",
     );
     assert!(exhaustive.rows.is_empty());
 
     let non_exhaustive = engine.execute(
-        "from rows\nderive category =\n  match state\n    Pair (Some _, None) => \"left\"\n    Pair (None, Some _) => \"right\"\n    Pair (None, None) => \"neither\"\n    Empty => \"empty\"",
+        "from rows\nderive category =\n  match state\n    Pair((Some(_), None)) => \"left\"\n    Pair((None, Some(_))) => \"right\"\n    Pair((None, None)) => \"neither\"\n    Empty => \"empty\"",
     );
     assert!(!non_exhaustive.ok);
     assert!(
@@ -2719,7 +2890,7 @@ fn derive_match_constructs_named_adt_values_from_bindings() {
             .collect::<Vec<_>>(),
         [
             ("id", "int"),
-            ("retry_at", "option int"),
+            ("retry_at", "Option<int>"),
             ("summary", "Summary"),
             ("display", "Display"),
         ]
@@ -2908,7 +3079,7 @@ table empty_jobs Job
 create index jobs (state)
 create index jobs (tree)
 
-insert jobs {id = 1, state = Queued {attempt = 0}, tree = Leaf "root"}
+insert jobs {id = 1, state = Queued {attempt: 0}, tree = Leaf "root"}
 insert jobs {id = 2, state = Done, owner = Some "alice", tree = Branch {label = "kept", children = []}}"#,
     );
     let source = r#"update jobs
@@ -2940,12 +3111,12 @@ set tree =
     assert_eq!(rows.rows[0]["transition"].source_text(), "\"queued\"");
     assert_eq!(
         rows.rows[0]["state"].source_text(),
-        "Running {attempt = 1, worker = \"local\"}"
+        "Running {attempt: 1, worker: \"local\"}"
     );
-    assert_eq!(rows.rows[0]["owner"].source_text(), "Some (\"local\")");
+    assert_eq!(rows.rows[0]["owner"].source_text(), "Some(\"local\")");
     assert!(rows.rows[0]["tree"].source_text().starts_with("Branch"));
     assert_eq!(rows.rows[1]["state"].source_text(), "Done");
-    assert_eq!(rows.rows[1]["owner"].source_text(), "Some (\"alice\")");
+    assert_eq!(rows.rows[1]["owner"].source_text(), "Some(\"alice\")");
     assert!(rows.rows[1]["tree"].source_text().contains("kept"));
 
     let before = serde_json::to_value(&rows.rows).unwrap();
@@ -3005,7 +3176,7 @@ table jobs Job
         &mut engine,
         r#"insert jobs
   id = 1
-  state = Queued {attempt = 0}
+  state = Queued {attempt: 0}
   tree = Leaf "root"
 returning id, state, meta.owner"#,
     );
@@ -3021,7 +3192,7 @@ returning id, state, meta.owner"#,
     );
     assert_eq!(
         inserted.rows[0]["state"].source_text(),
-        "Queued {attempt = 0}"
+        "Queued {attempt: 0}"
     );
     assert_eq!(inserted.rows[0]["meta.owner"].source_text(), "None");
 
@@ -3077,7 +3248,7 @@ returning {id, state}"#,
     assert_eq!(updated.affected_rows, Some(1));
     assert_eq!(
         updated.rows[0]["state"].source_text(),
-        "Running {attempt = 1, worker = \"local\"}"
+        "Running {attempt: 1, worker: \"local\"}"
     );
 
     let empty = ok(
@@ -3094,7 +3265,7 @@ returning {id, state}"#,
     assert_eq!(failed.error.unwrap().code, "E_FIELD");
     assert_eq!(
         ok(&mut engine, "from jobs | filter id == 1").rows[0]["state"].source_text(),
-        "Running {attempt = 1, worker = \"local\"}"
+        "Running {attempt: 1, worker: \"local\"}"
     );
 
     let deleted = ok(
@@ -3105,7 +3276,7 @@ returning {id, state}"#,
     assert!(deleted.rows[0]["id"].cmp_eq(&Value::Int(2)));
     assert_eq!(
         deleted.rows[0]["state"].source_text(),
-        "Queued {attempt = 4}"
+        "Queued {attempt: 4}"
     );
     assert_eq!(ok(&mut engine, "from jobs").rows.len(), 1);
 }
@@ -3261,7 +3432,7 @@ type Job =
 table jobs Job
   key id
 
-insert jobs {id = 1, priority = 5, scheduled = 1, state = Queued {attempt = 0}}
+insert jobs {id = 1, priority = 5, scheduled = 1, state = Queued {attempt: 0}}
 insert jobs {id = 2, priority = 10, scheduled = 4, state = Queued {attempt = 1}}
 insert jobs {id = 3, priority = 10, scheduled = 2, state = Queued {attempt = 2}}
 insert jobs {id = 4, priority = 20, scheduled = 0, state = Done}"#,
@@ -3295,7 +3466,7 @@ returning id, state"#;
 
     let deleted = ok(
         &mut engine,
-        "delete jobs\nsort {-priority, id}\ntake 2..3\nreturning id, state",
+        "delete jobs\nsort {-priority, id}\ntake 2..=3\nreturning id, state",
     );
     assert_eq!(deleted.affected_rows, Some(2));
     assert!(deleted.rows[0]["id"].cmp_eq(&Value::Int(2)));

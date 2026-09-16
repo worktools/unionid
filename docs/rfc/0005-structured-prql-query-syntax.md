@@ -1,6 +1,6 @@
 # RFC 0005：PRQL 风格的结构化查询语法
 
-- 状态：已接受，分阶段实现
+- 状态：被 [RFC 0017](0017-rust-shaped-prql-language.md) 修订；pipeline 决策保留，类型、值、运算符和 delimiter 规范已替换
 - 日期：2026-09-08
 - 父任务：[#119](https://github.com/worktools/unionid/issues/119)
 - 实现任务：[#142](https://github.com/worktools/unionid/issues/142)、[#143](https://github.com/worktools/unionid/issues/143)；时间 literal 随 [#139](https://github.com/worktools/unionid/issues/139) 交付

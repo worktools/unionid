@@ -27,6 +27,21 @@ enum CompactFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DocsFormat {
+    Markdown,
+    Json,
+}
+
+#[derive(Debug, Subcommand)]
+enum DocsCommand {
+    /// Print an offline, version-matched query reference and runnable examples for LLMs.
+    Query {
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: DocsFormat,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum IncrementalBackupCommand {
     /// Create and activate a verified baseline and database journal.
@@ -154,6 +169,11 @@ enum Command {
         db: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
+    },
+    /// Read version-matched language documentation bundled with this binary. / 读取二进制内置且版本匹配的语言文档。
+    Docs {
+        #[command(subcommand)]
+        command: DocsCommand,
     },
     /// Create a runnable starter project in a new or empty directory. / 在新目录或空目录创建可运行的入门项目。
     Init { directory: PathBuf },
@@ -754,6 +774,18 @@ fn print_version(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn print_query_docs(json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&unionid::query_docs()).map_err(|error| error.to_string())?
+        );
+    } else {
+        print!("{}", unionid::render_query_docs_markdown());
+    }
+    Ok(())
+}
+
 fn doctor(db: Option<PathBuf>, json: bool) -> Result<(), String> {
     let database = match db {
         Some(path) => {
@@ -814,6 +846,9 @@ fn run(args: Args) -> Result<(), String> {
     match args.command {
         Command::Version { format } => print_version(matches!(format, Format::Json)),
         Command::Doctor { db, format } => doctor(db, matches!(format, Format::Json)),
+        Command::Docs { command } => match command {
+            DocsCommand::Query { format } => print_query_docs(matches!(format, DocsFormat::Json)),
+        },
         Command::Init { directory } => project::init(directory),
         Command::Project { .. } => unreachable!("project commands are handled before run"),
         Command::Server {

@@ -18,7 +18,7 @@ select {
   score = score + $bonus,
   doubled = score * 2,
   state = match state {
-    Pending => Running {attempt = 0},
+    Pending => Running {attempt: 0},
     current => current,
   },
 }
@@ -28,7 +28,7 @@ derive original = score
 derive score = score + $bonus
 derive doubled = score * 2
 derive state = match state {
-  Pending => Running {attempt = 0},
+  Pending => Running {attempt: 0},
   current => current,
 }
 select {id, original, score, doubled, state}
@@ -66,7 +66,7 @@ fn computed_select_matches_expansion_and_survives_durable_use() {
             assert!(result.rows[0]["doubled"].cmp_eq(&Value::Int(10)));
             assert_eq!(
                 result.rows[0]["state"].source_text(),
-                "Running {attempt = 0}"
+                "Running {attempt: 0}"
             );
             let json = serde_json::to_value(result).unwrap();
             if let Some(previous) = &baseline {

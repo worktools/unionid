@@ -61,56 +61,56 @@ The executable language also supports native `uuid`, `bytes`, `date`, `timestamp
 The schema below combines the product type `Task` with the sum type `State`. Each of `Running`, `Done`, and `Failed` has a distinct payload; fields that do not belong to a variant do not exist.
 
 ```text
-type State =
+enum State {
   Pending
-  | Running {
-    worker text,
-    attempt int,
+  Running {
+    worker: text
+    attempt: int
   }
-  | Done {
-    result text,
+  Done {
+    result: text
   }
-  | Failed {
-    message text,
-    retryable bool,
+  Failed {
+    message: text
+    retryable: bool
   }
-
-type Task = {
-  id int,
-  title text,
-  tags list text,
-  state State,
 }
 
-table tasks Task
+struct Task {
+  id: int
+  title: text
+  tags: List<text>
+  state: State
+}
+
+table tasks: Task {
   key id
+}
 
 insert tasks {
-  id = 1,
-  title = "sync directory",
-  tags = ["sync", "local"],
-  state = Running {worker = "worker-1", attempt = 2},
+  id: 1
+  title: "sync directory"
+  tags: ["sync", "local"]
+  state: Running {worker: "worker-1", attempt: 2}
 }
 ```
 
-查询从上到下组合，并直接解构 `State`。match 必须覆盖所有可能形态，因此新增 variant 时不会被旧查询静默忽略。
+查询从上到下组合，并直接解构 `State`。match 必须覆盖所有可能形态，因此新增 variant 时不会被旧查询静默忽略。字段或 match 已确定 enum 类型时可省略 `State::`；独立构造或有歧义时仍可使用完整限定名。
 
-Queries compose from top to bottom and destructure `State` directly. A match must cover every possible shape, so a newly added variant cannot be silently ignored by an old query.
+Queries compose from top to bottom and destructure `State` directly. A match must cover every possible shape, so a newly added variant cannot be silently ignored by an old query. When a field or match fixes the enum type, `State::` may be omitted; standalone or ambiguous construction can still use the qualified name.
 
 ```text
 from tasks
-filter (
-  match state {
-    Running {attempt, ..} => attempt >= 2,
-    Failed {retryable, ..} => retryable,
-    _ => false,
-  }
-)
+filter match state {
+  Running {attempt, ..} => attempt >= 2
+  Failed {retryable, ..} => retryable
+  _ => false
+}
 derive state_label = match state {
-  Pending => "pending",
-  Running {worker, ..} => worker,
-  Done {result} => result,
-  Failed {message, ..} => message,
+  Pending => "pending"
+  Running {worker, ..} => worker
+  Done {result} => result
+  Failed {message, ..} => message
 }
 select {id, title, state, state_label}
 sort id
@@ -121,19 +121,30 @@ take 20
 
 ```text
 update tasks
-filter (
-  match state {
-    Pending => true,
-    _ => false,
-  }
-)
-set state = Running {worker = "worker-1", attempt = 1}
+filter match state {
+  Pending => true
+  _ => false
+}
+set state = Running {worker: "worker-1", attempt: 1}
 returning {id, state}
 ```
 
 `filter`、`select`、`sort`、`take`、`page`、`derive`、`group`、`aggregate` 和查询局部 `let` 都是可组合 stage。稳定跨请求分页使用 `sort {-priority, id} | page 100`，并通过响应中的 opaque cursor 继续；排序必须以主键收尾。`explain from tasks | filter id == 1` 返回计划且不读取结果行；`explain analyze ...` 在同一读快照上实际执行并返回无业务数据的耗时、读取量与内存统计。完整语法见 [QUERY.md](docs/QUERY.md)。
 
 `filter`, `select`, `sort`, `take`, `page`, `derive`, `group`, `aggregate`, and query-local `let` are composable stages. Stable cross-request traversal uses `sort {-priority, id} | page 100` and resumes with the opaque response cursor; the order must end in the primary key. `explain from tasks | filter id == 1` reports a plan without reading result rows; `explain analyze ...` executes on the same read snapshot and returns value-free timing, work, and memory observations. See [QUERY.md](docs/QUERY.md) for the complete executable surface.
+
+LLM 和代码生成工具可以直接从当前二进制取得版本匹配、离线可用的查询参考与可运行示例。默认 Markdown 可直接放入 prompt，version 1 JSON 将 reference 与 examples 分开，便于工具读取。生成查询前再用 `schema print` 提供实际数据库 schema；保存后的查询可用 `query describe` 在不执行的情况下绑定检查：
+
+LLMs and code generators can read a version-matched, offline query reference and runnable examples directly from the current binary. The default Markdown is prompt-ready; version-1 JSON separates the reference and examples for tools. Pair it with the database's actual schema before generation, then bind a saved query without executing it:
+
+```bash
+unionid docs query
+unionid docs query --format json
+unionid schema print --db app.redb --format json
+unionid query describe --db app.redb --file query.unid
+```
+
+The bundled reference is also available in [LLM_QUERY.md](docs/LLM_QUERY.md); it documents the Rust-shaped contextual enum shorthand, arrow closures, pipeline ordering, bounded reads, mutations, and a generation checklist.
 
 服务观测可读取有版本、有限 cardinality 的 `ConcurrentEngine::metrics_snapshot()`；可选 `metrics` feature 只渲染 Prometheus 文本，不自动公开网络 endpoint。完整部署边界见 [METRICS.md](docs/METRICS.md)。
 
@@ -168,16 +179,18 @@ struct Task {
 }
 
 let mut db = Engine::memory();
-db.execute(r#"type State =
+db.execute(r#"enum State {
   Pending
-  | Running {worker text, attempt int}
-type Task = {
-  id int,
-  title text,
-  state State,
+  Running {worker: text, attempt: int}
 }
-table tasks Task
-  key id"#);
+struct Task {
+  id: int
+  title: text
+  state: State
+}
+table tasks: Task {
+  key id
+}"#);
 
 let row = Task {
     id: 1,
@@ -200,13 +213,13 @@ Version 1 mutation 请求可通过 `with_idempotency_key` 获得跨 TCP/HTTP 重
 
 关联读可用 `Engine::fetch_by_key` / `typed_fetch_by_key` 按主键或已索引列批量取回，结果与输入键等长同序、缺失键为 `None`，并基于一次一致快照；每个键在运行时校验唯一性，未索引键或非唯一命中分别返回 `E_RELATION_KEY` / `E_RELATION_NOT_UNIQUE`。设计见 [RFC 0013](docs/rfc/0013-minimal-relational-reads.md)。
 
-查询语言也支持有界的一对多展开：`lookup lines from order_lines on order_id == id take 100` 为每个 driver row 增加 typed `list Line`，缺失关联为 `[]`。目标 key 必须有索引，逐行上限必须显式给出；分页时把 lookup 放在 `page` 后面，先限制 driver rows 再组装嵌套 ADT。
+查询语言也支持有界的一对多展开：`lookup lines from order_lines on order_id == id take 100` 为每个 driver row 增加 typed `List<Line>`，缺失关联为 `[]`。目标 key 必须有索引，逐行上限必须显式给出；分页时把 lookup 放在 `page` 后面，先限制 driver rows 再组装嵌套 ADT。
 
 Version-1 mutation requests can use `with_idempotency_key` for exactly-once effects across TCP/HTTP retries, with first-commit or replay metadata in the response. Receipts never expire automatically; inspect and explicitly prune a bounded preview with `unionid receipts status/prune`.
 
 Batched relational reads use `Engine::fetch_by_key` / `typed_fetch_by_key` against a primary key or an indexed column: results match the input keys in length and order, missing keys are `None`, and the call runs over one consistent snapshot. Each key is validated for uniqueness at runtime; a non-indexed key or a non-unique match returns `E_RELATION_KEY` or `E_RELATION_NOT_UNIQUE`. See [RFC 0013](docs/rfc/0013-minimal-relational-reads.md).
 
-The query language also supports bounded one-to-many expansion: `lookup lines from order_lines on order_id == id take 100` adds a typed `list Line` to each driver row, with `[]` for no match. The target key must be indexed and the per-row bound is explicit. In paginated queries, lookup follows `page`, so driver rows are bounded before nested ADTs are assembled.
+The query language also supports bounded one-to-many expansion: `lookup lines from order_lines on order_id == id take 100` adds a typed `List<Line>` to each driver row, with `[]` for no match. The target key must be indexed and the per-row bound is explicit. In paginated queries, lookup follows `page`, so driver rows are bounded before nested ADTs are assembled.
 
 可运行代码见 [`parameters.rs`](examples/parameters.rs)。完整 HTTP/Axum todolist 通过相同 version 1 数据协议验证 ADT、typed cursor 分页、真实客户端断开、丢响应后的幂等重试、migration、重启、检查和备份还原，见 [HTTP.md](docs/HTTP.md)。
 

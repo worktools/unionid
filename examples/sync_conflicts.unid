@@ -1,73 +1,77 @@
 # Complementary nested patterns classify both sides of a sync conflict.
-type Remote =
+enum Remote {
   Git {
-    url text,
-    branch text,
+    url: text
+    branch: text
   }
-  | Http {
-    url text,
-    token option text,
+  Http {
+    url: text
+    token: Option<text>
   }
+}
 
-type Change =
+enum Change {
   Added {
-    path text,
+    path: text
   }
-  | Modified {
-    path text,
-    before text,
-    after text,
+  Modified {
+    path: text
+    before: text
+    after: text
   }
-  | Deleted {
-    path text,
-    before text,
+  Deleted {
+    path: text
+    before: text
   }
+}
 
-type SyncState =
+enum SyncState {
   Clean {
-    revision text,
+    revision: text
   }
-  | Conflict {
-    local Change,
-    remote Change,
+  Conflict {
+    local: Change
+    remote: Change
   }
-
-type Workspace = {
-  id text,
-  remote Remote,
-  state SyncState,
-  last_sync option int = None,
 }
 
-table workspaces Workspace
+struct Workspace {
+  id: text
+  remote: Remote
+  state: SyncState
+  last_sync: Option<int> = None
+}
+
+table workspaces: Workspace {
   key id
-
-insert workspaces {
-  id = "docs",
-  last_sync = Some(100),
-  remote = Git {branch = "main", url = "ssh://example/docs"},
-  state = Conflict {local = Modified {after = "local", before = "old", path = "README.md"}, remote = Modified {after = "remote", before = "old", path = "README.md"}},
 }
 
 insert workspaces {
-  id = "images",
-  remote = Http {token = None, url = "https://example.test/images"},
-  state = Conflict {local = Added {path = "logo.png"}, remote = Deleted {before = "old-hash", path = "logo.png"}},
+  id: "docs"
+  last_sync: Some(100)
+  remote: Git {branch: "main", url: "ssh://example/docs"}
+  state: Conflict {local: Modified {after: "local", before: "old", path: "README.md"}, remote: Modified {after: "remote", before: "old", path: "README.md"}}
 }
 
 insert workspaces {
-  id = "notes",
-  last_sync = Some(120),
-  remote = Git {branch = "main", url = "ssh://example/notes"},
-  state = Clean {revision = "abc123"},
+  id: "images"
+  remote: Http {token: None, url: "https://example.test/images"}
+  state: Conflict {local: Added {path: "logo.png"}, remote: Deleted {before: "old-hash", path: "logo.png"}}
+}
+
+insert workspaces {
+  id: "notes"
+  last_sync: Some(120)
+  remote: Git {branch: "main", url: "ssh://example/notes"}
+  state: Clean {revision: "abc123"}
 }
 
 from workspaces
 derive local_change = match state {
-  Conflict {local = Added {path}, ..} => "added",
-  Conflict {local = Modified {path, ..}, ..} => "modified",
-  Conflict {local = Deleted {path, ..}, ..} => "deleted",
-  Clean {..} => "none",
+  Conflict {local: Added {path}, ..} => "added"
+  Conflict {local: Modified {path, ..}, ..} => "modified"
+  Conflict {local: Deleted {path, ..}, ..} => "deleted"
+  Clean {..} => "none"
 }
 sort id
 select {id, local_change, state, last_sync}

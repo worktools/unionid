@@ -292,7 +292,7 @@ fn fmt_cli_formats_file_and_stdin_and_checks_canonical_input() {
     let canonical = String::from_utf8(formatted.stdout).unwrap();
     assert_eq!(
         canonical,
-        "type Task = {\n  id int,\n  title text,\n}\n\nfrom tasks\ntake 1\n"
+        "struct Task {\n  id: int\n  title: text\n}\n\nfrom tasks\ntake 1\n"
     );
 
     let mut stdin = Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -1355,13 +1355,13 @@ returning {id, state}"#
     assert!(rows.ok, "{}", rows.message);
     assert_eq!(
         rows.rows[0]["state"].source_text(),
-        "Running {attempt = 6, worker = \"tcp-worker\"}"
+        "Running {attempt: 6, worker: \"tcp-worker\"}"
     );
     assert!(rows.rows[0]["ready"].cmp_eq(&unionid::Value::Bool(true)));
     let untouched = cli::send_one(&server.addr, "from jobs | filter id == 1").unwrap();
     assert_eq!(
         untouched.rows[0]["state"].source_text(),
-        "Queued {attempt = 2}"
+        "Queued {attempt: 2}"
     );
 
     let boolean_update = ProtocolRequest {

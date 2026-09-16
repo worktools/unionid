@@ -9,7 +9,7 @@ fn ok(engine: &mut Engine, source: &str) {
 fn schema_check_normalizes_reusable_declarations_and_indexes() {
     let source = "type Task = {id int, title text}\ntable later Task\ntable tasks Task\n  key id\ncreate index tasks (title)";
     let checked = Engine::check_schema(source).unwrap();
-    assert!(checked.normalized.contains("type Task ="));
+    assert!(checked.normalized.contains("struct Task {"));
     assert!(checked.normalized.contains("create index tasks (title)"));
     assert!(!checked.normalized.contains("create index tasks (id)"));
     let repeated = Engine::check_schema(&checked.normalized).unwrap();

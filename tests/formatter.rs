@@ -71,7 +71,7 @@ fn membership_expressions_keep_infix_canonical_syntax() {
     let source = "from jobs | filter id not in $ignored and state in [Queued, Running {worker = \"local\"}] | derive selected = id in [1, 2]";
     let formatted = format_source(source).unwrap();
     assert!(formatted.contains("id not in $ignored"));
-    assert!(formatted.contains("state in [Queued, Running {worker = \"local\"}]"));
+    assert!(formatted.contains("state in [Queued, Running {worker: \"local\"}]"));
     assert!(formatted.contains("selected = id in [1, 2]"));
     assert_eq!(format_source(&formatted).unwrap(), formatted);
 }
@@ -102,7 +102,7 @@ fn formatter_preserves_comments_at_stable_statement_boundaries() {
     let formatted = format_source(source).unwrap();
     assert_eq!(
         formatted,
-        "# schema\ntype Task = {\n  id int,\n}\n\n# row type\n# query\nfrom tasks\ntake 1\n\n# trailing note\n"
+        "# schema\nstruct Task {\n  id: int\n}\n\n# row type\n# query\nfrom tasks\ntake 1\n\n# trailing note\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
     assert_eq!(
@@ -139,7 +139,7 @@ fn formatter_uses_structured_record_and_returning_layout() {
     let formatted = format_source(source).unwrap();
     assert_eq!(
         formatted,
-        "insert tasks {\n  id = 1,\n  state = Pending,\n}\nreturning {id, state}\n\ninsert many tasks [\n  {id = 2, state = Pending},\n  {id = 3, state = Done},\n]\nreturning id\n\nupdate tasks\nset state = Done\nreturning {id, state}\n\ndelete tasks\nreturning\n"
+        "insert tasks {\n  id: 1\n  state: Pending\n}\nreturning {id, state}\n\ninsert many tasks [\n  {id: 2, state: Pending}\n  {id: 3, state: Done}\n]\nreturning id\n\nupdate tasks\nset state = Done\nreturning {id, state}\n\ndelete tasks\nreturning\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
 }
@@ -150,7 +150,7 @@ fn formatter_preserves_boolean_match_results_and_update_precedence() {
     let formatted = format_source(source).unwrap();
     assert_eq!(
         formatted,
-        "from jobs\nderive retryable = match state {\n  Pending {retry_at} => is_some retry_at and true,\n  Running {attempt} => attempt < $limit or false,\n}\n\nupdate jobs\nset ready = id > 0 and (not ready or contains tags \"active\")\n"
+        "from jobs\nderive retryable = match state {\n  Pending {retry_at} => is_some retry_at && true\n  Running {attempt} => attempt < $limit || false\n}\n\nupdate jobs\nset ready = id > 0 && (!ready || contains tags \"active\")\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
 }
@@ -161,7 +161,7 @@ fn formatter_wraps_long_boolean_expressions_at_structural_boundaries() {
     let formatted = format_source(source).unwrap();
     assert_eq!(
         formatted,
-        "from jobs\nderive retryable = (\n  any history (\n    attempt ->\n      attempt.outcome == Rejected {code = 503}\n      and any attempt.checkpoints (checkpoint -> checkpoint >= 3)\n      and is_some attempt.note\n  )\n)\n"
+        "from jobs\nderive retryable = {\n  any history (\n    attempt ->\n      attempt.outcome == Rejected {code: 503}\n      && any attempt.checkpoints (checkpoint -> checkpoint >= 3)\n      && is_some attempt.note\n  )\n}\n"
     );
     assert_eq!(format_source(&formatted).unwrap(), formatted);
 }

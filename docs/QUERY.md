@@ -10,17 +10,15 @@ unionid 的查询从表开始，按书写顺序经过一组 transform：
 
 ```text
 from tasks
-filter (
-  match state {
-    Running {attempt, ..} => attempt >= 2 and attempt < 5,
-    _ => false,
-  }
-)
+filter match state {
+  Running {attempt, ..} => attempt >= 2 && attempt < 5
+  _ => false
+}
 derive state_label = match state {
-  Pending => "pending",
-  Running {..} => "running",
-  Done {..} => "done",
-  Failed {..} => "failed",
+  Pending => "pending"
+  Running {..} => "running"
+  Done {..} => "done"
+  Failed {..} => "failed"
 }
 select {id, title, owner.email, state_label}
 sort id
@@ -32,21 +30,21 @@ take 20
 | 能力 | 当前形式 | 状态 | 后续任务 |
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
-| 布尔过滤 | `filter id in $ids` | 已实现括号、`not/and/or`、有类型算术、字段间比较、`in`/`not in`、Option 辅助函数与集合谓词 | — |
-| sum/option 模式过滤 | `filter (match field {...})` | 已实现 braced branches、unit/record/位置负载、递归 record/tuple/sum/option pattern，以及完整嵌套穷尽与不可达检查 | — |
+| 布尔过滤 | `filter id in $ids` | 已实现括号、`!`/`&&`/`\|\|`、有类型算术、字段间比较、`in`/`not in`、Option 辅助函数与集合谓词 | — |
+| sum/option 模式过滤 | `filter match field {...}` | 已实现 braced branches、unit/record/位置负载、递归 record/tuple/sum/option pattern，以及完整嵌套穷尽与不可达检查 | — |
 | 投影 | `select {field, nested.field}` | 已实现并可选择普通或 ADT 派生列 | — |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | — |
-| 截取 | `take 20` / `take 11..20` | 已实现前 N 行与一基闭区间 | — |
+| 截取 | `take 20` / `take 10..20` / `take 10..=20` | 已实现前 N 行与 Rust 风格半开／闭区间 | — |
 | 稳定分页 | `page 100` / `page 100 after "u1..."` | 已实现有界 keyset page、正反向 opaque cursor、sequence-pinned 一致性 | #114/#131 |
 | 有界关联展开 | `lookup lines from order_lines on order_id == id take 100` | 已实现索引驱动、一致快照、嵌套 typed list 与显式逐行基数上限 | #241 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` / `upsert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91/#97 |
 | ADT 派生列 | `derive x = match field {...}` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
-| 布尔表达式与集合函数 | `and/or/not`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于 filter、普通／match derive、typed set 和 migration conversion；bytes 支持连续子序列 contains 与 octet length | #100/#138 |
+| 布尔表达式与集合函数 | `&&`/`\|\|`/`!`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于 filter、普通／match derive、typed set 和 migration conversion；bytes 支持连续子序列 contains 与 octet length | #100/#138 |
 | 其他派生列 | `derive score = priority + bonus` | 已实现 scalar 与 bool expression、typed 参数及后续 stage 作用域 | — |
-| 分组与汇总 | `aggregate {...}` / `group {key} (aggregate {...})` | 已实现 count/sum/min/max、typed 空输入语义与资源上限 | — |
+| 分组与汇总 | `aggregate {...}` / `group {key} { aggregate {...} }` | 已实现 count/sum/min/max、typed 空输入语义与资源上限 | — |
 | 查询局部定义 | `let retryable = attempt -> attempt < 3` | 已实现常量、单/多参数非递归纯函数、有限推断、词法遮蔽与展开预算 | — |
-| 有限自递归 ADT | `type Tree = Leaf text \| Branch {children list Tree}` | 已实现声明、严格值、match coverage、精确索引、持久化与 migration；运行时值仍是有限树 | #81 |
+| 有限自递归 ADT | `enum Tree { Leaf(text) Branch { children: List<Tree> } }` | 已实现声明、严格值、match coverage、精确索引、持久化与 migration；运行时值仍是有限树 | #81 |
 | 执行计划 | `explain from tasks \| filter id == 1` | 已实现 full scan、主键／二级索引 lookup、候选行估计、stage 顺序与结果 schema | — |
 | 实际执行剖析 | `explain analyze from tasks \| filter id == 1` | 已实现同快照真实执行、结构化耗时／行数／索引／缓存／批次／内存统计，且不返回业务行 | #295 |
 | 更新与删除 | `update table ... set`、`delete table ...` | 已实现 filter/match/sort/take target、typed set、穷尽 match assignment、嵌套 record 路径、typed returning、原子约束与增量持久维护 | #15/#83/#85/#87 |
@@ -86,7 +84,7 @@ stage             = local-binding | value-filter | match-filter | derive-express
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
-set-stage         = (newline | "|") "set" (set-assignment | "{" set-assignment ("," set-assignment)* ","? "}")
+set-stage         = (newline | "|") "set" (set-assignment | "{" set-assignment (separator+ set-assignment)* separator* "}")
 set-assignment    = field-path "=" (result-expression | match-expression)
 delete            = "delete" table delete-stage*
 delete-stage      = newline filter-stage | "|" filter-stage
@@ -95,52 +93,50 @@ upsert            = "upsert" (table (record-value | parameter) | "many" table (l
 
 value-filter      = "filter" nested-bool-expression
 local-binding     = "let" identifier type? "=" (local-parameters "->")? nested-bool-expression
-local-parameters  = binding | "(" local-parameter ("," local-parameter)* ")"
+local-parameters  = binding | "(" local-parameter (separator+ local-parameter)* separator* ")"
 local-parameter   = binding type?
-match-filter      = "filter" "(" match-predicate ")"
-match-predicate   = "match" field-path "{" match-arm ("," match-arm)* ","? "}"
+match-filter      = "filter" match-predicate
+match-predicate   = "match" field-path "{" match-arm (separator+ match-arm)* separator* "}"
 match-arm         = arm-pattern "=>" bool-expression
 derive-match      = "derive" identifier "=" nested-match-expression
-derive-expression = "derive" (derived-field | "{" derived-field ("," derived-field)* ","? "}")
+derive-expression = "derive" (derived-field | "{" derived-field (separator+ derived-field)* separator* "}")
 derived-field     = identifier "=" (nested-bool-expression | match-expression)
 lookup            = "lookup" identifier "from" table "on" field-path "==" field-path "take" positive-integer
-aggregate         = "aggregate" "{" aggregate-field ("," aggregate-field)* ","? "}"
-group-aggregate   = "group" group-fields "(" aggregate ")"
-group-fields      = field-path | "{" field-path ("," field-path)* ","? "}"
+aggregate         = "aggregate" "{" aggregate-field (separator+ aggregate-field)* separator* "}"
+group-aggregate   = "group" group-fields "{" aggregate "}"
+group-fields      = field-path | "{" field-path (separator+ field-path)* separator* "}"
 aggregate-field   = identifier "=" ("count" | (("sum" | "min" | "max") scalar-expression)) newline?
 nested-match-expression = match-expression
-match-expression  = "match" field-path "{" match-value-arm ("," match-value-arm)* ","? "}"
+match-expression  = "match" field-path "{" match-value-arm (separator+ match-value-arm)* separator* "}"
 match-value-arm   = arm-pattern "=>" result-expression
 result-expression = bool-expression | match-value
 match-value       = binding-path | literal | constructor-value | record-value | tuple-value | list-value
-constructor-value = qualified-variant (record-value | value-argument*)?
-value-argument    = binding-path | literal | "(" match-value ")" | tuple-value | list-value
-record-value      = "{" value-field ("," value-field)* ","? "}"
-value-field       = identifier "=" match-value
-tuple-value       = "(" match-value "," (match-value ("," match-value)*)? ")"
-list-value        = "[" (match-value ("," match-value)* ","?)? "]"
-select            = "select" select-field | "select" "{" select-field ("," select-field)* ","? "}"
+constructor-value = qualified-variant (record-value | "(" (match-value (separator+ match-value)* separator*)? ")")?
+record-value      = "{" value-field (separator+ value-field)* separator* "}"
+value-field       = identifier ":" match-value
+tuple-value       = "(" match-value separator+ match-value (separator+ match-value)* separator* ")"
+list-value        = "[" (match-value (separator+ match-value)* separator*)? "]"
+select            = "select" select-field | "select" "{" select-field (separator+ select-field)* separator* "}"
 select-field      = field-path | derived-field
-sort              = "sort" sort-key | "sort" "{" sort-key ("," sort-key)* ","? "}"
+sort              = "sort" sort-key | "sort" "{" sort-key (separator+ sort-key)* separator* "}"
 sort-key          = "-"? field-path
-take              = "take" nonnegative-integer | "take" positive-integer ".." positive-integer
+take              = "take" nonnegative-integer | "take" positive-integer (".." | "..=") positive-integer
 page              = "page" positive-integer (("after" | "before") string)?
 
 arm-pattern       = "_" | constructor-pattern
 pattern           = "_" | binding | constructor-pattern | record-pattern | tuple-pattern
-constructor-pattern = qualified-variant (record-pattern | pattern-argument*)?
-qualified-variant = Variant | Type "." Variant
-pattern-argument  = binding | "_" | "(" pattern ")" | tuple-pattern
+constructor-pattern = qualified-variant (record-pattern | "(" (pattern ("," pattern)*)? ")")?
+qualified-variant = Variant | Type "::" Variant
 record-pattern    = "{" (field-pattern ("," field-pattern)* ("," "..")? | "..")? "}"
-field-pattern     = identifier ("=" pattern)?
+field-pattern     = identifier (":" pattern)?
 tuple-pattern     = "(" pattern "," (pattern ("," pattern)*)? ")"
 binding           = lowercase-identifier
 nested-bool-expression = bool-expression | newline indent bool-expression dedent
 bool-expression   = or-expression
-or-expression     = and-expression ("or" and-expression)*
-and-expression    = not-expression ("and" not-expression)*
-not-expression    = "not" not-expression | bool-primary
-bool-primary      = "(" bool-expression ")" | contains-call | list-predicate | option-predicate | scalar-expression (comparison scalar-expression)?
+or-expression     = and-expression ("||" and-expression)*
+and-expression    = not-expression ("&&" not-expression)*
+not-expression    = "!" not-expression | bool-primary
+bool-primary      = "(" bool-expression ")" | "{" bool-expression "}" | contains-call | list-predicate | option-predicate | scalar-expression (comparison scalar-expression)?
 contains-call     = "contains" scalar-argument scalar-argument
 list-predicate    = ("any" | "all") scalar-argument "(" binding "->" bool-expression ")"
 option-predicate  = ("is_some" | "is_none") scalar-expression
@@ -153,64 +149,66 @@ scalar-argument   = scalar-primary | "-" scalar-argument | "length" scalar-argum
 scalar-primary    = field-path | literal | "(" scalar-expression ")"
 comparison        = "==" | "!=" | ">" | ">=" | "<" | "<="
 field-path        = identifier ("." identifier)*
+separator         = newline | ","
 ```
 
-`=`、`limit`、不带花括号的多字段 `select id,name`，以及旧缩进 record/match/group 是兼容入口。新文档和格式化输出使用 `==`、`take`、单字段 `select id`／多字段 `select {id, name}`、braced match 和 parenthesized group inner pipeline。
+`=`、`limit`、不带花括号的多字段 `select id,name`，以及旧缩进 record/match/group 是持久数据与旧源码的兼容入口。新文档和 formatter 输出使用 `==`、`take`、`select {id, name}`、braced match、braced group inner pipeline、可选的 `::` 限定构造器和 Rust 风格布尔运算符。期望 enum 类型明确时允许省略类型前缀。
 
-复杂条件的规范格式使用括号明确表达式边界，每行写一个逻辑项并把 `and` 或 `or` 放在续行开头：
+复杂条件的规范格式使用表达式块明确边界，并把 `&&` 或 `||` 放在续行开头：
 
 ```text
 from jobs
-filter (
+filter {
   priority >= 10
-  and contains tags "sync"
-  and not archived
-)
+  && contains tags "sync"
+  && !archived
+}
 select {id}
 ```
 
-混用 `and` 与 `or` 时应加括号直接表达分组，不要求读者仅凭优先级判断：
+混用 `&&` 与 `||` 时应加括号直接表达分组，不要求读者仅凭优先级判断：
 
 ```text
-filter (
-  (urgent or priority >= 50)
-  and contains tags "sync"
-)
+filter {
+  (urgent || priority >= 50)
+  && contains tags "sync"
+}
 ```
 
 括号内部可以跨行，因此更深的组合也能保持一个条件一行：
 
 ```text
-filter (
+filter {
   urgent
-  or (
+  || (
     priority >= 50
-    and not archived
+    && !archived
   )
-)
+}
 ```
 
-单个比较或很短的同类组合仍可写在 `filter` 同一行。括号用于说明分组，record/list/tuple 继续使用各自已有的必要标点；语言不会为了追求“零符号”而隐藏结构。
+单个比较或很短的同类组合仍可写在 `filter` 同一行。`{}` 表示跨行表达式边界，`()` 改变优先级；语言不会为了追求“零符号”而隐藏结构。
 
 ## 数值表达式
 
 `+`、`-`、`*`、`/` 和一元 `-` 可用于普通 filter、match condition、普通 derive，以及 `derive name = match source {...}` 的分支结果和嵌套构造值。乘除优先于加减；需要改变顺序时使用括号。中缀运算符的规范格式在两侧留空格，复杂算术可在括号内换行：
 
 ```text
-filter (
+filter {
   priority
   + bonus * 2
-) >= threshold
+  >= threshold
+}
 
 derive next_attempt = match state {
-  Queued {attempt, ..} => Some (attempt + 1),
-  _ => None,
+  Queued {attempt, ..} => Some(attempt + 1)
+  _ => None
 }
 ```
 
 运算数必须归一为同一个 int 或 float 类型。字段和 binding 决定类型时，同类型的数字 literal 会在扫描前转换；两个不同类型的字段不会隐式混合。命名数值类型保留名义身份，例如 `Attempts + 1` 的结果仍是 `Attempts`。
 
-`int / int` 使用向零截断的整数除法。整数加减乘除和一元负号执行 checked 运算；溢出与除零返回 `E_ARITH`。float 运算拒绝除以正负零，也拒绝产生 NaN 或无限值；负零归一为正零。`and/or` 继续短路求值，因此未执行分支中的算术错误不会触发。
+`int / int` 使用向零截断的整数除法。整数加减乘除和一元负号执行 checked 运算；溢出与除零返回 `E_ARITH`。float 运算拒绝除以正负零，也拒绝产生 NaN 或无限值；负零归一为正零。`&&`/`||` 继续短路求值，因此未执行分支中的算术错误不会触发。
 
 `decimal P S` 只与完全相同的 decimal 类型做 `+`、`-` 和一元负号；literal 可由字段上下文精确补零到目标 scale。每个中间结果与 `sum` 的每一步都检查 P 位范围，超限返回 `E_ARITH` 并回滚请求。乘法、除法、avg、隐式 rescale 和舍入未定义，使用时返回 `E_TYPE`。
 
@@ -220,13 +218,13 @@ derive next_attempt = match state {
 
 ```text
 insert many events [
-  {id = 1, event = Login {user = "alice"}},
-  {id = 2, event = Purchase {item = 42, amount_cents = 1990}},
+  {id: 1, event: Event::Login {user: "alice"}}
+  {id: 2, event: Event::Purchase {item: 42, amount_cents: 1990}}
 ]
 returning {id, event}
 ```
 
-Rust API 与 version 1 TCP 可传入 `insert many events $rows`；prepared operation 会把 `$rows` 推导为 `list Event` 并绑定当前 schema identity。每个输入 record 先按表 row type 递归补默认值和检查命名 ADT，再对“旧 rows + 完整新批次”统一检查主键并重建派生索引。输入顺序决定新 RowId 和 returning 行顺序；空 list 返回 `affected_rows = 0`，有 returning 时仍返回稳定 columns。
+Rust API 与 version 1 TCP 可传入 `insert many events $rows`；prepared operation 会把 `$rows` 推导为 `List<Event>` 并绑定当前 schema identity。每个输入 record 先按表 row type 递归补默认值和检查命名 ADT，再对“旧 rows + 完整新批次”统一检查主键并重建派生索引。输入顺序决定新 RowId 和 returning 行顺序；空 list 返回 `affected_rows = 0`，有 returning 时仍返回稳定 columns。
 
 `upsert many events <list>` 使用同一完整 row list，并要求表声明主键。每项按输入顺序更新已有主键或插入新主键；更新保留 RowId，新行按该顺序分配 RowId。输入 list 内的主键必须互不重复，否则返回 `E_CONSTRAINT`。成功响应的 `upsert_actions` 与输入和 returning 行逐项对齐，每项为 `inserted` 或 `updated`。
 
@@ -240,27 +238,25 @@ Rust `prepare` 也可在相同 schema identity 下绑定单行 `insert table $ro
 
 ```text
 update jobs
-filter (
-  match state {
-    Queued {..} => true,
-    _ => false,
-  }
-)
+filter match state {
+  Queued {..} => true
+  _ => false
+}
 sort {-priority, scheduled_at, id}
 take 1
 set {
-  attempts = attempts + 1,
+  attempts = attempts + 1
   state = match state {
-    Queued {attempt, ..} => Running {worker = "local", attempt = attempt + 1},
-    current => current,
-  },
+    Queued {attempt, ..} => Running {worker: "local", attempt: attempt + 1}
+    current => current
+  }
 }
 returning {id, state}
 
 delete jobs | filter archived == true | returning
 ```
 
-不写 filter 时从整表开始选择。mutation target 接受普通 filter、braced match filter、sort 和 take，并严格按源码顺序执行；sort 并列保持稳定 RowId 输入顺序，生产语句仍应以唯一键结束排序。`take n` 与一基闭区间 `take start..end` 和读取 pipeline 一致。update 的全部 target stage 必须位于第一个 set 之前；derive/select/group/aggregate 不属于 mutation target。单行形式使用 `|`，例如 `update jobs | filter id == 1 | take 1 | set attempts = attempts + 1`。复杂选择和多项 set 推荐逐行写。
+不写 filter 时从整表开始选择。mutation target 接受普通 filter、braced match filter、sort 和 take，并严格按源码顺序执行；sort 并列保持稳定 RowId 输入顺序，生产语句仍应以唯一键结束排序。`take n`、半开区间 `take start..end` 与闭区间 `take start..=end` 和读取 pipeline 一致。update 的全部 target stage 必须位于第一个 set 之前；derive/select/group/aggregate 不属于 mutation target。单行形式使用 `|`，例如 `update jobs | filter id == 1 | take 1 | set attempts = attempts + 1`。复杂选择和多项 set 推荐逐行写。
 
 多字段更新规范写成 `set {left = right, right = left}`，每个右侧读取旧行，可安全交换字段。单项 `set left = right` 保持可用；旧的重复 `set` 也继续执行，formatter 将其合并为一个字段集。空字段集、缺少逗号和重复路径会提供源码诊断；重复检查跨越同一 update 的所有 set。
 
@@ -295,15 +291,15 @@ from tasks | filter id > 1 | take 1
 | `from` | 表的完整行类型 | 读取表；未排序行序不构成承诺 | 返回带完整 schema 的空结果 |
 | `let` | 不变 | 注册供后续 stage 展开的局部表达式或纯函数，不读取或改变行 | 仍检查可确定的引用、类型、递归和预算 |
 | `filter` | 不变 | 只保留条件为真的行 | 仍执行字段与类型检查 |
-| `filter (match ... {...})` | 不变 | 每行按其 sum/option constructor 执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
+| `filter match ... {...}` | 不变 | 每行按其 sum/option constructor 执行唯一分支的条件 | 仍执行模式绑定和穷尽检查 |
 | `derive` | 追加或替换有静态类型的字段 | 每行求值一次 scalar 或 bool expression，行数与顺序不变 | 仍推导结果类型并检查完整表达式 |
 | `derive name = match source {...}` | 追加或替换有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
 | `lookup` | 追加目标表 row type 的 `list` 字段 | 按索引为每个 driver row 读取有界关联行；driver 行数与顺序不变 | 仍检查表、字段、索引、类型和上限 |
 | `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/sum 为类型化零；min/max 为 None |
-| `group ... (aggregate {...})` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
+| `group ... { aggregate {...} }` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
 | `sort` | 不变 | 单列或多列词典序；全部键相同的次序不承诺 | 返回空结果但仍检查全部键 |
-| `take` | 不变 | 保留前 N 行，或一基闭区间内的行；无 sort 时位置不稳定 | 返回空结果但仍检查范围 |
+| `take` | 不变 | 保留前 N 行，或一基 Rust 风格半开／闭区间内的行；无 sort 时位置不稳定 | 返回空结果但仍检查范围 |
 | `page` | 不变 | 按唯一 sort tuple 返回有界页和 opaque cursor；之后只允许 lookup/select | 返回空页且不产生新 cursor |
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
@@ -346,7 +342,7 @@ explain analyze
 
 成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`，以及最终结果 schema。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
 
-planner 跳过开头的 row-independent `let`，然后只从连续的简单 `field op bound` filter 提取边界；`op` 可以是 `==`、`>`、`>=`、`<` 或 `<=`。复合索引使用从首 component 开始的连续 equality prefix，并在紧邻的下一个 component 上合并至多一组 lower/upper range；range 后或 key gap 后的条件仍作为 residual filter。遇到 compound bool、`filter match`、derive、select、aggregate/group、sort、take 或其他语义边界后停止抽取，也不从 `and`／`or` 内部拆条件。
+planner 跳过开头的 row-independent `let`，然后只从连续的简单 `field op bound` filter 提取边界；`op` 可以是 `==`、`>`、`>=`、`<` 或 `<=`。复合索引使用从首 component 开始的连续 equality prefix，并在紧邻的下一个 component 上合并至多一组 lower/upper range；range 后或 key gap 后的条件仍作为 residual filter。遇到 compound bool、`filter match`、derive、select、aggregate/group、sort、take 或其他语义边界后停止抽取，也不从 `&&`／`||` 内部拆条件。
 
 去掉 equality-fixed sort 字段后，剩余 sort 只有与索引 suffix 的连续前缀方向完全相同或全部相反时才消费 index order。多个候选依次按 equality component 数、是否有 range、是否满足 sort/page、key component 数和 stable index ID 选择。原 filter 始终按源码顺序再次执行；如果后续 stage 会改变行集或顺序，执行器不会提前按 `take` 截断。
 
@@ -363,12 +359,12 @@ planner 跳过开头的 row-independent `let`，然后只从连续的简单 `fie
 ```text
 from jobs
 let max_attempts = 3
-let visible = not archived
+let visible = !archived
 let retryable = attempt -> attempt < max_attempts
 let add = (value, bonus) -> value + bonus
 derive can_retry = retryable attempts
 derive score = add priority 2
-filter can_retry and visible
+filter can_retry && visible
 ```
 
 调用使用空格应用。调用本身作为另一个调用的参数时加括号，例如 `twice (add_one attempts)`；负的复合参数同样写成 `adjust (-attempts)`，让减法与参数边界保持明确。`contains`、`any/all` 等前缀形式收到函数调用结果时写成 `contains (normalize tags) "sync"`。函数只能接收和返回数据值，不产生可存储、可传输或可返回的函数值。
@@ -376,9 +372,9 @@ filter can_retry and visible
 引擎优先从调用参数的字段类型推断每个参数，并在同一局部定义的后续调用中保持该类型。无法从 `None`、空 list/record 等值确定类型时，使用与字段声明一致的低标点注解：
 
 ```text
-let missing option int = None
-let present = (value option int) -> is_some value
-let no_value option int = value -> None
+let missing: Option<int> = None
+let present = (value: Option<int>) -> is_some value
+let no_value: Option<int> = value -> None
 ```
 
 局部名称后的类型是结果类型；括号中参数名称后的类型是参数类型。单个无注解参数写成 `value ->`，多参数即使都无注解也写成 `(value, lower, upper) ->`。显式类型只接受 primitive、已声明的命名类型及 option/list/tuple 组合。类型仍无法确定或同一函数收到不兼容类型时返回 `E_TYPE`。
@@ -393,12 +389,14 @@ let 可用于普通 filter/derive、match condition、ADT derive 的 scalar resu
 
 ```text
 from jobs
-filter
-  not archived
-  and priority >= threshold
-filter
+filter {
+  !archived
+  && priority >= threshold
+}
+filter {
   contains tags "sync"
-  or length tags == 0
+  || length tags == 0
+}
 select {id, priority}
 ```
 
@@ -407,67 +405,63 @@ select {id, priority}
 ```text
 from jobs
 filter id in $ids
-filter state not in [Done, Failed {retryable = false}]
+filter state not in [Done, Failed {retryable: false}]
 select {id, state}
 ```
 
 - 比较的两侧可以是字段路径、literal 或 `length`。因此支持字段与字段、字段与 literal，以及 `length tags >= minimum_tags`；至少一侧必须能确定类型。
 - `==` 和 `!=` 支持类型一致的完整值，包括 record、tuple、sum、option 和 list。literal 会按另一侧的类型检查，因此 `contains [] 1` 是类型明确且恒为 false 的合法表达式。
-- `item in collection` 与 `item not in collection` 要求右侧是 `list T`，并按完整 typed equality 从左到右短路。列表字面量、字段和 prepared list 参数都可作为右侧；空列表分别恒为 false／true。元素和列表类型在扫描前统一，`id in $ids` 会把 `$ids` 推导为 `list int`，不会做数字／文本或命名 ADT 的隐式转换。
+- `item in collection` 与 `item not in collection` 要求右侧是 `List<T>`，并按完整 typed equality 从左到右短路。列表字面量、字段和 prepared list 参数都可作为右侧；空列表分别恒为 false／true。元素和列表类型在扫描前统一，`id in $ids` 会把 `$ids` 推导为 `List<int>`，不会做数字／文本或命名 ADT 的隐式转换。
 - `>`、`>=`、`<`、`<=` 当前只支持 int、float 和 text。
 - Int 使用精确 i64 比较。Float 使用精确数值相等，`-0.0` 与 `0.0` 相等；拒绝 NaN、Infinity 和超出 i64 的整数。
 - Float 字段可接受能够精确表示的整数字面量；Int 字段不接受浮点字面量。数字不会自动转换成 text。
 - `contains collection item` 只接受 list，并按 list 元素的完整类型化相等语义判断；元素可以是命名 ADT。`length` 接受 list 或 text，分别返回元素数或 Unicode scalar 数。
 - `any items (item -> condition)` 与 `all items (item -> condition)` 对 list 元素建立有类型的词法绑定。绑定可访问 record 字段，predicate 也可引用外层行字段或 match binding，并可继续嵌套 `any/all`。局部绑定遮蔽同名外层字段。
 - `in`、`not in` 和 `any/all` 从左到右执行并短路。空 list 上 `in`/`any` 为 false，`not in`/`all` 为 true。每条 pipeline 或 DML target 最多执行 100,000 次 list 元素比较／predicate，组合与嵌套调用共享预算，超限返回 `E_LIMIT`。
-- `is_some value` 与 `is_none value` 只接受静态类型为 `option T` 的值。二者不提取 payload；需要读取 payload 时仍使用显式 match。孤立的 `None` 没有元素类型，必须从字段、binding 或 typed 参数获得类型。
+- `is_some value` 与 `is_none value` 只接受静态类型为 `Option<T>` 的值。二者不提取 payload；需要读取 payload 时仍使用显式 match。孤立的 `None` 没有元素类型，必须从字段、binding 或 typed 参数获得类型。
 - bool 字段可以直接作为条件。其他类型不隐式转换为 bool；option 也不提供 truthiness，必须用 `is_some/is_none` 或显式 match。
-- 优先级从高到低为括号／比较／函数、`not`、`and`、`or`。混用 `and` 与 `or` 的规范源码使用括号明确分组。`and` 和 `or` 在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。
+- 优先级从高到低为括号／比较／函数、`!`、`&&`、`||`。混用 `&&` 与 `||` 的规范源码使用括号明确分组。逻辑运算在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。
 - 普通字段路径只能穿过 record。variant 和 option 的内容必须用显式模式处理。
 
 如果查询的第一个有效数据 stage 是单纯的有索引等值条件，引擎会按上述类型化计划直接读取候选行；前置 let 不阻止 lookup。复合布尔表达式暂时扫描候选表。具体选择可用 `explain` 检查。
 
 ## 模式过滤
 
-`match` 检查一个 sum 或 option 字段，并在当前 constructor 的负载中建立局部绑定；作为 filter 使用时由括号明确完整条件边界：
+`match` 检查一个 sum 或 option 字段，并在当前 constructor 的负载中建立局部绑定：
 
 ```text
 from tasks
-filter (
-  match state {
-    Pending => false,
-    Running {worker, attempt} => worker == "local",
-    Done {result} => result == "ok",
-    Failed {retryable, ..} => retryable,
-  }
-)
+filter match state {
+  Pending => false
+  Running {worker, attempt} => worker == "local"
+  Done {result} => result == "ok"
+  Failed {retryable, ..} => retryable
+}
 select {id, title}
 ```
 
-花括号明确 branch set 的起止位置，逗号分隔分支并允许 trailing comma。后续 stage 在右括号后继续：
+花括号明确 branch set 的起止位置，多行分支由换行分隔。后续 stage 在右花括号后继续：
 
 ```text
 from tasks
-filter (
-  match state {
-    Running {attempt, ..} => attempt >= 2 and attempt < 5,
-    _ => false,
-  }
-)
+filter match state {
+  Running {attempt, ..} => attempt >= 2 && attempt < 5
+  _ => false
+}
 select {id}
 take 1
 ```
 
 当前规则如下：
 
-- unit 变体直接写 `Pending`。带单个 record 负载的变体写 `Running {worker, attempt}`；位置负载用空格绑定，例如 `Pair left right`。
-- option 使用 `None` 与 `Some value`；写成 `Some _` 可以只判断存在而忽略内容。
-- record 字段名默认也是局部绑定；`{retry_at = at, ..}` 把字段重命名为 `at`。等号右侧也可递归使用 constructor、record 或 tuple pattern，例如 `{error = Network {message}, retry_at = Some at}`。绑定可以继续访问嵌套 record，例如 `meta.attempts >= 3`。
-- tuple 用自身的积类型标点分解，例如 `Some (at, reason)`；`_` 可出现在任意嵌套位置并忽略该值。位置 constructor 的参数仍用空格，例如 `Pair left right`。一个位置参数本身又是 constructor 时用括号明确边界，例如 `Outer (Some value) other`。
+- unit 变体直接写 `Pending` 或限定形式 `State::Pending`。match scrutinee 已确定 enum 类型，因此带 record 负载通常简写为 `Running {worker, attempt}`；也可写完整的 `State::Running {...}`。位置负载写 `Pair(left, right)`。
+- option 使用 `None` 与 `Some(value)`；写成 `Some(_)` 可以只判断存在而忽略内容。
+- record 字段名默认也是局部绑定；`{retry_at: at, ..}` 把字段重命名为 `at`。冒号右侧也可递归使用 constructor、record 或 tuple pattern，例如 `{error: Network {message}, retry_at: Some(at)}`。
+- tuple 用自身的积类型标点分解，例如 `Some((at, reason))`。一个 constructor 携带多个位置参数时写 `Outer(Some(value), other)`；单个 tuple payload 通过双层括号区分。
 - `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
-- 顶层 `_` 覆盖尚未出现的值，必须位于最后。顶层小写 binding 同样不可反驳并必须位于最后，但会把完整源值绑定到该名称；`current => current` 可在 derive 或 update assignment 中保留其他 constructor。没有不可反驳分支时，多个同名顶层 constructor 分支可以用互补的嵌套 pattern 覆盖完整值域。例如 `Failed {retry_at = Some at, ..}` 与 `Failed {retry_at = None, ..}` 可以共同覆盖 `Failed`；只写其中一个仍然是非穷尽 match。
-- 构造器由被匹配字段的命名类型确定，也可写成 `State.Running`。其他命名 sum 的同名构造器不会混用。
-- condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`not/and/or`、`contains/length`、`any/all` 与 `is_some/is_none`。复杂 condition 可在 `=>` 后换行并缩进一层；match binding 和 list predicate binding 都按词法作用域解析。
+- 顶层 `_` 覆盖尚未出现的值，必须位于最后。顶层小写 binding 同样不可反驳并必须位于最后，但会把完整源值绑定到该名称；`current => current` 可在 derive 或 update assignment 中保留其他 constructor。没有不可反驳分支时，多个同名顶层 constructor 分支可以用互补的嵌套 pattern 覆盖完整值域。例如 `Failed {retry_at: Some(at), ..}` 与 `Failed {retry_at: None, ..}` 可以共同覆盖 `Failed`；只写其中一个仍然是非穷尽 match。
+- 构造器由被匹配字段的命名类型确定，因此可省略类型前缀；也可写成 `State::Running`。其他命名 sum 的同名构造器不会混用。
+- condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`!`/`&&`/`||`、`contains/length`、`any/all` 与 `is_some/is_none`。
 - 分支按源码顺序选择第一个匹配项。检查器使用有预算的 pattern matrix 分析 sum、option、record 与 tuple 的组合关系，允许可到达的重叠分支，拒绝被先前分支完全覆盖的分支。非穷尽错误会同时列出仍未完全覆盖的顶层 constructor，并给出一个具体嵌套值样例。覆盖分析最多执行 100,000 步，超限返回 `E_LIMIT`。
 
 未知构造器、重复分支、通配分支后的不可达分支、遗漏 constructor、错误负载字段及分支作用域错误会在扫描前返回 `E_MATCH`。非 sum/option 来源或非 bool 条件返回类型错误。
@@ -479,16 +473,16 @@ take 1
 ```text
 from jobs
 derive score = priority + bonus * 2
-derive needs_retry = (
+derive needs_retry = {
   attempts < max_attempts
-  and not archived
-)
+  && !archived
+}
 derive has_failure = any history (attempt -> is_some attempt.error)
-filter needs_retry and has_failure
+filter needs_retry && has_failure
 select {id, score, needs_retry}
 ```
 
-只有单个 scalar expression 时，结果保留它的类型；例如复制 `history` 仍得到 `list Attempt`，命名的 `Score + 1` 仍得到 `Score`。比较、`not/and/or`、`contains`、`any/all` 与 `is_some/is_none` 产生 bool。`$name` 参数从字段或运算数推导类型；孤立的 `$value`、`None`、空 list 或空 record 没有足够类型信息，会在扫描前返回 `E_TYPE`。
+只有单个 scalar expression 时，结果保留它的类型；例如复制 `history` 仍得到 `List<Attempt>`，命名的 `Score + 1` 仍得到 `Score`。比较、`!`/`&&`/`||`、`contains`、`any/all` 与 `is_some/is_none` 产生 bool。`$name` 参数从字段或运算数推导类型；孤立的 `$value`、`None`、空 list 或空 record 没有足够类型信息，会在扫描前返回 `E_TYPE`。
 
 新列追加到当前 schema，后续 filter、derive、select 和 sort 可以直接引用。同名派生会替换已有列并保留其列位置，可改变查询结果类型；数据库 schema 与原始行不受影响。一个字段集内不允许重复输出名；`select` 已移除的字段也不能再引用。每行只读取求值开始时的当前行，表达式没有写入或其他副作用。布尔短路、算术错误和 `any/all` 共享预算都沿用 filter 语义。
 
@@ -525,18 +519,18 @@ formatter 将名字不重复的相邻 derive 合并成字段集；若紧接的 s
 ```text
 from jobs
 derive retry_at = match state {
-  Failed {retry_at = Some at, ..} => Some at,
-  _ => None,
+  Failed {retry_at: Some(at), ..} => Some(at)
+  _ => None
 }
 filter retry_at == Some 30
 select {id, retry_at}
 ```
 
-`match` 的 branch set 使用花括号和逗号，派生字段追加到当前 schema，后续 filter、derive、select 和 sort 都可以引用它；名称与已有字段冲突时拒绝。旧缩进分支仍是兼容输入。
+`match` 的 branch set 使用花括号，多行分支由换行分隔，派生字段追加到当前 schema，后续 filter、derive、select 和 sort 都可以引用它；名称与已有字段冲突时拒绝。旧缩进分支仍是兼容输入。
 
-当前分支结果可以是局部 binding（含嵌套 record 路径）、literal，或递归的 constructor/record/tuple/list 值。空格表示 constructor 应用，例如 `Some at`；位置参数本身是复合值时用括号划定边界，例如 `Display.Retrying (Summary {label = message})`。命名 record 可写成 `Summary {label = message}`，省略字段会使用其 schema 默认值；缺少必填字段和未知字段仍报错。
+当前分支结果可以是局部 binding（含嵌套 record 路径）、literal，或递归的 constructor/record/tuple/list 值。位置 payload 使用括号，例如 `Some(at)`、`Display::Retrying(Summary {label: message})`。命名 record 可写成 `Summary {label: message}`，省略字段会使用其 schema 默认值；缺少必填字段和未知字段仍报错。
 
-引擎先从 binding、primitive literal、`Some value`、结构化 product 或限定 constructor 推导结果类型，再按该类型检查全部分支。`None`、空 list/record 和未限定的普通 sum constructor 不能单独确定类型，但可在其他分支已经给出类型时使用；需要主动确定命名 sum 时写 `Type.Variant`，命名 record 写 `TypeName {...}`。不同命名类型不会因结构相同而统一。
+引擎先从 binding、primitive literal、`Some(value)`、结构化 product 或限定 constructor 推导结果类型，再按该类型检查全部分支。`None`、空 list/record 和未限定的普通 sum constructor 不能单独确定类型，但可在其他分支已经给出类型时使用；需要主动确定命名 sum 时写 `Type::Variant`，命名 record 写 `TypeName {...}`。不同命名类型不会因结构相同而统一。
 
 分支必须穷尽且结果类型一致，constructor 归属、参数数量、嵌套覆盖关系和每个值都在扫描前检查。pattern 可以递归解构 record、tuple、sum 和 option，同一个顶层 constructor 可以由多个互补嵌套分支覆盖。派生结果支持 scalar arithmetic、完整 bool/Option/list predicate 和查询局部纯函数；短路与集合求值预算沿用普通 derive。复杂结果可在 `=>` 后换行缩进。prepared query 记录 schema revision/hash，schema 改变后以 `E_SCHEMA_CHANGED` 拒绝旧 plan。
 
@@ -548,24 +542,24 @@ select {id, retry_at}
 from events
 filter received_at >= $since
 aggregate {
-  events = count,
-  amount = sum amount_cents,
-  earliest = min received_at,
-  latest = max received_at,
+  events = count
+  amount = sum amount_cents
+  earliest = min received_at
+  latest = max received_at
 }
 ```
 
-分组时把 aggregate 放进 group 的 parenthesized inner pipeline。单个 key 可直接写字段路径；多个 key 使用花括号明确边界：
+分组时把 aggregate 放进 group 的 braced inner pipeline。单个 key 可直接写字段路径；多个 key 使用内层花括号明确 key set：
 
 ```text
 from events
 derive day = received_at / 86400
-group {source, day} (
+group {source, day} {
   aggregate {
-    events = count,
-    amount = sum amount_cents,
+    events = count
+    amount = sum amount_cents
   }
-)
+}
 filter events >= 10
 sort {source, day}
 take 20
@@ -577,8 +571,8 @@ take 20
 | --- | --- | --- | --- |
 | `count` | 不接参数，统计输入行 | `int` | `0` |
 | `sum expression` | `int` / `float`，包括命名数值类型 | 与输入相同 | 同类型的零 |
-| `min expression` | `int` / `float` / `text`，包括相应命名类型 | `option T` | `None` |
-| `max expression` | `int` / `float` / `text`，包括相应命名类型 | `option T` | `None` |
+| `min expression` | `int` / `float` / `text`，包括相应命名类型 | `Option<T>` | `None` |
+| `max expression` | `int` / `float` / `text`，包括相应命名类型 | `Option<T>` | `None` |
 
 `sum` 的 int 使用 checked addition，溢出返回 `E_ARITH`；float 每一步都必须保持有限，正负零最终归一为正零。min/max 接受所有具有静态类型的有限 ADT，并与 filter、sort 和 cursor boundary 共用 total order；它们用 Option 明确表达空输入，不引入 null 或三值逻辑。分组空输入没有 group，因此返回零行。
 
@@ -605,7 +599,7 @@ sort {-priority, created_at, id}
 page 100
 ```
 
-`take N` 接受非负整数并保留前 N 行，`take 0` 返回空行但仍保留当前结果 schema。`take start..end` 使用一基闭区间，因此 `take 11..20` 跳过前 10 行并最多返回 10 行；尾部越界返回剩余行。start 必须至少为 1，end 不能小于 start。范围总是相对于该 stage 收到的当前结果。
+`take N` 接受非负整数并保留前 N 行，`take 0` 返回空行但仍保留当前结果 schema。范围使用一基位置和 Rust 端点规则：`take 11..21` 是半开区间，返回第 11 到 20 行；`take 11..=20` 是等价的闭区间。尾部越界返回剩余行。start 必须至少为 1，end 不能小于 start；范围总是相对于该 stage 收到的当前结果。
 
 ### 有界 lookup 关联展开
 
@@ -619,7 +613,7 @@ lookup lines from order_lines on order_id == id take 100
 select {id, customer, lines}
 ```
 
-`on` 左侧 `order_id` 属于目标表 `order_lines`，右侧 `id` 属于当前 pipeline schema。两侧必须是同一个静态类型，目标字段必须是主键、二级索引或复合索引的第一项。`lines` 不能覆盖现有字段，其类型为 `list Line`；匿名 record 表则得到对应匿名 record list。每个 driver row 保留一次，目标无匹配时是 `[]`，不会产生 null 或扁平重复行。每个目标 RowId 在 list 中最多出现一次，相同 value 的不同行不会被去重。首版 list 使用目标索引的稳定 traversal 顺序：单字段索引按 RowId，复合索引按剩余 component 后接 RowId；当前语法不接受目标侧自定义 sort。
+`on` 左侧 `order_id` 属于目标表 `order_lines`，右侧 `id` 属于当前 pipeline schema。两侧必须是同一个静态类型，目标字段必须是主键、二级索引或复合索引的第一项。`lines` 不能覆盖现有字段，其类型为 `List<Line>`；匿名 record 表则得到对应匿名 record list。每个 driver row 保留一次，目标无匹配时是 `[]`，不会产生 null 或扁平重复行。每个目标 RowId 在 list 中最多出现一次，相同 value 的不同行不会被去重。首版 list 使用目标索引的稳定 traversal 顺序：单字段索引按 RowId，复合索引按剩余 component 后接 RowId；当前语法不接受目标侧自定义 sort。
 
 末尾 `take` 是逐个 driver row 的强制基数上限，取值 1..=1000。执行器最多读取 `take + 1` 个匹配；多出一行就返回 `E_RELATION_LIMIT`，不静默丢数据。一个 lookup stage 最多接收 10,000 个 driver rows，并继续受 working bytes、结果行、deadline 与相同 committed snapshot 约束。多个 lookup 可按顺序嵌套组合；如果前一层 list 还要做任意深度遍历，应在应用的 typed ADT 上处理。
 
@@ -658,14 +652,14 @@ take 20
 
 - 顶层 `from` 开始一条查询。同层 `let`、`filter`、`derive`、`group`、`aggregate`、`select`、`sort`、`take`、`page` 或兼容的 `limit` 延续当前 pipeline。
 - 顶层 `update table` 开始修改，后续同层 filter、sort、take、set 和 returning 延续当前语句；顶层 `delete table` 开始删除，后续同层 filter、sort、take 和 returning 延续当前语句。
-- `{}` 包围 record、projection、match branches 与 aggregate fields，`()` 包围 precedence、跨行 bool expression 和 group inner pipeline，`[]` 包围 list；delimiter 内换行只负责布局，相邻项使用逗号。旧缩进 match/group 与表达式 block 继续作为兼容输入。table、migration 和 explain 的外层 block 仍由缩进进入和退出；缩进不能使用 tab。
+- `{}` 包围 record、projection、match branches 与 aggregate fields，`()` 包围 precedence、tuple、位置 payload 和嵌套调用，`[]` 包围 list；delimiter 内换行分隔多行项，逗号分隔紧凑单行项。旧缩进 match/group 与表达式 block 继续作为兼容输入。table、migration 和 explain 的外层 block 仍由缩进进入和退出；缩进不能使用 tab。
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
 - 括号和集合内允许换行。字符串里的 `|`、逗号和 `#` 都是文本，不参与分隔。
-- 同层出现新的 `from`、`explain`、`type`、`table`、`insert`、`upsert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
+- 同层出现新的 `from`、`explain`、`struct`、`enum`、`type`、`table`、`insert`、`upsert`、`update`、`delete` 或 `create` 时，前一条语句结束并开始新语句。
 - REPL 使用与 parser 相同的 token、layout 和 EOF 状态判断 complete、incomplete、invalid。`ready>` 后的空行提交；incomplete 保留缓冲区继续输入，invalid 立即带 span 报错并清空。交互 EOF 执行 complete 缓冲区，或报告 incomplete 后退出。
 - REPL 的空行是提交当前完整缓冲区的交互手势，不是文件语法的一部分，也不引入分号。
 
-布尔表达式可在 `filter`／`=>` 的缩进块或括号内跨行；`any/all` 的 predicate 括号也可跨行。标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；每条 pipeline 或 DML target 最多求值 100,000 个 list predicate 元素，超限返回受控错误。
+布尔表达式可在 `filter { ... }`、`=>` 的缩进块或 precedence 括号内跨行；`any/all` 的 predicate 括号也可跨行。标量函数参数和比较两侧当前保持在同一逻辑行。源码最多 1 MiB、100,000 tokens 和 64 层类型、值、表达式或布局嵌套；每条 pipeline 或 DML target 最多求值 100,000 个 list predicate 元素，超限返回受控错误。
 
 ## 错误与响应
 
@@ -702,11 +696,9 @@ take 20
 
 ```text
 from tasks
-filter (
-  match state {
-    Pending => true,
-  }
-)
+filter match state {
+  Pending => true
+}
 ```
 
 ## 可执行示例与测试
@@ -727,7 +719,7 @@ filter (
 | 查询局部定义 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 常量、单/多参数纯函数、match binding、aggregate 输入、显式类型、词法遮蔽、prepared 参数、调用与展开预算 | `query_local_*`、`local_function_*`、`prepared_queries_infer_parameters_through_local_functions` |
 | 布尔与集合表达式 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 数值表达式 | [invoices.unid](../examples/invoices.unid) 与测试内脚本 | int/float/decimal 类型、固定 scale、逐步 precision、优先级、跨行括号、整数除法、短路及运行时错误 | `decimal_*`、`typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
-| 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
+| 列表分页 | 测试内脚本 | 嵌套多键排序、一基 Rust 风格范围、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 | 稳定游标分页 | HTTP todolist 与接口测试 | typed page helper、重复排序前缀、正反向、redb 重开、TCP/HTTP 断开、deadline、migration 和 cursor 错误 | `tests/pagination.rs`、`tests/pagination_interfaces.rs`、`examples/todolist.rs` |
 | UUID 与二进制 metadata | [content_metadata.unid](../examples/content_metadata.unid) | UUID 主键、hex bytes、unique index、contains/length、typed protocol v2、cursor、migration 与 backup/restore | `tests/uuid_bytes.rs` |
 | 原子修改 | [task_mutations.unid](../examples/task_mutations.unid) 与测试内脚本 | typed/nested/simultaneous set、match target、穷尽 ADT match assignment、顶层保留 binding、typed 参数、主键冲突、运行时回滚、索引维护、稳定 RowId、TCP 和 redb 重开 | `update_*`、`failed_multi_row_updates_*`、`versioned_tcp_updates_*`、`adt_match_updates_*`、`redb_update_delete_*` |

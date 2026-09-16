@@ -13,58 +13,62 @@ pub use check::{
     ProjectCheckStage, ProjectCheckStatus, check,
 };
 
-const STARTER_SCHEMA: &str = r#"type State =
+const STARTER_SCHEMA: &str = r#"enum State {
   Pending
-  | Running {
-    worker text,
-    attempt int,
+  Running {
+    worker: text
+    attempt: int
   }
-  | Done {
-    result text,
+  Done {
+    result: text
   }
-
-type Task = {
-  id int,
-  title text,
-  state State,
 }
 
-table tasks Task
+struct Task {
+  id: int
+  title: text
+  state: State
+}
+
+table tasks: Task {
   key id
+}
 "#;
 
-const STARTER_MIGRATION: &str = r#"migration m0001_initial
-  add type State =
+const STARTER_MIGRATION: &str = r#"migration m0001_initial {
+  add enum State {
     Pending
-    | Running {
-      worker text,
-      attempt int,
+    Running {
+      worker: text
+      attempt: int
     }
-    | Done {
-      result text,
+    Done {
+      result: text
     }
-  add type Task = {
-    id int,
-    title text,
-    state State,
   }
-  add table tasks Task key id
+  add struct Task {
+    id: int
+    title: text
+    state: State
+  }
+  add table tasks: Task {
+    key id
+  }
+}
 "#;
 
 const STARTER_SEED: &str = r#"insert many tasks [
-  {id = 1, state = Running {attempt = 1, worker = "local"}, title = "learn ADTs"},
-  {id = 2, state = Pending, title = "ship the app"},
+  {id: 1, state: Running {attempt: 1, worker: "local"}, title: "learn ADTs"}
+  {id: 2, state: Pending, title: "ship the app"}
 ]
 returning {id, state}
 "#;
 
 const STARTER_QUERY: &str = r#"from tasks
-filter (
-  match state {
-    Running {attempt, ..} => attempt >= 1,
-    _ => false,
-  }
-)
+filter match state {
+  Running {attempt, ..} => attempt >= 1
+  _ => false
+}
 select {id, title, state}
 sort id
 "#;

@@ -1,43 +1,43 @@
-type Tree =
-  Leaf text
-  | Branch {
-    label text,
-    children list Tree,
+enum Tree {
+  Leaf(text)
+  Branch {
+    label: text
+    children: List<Tree>
   }
-
-type Document = {
-  id int,
-  tree Tree,
 }
 
-table documents Document
+struct Document {
+  id: int
+  tree: Tree
+}
+
+table documents: Document {
   key id
+}
 
 create index documents (tree)
 
 insert documents {
-  id = 1,
-  tree = Branch {children = [Leaf("readme"), Branch {children = [], label = "src"}], label = "root"},
+  id: 1
+  tree: Branch {children: [Leaf("readme"), Branch {children: [], label: "src"}], label: "root"}
 }
 
 insert documents {
-  id = 2,
-  tree = Leaf("single"),
+  id: 2
+  tree: Leaf("single")
 }
 
 from documents
-filter (
-  match tree {
-    Leaf value => value == "single",
-    Branch {children, ..} => contains children Tree.Leaf("readme"),
-  }
-)
+filter match tree {
+  Leaf(value) => value == "single"
+  Branch {children, ..} => contains children Tree::Leaf("readme")
+}
 select {
-  id,
-  tree,
+  id
+  tree
   root_label = match tree {
-    Leaf value => value,
-    Branch {label, ..} => label,
-  },
+    Leaf(value) => value
+    Branch {label, ..} => label
+  }
 }
 sort id
