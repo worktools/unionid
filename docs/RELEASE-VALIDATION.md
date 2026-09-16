@@ -1,4 +1,4 @@
-# v0.5 端到端发布验收
+# v0.6 端到端发布验收
 
 ## 核心正确性场景
 
@@ -24,7 +24,7 @@ cargo test --locked --test release_scenarios
 
 这些场景验证应用进程边界上的查询、DML、schema/data migration、索引重建、ledger 和 backup/restore 一致性。提交前／后退出、真实文件增长失败及 open/check 成本由 #13/#14 的存储测试和[恢复成本记录](benchmarks/recovery-2026-09-07.md)提供。
 
-它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。当前 1 万／10 万行的 query、write、check 与 shadow migration 数据见 [M7 验收记录](benchmarks/m7-acceptance-2026-09-10.md)；v0.5 双平台候选、静态查询/typed application、增量备份、Envoy mTLS 与包内教程由 [#320](https://github.com/worktools/unionid/issues/320) 做最终验收。
+它们不模拟物理断电、文件系统违反同步承诺或设备损坏，也不提供延迟承诺。当前 1 万／10 万行的 query、write、check 与 shadow migration 数据见 [M7 验收记录](benchmarks/m7-acceptance-2026-09-10.md)；v0.6 双平台候选、v0.5 数据与客户端兼容、原生包和空目录 starter 由 [#329](https://github.com/worktools/unionid/issues/329) 做最终验收。
 
 ## crates.io 与 GitHub Release 发布
 
@@ -38,11 +38,13 @@ cargo publish --dry-run --locked --registry crates-io
 
 参考的 `command-pool` 流程使用 `katyo/publish-crates@v2`。该 action 当前声明 Node 20 runtime，因此 unionid 保留相同的 GitHub Actions + registry token 模型，但在固定 Rust 1.94.0 runner 中直接调用 Cargo，避免重新引入已在 #105 消除的 Node runtime 警告。
 
-## v0.5 候选机器证据
+## v0.6 候选机器证据
 
 CI 矩阵固定核对 Linux `x86_64-unknown-linux-gnu` 与 macOS `aarch64-apple-darwin`。每个 job 只有在 formatter、locked check、严格 Clippy、完整测试、Engine/CLI/TCP 教程、HTTP/stream 示例、评测 smoke、release build 和包外 SHA-256 验证全部成功后，才运行 `scripts/record-release-acceptance.py`。
 
-该脚本重新读取已验证压缩包中的 `RELEASE.json` 与 `release/contract.json`，要求 manifest 的 clean source commit 与实际 GitHub head SHA、预期 target 和源码 contract 一致，然后输出 version 1 JSON。报告保存 runner OS/arch/target、workflow URL、candidate commit、archive/manifest/contract SHA-256、完整 release manifest、通过状态和对应测试／文档证据。只有 Linux 报告把 Envoy mTLS 真实旅程记为通过，两个平台都记录部署契约静态验证。不保存数据库内容、secret 或不稳定的墙钟时间。macOS/Linux 报告分别以 GitHub Actions artifact 保留 90 天；Linux 额外保存 Envoy 真实旅程与 10k/100k 增量备份原始 JSON。workflow URL 与摘要写入 #320。
+候选 job 还会按当前平台下载 GitHub 已发布的 v0.5.0 原生包并核对其公开 `.sha256`。`scripts/verify-v050-compatibility.py` 用 v0.5 binary 建库、检查并生成 logical backup，再要求 v0.6 保持 capability contract、typed rows 与 schema identity，恢复 v0.5 backup，并接受 v0.5 CLI 通过 version 1 TCP 查询 v0.6 read-only server。这条测试只覆盖已冻结的直接兼容路径，不把跨版本 mutation 或 format 降级加入承诺。
+
+该脚本重新读取已验证压缩包中的 `RELEASE.json` 与 `release/contract.json`，要求 manifest 的 clean source commit 与实际 GitHub head SHA、预期 target 和源码 contract 一致，然后输出 version 1 JSON。报告保存 runner OS/arch/target、workflow URL、candidate commit、archive/manifest/contract SHA-256、完整 release manifest、通过状态和对应测试／文档证据。两个平台都从空目录运行生成式 starter；只有 Linux 报告把 Envoy mTLS 真实旅程记为通过。报告不保存数据库内容、secret 或不稳定的墙钟时间。macOS/Linux 报告分别以 GitHub Actions artifact 保留 90 天；可选的大型增量备份 evaluator 默认关闭，不是 v0.6 候选门槛。workflow URL 与摘要写入 #329。
 
 ## English Description
 
@@ -50,12 +52,14 @@ CI 矩阵固定核对 Linux `x86_64-unknown-linux-gnu` 与 macOS `aarch64-apple-
 
 The source and restored databases are compared for canonical schema, revision/hash, immutable migration ledger, typed query results, and structured explain access paths. The nested configuration case also prevents migration bindings from erasing the identity of a named record contained inside an outer sum payload.
 
-Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. The [M7 acceptance record](benchmarks/m7-acceptance-2026-09-10.md) retains current 10k/100k query, write, check, and shadow-migration evidence; [#320](https://github.com/worktools/unionid/issues/320) owns the final v0.5 dual-platform candidate, static-query and typed-application paths, incremental backup, Envoy mTLS, independent Rust consumer, and packaged-tutorial acceptance.
+Run the suite with `cargo test --locked --test release_scenarios`. It covers application process boundaries and logical recovery, while physical power loss, broken filesystem synchronization, and hardware damage remain outside the test claim. The [M7 acceptance record](benchmarks/m7-acceptance-2026-09-10.md) retains current 10k/100k query, write, check, and shadow-migration evidence; [#329](https://github.com/worktools/unionid/issues/329) owns the final v0.6 dual-platform candidate, v0.5 data/client compatibility, native archives, and empty-directory starter acceptance.
 
 Official versions are published only by `.github/workflows/release.yml`; developers do not run `cargo publish` from a workstation. The independent `release/contract.json` freezes software, minimum Rust, redb, version-report schema, storage/backup/codec, protocol, and stream versions. Packaging requires it to match Cargo and the binary, includes the source contract in the archive, and records the full source commit plus clean-worktree status in `RELEASE.json`. Dirty trees require an explicit `--allow-dirty` development override and are always rejected by the formal verifier. Verification compares the packaged contract, manifest, and binary report against the trusted contract outside the package. A manual non-tag run executes `cargo publish --dry-run --locked --registry crates-io` alongside the native artifact checks without requiring publication credentials. On a `v*` tag, the workflow verifies `CARGO_REGISTRY_TOKEN`, publishes `unionid-derive` before `unionid`, then assembles the macOS/Linux assets and creates the GitHub Release. Missing credentials or any crate validation/publication failure blocks the GitHub Release job. The GitHub Release body is selected from `docs/RELEASE-${tag}.md`, so a tag cannot silently reuse notes from an older version.
 
 The reference `command-pool` workflow uses `katyo/publish-crates@v2`. Because that action currently declares a Node 20 runtime, unionid preserves its GitHub Actions plus registry-token model but invokes Cargo directly on the pinned Rust 1.94.0 runner, avoiding the runtime warning removed in #105.
 
-For v0.5 candidate evidence, the CI matrix fixes the expected targets to Linux `x86_64-unknown-linux-gnu` and macOS `aarch64-apple-darwin`. A job runs `scripts/record-release-acceptance.py` only after formatting, locked checks, strict Clippy, the full suite, the packaged independent consumer, Engine/CLI/TCP tutorial, HTTP/stream example, evaluator smoke runs, release build, and out-of-package SHA-256 verification all succeed. The single manually dispatched candidate run enables the 10k/100k incremental-backup evaluator; the Linux job also runs the real Envoy container journey.
+For v0.6 candidate evidence, the CI matrix fixes the expected targets to Linux `x86_64-unknown-linux-gnu` and macOS `aarch64-apple-darwin`. A job runs `scripts/record-release-acceptance.py` only after formatting, locked checks, strict Clippy, the full suite, the packaged independent consumer, Engine/CLI/TCP tutorial, HTTP/stream example, evaluator smoke runs, release build, the generated empty-directory starter, and out-of-package SHA-256 verification all succeed. The optional 10k/100k incremental-backup evaluator stays disabled by default; the Linux job still runs the real Envoy container journey.
 
-The recorder rereads `RELEASE.json` and `release/contract.json` from the verified archive. It requires the manifest's clean source commit to equal the GitHub head SHA, expected target, and trusted source contract, then writes a version-1 JSON report. The report retains runner OS/arch/target, workflow URL, candidate commit, archive/manifest/contract SHA-256 values, the full release manifest, explicit pass results, and test/document evidence. The real Envoy mTLS journey appears as a passed result only in the Linux report; both platforms record the static deployment-contract validation. Reports contain no database values, secrets, or unstable wall-clock timestamp. GitHub retains separate macOS/Linux report artifacts for 90 days; Linux also retains the Envoy journey and raw 10k/100k incremental-backup JSON. #320 retains workflow links and summaries.
+Each candidate job also downloads the published v0.5.0 native archive for its platform and verifies the public checksum. `scripts/verify-v050-compatibility.py` uses the v0.5 binary to create and check a database and logical backup, then requires v0.6 to preserve the capability contract, typed rows, and schema identity, restore the v0.5 backup, and accept a version-1 TCP query from the v0.5 CLI against a v0.6 read-only server. This proves the frozen direct path without promising cross-version mutations or storage-format downgrade.
+
+The recorder rereads `RELEASE.json` and `release/contract.json` from the verified archive. It requires the manifest's clean source commit to equal the GitHub head SHA, expected target, and trusted source contract, then writes a version-1 JSON report. The report retains runner OS/arch/target, workflow URL, candidate commit, archive/manifest/contract SHA-256 values, the full release manifest, explicit pass results, and test/document evidence. Both platforms record the empty-directory generated starter; the real Envoy mTLS journey appears as passed only in the Linux report. Reports contain no database values, secrets, or unstable wall-clock timestamp. GitHub retains separate macOS/Linux reports for 90 days, and #329 retains workflow links and summaries.

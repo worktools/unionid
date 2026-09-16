@@ -4,6 +4,7 @@
 
 ## 发布后进展
 
+- v0.6.0 只收口首次接入：`init` 生成规范 `.unid` 项目，`project check` 在建库前联合验证 schema、migration 与 query，发布包从空目录验证运行、重开、诊断和备份还原。候选流程另外使用真实 v0.5.0 原生包验证数据、logical backup 和 v0.5 CLI → v0.6 server 的兼容路径；storage、codec、backup 与 protocol 数值保持不变。
 - v0.5 的跨主机安全入口选择官方网关路径：Unionid 继续只监听 loopback，`deploy/envoy` 用固定 Envoy 版本终止 TLS 1.3 mTLS、限制连接/缓冲并输出不含业务值的证书身份审计。Linux release job 执行真实有证书读取、无证书拒绝、优雅关闭、完整检查和只读写拒绝；普通 CI 只验证配置约束，不增加 macOS 日常运行。
 - filter comparison、sort、min/max 与 cursor boundary 现在保存绑定静态类型，并共用 catalog-aware ADT total order。primitive、命名 scalar、sum、record、tuple、option、list 和有限递归值均可排序；sum/record 使用稳定 variant/field ID，避免运行时名称或 map 次序改变语义。复合 index schema、memory tuple key、redb index-key codec 3、storage format 5、backup 4 与显式 4→5 upgrade 已接入。planner 支持 equality prefix、紧邻 range、声明方向／全局反向的 index order，以及主键或完整 unique suffix 证明下的 page seek；query 和 mutation target 会在 residual filter 后有界满足 `take/page`。
 - 普通 row-only DML 使用按路径复制的 persistent row/index/receipt roots 和请求级合并 write set；Engine 通过一个 committed root 同时发布 database 与 receipt。redb 直接编码并核对变化的 catalog/row/index/receipt stable keys，常驻 durable head 只保留 layout、meta 与兼容状态；DDL、migration、upgrade、restore 和 receipt prune 明确走临时 full-rebuild 路径。`MutationProfile` 与 `tools/workload-eval` 分别记录 candidate build、durable commit、增量模式及不含业务值的 write-set 计数。
