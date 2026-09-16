@@ -29,6 +29,7 @@ mod pagination;
 mod params;
 pub mod portable;
 pub mod profile;
+pub mod project;
 pub mod protocol;
 pub mod query;
 pub mod query_contract;

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
-use unionid::{cli, server};
+use unionid::{cli, project, server};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -144,6 +144,8 @@ enum Command {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Create a runnable starter project in a new or empty directory. / 在新目录或空目录创建可运行的入门项目。
+    Init { directory: PathBuf },
     Server {
         #[arg(long, default_value = "127.0.0.1:7878")]
         addr: String,
@@ -793,6 +795,7 @@ fn run(args: Args) -> Result<(), String> {
     match args.command {
         Command::Version { format } => print_version(matches!(format, Format::Json)),
         Command::Doctor { db, format } => doctor(db, matches!(format, Format::Json)),
+        Command::Init { directory } => project::init(directory),
         Command::Server {
             addr,
             db,
