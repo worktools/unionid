@@ -265,6 +265,7 @@ pub struct ExistsFilter {
     pub correlations: Vec<ExistsCorrelation>,
     pub index: Option<String>,
     pub index_target: Option<String>,
+    pub index_shape: Option<String>,
 }
 
 #[derive(Debug, Clone)]

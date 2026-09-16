@@ -1539,7 +1539,7 @@ impl Database {
     ) -> Result<QueryResponse> {
         match stmt {
             Statement::Pipeline(pipeline) => {
-                self.query_from_output(source, pipeline, control, Some(sink))
+                self.query_from_output(source, pipeline, control, Some(sink), None)
             }
             _ => Err(Error::new(
                 "E_STREAM_SHAPE",
@@ -3689,6 +3689,7 @@ impl Database {
             })?;
         let (definition, components, selected_correlation) = selected;
         exists.index_target = Some(selected_correlation.target.clone());
+        exists.index_shape = Some(definition.shape_key());
         exists.index = Some(if components.len() == 1 && !components[0].descending {
             format!("{}.{}", exists.pipeline.from, components[0].column)
         } else {
@@ -4587,6 +4588,52 @@ impl Database {
         })
     }
 
+    fn plan_access_for_index(
+        &self,
+        source: &dyn TypedRowSource,
+        pipeline: &Pipeline,
+        page: Option<&PreparedPage>,
+        shape: &str,
+        estimate_rows: bool,
+    ) -> Result<PlannedAccess> {
+        let definition = self
+            .index_definitions
+            .get(&pipeline.from)
+            .and_then(|definitions| {
+                definitions
+                    .values()
+                    .find(|definition| definition.shape_key() == shape)
+            })
+            .ok_or_else(|| Error::new("E_QUERY", "bound query index is no longer available"))?;
+        if !source.has_index(&pipeline.from, shape) {
+            return Err(Error::new(
+                "E_QUERY",
+                "bound query index is unavailable from the row source",
+            ));
+        }
+        let constraints = leading_index_constraints(pipeline);
+        let candidate = self
+            .index_access_candidate(
+                source,
+                pipeline,
+                page,
+                definition,
+                &constraints,
+                estimate_rows,
+            )?
+            .ok_or_else(|| {
+                Error::new(
+                    "E_QUERY",
+                    "bound query index no longer matches the prepared access constraints",
+                )
+            })?;
+        Ok(PlannedAccess {
+            plan: candidate.plan,
+            index_scan: Some(candidate.index_scan),
+            ordered_sort: candidate.ordered_sort,
+        })
+    }
+
     fn index_access_candidate(
         &self,
         source: &dyn TypedRowSource,
@@ -4971,7 +5018,7 @@ impl Database {
         pipeline: Pipeline,
         control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
-        self.query_from_output(source, pipeline, control, None)
+        self.query_from_output(source, pipeline, control, None, None)
     }
 
     fn query_from_output(
@@ -4980,6 +5027,7 @@ impl Database {
         mut pipeline: Pipeline,
         control: Option<&ExecutionControl>,
         mut sink: Option<&mut dyn QueryRowSink>,
+        forced_index_shape: Option<&str>,
     ) -> Result<QueryResponse> {
         check_deadline(control)?;
         let prepare_started = Instant::now();
@@ -4988,7 +5036,11 @@ impl Database {
         let prepare_micros = instant_elapsed_micros(prepare_started);
         let plan_started = Instant::now();
         let stats = source.table_stats(&pipeline.from)?;
-        let access = self.plan_access(source, &pipeline, prepared_page.as_ref(), true)?;
+        let access = if let Some(shape) = forced_index_shape {
+            self.plan_access_for_index(source, &pipeline, prepared_page.as_ref(), shape, true)?
+        } else {
+            self.plan_access(source, &pipeline, prepared_page.as_ref(), true)?
+        };
         let plan_micros = instant_elapsed_micros(plan_started);
         let execution_started = Instant::now();
         let execution_plan = ExecutionPlanObservation {
@@ -5527,7 +5579,12 @@ impl Database {
             offset: 0,
             limit: 1,
         });
-        let response = self.query_from(source, pipeline, control)?;
+        let index_shape = exists
+            .index_shape
+            .as_deref()
+            .expect("exists index shape was bound while preparing the pipeline");
+        let response =
+            self.query_from_output(source, pipeline, control, None, Some(index_shape))?;
         if let Some(nested) = response.execution {
             observation.index_entries_examined = observation
                 .index_entries_examined

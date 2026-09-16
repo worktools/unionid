@@ -90,6 +90,43 @@ filter exists {
 }
 
 #[test]
+fn exists_executes_with_the_index_selected_during_binding() {
+    let mut engine = setup();
+    ok(
+        &mut engine,
+        r#"create index items (state, note)
+
+insert many items [
+  {id: 20, task_id: 20, note: "shared", state: Open}
+  {id: 21, task_id: 21, note: "shared", state: Open}
+  {id: 22, task_id: 22, note: "shared", state: Open}
+  {id: 23, task_id: 23, note: "shared", state: Open}
+  {id: 24, task_id: 24, note: "shared", state: Open}
+]"#,
+    );
+    let response = ok(
+        &mut engine,
+        r#"explain analyze from tasks
+filter id == 1
+filter exists {
+  from items
+  filter task_id == outer.id
+  filter state == Open
+  filter note == "shared"
+}"#,
+    );
+    assert_eq!(
+        response.plan.as_ref().unwrap().exists[0].index,
+        "items.task_id"
+    );
+    assert_eq!(response.rows.len(), 0);
+    assert!(
+        response.analysis.unwrap().index_entries_examined <= 3,
+        "the outer primary-key lookup and pinned exists lookup should inspect only task 1 entries"
+    );
+}
+
+#[test]
 fn invalid_exists_shapes_fail_before_scanning() {
     let mut engine = setup();
     let cases = [

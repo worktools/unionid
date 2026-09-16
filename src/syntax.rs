@@ -1664,6 +1664,7 @@ impl Parser {
                 correlations: Vec::new(),
                 index: None,
                 index_target: None,
+                index_shape: None,
             }))
         } else if self.word("match") || self.parenthesized_match_starts() {
             let parenthesized = self.eat(Kind::Open('('));
