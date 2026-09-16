@@ -282,6 +282,7 @@ fn visit_pipeline(pipeline: &Pipeline, visitor: &mut impl FnMut(&ScalarExpressio
         match stage {
             Stage::Let(binding) => visit_bool(&binding.expression, visitor),
             Stage::Filter(expression) => visit_bool(expression, visitor),
+            Stage::FilterExists(exists) => visit_pipeline(&exists.pipeline, visitor),
             Stage::FilterMatch(predicate) => {
                 for arm in &predicate.arms {
                     visit_bool(&arm.condition, visitor);
@@ -314,6 +315,7 @@ fn visit_pipeline_mut(pipeline: &mut Pipeline, visitor: &mut impl FnMut(&mut Sca
         match stage {
             Stage::Let(binding) => visit_bool_mut(&mut binding.expression, visitor),
             Stage::Filter(expression) => visit_bool_mut(expression, visitor),
+            Stage::FilterExists(exists) => visit_pipeline_mut(&mut exists.pipeline, visitor),
             Stage::FilterMatch(predicate) => {
                 for arm in &mut predicate.arms {
                     visit_bool_mut(&mut arm.condition, visitor);

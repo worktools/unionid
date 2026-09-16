@@ -14,8 +14,9 @@ use crate::model::{
 };
 use crate::profile::ExecutionObservation;
 use crate::query::{
-    Aggregate, AggregateAssignment, AggregateFunction, CmpOp, IndexComponent, PageDirection,
-    PageSpec, Pipeline, Returning, SetAssignment, SetValue, SortKey, Stage, Statement,
+    Aggregate, AggregateAssignment, AggregateFunction, CmpOp, ExistsCorrelation, ExistsFilter,
+    IndexComponent, PageDirection, PageSpec, Pipeline, Returning, SetAssignment, SetValue, SortKey,
+    Stage, Statement,
 };
 use crate::row_source::{
     CandidateRowSource, EncodedIndexBounds, GENERAL_WORKING_MAX_BYTES, IndexHit, IndexHitCursor,
@@ -40,6 +41,7 @@ pub const MAX_AGGREGATE_OUTPUTS: usize = 256;
 pub const MAX_AGGREGATE_CELLS: usize = 1_000_000;
 pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_LOOKUP_DRIVERS: usize = 10_000;
+pub const MAX_EXISTS_DRIVERS: usize = 10_000;
 
 struct PlannedAccess {
     plan: QueryAccessPlan,
@@ -887,6 +889,7 @@ pub struct QueryAccessPlan {
 pub enum QueryStageKind {
     Let,
     Filter,
+    FilterExists,
     FilterMatch,
     Derive,
     DeriveMatch,
@@ -930,6 +933,21 @@ pub struct LookupPlan {
     pub per_row_limit: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExistsPlan {
+    pub stage: usize,
+    pub table: String,
+    pub correlations: Vec<ExistsCorrelationPlan>,
+    pub index: String,
+    pub driver_limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExistsCorrelationPlan {
+    pub target: String,
+    pub outer: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryPlan {
     pub table: String,
@@ -938,6 +956,8 @@ pub struct QueryPlan {
     pub result_schema: Vec<ResponseColumn>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lookups: Vec<LookupPlan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exists: Vec<ExistsPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PagePlan>,
 }
@@ -1519,7 +1539,7 @@ impl Database {
     ) -> Result<QueryResponse> {
         match stmt {
             Statement::Pipeline(pipeline) => {
-                self.query_from_output(source, pipeline, control, Some(sink))
+                self.query_from_output(source, pipeline, control, Some(sink), None)
             }
             _ => Err(Error::new(
                 "E_STREAM_SHAPE",
@@ -3035,6 +3055,7 @@ impl Database {
                     ));
                 }
                 Stage::Let(_)
+                | Stage::FilterExists(_)
                 | Stage::Derive(_)
                 | Stage::DeriveMatch(_)
                 | Stage::Lookup(_)
@@ -3240,6 +3261,7 @@ impl Database {
                 }
                 Stage::Page(_) => unreachable!("page mutation targets are rejected during bind"),
                 Stage::Let(_)
+                | Stage::FilterExists(_)
                 | Stage::Derive(_)
                 | Stage::DeriveMatch(_)
                 | Stage::Lookup(_)
@@ -3454,6 +3476,7 @@ impl Database {
                     locals.expand_bool(&self.catalog, &schema, expression)?;
                     crate::expression::bind(&self.catalog, &schema, expression)?
                 }
+                Stage::FilterExists(exists) => self.bind_exists(&schema, exists)?,
                 Stage::FilterMatch(pred) => {
                     for arm in &mut pred.arms {
                         locals.expand_bool(&self.catalog, &schema, &mut arm.condition)?;
@@ -3604,6 +3627,76 @@ impl Database {
             default: None,
             id: 0,
         })
+    }
+
+    fn bind_exists(&self, outer_schema: &[Column], exists: &mut ExistsFilter) -> Result<()> {
+        let target = self.table(&exists.pipeline.from)?;
+        if target.schema.iter().any(|column| column.name == "outer") {
+            return Err(Error::new(
+                "E_QUERY",
+                "exists target tables cannot define the reserved top-level field 'outer'",
+            ));
+        }
+        let mut scope = target.schema.clone();
+        scope.push(Column {
+            name: "outer".into(),
+            ty: ScalarType::Record(outer_schema.to_vec()),
+            default: None,
+            id: 0,
+        });
+        let mut correlations = Vec::new();
+        for stage in &mut exists.pipeline.stages {
+            let Stage::Filter(expression) = stage else {
+                return Err(Error::new(
+                    "E_QUERY",
+                    "exists inner pipelines currently support only filter stages",
+                ));
+            };
+            crate::expression::bind(&self.catalog, &scope, expression)?;
+            collect_exists_correlations(expression, &mut correlations);
+        }
+        correlations
+            .sort_by(|left, right| (&left.target, &left.outer).cmp(&(&right.target, &right.outer)));
+        correlations
+            .dedup_by(|left, right| left.target == right.target && left.outer == right.outer);
+        if correlations.is_empty() {
+            return Err(Error::new(
+                "E_QUERY",
+                "exists requires an equality correlation such as target_id == outer.id",
+            ));
+        }
+        let definitions = self
+            .index_definitions
+            .get(&exists.pipeline.from)
+            .into_iter()
+            .flat_map(|definitions| definitions.values());
+        let selected = definitions
+            .filter_map(|definition| {
+                let components = definition.effective_components();
+                let correlation = correlations.iter().find(|correlation| {
+                    components
+                        .first()
+                        .is_some_and(|component| component.column == correlation.target)
+                })?;
+                Some((definition, components, correlation))
+            })
+            .min_by_key(|(definition, components, _)| (components.len(), definition.id))
+            .ok_or_else(|| {
+                Error::new(
+                    "E_RELATION_KEY",
+                    "an exists correlation target must be the first field of an index",
+                )
+            })?;
+        let (definition, components, selected_correlation) = selected;
+        exists.index_target = Some(selected_correlation.target.clone());
+        exists.index_shape = Some(definition.shape_key());
+        exists.index = Some(if components.len() == 1 && !components[0].descending {
+            format!("{}.{}", exists.pipeline.from, components[0].column)
+        } else {
+            format!("{} ({})", exists.pipeline.from, definition.display_shape())
+        });
+        exists.correlations = correlations;
+        Ok(())
     }
 
     /// Bind a statement far enough to know every type exposed by its response.
@@ -4317,6 +4410,33 @@ impl Database {
                 })
             })
             .collect();
+        let exists = pipeline
+            .stages
+            .iter()
+            .enumerate()
+            .filter_map(|(position, stage)| {
+                let Stage::FilterExists(exists) = stage else {
+                    return None;
+                };
+                Some(ExistsPlan {
+                    stage: position + 1,
+                    table: exists.pipeline.from.clone(),
+                    correlations: exists
+                        .correlations
+                        .iter()
+                        .map(|correlation| ExistsCorrelationPlan {
+                            target: correlation.target.clone(),
+                            outer: correlation.outer.clone(),
+                        })
+                        .collect(),
+                    index: exists
+                        .index
+                        .clone()
+                        .expect("exists index was bound while preparing the pipeline"),
+                    driver_limit: MAX_EXISTS_DRIVERS,
+                })
+            })
+            .collect();
         let mut response = QueryResponse::ok_message("query plan");
         let page = prepared_page.as_ref().map(|page| PagePlan {
             limit: page.spec.limit,
@@ -4361,6 +4481,7 @@ impl Database {
             stages,
             result_schema,
             lookups,
+            exists,
             page,
         });
         Ok(response)
@@ -4464,6 +4585,52 @@ impl Database {
             },
             index_scan: None,
             ordered_sort: None,
+        })
+    }
+
+    fn plan_access_for_index(
+        &self,
+        source: &dyn TypedRowSource,
+        pipeline: &Pipeline,
+        page: Option<&PreparedPage>,
+        shape: &str,
+        estimate_rows: bool,
+    ) -> Result<PlannedAccess> {
+        let definition = self
+            .index_definitions
+            .get(&pipeline.from)
+            .and_then(|definitions| {
+                definitions
+                    .values()
+                    .find(|definition| definition.shape_key() == shape)
+            })
+            .ok_or_else(|| Error::new("E_QUERY", "bound query index is no longer available"))?;
+        if !source.has_index(&pipeline.from, shape) {
+            return Err(Error::new(
+                "E_QUERY",
+                "bound query index is unavailable from the row source",
+            ));
+        }
+        let constraints = leading_index_constraints(pipeline);
+        let candidate = self
+            .index_access_candidate(
+                source,
+                pipeline,
+                page,
+                definition,
+                &constraints,
+                estimate_rows,
+            )?
+            .ok_or_else(|| {
+                Error::new(
+                    "E_QUERY",
+                    "bound query index no longer matches the prepared access constraints",
+                )
+            })?;
+        Ok(PlannedAccess {
+            plan: candidate.plan,
+            index_scan: Some(candidate.index_scan),
+            ordered_sort: candidate.ordered_sort,
         })
     }
 
@@ -4737,6 +4904,7 @@ impl Database {
                     Stage::Let(_) | Stage::Derive(_) | Stage::DeriveMatch(_) | Stage::Select(_) => {
                     }
                     Stage::Filter(_)
+                    | Stage::FilterExists(_)
                     | Stage::FilterMatch(_)
                     | Stage::Lookup(_)
                     | Stage::Aggregate(_)
@@ -4850,7 +5018,7 @@ impl Database {
         pipeline: Pipeline,
         control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
-        self.query_from_output(source, pipeline, control, None)
+        self.query_from_output(source, pipeline, control, None, None)
     }
 
     fn query_from_output(
@@ -4859,6 +5027,7 @@ impl Database {
         mut pipeline: Pipeline,
         control: Option<&ExecutionControl>,
         mut sink: Option<&mut dyn QueryRowSink>,
+        forced_index_shape: Option<&str>,
     ) -> Result<QueryResponse> {
         check_deadline(control)?;
         let prepare_started = Instant::now();
@@ -4867,7 +5036,11 @@ impl Database {
         let prepare_micros = instant_elapsed_micros(prepare_started);
         let plan_started = Instant::now();
         let stats = source.table_stats(&pipeline.from)?;
-        let access = self.plan_access(source, &pipeline, prepared_page.as_ref(), true)?;
+        let access = if let Some(shape) = forced_index_shape {
+            self.plan_access_for_index(source, &pipeline, prepared_page.as_ref(), shape, true)?
+        } else {
+            self.plan_access(source, &pipeline, prepared_page.as_ref(), true)?
+        };
         let plan_micros = instant_elapsed_micros(plan_started);
         let execution_started = Instant::now();
         let execution_plan = ExecutionPlanObservation {
@@ -4921,7 +5094,10 @@ impl Database {
             .iter()
             .enumerate()
             .position(|(position, stage)| match stage {
-                Stage::Lookup(_) | Stage::Aggregate(_) | Stage::Page(_) => true,
+                Stage::FilterExists(_)
+                | Stage::Lookup(_)
+                | Stage::Aggregate(_)
+                | Stage::Page(_) => true,
                 Stage::Sort(_) => access.ordered_sort != Some(position),
                 Stage::Select(_) => {
                     prepared_page.is_some() && final_sort.is_some_and(|sort| position > sort)
@@ -5092,6 +5268,25 @@ impl Database {
                             |path| row_field(&row, path),
                             &mut evaluation_budget,
                         )? {
+                            filtered.push(row);
+                        }
+                    }
+                    rows = filtered;
+                }
+                Stage::FilterExists(exists) => {
+                    if rows.len() > MAX_EXISTS_DRIVERS {
+                        return Err(Error::new(
+                            "E_LIMIT",
+                            format!(
+                                "exists has {} driver rows; limit is {MAX_EXISTS_DRIVERS}; add filter or take before exists",
+                                rows.len()
+                            ),
+                        ));
+                    }
+                    let mut filtered = Vec::with_capacity(rows.len());
+                    for (position, row) in rows.into_iter().enumerate() {
+                        check_deadline_periodically(control, position)?;
+                        if self.evaluate_exists(source, &exists, &row, control, &mut observation)? {
                             filtered.push(row);
                         }
                     }
@@ -5333,6 +5528,80 @@ impl Database {
         Ok(())
     }
 
+    fn evaluate_exists(
+        &self,
+        source: &dyn TypedRowSource,
+        exists: &ExistsFilter,
+        outer: &BTreeMap<String, Value>,
+        control: Option<&ExecutionControl>,
+        observation: &mut ExecutionObservation,
+    ) -> Result<bool> {
+        let mut pipeline = exists.pipeline.as_ref().clone();
+        for stage in &mut pipeline.stages {
+            let Stage::Filter(expression) = stage else {
+                unreachable!("exists stages were restricted during binding")
+            };
+            replace_outer_references(expression, outer)?;
+        }
+        let target = exists
+            .index_target
+            .as_ref()
+            .expect("exists index target was bound while preparing the pipeline");
+        let correlation = exists
+            .correlations
+            .iter()
+            .find(|correlation| &correlation.target == target)
+            .expect("exists selected correlation was retained after binding");
+        let bound = row_field(outer, &correlation.outer).ok_or_else(|| {
+            Error::new(
+                "E_FIELD",
+                format!(
+                    "outer field '{}' disappeared during exists execution",
+                    correlation.outer
+                ),
+            )
+        })?;
+        pipeline.stages.insert(
+            0,
+            Stage::Filter(crate::query::BoolExpression::Compare {
+                left: crate::query::ScalarExpression::Reference(target.clone()),
+                op: CmpOp::Eq,
+                right: crate::query::ScalarExpression::Literal(bound.clone()),
+                operand_type: None,
+            }),
+        );
+        pipeline.stages.push(Stage::Sort(vec![SortKey {
+            column: target.clone(),
+            descending: false,
+            ty: None,
+        }]));
+        pipeline.stages.push(Stage::Take {
+            offset: 0,
+            limit: 1,
+        });
+        let index_shape = exists
+            .index_shape
+            .as_deref()
+            .expect("exists index shape was bound while preparing the pipeline");
+        let response =
+            self.query_from_output(source, pipeline, control, None, Some(index_shape))?;
+        if let Some(nested) = response.execution {
+            observation.index_entries_examined = observation
+                .index_entries_examined
+                .saturating_add(nested.index_entries_examined);
+            observation.rows_decoded = observation.rows_decoded.saturating_add(nested.rows_decoded);
+            observation.row_cache_hits = observation
+                .row_cache_hits
+                .saturating_add(nested.row_cache_hits);
+            observation.row_cache_misses = observation
+                .row_cache_misses
+                .saturating_add(nested.row_cache_misses);
+            observation.batches = observation.batches.saturating_add(nested.batches);
+            observation.observe_working_bytes(nested.working_peak_bytes);
+        }
+        Ok(!response.rows.is_empty())
+    }
+
     fn apply_streaming_prefix(
         &self,
         mut row: BTreeMap<String, Value>,
@@ -5412,7 +5681,10 @@ impl Database {
                     state.emitted = state.emitted.saturating_add(1);
                     exhausted |= state.emitted == *limit;
                 }
-                Stage::Lookup(_) | Stage::Aggregate(_) | Stage::Page(_) => {
+                Stage::FilterExists(_)
+                | Stage::Lookup(_)
+                | Stage::Aggregate(_)
+                | Stage::Page(_) => {
                     unreachable!("blocking stages are excluded from the streaming prefix")
                 }
             }
@@ -6473,6 +6745,7 @@ fn query_stage_kind(stage: &Stage) -> QueryStageKind {
     match stage {
         Stage::Let(_) => QueryStageKind::Let,
         Stage::Filter(_) => QueryStageKind::Filter,
+        Stage::FilterExists(_) => QueryStageKind::FilterExists,
         Stage::FilterMatch(_) => QueryStageKind::FilterMatch,
         Stage::Derive(_) => QueryStageKind::Derive,
         Stage::DeriveMatch(_) => QueryStageKind::DeriveMatch,
@@ -6482,6 +6755,134 @@ fn query_stage_kind(stage: &Stage) -> QueryStageKind {
         Stage::Sort(_) => QueryStageKind::Sort,
         Stage::Take { .. } => QueryStageKind::Take,
         Stage::Page(_) => QueryStageKind::Page,
+    }
+}
+
+fn collect_exists_correlations(
+    expression: &crate::query::BoolExpression,
+    output: &mut Vec<ExistsCorrelation>,
+) {
+    match expression {
+        crate::query::BoolExpression::Compare {
+            left: crate::query::ScalarExpression::Reference(left),
+            op: CmpOp::Eq,
+            right: crate::query::ScalarExpression::Reference(right),
+            ..
+        } => {
+            if let Some(correlation) = exists_correlation(left, right) {
+                output.push(correlation);
+            } else if let Some(correlation) = exists_correlation(right, left) {
+                output.push(correlation);
+            }
+        }
+        crate::query::BoolExpression::And(left, right) => {
+            collect_exists_correlations(left, output);
+            collect_exists_correlations(right, output);
+        }
+        _ => {}
+    }
+}
+
+fn exists_correlation(target: &str, outer: &str) -> Option<ExistsCorrelation> {
+    if target == "outer" || target.starts_with("outer.") {
+        return None;
+    }
+    let outer = outer.strip_prefix("outer.")?;
+    (!outer.is_empty()).then(|| ExistsCorrelation {
+        target: target.to_owned(),
+        outer: outer.to_owned(),
+    })
+}
+
+fn replace_outer_references(
+    expression: &mut crate::query::BoolExpression,
+    outer: &BTreeMap<String, Value>,
+) -> Result<()> {
+    replace_outer_bool(expression, outer, false)
+}
+
+fn replace_outer_bool(
+    expression: &mut crate::query::BoolExpression,
+    outer: &BTreeMap<String, Value>,
+    shadowed: bool,
+) -> Result<()> {
+    use crate::query::BoolExpression;
+    match expression {
+        BoolExpression::Value(value)
+        | BoolExpression::IsSome(value)
+        | BoolExpression::IsNone(value) => replace_outer_scalar(value, outer, shadowed),
+        BoolExpression::Compare { left, right, .. }
+        | BoolExpression::Contains {
+            collection: left,
+            item: right,
+        }
+        | BoolExpression::Membership {
+            item: left,
+            collection: right,
+            ..
+        } => {
+            replace_outer_scalar(left, outer, shadowed)?;
+            replace_outer_scalar(right, outer, shadowed)
+        }
+        BoolExpression::Any {
+            collection,
+            binding,
+            predicate,
+        }
+        | BoolExpression::All {
+            collection,
+            binding,
+            predicate,
+        } => {
+            replace_outer_scalar(collection, outer, shadowed)?;
+            replace_outer_bool(predicate, outer, shadowed || binding == "outer")
+        }
+        BoolExpression::Not(value) => replace_outer_bool(value, outer, shadowed),
+        BoolExpression::And(left, right) | BoolExpression::Or(left, right) => {
+            replace_outer_bool(left, outer, shadowed)?;
+            replace_outer_bool(right, outer, shadowed)
+        }
+    }
+}
+
+fn replace_outer_scalar(
+    expression: &mut crate::query::ScalarExpression,
+    outer: &BTreeMap<String, Value>,
+    shadowed: bool,
+) -> Result<()> {
+    use crate::query::ScalarExpression;
+    match expression {
+        ScalarExpression::Reference(path) if !shadowed && path == "outer" => {
+            *expression = ScalarExpression::Literal(Value::Record(outer.clone()));
+            Ok(())
+        }
+        ScalarExpression::Reference(path) if !shadowed && path.starts_with("outer.") => {
+            let field = path.strip_prefix("outer.").expect("prefix was checked");
+            let value = row_field(outer, field).ok_or_else(|| {
+                Error::new(
+                    "E_FIELD",
+                    format!("outer field '{field}' disappeared during exists execution"),
+                )
+            })?;
+            *expression = ScalarExpression::Literal(value.clone());
+            Ok(())
+        }
+        ScalarExpression::Reference(_)
+        | ScalarExpression::Parameter { .. }
+        | ScalarExpression::Literal(_) => Ok(()),
+        ScalarExpression::Ascribed { value, .. }
+        | ScalarExpression::Length(value)
+        | ScalarExpression::Negate { value, .. } => replace_outer_scalar(value, outer, shadowed),
+        ScalarExpression::Call { arguments, .. } => {
+            for argument in arguments {
+                replace_outer_scalar(argument, outer, shadowed)?;
+            }
+            Ok(())
+        }
+        ScalarExpression::Arithmetic { left, right, .. } => {
+            replace_outer_scalar(left, outer, shadowed)?;
+            replace_outer_scalar(right, outer, shadowed)
+        }
     }
 }
 

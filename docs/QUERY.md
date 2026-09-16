@@ -37,6 +37,7 @@ take 20
 | 截取 | `take 20` / `take 10..20` / `take 10..=20` | 已实现前 N 行与 Rust 风格半开／闭区间 | — |
 | 稳定分页 | `page 100` / `page 100 after "u1..."` | 已实现有界 keyset page、正反向 opaque cursor、sequence-pinned 一致性 | #114/#131 |
 | 有界关联展开 | `lookup lines from order_lines on order_id == id take 100` | 已实现索引驱动、一致快照、嵌套 typed list 与显式逐行基数上限 | #241 |
+| 有界相关 existence | `filter exists { from items ... }` | 已实现显式 `outer.path`、索引前置、首行短路与 10,000 driver 上限 | #337 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` / `upsert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91/#97 |
 | ADT 派生列 | `derive x = match field {...}` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
@@ -80,7 +81,7 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 query             = "from" table pipeline-stage*
 explain           = "explain" "analyze"? query | "explain" "analyze"? newline indent query dedent
 pipeline-stage    = newline stage | "|" stage
-stage             = local-binding | value-filter | match-filter | derive-expression | derive-match | lookup | aggregate | group-aggregate | select | sort | take | page
+stage             = local-binding | value-filter | exists-filter | match-filter | derive-expression | derive-match | lookup | aggregate | group-aggregate | select | sort | take | page
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
@@ -92,6 +93,7 @@ filter-stage      = value-filter | match-filter
 upsert            = "upsert" (table (record-value | parameter) | "many" table (list-value | parameter))
 
 value-filter      = "filter" nested-bool-expression
+exists-filter     = "filter" "exists" "{" pipeline "}"
 local-binding     = "let" identifier type? "=" (local-parameters "->")? nested-bool-expression
 local-parameters  = binding | "(" local-parameter (separator+ local-parameter)* separator* ")"
 local-parameter   = binding type?
@@ -295,6 +297,7 @@ from tasks | filter id > 1 | take 1
 | `derive` | 追加或替换有静态类型的字段 | 每行求值一次 scalar 或 bool expression，行数与顺序不变 | 仍推导结果类型并检查完整表达式 |
 | `derive name = match source {...}` | 追加或替换有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
 | `lookup` | 追加目标表 row type 的 `list` 字段 | 按索引为每个 driver row 读取有界关联行；driver 行数与顺序不变 | 仍检查表、字段、索引、类型和上限 |
+| `filter exists` | 不变 | 只保留内层目标表至少有一条匹配的 driver row | 仍检查目标表、`outer` 路径、相关键类型、索引和 stage 边界 |
 | `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/sum 为类型化零；min/max 为 None |
 | `group ... { aggregate {...} }` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
@@ -340,7 +343,7 @@ explain analyze
 
 取消、deadline、行数和工作内存上限与普通查询完全相同；执行失败时直接返回对应错误，不返回不完整的分析对象。计数描述 unionid 执行器可观察到的逻辑工作量，不代表物理磁盘读取或分配器精确 RSS。重复测量可比较计划与工作量，wall-clock 时间仍会受机器负载和缓存状态影响。
 
-成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`，以及最终结果 schema。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
+成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`、相关存在过滤 `exists`，以及最终结果 schema。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限；每个 exists 计划公开目标表、相关路径、实际索引和 driver 上限。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
 
 planner 跳过开头的 row-independent `let`，然后只从连续的简单 `field op bound` filter 提取边界；`op` 可以是 `==`、`>`、`>=`、`<` 或 `<=`。复合索引使用从首 component 开始的连续 equality prefix，并在紧邻的下一个 component 上合并至多一组 lower/upper range；range 后或 key gap 后的条件仍作为 residual filter。遇到 compound bool、`filter match`、derive、select、aggregate/group、sort、take 或其他语义边界后停止抽取，也不从 `&&`／`||` 内部拆条件。
 
@@ -619,6 +622,26 @@ select {id, customer, lines}
 
 稳定分页时 lookup 必须放在 page 后面，让引擎先取出有界 driver page，再读取关联；page 后只允许 lookup 和 select。非分页查询应先用 indexed filter 或 take 限制 driver。`explain` 的 `lookups` 可确认目标索引和逐行预算。lookup 不能用于 update/delete target，也不是 SQL 的 inner/left/right/full join。
 
+### 有界相关 exists
+
+`filter exists` 处理“只保留至少有一个匹配子项的任务”一类查询，不把子项装进结果：
+
+```text
+from tasks
+filter exists {
+  from task_items
+  filter task_id == outer.id
+  filter state != Done
+}
+sort id
+```
+
+内层普通字段属于 `task_items`；`outer.id` 明确引用进入 exists stage 时的任务。至少一个内层 filter 必须包含类型一致的 `target.path == outer.path`，目标路径必须是主键或二级索引的首个 component。相关条件可以与其他纯 filter 组合，执行器始终把选中的相关等值条件下推到索引，并在第一条通过 residual filters 的目标行处停止。
+
+一个 exists stage 最多接收 10,000 个 driver rows，沿用同一 committed snapshot、deadline、取消、decode 与 working-memory 限制。首版内层只允许 filter；不支持嵌套 exists、derive、lookup、aggregate、sort、take、page、select，也不支持 mutation target 或 `not exists`。多个普通 filter 和 exists stage 可按 pipeline 顺序表达 conjunction。
+
+`explain` 的 `exists` 数组公开 stage、目标表、`target`/`outer` 相关路径、实际索引和 driver limit；普通 explain 只绑定和规划，不执行目标查询，也不显示外层字段值。完整契约见 [RFC 0018](rfc/0018-bounded-correlated-exists.md)。
+
 ### 有界 keyset page
 
 `page N` 开始正向遍历，N 必须在 1..=1000。查询必须有显式 `sort`，最后一个排序键必须是源表主键；绑定器根据 schema 证明完整 tuple 唯一，不根据当前样本数据猜测。最终 sort 与 page 之间只允许 `select`，page 后只允许上述有界 lookup 和 `select`，因此可以投影掉排序字段而不把主键暴露给客户端。page 不与 `take`、`aggregate`、`group` 或 mutation target 混用。
@@ -677,7 +700,7 @@ take 20
 | `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |
-| `E_RELATION_KEY` / `E_RELATION_LIMIT` | lookup 目标字段没有可用索引，或某个 driver row 的匹配数超过显式 take |
+| `E_RELATION_KEY` / `E_RELATION_LIMIT` | lookup/exists 相关目标字段没有可用索引，或某个 lookup driver row 的匹配数超过显式 take |
 | `E_PAGE_SHAPE` / `E_PAGE_ORDER` | page 位置、limit、组合不合法，或排序既没有以主键收尾，也没有覆盖 equality-fixed prefix 后的完整 unique-index suffix |
 | `E_CURSOR_LIMIT` / `E_CURSOR_CODEC` / `E_CURSOR_INTEGRITY` | cursor 超限、编码无效或 HMAC 验证失败 |
 | `E_CURSOR_DATABASE` / `E_CURSOR_SCHEMA` / `E_CURSOR_QUERY` / `E_CURSOR_STALE` | cursor 的数据库、schema、绑定查询/参数/方向/limit 或 commit sequence 不匹配 |

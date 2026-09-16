@@ -247,6 +247,7 @@ pub struct Pipeline {
 pub enum Stage {
     Let(LocalBinding),
     Filter(BoolExpression),
+    FilterExists(ExistsFilter),
     FilterMatch(MatchPredicate),
     Derive(DeriveExpression),
     DeriveMatch(DeriveMatch),
@@ -256,6 +257,21 @@ pub enum Stage {
     Sort(Vec<SortKey>),
     Take { offset: usize, limit: usize },
     Page(PageSpec),
+}
+
+#[derive(Debug, Clone)]
+pub struct ExistsFilter {
+    pub pipeline: Box<Pipeline>,
+    pub correlations: Vec<ExistsCorrelation>,
+    pub index: Option<String>,
+    pub index_target: Option<String>,
+    pub index_shape: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExistsCorrelation {
+    pub target: String,
+    pub outer: String,
 }
 
 #[derive(Debug, Clone)]

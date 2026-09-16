@@ -68,7 +68,7 @@ select {id, title, state, urgent}
 take 11..31
 ```
 
-Available stages are `let`, `filter`, `filter match`, `derive`, `lookup`, `aggregate`,
+Available stages are `let`, `filter`, `filter exists`, `filter match`, `derive`, `lookup`, `aggregate`,
 `group`, `select`, `sort`, `take`, and `page`. A compact single-line query may join stages
 with `|`. Do not reorder stages: `filter` after `take` observes only the taken rows, and
 fields removed by `select` are unavailable later.
@@ -123,6 +123,21 @@ sort state
 `lookup lines from order_lines on order_id == id take 100` attaches a bounded typed list.
 The target key must be indexed. Unionid intentionally has no general SQL-style flattened
 join.
+
+Use an indexed correlated existence filter when the related rows are not needed in the result:
+
+```text
+from tasks
+filter exists {
+  from task_items
+  filter task_id == outer.id
+  filter state != Done
+}
+```
+
+The inner pipeline currently accepts only `filter`. It must contain a typed equality between
+an indexed target path and an explicit `outer.<path>`. Do not invent `not exists`, nested
+subqueries, or unindexed correlations.
 
 ## Mutation
 
