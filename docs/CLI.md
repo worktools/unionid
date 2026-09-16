@@ -20,6 +20,7 @@ After installing the binary, generate a minimal ADT project in a missing or empt
 ```bash
 unionid init tasks
 cd tasks
+unionid project check --dir .
 unionid migration apply --db data/tasks.redb --dir migrations
 unionid run --db data/tasks.redb --file seed.unid
 unionid run --db data/tasks.redb --file queries/list_running.unid
@@ -30,6 +31,14 @@ unionid check --db data/tasks.redb
 骨架包含规范格式的 `schema.unid`、`migrations/0001_initial.unid`、`seed.unid`、一个直接匹配 enum variant 的 typed query，以及简短双语 README。`init` 会在写入前验证内置 schema、migration、seed 和 query；非空目录、普通文件或路径冲突会明确失败，已有内容保持不变。该命令只创建显式目录中的文件，不搜索工作目录、不创建项目 manifest，也不隐式创建数据库。
 
 The scaffold contains canonical `schema.unid`, `migrations/0001_initial.unid`, `seed.unid`, a typed query that matches an enum variant directly, and a short bilingual README. Before writing, `init` validates its built-in schema, migration, seed, and query. A non-empty directory, regular file, or path conflict fails explicitly and leaves existing content unchanged. The command only creates files under the explicit destination; it performs no working-directory discovery, creates no project manifest, and does not create a database implicitly.
+
+`project check --dir <directory>` 按固定顺序检查 `schema.unid`、`migrations/` 和 `queries/`。它要求源码采用规范格式，验证 migration 历史最终得到声明式 schema，并在同一 schema 上绑定每个 query。命令不搜索父目录、不执行 seed，也不打开或创建数据库。检查最多读取 256 个源码文件、512 个目录项和 16 层 query 目录；单文件沿用 1 MiB 源码限制，项目源码合计不超过 8 MiB。`--format json` 返回 version 1 报告，错误只携带相对路径、稳定错误码和可用时的源码 span。
+
+`project check --dir <directory>` validates `schema.unid`, `migrations/`, and `queries/` in that fixed order. It requires canonical formatting, proves that the migration history reaches the declarative schema, and binds every query against that schema. It never searches parent directories, executes seed data, or opens or creates a database. A check reads at most 256 source files, 512 directory entries, and 16 query-directory levels; each file retains the 1 MiB source limit and total project source is capped at 8 MiB. `--format json` emits a version-1 report whose errors contain only a relative path, stable error code, and source span.
+
+Use `project check` for source contracts before a database exists. Use `doctor --db` for a non-mutating compatibility summary from a private copy of an existing database. Use `check --db` when the original database is offline and must pass full physical and logical integrity checks.
+
+数据库创建前用 `project check` 检查源码契约；已有数据库的非修改兼容性摘要用 `doctor --db`；需要对离线原数据库执行完整物理与逻辑完整性检查时用 `check --db`。
 
 ## 版本与部署诊断
 

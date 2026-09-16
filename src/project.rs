@@ -5,6 +5,14 @@ use std::path::{Path, PathBuf};
 use crate::migration::MigrationFile;
 use crate::{Engine, QueryResponse};
 
+mod check;
+
+pub use check::{
+    MAX_PROJECT_ENTRIES, MAX_PROJECT_FILES, MAX_PROJECT_QUERY_DEPTH, MAX_PROJECT_SOURCE_BYTES,
+    PROJECT_CHECK_VERSION, ProjectCheckError, ProjectCheckPhase, ProjectCheckReport,
+    ProjectCheckStage, ProjectCheckStatus, check,
+};
+
 const STARTER_SCHEMA: &str = r#"type State =
   Pending
   | Running {
@@ -70,6 +78,7 @@ This project shows Unionid's core path: define data with algebraic data types, a
 From this directory / 在当前目录运行：
 
 ```sh
+unionid project check --dir .
 unionid migration apply --db data/tasks.redb --dir migrations
 unionid run --db data/tasks.redb --file seed.unid
 unionid run --db data/tasks.redb --file queries/list_running.unid
@@ -101,6 +110,7 @@ pub fn init(directory: impl AsRef<Path>) -> Result<(), String> {
 
     println!("initialized Unionid project at {}", directory.display());
     println!("run these commands from that directory:");
+    println!("  unionid project check --dir .");
     println!("  unionid migration apply --db data/tasks.redb --dir migrations");
     println!("  unionid run --db data/tasks.redb --file seed.unid");
     println!("  unionid run --db data/tasks.redb --file queries/list_running.unid");

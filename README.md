@@ -127,14 +127,15 @@ Rust 1.94 or newer is required. Install v0.5.0 directly from crates.io, then gen
 cargo install unionid --version 0.5.0 --locked
 unionid init tasks
 cd tasks
+unionid project check --dir .
 unionid migration apply --db data/tasks.redb --dir migrations
 unionid run --db data/tasks.redb --file seed.unid
 unionid run --db data/tasks.redb --file queries/list_running.unid
 ```
 
-`init` 只接受不存在或空目录，不会覆盖已有文件，并在完成后输出可复制的后续命令。`run` 默认使用临时内存库；传入 redb 路径即可持久化。一个源码请求是一个原子批次。
+`init` 只接受不存在或空目录，不会覆盖已有文件，并在完成后输出可复制的后续命令。`project check` 一次检查声明式 schema、完整 migration 链和全部静态 query，不打开或创建数据库。`run` 默认使用临时内存库；传入 redb 路径即可持久化。一个源码请求是一个原子批次。
 
-`init` accepts only a missing or empty directory, never overwrites existing files, and prints copy-pasteable next commands. `run` uses a fresh in-memory database by default; pass a redb path for durable use. One source request is one atomic batch.
+`init` accepts only a missing or empty directory, never overwrites existing files, and prints copy-pasteable next commands. `project check` validates the declarative schema, complete migration chain, and every static query in one command without opening or creating a database. `run` uses a fresh in-memory database by default; pass a redb path for durable use. One source request is one atomic batch.
 
 ```bash
 unionid run --db ./data/app.redb --file examples/tasks.unid

@@ -131,6 +131,17 @@ enum RestoreCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    /// Validate schema, migrations, and queries without opening a database. / 不打开数据库，检查 schema、migration 和 query。
+    Check {
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Print software, protocol, storage, codec, and target versions.
     Version {
@@ -146,6 +157,11 @@ enum Command {
     },
     /// Create a runnable starter project in a new or empty directory. / 在新目录或空目录创建可运行的入门项目。
     Init { directory: PathBuf },
+    /// Work with a Unionid source project. / 操作 Unionid 源码项目。
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
     Server {
         #[arg(long, default_value = "127.0.0.1:7878")]
         addr: String,
@@ -608,6 +624,9 @@ impl Args {
             },
             Command::Version { format }
             | Command::Doctor { format, .. }
+            | Command::Project {
+                command: ProjectCommand::Check { format, .. },
+            }
             | Command::Upgrade { format, .. }
             | Command::ImportLegacy { format, .. }
             | Command::Receipts {
@@ -796,6 +815,7 @@ fn run(args: Args) -> Result<(), String> {
         Command::Version { format } => print_version(matches!(format, Format::Json)),
         Command::Doctor { db, format } => doctor(db, matches!(format, Format::Json)),
         Command::Init { directory } => project::init(directory),
+        Command::Project { .. } => unreachable!("project commands are handled before run"),
         Command::Server {
             addr,
             db,
@@ -1106,6 +1126,55 @@ fn run(args: Args) -> Result<(), String> {
     }
 }
 
+fn run_project_command(args: &Args) -> Option<i32> {
+    let Command::Project { command } = &args.command else {
+        return None;
+    };
+    let ProjectCommand::Check { dir, format } = command;
+    let report = project::check(dir);
+    if matches!(format, Format::Json) {
+        println!(
+            "{}",
+            serde_json::to_string(&report).expect("project check report serialization cannot fail")
+        );
+    } else {
+        for stage in &report.stages {
+            let phase = match stage.phase {
+                project::ProjectCheckPhase::Schema => "schema",
+                project::ProjectCheckPhase::Migrations => "migrations",
+                project::ProjectCheckPhase::Queries => "queries",
+            };
+            let status = match stage.status {
+                project::ProjectCheckStatus::NotChecked => "not checked",
+                project::ProjectCheckStatus::Passed => "passed",
+                project::ProjectCheckStatus::Failed => "failed",
+            };
+            println!(
+                "{phase}: {status} ({} files, {} bytes)",
+                stage.files, stage.source_bytes
+            );
+        }
+        if let Some(error) = &report.error {
+            if let Some(span) = error.span {
+                eprintln!(
+                    "{}: {}: {} (line {}, column {})",
+                    error.path, error.code, error.message, span.line, span.column
+                );
+            } else {
+                eprintln!("{}: {}: {}", error.path, error.code, error.message);
+            }
+        } else {
+            println!("project check ok");
+        }
+    }
+    Some(
+        report
+            .error
+            .as_ref()
+            .map_or(0, |error| classify_exit(&error.code, false)),
+    )
+}
+
 fn main() {
     let raw = std::env::args_os().collect::<Vec<_>>();
     let json_requested = raw.iter().any(|argument| argument == "--format=json")
@@ -1139,6 +1208,12 @@ fn main() {
             std::process::exit(exit_code);
         }
     };
+    if let Some(exit_code) = run_project_command(&args) {
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return;
+    }
     let output = args.error_output();
     if let Err(error) = run(args) {
         exit_error(error, output, None);
