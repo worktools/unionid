@@ -1,6 +1,6 @@
 # 当前可运行的语言预览
 
-本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.uid)、[任务修改](../examples/task_mutations.uid)、[schema migration](../examples/schema_migration.uid)、[后台队列](../examples/job_queue.uid)、[配置](../examples/config.uid)、[事件](../examples/events.uid)、[同步冲突](../examples/sync_conflicts.uid)、[有限递归树](../examples/recursive_tree.uid)、[UUID/bytes 内容元数据](../examples/content_metadata.uid)、[时间/session](../examples/session_events.uid)、[decimal 账单](../examples/invoices.uid)。
+本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.unid)、[任务修改](../examples/task_mutations.unid)、[schema migration](../examples/schema_migration.unid)、[后台队列](../examples/job_queue.unid)、[配置](../examples/config.unid)、[事件](../examples/events.unid)、[同步冲突](../examples/sync_conflicts.unid)、[有限递归树](../examples/recursive_tree.unid)、[UUID/bytes 内容元数据](../examples/content_metadata.unid)、[时间/session](../examples/session_events.unid)、[decimal 账单](../examples/invoices.unid)。
 
 当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys (aggregate {...})`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`not/and/or`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
@@ -269,12 +269,12 @@ Rust 客户端可以调用 `unionid::input_status(source)`，在执行前得到 
 ## 本地与 TCP
 
 ```bash
-cargo run -- run --file examples/tasks.uid
-cargo run -- run --file examples/config.uid --format json
-cargo run -- run --file examples/events.uid
-cargo run -- run --file examples/sync_conflicts.uid
-cargo run -- run --file examples/task_mutations.uid
-cargo run -- fmt --file examples/tasks.uid --check
+cargo run -- run --file examples/tasks.unid
+cargo run -- run --file examples/config.unid --format json
+cargo run -- run --file examples/events.unid
+cargo run -- run --file examples/sync_conflicts.unid
+cargo run -- run --file examples/task_mutations.unid
+cargo run -- fmt --file examples/tasks.unid --check
 cargo run -- cli --memory
 cargo run --example embedded
 cargo run --example parameters
@@ -284,7 +284,7 @@ cargo run --example parameters
 
 ```bash
 cargo run -- server --addr 127.0.0.1:7878
-cargo run -- cli --addr 127.0.0.1:7878 --file examples/tasks.uid
+cargo run -- cli --addr 127.0.0.1:7878 --file examples/tasks.unid
 ```
 
 TCP 的稳定客户端入口是 [JSON Lines version 1](PROTOCOL.md)：请求包含 `version/request_id/query/params` 和可选 schema 前置条件，响应回显 ID，并以独立 wire codec 无损编码 ADT 与 i64。JSON 中的换行不会被压平。服务暂时兼容 `{"query":"..."}` 和旧纯文本单行请求。

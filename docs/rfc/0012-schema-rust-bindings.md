@@ -32,7 +32,7 @@
 
 ### 4. 验证
 
-- `codegen::rust` 对 `examples/schema.uid`、递归 ADT、六类标量、关键字字段名生成正确的 Rust。
+- `codegen::rust` 对 `examples/schema.unid`、递归 ADT、六类标量、关键字字段名生成正确的 Rust。
 - CLI `--file`、`--db`、`--output` 三条路径经真实子进程验证。
 - 非 schema 脚本返回 `E_SCHEMA`。
 
@@ -139,7 +139,7 @@ Codegen first because it needs no crate-structure change, is testable without ma
 
 ### 4. Validation
 
-- `codegen::rust` emits correct Rust for `examples/schema.uid`, recursive ADTs, the six scalars, and keyword field names.
+- `codegen::rust` emits correct Rust for `examples/schema.unid`, recursive ADTs, the six scalars, and keyword field names.
 - The CLI `--file`, `--db`, and `--output` paths are verified through real subprocesses.
 - Non-schema scripts return `E_SCHEMA`.
 

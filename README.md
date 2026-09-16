@@ -24,9 +24,9 @@ It is designed around two defining ideas:
 
 A task state therefore does not need to be simulated with `status = "running"` and nullable payload columns. The schema describes every valid shape precisely, and queries match those shapes directly.
 
-当前还可直接声明 `uuid`、`bytes`、`date`、`timestamp`、`duration` 与 `decimal P S`：UUID 可作为主键，bytes 支持索引与二进制查询，temporal 值提供显式 offset，decimal 提供固定 scale 与 checked 精确算术。可运行示例见 [`content_metadata.uid`](examples/content_metadata.uid)、[`session_events.uid`](examples/session_events.uid) 与 [`invoices.uid`](examples/invoices.uid)。
+当前还可直接声明 `uuid`、`bytes`、`date`、`timestamp`、`duration` 与 `decimal P S`：UUID 可作为主键，bytes 支持索引与二进制查询，temporal 值提供显式 offset，decimal 提供固定 scale 与 checked 精确算术。可运行示例见 [`content_metadata.unid`](examples/content_metadata.unid)、[`session_events.unid`](examples/session_events.unid) 与 [`invoices.unid`](examples/invoices.unid)。
 
-The executable language also supports native `uuid`, `bytes`, `date`, `timestamp`, `duration`, and `decimal P S`: UUIDs can be primary keys, bytes support indexed binary queries, temporal values use explicit offsets, and decimals provide fixed-scale checked arithmetic. See [`content_metadata.uid`](examples/content_metadata.uid), [`session_events.uid`](examples/session_events.uid), and [`invoices.uid`](examples/invoices.uid).
+The executable language also supports native `uuid`, `bytes`, `date`, `timestamp`, `duration`, and `decimal P S`: UUIDs can be primary keys, bytes support indexed binary queries, temporal values use explicit offsets, and decimals provide fixed-scale checked arithmetic. See [`content_metadata.unid`](examples/content_metadata.unid), [`session_events.unid`](examples/session_events.unid), and [`invoices.unid`](examples/invoices.unid).
 
 ## ADT 数据模型与查询 / ADT data model and queries
 
@@ -127,7 +127,7 @@ Rust 1.94 or newer is required. After publication, v0.5.0 can be installed direc
 cargo install unionid --version 0.5.0 --locked
 git clone --depth 1 https://github.com/worktools/unionid.git
 cd unionid
-unionid run --file examples/tasks.uid
+unionid run --file examples/tasks.unid
 ```
 
 `run` 默认使用临时内存库；传入 redb 路径即可持久化。一个源码请求是一个原子批次。
@@ -135,7 +135,7 @@ unionid run --file examples/tasks.uid
 `run` uses a fresh in-memory database by default; pass a redb path for durable use. One source request is one atomic batch.
 
 ```bash
-unionid run --db ./data/app.redb --file examples/tasks.uid
+unionid run --db ./data/app.redb --file examples/tasks.unid
 unionid run --db ./data/app.redb --query 'from tasks | filter id == 1'
 unionid cli --db ./data/app.redb
 unionid check --db ./data/app.redb

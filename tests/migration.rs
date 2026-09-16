@@ -328,7 +328,7 @@ fn executable_schema_migration_example() {
     let mut engine = Engine::memory();
     let response = ok(
         &mut engine,
-        include_str!("../examples/schema_migration.uid"),
+        include_str!("../examples/schema_migration.unid"),
     );
     assert_eq!(response.rows.len(), 1);
     assert!(response.rows[0]["priority"].cmp_eq(&Value::Int(0)));

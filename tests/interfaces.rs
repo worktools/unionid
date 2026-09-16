@@ -17,7 +17,7 @@ use unionid::{
 #[test]
 fn local_cli_executes_file_and_reports_errors_with_nonzero_status() {
     let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
-        .args(["run", "--file", "examples/tasks.uid", "--format", "json"])
+        .args(["run", "--file", "examples/tasks.unid", "--format", "json"])
         .output()
         .unwrap();
     assert!(
@@ -790,7 +790,7 @@ fn multiline_stdin_is_a_single_atomic_batch() {
         .stdin
         .take()
         .unwrap()
-        .write_all(include_bytes!("../examples/tasks.uid"))
+        .write_all(include_bytes!("../examples/tasks.unid"))
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
@@ -801,7 +801,7 @@ fn multiline_stdin_is_a_single_atomic_batch() {
 #[test]
 fn tcp_and_embedded_engine_have_identical_typed_results() {
     let server = Server::start(&[]);
-    let script = include_str!("../examples/tasks.uid");
+    let script = include_str!("../examples/tasks.unid");
     let remote = cli::send_one(&server.addr, script).unwrap();
     let local = Engine::memory().execute(script);
     assert!(remote.ok, "{}", remote.message);
@@ -859,7 +859,7 @@ fn server_restart_recovers_typed_data_and_index() {
     ];
     {
         let server = Server::start(&args);
-        let response = cli::send_one(&server.addr, include_str!("../examples/tasks.uid")).unwrap();
+        let response = cli::send_one(&server.addr, include_str!("../examples/tasks.unid")).unwrap();
         assert!(response.ok);
     }
     let server = Server::start(&args);

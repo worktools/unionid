@@ -3,37 +3,37 @@ use unionid::{Engine, format_source};
 #[test]
 fn formatter_is_idempotent_for_current_examples() {
     for (name, source) in [
-        ("tasks", include_str!("../examples/tasks.uid")),
-        ("config", include_str!("../examples/config.uid")),
-        ("events", include_str!("../examples/events.uid")),
-        ("job_queue", include_str!("../examples/job_queue.uid")),
-        ("sync", include_str!("../examples/sync_conflicts.uid")),
+        ("tasks", include_str!("../examples/tasks.unid")),
+        ("config", include_str!("../examples/config.unid")),
+        ("events", include_str!("../examples/events.unid")),
+        ("job_queue", include_str!("../examples/job_queue.unid")),
+        ("sync", include_str!("../examples/sync_conflicts.unid")),
         (
             "content_metadata",
-            include_str!("../examples/content_metadata.uid"),
+            include_str!("../examples/content_metadata.unid"),
         ),
         (
             "session_events",
-            include_str!("../examples/session_events.uid"),
+            include_str!("../examples/session_events.unid"),
         ),
-        ("invoices", include_str!("../examples/invoices.uid")),
-        ("mutations", include_str!("../examples/task_mutations.uid")),
+        ("invoices", include_str!("../examples/invoices.unid")),
+        ("mutations", include_str!("../examples/task_mutations.unid")),
         (
             "recursive_tree",
-            include_str!("../examples/recursive_tree.uid"),
+            include_str!("../examples/recursive_tree.unid"),
         ),
-        ("schema", include_str!("../examples/schema.uid")),
+        ("schema", include_str!("../examples/schema.unid")),
         (
             "schema_migration",
-            include_str!("../examples/schema_migration.uid"),
+            include_str!("../examples/schema_migration.unid"),
         ),
         (
             "migration_initial",
-            include_str!("../examples/migrations/0001_initial.uid"),
+            include_str!("../examples/migrations/0001_initial.unid"),
         ),
         (
             "migration_priority",
-            include_str!("../examples/migrations/0002_add_priority.uid"),
+            include_str!("../examples/migrations/0002_add_priority.unid"),
         ),
     ] {
         let formatted = format_source(source).unwrap_or_else(|error| panic!("{name}: {error}"));

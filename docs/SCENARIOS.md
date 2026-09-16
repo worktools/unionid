@@ -40,13 +40,13 @@ type Job =
 
 常见工作流：
 
-- 查找可运行任务：解构 `Queued`，比较 `scheduled_at`，按 priority、时间和 id 排序后取一页，并把状态派生为统一的 text 标签。失败任务可直接用 `Failed {error = Network {message}, retry_at = Some at}` 解构嵌套失败原因和重试时间。当前完整示例见 [job_queue.uid](../examples/job_queue.uid)。
+- 查找可运行任务：解构 `Queued`，比较 `scheduled_at`，按 priority、时间和 id 排序后取一页，并把状态派生为统一的 text 标签。失败任务可直接用 `Failed {error = Network {message}, retry_at = Some at}` 解构嵌套失败原因和重试时间。当前完整示例见 [job_queue.unid](../examples/job_queue.unid)。
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行；`explain from jobs | filter id == "job-a" | take 1` 可验证 lookup、候选数和结果 schema。
 - 原子 claim：按旧状态筛选，`sort {-priority, scheduled_at, id} | take 1` 稳定选出下一条，再用 `set state = match state {...}` 把 `Queued` 改成 `Running`。末尾 `returning {id, state}` 在同一请求中返回命中的新状态；没有候选时得到稳定 columns、空 rows 和 affected_rows 0，无需先查询 ID。
 - 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter (match state {...})` 组合即可限定状态。
 - 复用业务判断：`let important = value -> value >= 10` 和 `let has_tag = (values list text, tag text) -> contains values tag` 可在当前 pipeline 后续的 filter、derive 与 aggregate 输入中重复调用，避免复制长条件。
 - 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
-- 按状态计数：`derive state_label = match state {...}` 把 sum 分支归一为状态名，再用 `group state_label (aggregate {...})` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.uid](../examples/job_queue.uid)。
+- 按状态计数：`derive state_label = match state {...}` 把 sum 分支归一为状态名，再用 `group state_label (aggregate {...})` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.unid](../examples/job_queue.unid)。
 
 列表查询必须提供唯一的最终排序键，例如 `sort {-priority, created_at, id}`。只按 priority 分页会让相同优先级的跨请求边界不稳定。
 
@@ -86,7 +86,7 @@ type ServiceConfig =
 - 按 environment、owner 和固定 record 路径筛选；普通 record 路径当前已支持，option 需要 #35 显式解构。
 - 只列出 HTTP 服务并投影 `base_url`；需要 #35 的 match expression，因为字段只存在于 `Http` 分支。
 - 判断某个完整 header 或 validation issue 是否存在可用 `contains`；按元素字段筛选可用 `any headers (header -> header.name == "authorization")`。若 `headers` 位于 sum payload 中，先用 `filter (match ... {...})` 建立 list binding，再在 condition 中使用 `any/all`。
-- 整体 upsert 一份配置并校验嵌套类型；当前按主键插入或完整替换，示例见 [`config.uid`](../examples/config.uid)。
+- 整体 upsert 一份配置并校验嵌套类型；当前按主键插入或完整替换，示例见 [`config.unid`](../examples/config.unid)。
 - 把 `Bearer` 改名或给 `Http` 增加字段；身份保留、回填和转换属于 #17–#19。
 
 密码值本身不应默认明文保存；`SecretRef` 表达引用来源。静态加密和访问控制不是 ADT 能自动解决的问题。
@@ -119,7 +119,7 @@ type Event =
   delivery DeliveryState = Pending
 ```
 
-常见工作流包括批量接收事件、筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。`insert many events $rows` 可从 Rust/TCP 一次提交 typed `list Event`，逐行补默认 delivery 并在整批主键验证后原子写入；literal 示例见 [events.uid](../examples/events.uid)。当前 `filter (match ... {...})` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，来源统计可用 `group source (aggregate {...})`。
+常见工作流包括批量接收事件、筛选 `InvoicePaid` 金额、为不同 payload 派生摘要、列出下一批 Pending 事件、追加投递失败、统计来源和清理过期记录。`insert many events $rows` 可从 Rust/TCP 一次提交 typed `list Event`，逐行补默认 delivery 并在整批主键验证后原子写入；literal 示例见 [events.unid](../examples/events.unid)。当前 `filter (match ... {...})` 能筛选单 record 负载并在 condition 中组合布尔、比较和集合判断；`DeadLetter {failures}` 分支可用 `any failures (failure -> failure == Timeout {after_ms = 5000})` 检查元素。状态更新与保留期删除已经可执行，来源统计可用 `group source (aggregate {...})`。
 
 ## 4. 离线同步与冲突状态
 
@@ -147,7 +147,7 @@ type Workspace =
   last_sync option int = None
 ```
 
-常见查询是列出全部 Conflict 并提取双方 change、查找 changes 中触及某路径的 Dirty workspace、按 `last_sync` 找未同步项，以及原子提交一次冲突解决。[sync_conflicts.uid](../examples/sync_conflicts.uid) 已用同一个 `Conflict` constructor 的三个互补嵌套分支完整覆盖 local change 并派生类型化标签；`Dirty {changes}` 的 condition 可用 `any changes (change -> change == Added {path = $path, hash = $hash})`，`is_none last_sync` 可检查未同步状态。条件 update 已复用同一表达式。
+常见查询是列出全部 Conflict 并提取双方 change、查找 changes 中触及某路径的 Dirty workspace、按 `last_sync` 找未同步项，以及原子提交一次冲突解决。[sync_conflicts.unid](../examples/sync_conflicts.unid) 已用同一个 `Conflict` constructor 的三个互补嵌套分支完整覆盖 local change 并派生类型化标签；`Dirty {changes}` 的 condition 可用 `any changes (change -> change == Added {path = $path, hash = $hash})`，`is_none last_sync` 可检查未同步状态。条件 update 已复用同一表达式。
 
 ## 5. Session、缓存与功能开关
 
@@ -216,7 +216,7 @@ table documents Document
   key id
 ```
 
-[recursive_tree.uid](../examples/recursive_tree.uid) 构造多层 Branch/Leaf 值，用递归 pattern 区分根节点并派生统一标签，还验证完整值的精确二级索引。相同机制可表达 `cause option Error` 的有限原因链，或 `Literal | All (list Rule) | Not Rule` 的规则 AST。
+[recursive_tree.unid](../examples/recursive_tree.unid) 构造多层 Branch/Leaf 值，用递归 pattern 区分根节点并派生统一标签，还验证完整值的精确二级索引。相同机制可表达 `cause option Error` 的有限原因链，或 `Literal | All (list Rule) | Not Rule` 的规则 AST。
 
 这些值没有对象身份、共享节点或循环边，并受 64 层值预算约束。当前查询可以在源码中写出已知深度的 pattern，不提供任意深度遍历、递归函数或 subtree 路径索引；需要频繁跨节点查询的任意图仍应拆表或交给应用代码。类型有效性、codec、migration 与 backup 规则见 [RFC 0001](rfc/0001-finite-recursive-adts.md)。
 
@@ -240,11 +240,11 @@ table payments Payment
 
 它覆盖几类反复出现的操作：UUIDv4/v7 可作为分布式写入产生的稳定 key；带 offset 的事件时间在插入时规范为同一个 UTC instant；账单金额按固定 scale 精确求和并在溢出时整体失败；retry duration 保持单位；digest 以 bytes 做精确匹配，避免 hex 大小写造成两个逻辑 key。应用仍可用 `type InvoiceId = uuid`、`type Currency = CNY | USD` 和 `{amount decimal 18 2, currency Currency}` 保留领域约束。
 
-[content_metadata.uid](../examples/content_metadata.uid) 已执行 UUID 主键、unique bytes digest、二进制子序列筛选和 octet 长度派生。UUID/bytes 也已覆盖 Rust serde 参数与结果、version 2 wire、redb 重开、backup/restore、cursor、聚合和显式 migration parse；任何普通、unique 或主键索引中的 bytes 值限制为 8192 octets，超限以 `E_INDEX_KEY_LIMIT` 原子失败，未索引值仍使用通用 16 MiB 上限。
+[content_metadata.unid](../examples/content_metadata.unid) 已执行 UUID 主键、unique bytes digest、二进制子序列筛选和 octet 长度派生。UUID/bytes 也已覆盖 Rust serde 参数与结果、version 2 wire、redb 重开、backup/restore、cursor、聚合和显式 migration parse；任何普通、unique 或主键索引中的 bytes 值限制为 8192 octets，超限以 `E_INDEX_KEY_LIMIT` 原子失败，未索引值仍使用通用 16 MiB 上限。
 
-[session_events.uid](../examples/session_events.uid) 用显式 offset timestamp 表达 session 打开/过期时间，用 exact duration 表达 retry delay，并派生下一次重试 instant 与 session lifetime。date 保持 civil day，不隐式转成午夜 instant；timestamp 输入规范为 UTC 微秒，不读取本地时区或 DST 数据；duration/timestamp 算术与 duration sum 全部 checked。
+[session_events.unid](../examples/session_events.unid) 用显式 offset timestamp 表达 session 打开/过期时间，用 exact duration 表达 retry delay，并派生下一次重试 instant 与 session lifetime。date 保持 civil day，不隐式转成午夜 instant；timestamp 输入规范为 UTC 微秒，不读取本地时区或 DST 数据；duration/timestamp 算术与 duration sum 全部 checked。
 
-[invoices.uid](../examples/invoices.uid) 用 `decimal 18 2` 保存 subtotal/fee，并用 `Currency = CNY | USD` 明确货币单位；金额加法保持同一 scale，每一步检查 precision。它不会把不同 currency 相加，也不把 currency 暗藏在 decimal scalar 中。
+[invoices.unid](../examples/invoices.unid) 用 `decimal 18 2` 保存 subtotal/fee，并用 `Currency = CNY | USD` 明确货币单位；金额加法保持同一 scale，每一步检查 precision。它不会把不同 currency 相加，也不把 currency 暗藏在 decimal scalar 中。
 
 迁移场景必须验证已有 text/int 数据，而不是把 cast 隐藏在类型变化中。例如 text ID 通过 `uuid_parse old` 转换，旧 amount text 通过 `decimal_parse old 18 2` 转换；任一坏行会阻止 schema、数据、索引和 ledger 发布。wire、redb、backup、cursor 与旧版本兼容边界由 RFC 的 golden vectors 一起验收。
 

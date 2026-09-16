@@ -12,7 +12,7 @@ unionid 已经能在 Rust、protocol v2 和持久 codec 中无损表示 ADT，�
 
 ### 2. 决策
 
-version 1 `SchemaDescription` 直接从当前 catalog/type IR 产生，包含 schema revision/hash、命名类型、表、主键、索引、默认值和完整类型形状。`unionid schema describe --file <schema.uid>` 描述声明文件，`--db <db.redb>` 以只读方式描述 live catalog；两者输出同一 JSON 结构。Rust API 为 `portable::describe`、`PortableContract::from_source` 和 `Engine::portable_contract`。
+version 1 `SchemaDescription` 直接从当前 catalog/type IR 产生，包含 schema revision/hash、命名类型、表、主键、索引、默认值和完整类型形状。`unionid schema describe --file <schema.unid>` 描述声明文件，`--db <db.redb>` 以只读方式描述 live catalog；两者输出同一 JSON 结构。Rust API 为 `portable::describe`、`PortableContract::from_source` 和 `Engine::portable_contract`。
 
 schema revision 以及类型、字段、变体、表和索引 ID 使用十进制字符串，避免普通 JSON number 的精度损失。主键和索引同时给出名称与稳定 field-ID path。根对象明确声明 `database_local_catalog` 和 `globally_stable: false`：ID 只在同一数据库的 migration lineage 内稳定，不是 Rust `TypeId`、应用领域 ID 或跨数据库全局 ID。命名 scalar/newtype 的领域身份由命名 type ref 表达；内部 catalog ID 不进入 serde 领域对象。
 
@@ -66,7 +66,7 @@ schema revision 以及类型、字段、变体、表和索引 ID 使用十进制
 
 unionid already preserves ADTs through Rust, protocol v2, and durable codecs, but generators need a stable machine-readable input. Requiring every SDK to parse formatted schema source duplicates language logic, while treating Rust types, `TypeId`, serde details, or ordinary JSON numbers as the portable contract loses identity or precision. A successful migration alone also says nothing about old queries, readers, or writers.
 
-Version 1 `SchemaDescription` is emitted directly from the current catalog/type IR. It contains schema revision/hash, named types, tables, primary keys, indexes, defaults, and complete type shapes. `unionid schema describe --file <schema.uid>` describes a declaration file; `--db <db.redb>` opens an existing live catalog read-only. The Rust APIs are `portable::describe`, `PortableContract::from_source`, and `Engine::portable_contract`.
+Version 1 `SchemaDescription` is emitted directly from the current catalog/type IR. It contains schema revision/hash, named types, tables, primary keys, indexes, defaults, and complete type shapes. `unionid schema describe --file <schema.unid>` describes a declaration file; `--db <db.redb>` opens an existing live catalog read-only. The Rust APIs are `portable::describe`, `PortableContract::from_source`, and `Engine::portable_contract`.
 
 Schema revision and all catalog IDs are unsigned decimal strings to avoid JSON-number precision loss. Primary keys and indexes carry both names and stable field-ID paths. The root explicitly says `database_local_catalog` and `globally_stable: false`: IDs remain meaningful only within one database migration lineage. They are not Rust `TypeId`, application domain IDs, or globally comparable IDs. Named scalar/newtype identity remains a named type reference without leaking catalog IDs into serde domain objects.
 

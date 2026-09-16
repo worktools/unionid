@@ -703,26 +703,26 @@ filter (
 
 | 场景 | 示例 | 覆盖内容 | 自动验证 |
 | --- | --- | --- | --- |
-| 任务状态 | [tasks.uid](../examples/tasks.uid) | sum、record、option/list、braced match、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
-| 嵌套配置 | [config.uid](../examples/config.uid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
-| 事件记录 | [events.uid](../examples/events.uid) | typed 批量 insert、sum 完整值比较、typed derive 和字符串中的 `|` | `tests/language.rs::executable_examples`、`typed_bulk_insert_*`、`versioned_tcp_bulk_inserts_*` |
-| 后台任务队列 | [job_queue.uid](../examples/job_queue.uid) | 嵌套 sum/record/option/list、局部纯函数、布尔/集合 filter、普通与 ADT derive、group/aggregate、typed arithmetic、嵌套 pattern、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
-| 离线同步冲突 | [sync_conflicts.uid](../examples/sync_conflicts.uid) | 同一 `Conflict` constructor 的互补嵌套分支、typed derive 与 Option | `tests/language.rs::executable_examples` |
+| 任务状态 | [tasks.unid](../examples/tasks.unid) | sum、record、option/list、braced match、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
+| 嵌套配置 | [config.unid](../examples/config.unid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
+| 事件记录 | [events.unid](../examples/events.unid) | typed 批量 insert、sum 完整值比较、typed derive 和字符串中的 `\|` | `tests/language.rs::executable_examples`、`typed_bulk_insert_*`、`versioned_tcp_bulk_inserts_*` |
+| 后台任务队列 | [job_queue.unid](../examples/job_queue.unid) | 嵌套 sum/record/option/list、局部纯函数、布尔/集合 filter、普通与 ADT derive、group/aggregate、typed arithmetic、嵌套 pattern、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
+| 离线同步冲突 | [sync_conflicts.unid](../examples/sync_conflicts.unid) | 同一 `Conflict` constructor 的互补嵌套分支、typed derive 与 Option | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
 | 模式检查 | 测试内脚本 | 嵌套穷尽性、不可达分支、积类型相关性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*`、`complementary_nested_*`、`nested_pattern_coverage_*` |
 | ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
-| 普通派生 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | scalar/bool 结果、命名类型、完整 ADT 复制、typed 参数、短路、空表检查和后续 stage 作用域 | `regular_derives_*` |
-| 分组汇总 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | count/sum/min/max、命名数值、ADT key、空输入、溢出、后续 stage 与资源上限 | `basic_aggregates_*`、`grouped_aggregates_*`、`aggregates_reject_*`、`aggregate_group_limits_*` |
-| 查询局部定义 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | 常量、单/多参数纯函数、match binding、aggregate 输入、显式类型、词法遮蔽、prepared 参数、调用与展开预算 | `query_local_*`、`local_function_*`、`prepared_queries_infer_parameters_through_local_functions` |
-| 布尔与集合表达式 | [job_queue.uid](../examples/job_queue.uid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
-| 数值表达式 | [invoices.uid](../examples/invoices.uid) 与测试内脚本 | int/float/decimal 类型、固定 scale、逐步 precision、优先级、跨行括号、整数除法、短路及运行时错误 | `decimal_*`、`typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
+| 普通派生 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | scalar/bool 结果、命名类型、完整 ADT 复制、typed 参数、短路、空表检查和后续 stage 作用域 | `regular_derives_*` |
+| 分组汇总 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | count/sum/min/max、命名数值、ADT key、空输入、溢出、后续 stage 与资源上限 | `basic_aggregates_*`、`grouped_aggregates_*`、`aggregates_reject_*`、`aggregate_group_limits_*` |
+| 查询局部定义 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 常量、单/多参数纯函数、match binding、aggregate 输入、显式类型、词法遮蔽、prepared 参数、调用与展开预算 | `query_local_*`、`local_function_*`、`prepared_queries_infer_parameters_through_local_functions` |
+| 布尔与集合表达式 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
+| 数值表达式 | [invoices.unid](../examples/invoices.unid) 与测试内脚本 | int/float/decimal 类型、固定 scale、逐步 precision、优先级、跨行括号、整数除法、短路及运行时错误 | `decimal_*`、`typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
 | 列表分页 | 测试内脚本 | 嵌套多键排序、一基闭区间、兼容语法和空表错误 | `multi_key_sort_*`、`sort_keys_and_take_ranges_*` |
 | 稳定游标分页 | HTTP todolist 与接口测试 | typed page helper、重复排序前缀、正反向、redb 重开、TCP/HTTP 断开、deadline、migration 和 cursor 错误 | `tests/pagination.rs`、`tests/pagination_interfaces.rs`、`examples/todolist.rs` |
-| UUID 与二进制 metadata | [content_metadata.uid](../examples/content_metadata.uid) | UUID 主键、hex bytes、unique index、contains/length、typed protocol v2、cursor、migration 与 backup/restore | `tests/uuid_bytes.rs` |
-| 原子修改 | [task_mutations.uid](../examples/task_mutations.uid) 与测试内脚本 | typed/nested/simultaneous set、match target、穷尽 ADT match assignment、顶层保留 binding、typed 参数、主键冲突、运行时回滚、索引维护、稳定 RowId、TCP 和 redb 重开 | `update_*`、`failed_multi_row_updates_*`、`versioned_tcp_updates_*`、`adt_match_updates_*`、`redb_update_delete_*` |
-| 主键 Upsert | [config.uid](../examples/config.uid) 与测试内脚本 | insert/replace action、完整 row 默认值、重复执行、回滚、索引更新、RowId/cursor 和 redb 重开 | `upsert_*`、`local_cli_reports_the_structured_upsert_action`、`redb_update_delete_*` |
-| 批量插入 | [events.uid](../examples/events.uid) 与测试内脚本 | literal／参数 list、默认值、嵌套 ADT、空批次、批内冲突、预算、deadline、RowId/index 原子性、prepared/redb/TCP 与 returning 顺序 | `typed_bulk_insert_*`、`bulk_insert_validates_*`、`prepared_bulk_insert_*`、`parameterized_rows_*`、`versioned_tcp_bulk_inserts_*` |
+| UUID 与二进制 metadata | [content_metadata.unid](../examples/content_metadata.unid) | UUID 主键、hex bytes、unique index、contains/length、typed protocol v2、cursor、migration 与 backup/restore | `tests/uuid_bytes.rs` |
+| 原子修改 | [task_mutations.unid](../examples/task_mutations.unid) 与测试内脚本 | typed/nested/simultaneous set、match target、穷尽 ADT match assignment、顶层保留 binding、typed 参数、主键冲突、运行时回滚、索引维护、稳定 RowId、TCP 和 redb 重开 | `update_*`、`failed_multi_row_updates_*`、`versioned_tcp_updates_*`、`adt_match_updates_*`、`redb_update_delete_*` |
+| 主键 Upsert | [config.unid](../examples/config.unid) 与测试内脚本 | insert/replace action、完整 row 默认值、重复执行、回滚、索引更新、RowId/cursor 和 redb 重开 | `upsert_*`、`local_cli_reports_the_structured_upsert_action`、`redb_update_delete_*` |
+| 批量插入 | [events.unid](../examples/events.unid) 与测试内脚本 | literal／参数 list、默认值、嵌套 ADT、空批次、批内冲突、预算、deadline、RowId/index 原子性、prepared/redb/TCP 与 returning 顺序 | `typed_bulk_insert_*`、`bulk_insert_validates_*`、`prepared_bulk_insert_*`、`parameterized_rows_*`、`versioned_tcp_bulk_inserts_*` |
 | 批量 Upsert | 测试内脚本 | literal／参数 list、完整替换、输入内主键去重、unique index 冲突、稳定 RowId、逐项 action、deadline、CLI/TCP 与 redb 重开 | `typed_bulk_upsert_*`、`bulk_upsert_preserves_*`、`prepared_bulk_upsert_*`、`versioned_tcp_bulk_upserts_*` |
 | Prepared DML | [parameters.rs](../examples/parameters.rs) 与测试内脚本 | 命名 row/list 参数、filter/set/match 推导、空表预检、主键/returning、schema 失效、deadline、WAL 拒绝和 redb 重开 | `prepared_dml_*`、`prepared_bulk_insert_*`、`parameterized_rows_*` |
 

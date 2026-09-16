@@ -92,8 +92,8 @@ cargo fmt --check
 cargo check --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-cargo run -- run --file examples/tasks.uid
-cargo run -- fmt --file examples/tasks.uid
+cargo run -- run --file examples/tasks.unid
+cargo run -- fmt --file examples/tasks.unid
 cargo run --example embedded
 ```
 
