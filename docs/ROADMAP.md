@@ -192,9 +192,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 版本里程碑（v0.3.0 起） / Version milestones
 
-M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.2.0`，以下为目标版本，不表示已经发布。issue 的完整验收决定完成状态；计划整理不修改 Cargo 版本、不创建 tag，也不预设发布日期。软件版本与 storage/protocol 版本独立冻结。
+M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.5.0`，以下未发布版本仍是目标，不表示已经发布。issue 的完整验收决定完成状态；计划整理不创建 tag，也不预设发布日期。软件版本与 storage/protocol 版本独立冻结。
 
-M0–M9 retain completed-stage evidence. The latest published release is `v0.2.0`; the versions below are targets. Full issue acceptance determines completion. Planning does not bump Cargo versions, create tags or promise dates. Software, storage and protocol versions are frozen independently.
+M0–M9 retain completed-stage evidence. The latest published release is `v0.5.0`; later unreleased versions below remain targets. Full issue acceptance determines completion. Planning does not create tags or promise dates. Software, storage and protocol versions are frozen independently.
 
 ### v0.3.0 · 可靠 Rust 接入与应用闭环 / Reliable Rust integration and application workflows
 

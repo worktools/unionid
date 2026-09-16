@@ -32,6 +32,16 @@ fn user_docs_keep_one_versioned_first_use_command_contract() {
     assert_eq!(guide.matches("`README.md`").count(), 2);
     assert!(guide.contains("--output data/tasks.backup.json"));
     assert!(guide.contains("--db data/restored.redb"));
+
+    let release_notes = include_str!("../docs/RELEASE-v0.6.0.md");
+    for command in [
+        "unionid backup --db data/tasks.redb --output data/tasks.backup.json --format json",
+        "unionid restore --backup data/tasks.backup.json --db data/restored.redb --format json",
+        "unionid run --db data/restored.redb --file queries/list_running.unid",
+        "unionid check --db data/restored.redb",
+    ] {
+        assert_eq!(release_notes.matches(command).count(), 2);
+    }
 }
 
 #[test]

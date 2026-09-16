@@ -151,6 +151,7 @@ def main():
     previous_version = require_version(previous, "0.5.0")
     current_version = require_version(current, "0.6.0")
     for key in [
+        "schema_version",
         "protocol_versions",
         "stream_protocol_versions",
         "readable_storage_formats",

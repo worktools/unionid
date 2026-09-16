@@ -25,6 +25,10 @@ unionid run --db data/tasks.redb --file seed.unid
 unionid run --db data/tasks.redb --file queries/list_running.unid
 unionid doctor --db data/tasks.redb
 unionid check --db data/tasks.redb
+unionid backup --db data/tasks.redb --output data/tasks.backup.json --format json
+unionid restore --backup data/tasks.backup.json --db data/restored.redb --format json
+unionid run --db data/restored.redb --file queries/list_running.unid
+unionid check --db data/restored.redb
 ```
 
 ## 兼容与边界
@@ -62,6 +66,10 @@ unionid run --db data/tasks.redb --file seed.unid
 unionid run --db data/tasks.redb --file queries/list_running.unid
 unionid doctor --db data/tasks.redb
 unionid check --db data/tasks.redb
+unionid backup --db data/tasks.redb --output data/tasks.backup.json --format json
+unionid restore --backup data/tasks.backup.json --db data/restored.redb --format json
+unionid run --db data/restored.redb --file queries/list_running.unid
+unionid check --db data/restored.redb
 ```
 
 ### Compatibility and limits

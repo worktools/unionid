@@ -44,7 +44,7 @@ CI 矩阵固定核对 Linux `x86_64-unknown-linux-gnu` 与 macOS `aarch64-apple-
 
 候选 job 还会按当前平台下载 GitHub 已发布的 v0.5.0 原生包并核对其公开 `.sha256`。`scripts/verify-v050-compatibility.py` 用 v0.5 binary 建库、检查并生成 logical backup，再要求 v0.6 保持 capability contract、typed rows 与 schema identity，恢复 v0.5 backup，并接受 v0.5 CLI 通过 version 1 TCP 查询 v0.6 read-only server。这条测试只覆盖已冻结的直接兼容路径，不把跨版本 mutation 或 format 降级加入承诺。
 
-该脚本重新读取已验证压缩包中的 `RELEASE.json` 与 `release/contract.json`，要求 manifest 的 clean source commit 与实际 GitHub head SHA、预期 target 和源码 contract 一致，然后输出 version 1 JSON。报告保存 runner OS/arch/target、workflow URL、candidate commit、archive/manifest/contract SHA-256、完整 release manifest、通过状态和对应测试／文档证据。两个平台都从空目录运行生成式 starter；只有 Linux 报告把 Envoy mTLS 真实旅程记为通过。报告不保存数据库内容、secret 或不稳定的墙钟时间。macOS/Linux 报告分别以 GitHub Actions artifact 保留 90 天；可选的大型增量备份 evaluator 默认关闭，不是 v0.6 候选门槛。workflow URL 与摘要写入 #329。
+`scripts/record-release-acceptance.py` 重新读取已验证候选压缩包中的 `RELEASE.json` 与 `release/contract.json`，要求 manifest 的 clean source commit 与实际 GitHub head SHA、预期 target 和源码 contract 一致，然后输出 version 1 JSON。报告保存 runner OS/arch/target、workflow URL、candidate commit、archive/manifest/contract SHA-256、完整 release manifest、通过状态和对应测试／文档证据。两个平台都从空目录运行生成式 starter；只有 Linux 报告把 Envoy mTLS 真实旅程记为通过。报告不保存数据库内容、secret 或不稳定的墙钟时间。macOS/Linux 报告分别以 GitHub Actions artifact 保留 90 天；可选的大型增量备份 evaluator 默认关闭，不是 v0.6 候选门槛。workflow URL 与摘要写入 #329。
 
 ## English Description
 
