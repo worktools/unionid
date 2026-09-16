@@ -1940,6 +1940,23 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                     lookup.per_row_limit
                 );
             }
+            for exists in &plan.exists {
+                println!(
+                    "exists | {} where {} via {} (at most {} driver row(s))",
+                    exists.table,
+                    exists
+                        .correlations
+                        .iter()
+                        .map(|correlation| format!(
+                            "{} == outer.{}",
+                            correlation.target, correlation.outer
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" && "),
+                    exists.index,
+                    exists.driver_limit
+                );
+            }
             println!(
                 "result | {}",
                 plan.result_schema
@@ -2032,6 +2049,7 @@ fn query_stage_name(stage: &QueryStageKind) -> &'static str {
     match stage {
         QueryStageKind::Let => "let",
         QueryStageKind::Filter => "filter",
+        QueryStageKind::FilterExists => "filter_exists",
         QueryStageKind::FilterMatch => "filter_match",
         QueryStageKind::Derive => "derive",
         QueryStageKind::DeriveMatch => "derive_match",

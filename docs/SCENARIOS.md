@@ -198,6 +198,21 @@ select {id, customer, lines}
 
 每个订单仍只出现一次；没有明细时 `lines = []`。`take 100` 是强制逐订单上限，出现第 101 行会返回 `E_RELATION_LIMIT`，促使应用修正 schema 或选择更窄的读取，而不会返回看似完整的截断数据。目标 key 必须有索引，`explain.lookups` 会列出实际索引和上限。相同机制适合任务/事件、文档/修订等少量关联；多层图遍历或大规模报表仍不属于这个数据库的目标。
 
+如果列表页只需要“有异常明细的订单”，使用 exists 保持订单行形状且不读取完整 list：
+
+```text
+from orders
+filter exists {
+  from order_lines
+  filter order_id == outer.id
+  filter quantity <= 0
+}
+sort id
+take 100
+```
+
+`order_id` 必须由目标索引支持，`outer.id` 明确来自当前订单。执行器找到第一条异常明细即停止；一个 stage 最多检查 10,000 个订单。需要返回明细时仍使用 lookup。
+
 ## 7. 有限树、原因链与规则 AST
 
 固定层数的嵌套 record 无法表达目录、评论树或规则表达式。把节点拆成父子表会引入 join 和跨行一致性，而这些小型结构通常随所属对象整行读取和原子替换。直接自递归 named ADT 保留 constructor 约束：

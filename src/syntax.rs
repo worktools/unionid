@@ -1650,7 +1650,22 @@ impl Parser {
 
     fn filter_stage(&mut self) -> Result<Stage> {
         self.expect_word("filter")?;
-        if self.word("match") || self.parenthesized_match_starts() {
+        if self.word("exists") {
+            self.bump();
+            self.expect(Kind::Open('{'))?;
+            self.newlines();
+            let Statement::Pipeline(pipeline) = self.pipeline()? else {
+                unreachable!("exists inner source always parses as a pipeline")
+            };
+            self.newlines();
+            self.expect(Kind::Close('}'))?;
+            Ok(Stage::FilterExists(crate::query::ExistsFilter {
+                pipeline: Box::new(pipeline),
+                correlations: Vec::new(),
+                index: None,
+                index_target: None,
+            }))
+        } else if self.word("match") || self.parenthesized_match_starts() {
             let parenthesized = self.eat(Kind::Open('('));
             self.newlines();
             let predicate = self.match_predicate()?;
