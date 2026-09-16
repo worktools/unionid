@@ -43,7 +43,7 @@ PRQL 本身使用空格调用函数，并允许换行连接 pipeline；我们借
 - `struct`、`enum`、record value、projection 和 field set 使用 `{ ... }` 明确起止位置。旧缩进 record/sum 继续作为 durable compatibility 输入，canonical formatter 输出 Rust 形状。
 - enum 每行一个 variant，不再用 ML 风格的前导 `|`。
 - 多行查询每行一个 transform；单行查询可用 `|`，不再引入 `|>`。类型与表达式由语法上下文区分。
-- 值字段使用 `:`，派生和赋值使用 `=`。限定构造器用 `::`，位置负载用 `()`。注释使用 `#`。
+- 值字段使用 `:`，派生和赋值使用 `=`。完整限定构造器用 `::`；字段、match、set 等上下文已确定 enum 类型时可省略类型前缀。位置负载用 `()`。注释使用 `#`。
 - bool operator 使用 `!`、`&&`、`||`。复杂表达式放进 `{}` 换行；需要改变优先级时使用 `()`。
 - 查询局部闭包保留 `value -> expression` 与 `(left: T, right: U) -> expression`，不采用 `|value|`，避免与单行 pipeline 的 `|` 混淆。
 
@@ -77,7 +77,7 @@ insert tasks {
   title: "同步目录"
   owner: Contact {email: "alice@example.com"}
   tags: ["local", "sync"]
-  state: State::Running {worker: "local", attempt: 2}
+  state: Running {worker: "local", attempt: 2}
 }
 ```
 
@@ -86,14 +86,14 @@ insert tasks {
 ```text
 from tasks
 filter match state {
-  State::Running {attempt, ..} => attempt >= $min_attempt
+  Running {attempt, ..} => attempt >= $min_attempt
   _ => false
 }
 derive summary = match state {
-  State::Pending => "pending"
-  State::Running {worker, ..} => worker
-  State::Done {result} => result
-  State::Failed {message, ..} => message
+  Pending => "pending"
+  Running {worker, ..} => worker
+  Done {result} => result
+  Failed {message, ..} => message
 }
 select {id, title, summary}
 sort id
@@ -104,7 +104,7 @@ take 20
 
 ```text
 let retryable = s -> match s {
-  State::Failed {retryable, ..} => retryable
+  Failed {retryable, ..} => retryable
   _ => false
 }
 
@@ -114,7 +114,7 @@ select {id, title}
 
 update tasks
 filter id == $id
-set state = State::Done {result: $result}
+set state = Done {result: $result}
 
 delete tasks | filter id == $id
 

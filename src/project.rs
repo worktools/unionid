@@ -58,15 +58,15 @@ const STARTER_MIGRATION: &str = r#"migration m0001_initial {
 "#;
 
 const STARTER_SEED: &str = r#"insert many tasks [
-  {id: 1, state: State::Running {attempt: 1, worker: "local"}, title: "learn ADTs"}
-  {id: 2, state: State::Pending, title: "ship the app"}
+  {id: 1, state: Running {attempt: 1, worker: "local"}, title: "learn ADTs"}
+  {id: 2, state: Pending, title: "ship the app"}
 ]
 returning {id, state}
 "#;
 
 const STARTER_QUERY: &str = r#"from tasks
 filter match state {
-  State::Running {attempt, ..} => attempt >= 1
+  Running {attempt, ..} => attempt >= 1
   _ => false
 }
 select {id, title, state}

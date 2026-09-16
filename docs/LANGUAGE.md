@@ -32,7 +32,7 @@ table tasks: Task {
 insert tasks {
   id: 1
   owner: Contact {email: "alice@example.com"}
-  state: State::Running {worker: "local", attempt: 2}
+  state: Running {worker: "local", attempt: 2}
 }
 ```
 
@@ -47,7 +47,7 @@ insert tasks {
 - record 值使用 `field: value`；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载需要额外一层括号，如 `Pair((1, "x"))`。
 - 字段默认值写成 `field: Type = value`，例如 `nickname: Option<text> = None`、`tags: List<text> = []`。默认值必须是可按字段类型检查的纯字面值，在 schema 声明时完成校验并存为完整 typed value；不能引用其他字段、参数、时钟或函数。
 - 没有默认值的字段全部必填，即使类型为 option 也必须显式写 `None`。缺失字段逐层使用它自身声明的默认值；显式值不会因为类型错误而退回默认值。重复、缺失、未知字段及错误负载均报错。
-- 命名类型保留身份；限定构造器写成 `State::Pending` 或 `State::Running {...}`。
+- 命名类型保留身份。完整限定构造器写成 `State::Pending` 或 `State::Running {...}`；字段值、match 分支、set target 等位置的期望 enum 类型明确时，可简写为 `Pending` 或 `Running {...}`。独立构造或同名变体有歧义时使用限定名。
 - `table tasks: Task { key id }` 要求 Task 是 struct；`key` 声明 indexable scalar 主键，UUID 可直接作为生产 ID，拒绝重复键。无 key 时写空块 `table tasks: Task {}`。
 
 普通 secondary index 加速完整 typed value 的等值过滤；`unique` 在同一相等语义上增加约束：
@@ -71,8 +71,8 @@ planner 可以把连续的简单比较绑定为复合索引的 equality prefix�
 
 ```text
 insert many tasks [
-  {id: 1, owner: Contact {email: "a@example.com"}, state: State::Pending}
-  {id: 2, owner: Contact {email: "b@example.com"}, state: State::Pending}
+  {id: 1, owner: Contact {email: "a@example.com"}, state: Pending}
+  {id: 2, owner: Contact {email: "b@example.com"}, state: Pending}
 ]
 returning {id, state}
 ```
@@ -107,13 +107,13 @@ struct Chain {
 ```text
 from tasks
 filter match state {
-  State::Running {attempt, ..} => attempt >= 2 && attempt < 5
+  Running {attempt, ..} => attempt >= 2 && attempt < 5
   _ => false
 }
 derive state_label = match state {
-  State::Pending => "pending"
-  State::Running {..} => "running"
-  State::Done {..} => "done"
+  Pending => "pending"
+  Running {..} => "running"
+  Done {..} => "done"
 }
 select {id, owner.email, state, state_label}
 sort id
@@ -180,7 +180,7 @@ let tasks: Vec<Task> = response.typed_rows()?;
 ```text
 update tasks
 filter match state {
-  State::Pending => true
+  Pending => true
   _ => false
 }
 sort {-attempts, id}
@@ -188,7 +188,7 @@ take 1
 set {
   attempts = attempts + 1
   state = match state {
-    State::Pending => State::Done {result: "ok"}
+    Pending => Done {result: "ok"}
     current => current
   }
 }

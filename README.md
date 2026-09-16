@@ -91,26 +91,26 @@ insert tasks {
   id: 1
   title: "sync directory"
   tags: ["sync", "local"]
-  state: State::Running {worker: "worker-1", attempt: 2}
+  state: Running {worker: "worker-1", attempt: 2}
 }
 ```
 
-查询从上到下组合，并直接解构 `State`。match 必须覆盖所有可能形态，因此新增 variant 时不会被旧查询静默忽略。
+查询从上到下组合，并直接解构 `State`。match 必须覆盖所有可能形态，因此新增 variant 时不会被旧查询静默忽略。字段或 match 已确定 enum 类型时可省略 `State::`；独立构造或有歧义时仍可使用完整限定名。
 
-Queries compose from top to bottom and destructure `State` directly. A match must cover every possible shape, so a newly added variant cannot be silently ignored by an old query.
+Queries compose from top to bottom and destructure `State` directly. A match must cover every possible shape, so a newly added variant cannot be silently ignored by an old query. When a field or match fixes the enum type, `State::` may be omitted; standalone or ambiguous construction can still use the qualified name.
 
 ```text
 from tasks
 filter match state {
-  State::Running {attempt, ..} => attempt >= 2
-  State::Failed {retryable, ..} => retryable
+  Running {attempt, ..} => attempt >= 2
+  Failed {retryable, ..} => retryable
   _ => false
 }
 derive state_label = match state {
-  State::Pending => "pending"
-  State::Running {worker, ..} => worker
-  State::Done {result} => result
-  State::Failed {message, ..} => message
+  Pending => "pending"
+  Running {worker, ..} => worker
+  Done {result} => result
+  Failed {message, ..} => message
 }
 select {id, title, state, state_label}
 sort id
@@ -122,10 +122,10 @@ take 20
 ```text
 update tasks
 filter match state {
-  State::Pending => true
+  Pending => true
   _ => false
 }
-set state = State::Running {worker: "worker-1", attempt: 1}
+set state = Running {worker: "worker-1", attempt: 1}
 returning {id, state}
 ```
 

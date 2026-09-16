@@ -11,14 +11,14 @@ unionid 的查询从表开始，按书写顺序经过一组 transform：
 ```text
 from tasks
 filter match state {
-  State::Running {attempt, ..} => attempt >= 2 && attempt < 5
+  Running {attempt, ..} => attempt >= 2 && attempt < 5
   _ => false
 }
 derive state_label = match state {
-  State::Pending => "pending"
-  State::Running {..} => "running"
-  State::Done {..} => "done"
-  State::Failed {..} => "failed"
+  Pending => "pending"
+  Running {..} => "running"
+  Done {..} => "done"
+  Failed {..} => "failed"
 }
 select {id, title, owner.email, state_label}
 sort id
@@ -152,7 +152,7 @@ field-path        = identifier ("." identifier)*
 separator         = newline | ","
 ```
 
-`=`、`limit`、不带花括号的多字段 `select id,name`，以及旧缩进 record/match/group 是持久数据与旧源码的兼容入口。新文档和 formatter 输出使用 `==`、`take`、`select {id, name}`、braced match、braced group inner pipeline、`::` 限定构造器和 Rust 风格布尔运算符。
+`=`、`limit`、不带花括号的多字段 `select id,name`，以及旧缩进 record/match/group 是持久数据与旧源码的兼容入口。新文档和 formatter 输出使用 `==`、`take`、`select {id, name}`、braced match、braced group inner pipeline、可选的 `::` 限定构造器和 Rust 风格布尔运算符。期望 enum 类型明确时允许省略类型前缀。
 
 复杂条件的规范格式使用表达式块明确边界，并把 `&&` 或 `||` 放在续行开头：
 
@@ -201,7 +201,7 @@ filter {
 }
 
 derive next_attempt = match state {
-  State::Queued {attempt, ..} => Some(attempt + 1)
+  Queued {attempt, ..} => Some(attempt + 1)
   _ => None
 }
 ```
@@ -239,7 +239,7 @@ Rust `prepare` 也可在相同 schema identity 下绑定单行 `insert table $ro
 ```text
 update jobs
 filter match state {
-  State::Queued {..} => true
+  Queued {..} => true
   _ => false
 }
 sort {-priority, scheduled_at, id}
@@ -247,7 +247,7 @@ take 1
 set {
   attempts = attempts + 1
   state = match state {
-    State::Queued {attempt, ..} => State::Running {worker: "local", attempt: attempt + 1}
+    Queued {attempt, ..} => Running {worker: "local", attempt: attempt + 1}
     current => current
   }
 }
@@ -405,7 +405,7 @@ select {id, priority}
 ```text
 from jobs
 filter id in $ids
-filter state not in [State::Done, State::Failed {retryable: false}]
+filter state not in [Done, Failed {retryable: false}]
 select {id, state}
 ```
 
@@ -432,10 +432,10 @@ select {id, state}
 ```text
 from tasks
 filter match state {
-  State::Pending => false
-  State::Running {worker, attempt} => worker == "local"
-  State::Done {result} => result == "ok"
-  State::Failed {retryable, ..} => retryable
+  Pending => false
+  Running {worker, attempt} => worker == "local"
+  Done {result} => result == "ok"
+  Failed {retryable, ..} => retryable
 }
 select {id, title}
 ```
@@ -445,7 +445,7 @@ select {id, title}
 ```text
 from tasks
 filter match state {
-  State::Running {attempt, ..} => attempt >= 2 && attempt < 5
+  Running {attempt, ..} => attempt >= 2 && attempt < 5
   _ => false
 }
 select {id}
@@ -454,13 +454,13 @@ take 1
 
 当前规则如下：
 
-- unit 变体直接写 `Pending` 或限定形式 `State::Pending`。带 record 负载的变体写 `State::Running {worker, attempt}`；位置负载写 `Pair(left, right)`。
+- unit 变体直接写 `Pending` 或限定形式 `State::Pending`。match scrutinee 已确定 enum 类型，因此带 record 负载通常简写为 `Running {worker, attempt}`；也可写完整的 `State::Running {...}`。位置负载写 `Pair(left, right)`。
 - option 使用 `None` 与 `Some(value)`；写成 `Some(_)` 可以只判断存在而忽略内容。
 - record 字段名默认也是局部绑定；`{retry_at: at, ..}` 把字段重命名为 `at`。冒号右侧也可递归使用 constructor、record 或 tuple pattern，例如 `{error: Network {message}, retry_at: Some(at)}`。
 - tuple 用自身的积类型标点分解，例如 `Some((at, reason))`。一个 constructor 携带多个位置参数时写 `Outer(Some(value), other)`；单个 tuple payload 通过双层括号区分。
 - `{attempt, ..}` 绑定 `attempt` 并显式忽略其他字段。不写 `..` 时必须列出该负载的全部字段，避免 schema 新增字段后被静默忽略。
 - 顶层 `_` 覆盖尚未出现的值，必须位于最后。顶层小写 binding 同样不可反驳并必须位于最后，但会把完整源值绑定到该名称；`current => current` 可在 derive 或 update assignment 中保留其他 constructor。没有不可反驳分支时，多个同名顶层 constructor 分支可以用互补的嵌套 pattern 覆盖完整值域。例如 `Failed {retry_at: Some(at), ..}` 与 `Failed {retry_at: None, ..}` 可以共同覆盖 `Failed`；只写其中一个仍然是非穷尽 match。
-- 构造器由被匹配字段的命名类型确定，也可写成 `State::Running`。其他命名 sum 的同名构造器不会混用。
+- 构造器由被匹配字段的命名类型确定，因此可省略类型前缀；也可写成 `State::Running`。其他命名 sum 的同名构造器不会混用。
 - condition 与普通 filter 共用布尔表达式 binder 和 evaluator，支持绑定间比较、括号、`!`/`&&`/`||`、`contains/length`、`any/all` 与 `is_some/is_none`。
 - 分支按源码顺序选择第一个匹配项。检查器使用有预算的 pattern matrix 分析 sum、option、record 与 tuple 的组合关系，允许可到达的重叠分支，拒绝被先前分支完全覆盖的分支。非穷尽错误会同时列出仍未完全覆盖的顶层 constructor，并给出一个具体嵌套值样例。覆盖分析最多执行 100,000 步，超限返回 `E_LIMIT`。
 
@@ -519,7 +519,7 @@ formatter 将名字不重复的相邻 derive 合并成字段集；若紧接的 s
 ```text
 from jobs
 derive retry_at = match state {
-  State::Failed {retry_at: Some(at), ..} => Some(at)
+  Failed {retry_at: Some(at), ..} => Some(at)
   _ => None
 }
 filter retry_at == Some 30
@@ -697,7 +697,7 @@ take 20
 ```text
 from tasks
 filter match state {
-  State::Pending => true
+  Pending => true
 }
 ```
 

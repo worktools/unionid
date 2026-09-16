@@ -34,7 +34,7 @@ table tasks: Task {
 }
 ```
 
-字段在类型和值中分别写成 `name: Type` 和 `name: value`。泛型内建类型写成 `Option<T>`、`List<T>`、`Decimal<P, S>`。限定构造器使用 `State::Running`；record payload 使用 `{}`，位置 payload 使用 `()`。一个 tuple 作为唯一 payload 时保留双层括号，例如 `Pair((left, right))`。
+字段在类型和值中分别写成 `name: Type` 和 `name: value`。泛型内建类型写成 `Option<T>`、`List<T>`、`Decimal<P, S>`。完整限定构造器使用 `State::Running`；当字段、match scrutinee、set target 或其他上下文已经确定期望 enum 类型时，可以简写为 `Running`。独立构造或有歧义时使用完整限定名。record payload 使用 `{}`，位置 payload 使用 `()`。一个 tuple 作为唯一 payload 时保留双层括号，例如 `Pair((left, right))`。
 
 布尔运算符采用 `!`、`&&`、`||`。`take start..end` 是半开区间，`take start..=end` 包含末端。跨行表达式可以放进 `{}`，改变优先级时使用 `()`：
 
@@ -45,7 +45,7 @@ filter {
   && (!archived || priority >= 10)
 }
 filter match state {
-  State::Running {attempt, ..} => attempt >= 2
+  Running {attempt, ..} => attempt >= 2
   _ => false
 }
 sort {-priority, id}
@@ -82,7 +82,7 @@ filter any history (
 
 Unionid keeps PRQL's top-to-bottom pipeline and adopts Rust-shaped types, values, patterns, operators, and ranges. Canonical source has no semicolons. Newlines separate items in multiline braces; commas remain for compact inline forms.
 
-Fields use `name: Type` in declarations and `name: value` in values. Built-in generic types use `Option<T>`, `List<T>`, and `Decimal<P, S>`. Qualified constructors use `State::Running`. Record payloads use braces and positional payloads use parentheses. A tuple carried as one positional payload uses an extra pair of parentheses, such as `Pair((left, right))`.
+Fields use `name: Type` in declarations and `name: value` in values. Built-in generic types use `Option<T>`, `List<T>`, and `Decimal<P, S>`. A fully qualified constructor uses `State::Running`. When a field, match scrutinee, set target, or another context already fixes the expected enum type, it may be shortened to `Running`; standalone or ambiguous construction uses the qualified form. Record payloads use braces and positional payloads use parentheses. A tuple carried as one positional payload uses an extra pair of parentheses, such as `Pair((left, right))`.
 
 Boolean operators are `!`, `&&`, and `||`. `take start..end` is half-open, while `take start..=end` includes the endpoint. Braces delimit multiline expressions and parentheses change precedence.
 

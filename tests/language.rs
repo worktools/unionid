@@ -18,8 +18,14 @@ fn rust_shaped_schema_values_and_arrow_closures_execute_together() {
     let mut engine = Engine::memory();
     let response = ok(
         &mut engine,
-        r#"struct Row {
+        r#"enum State {
+  Pending
+  Ready(int)
+}
+
+struct Row {
   id: int
+  state: State
   values: List<int>
 }
 
@@ -27,11 +33,15 @@ table rows: Row {
   key id
 }
 
-insert rows {id: 1, values: [1, 4]}
+insert rows {id: 1, state: Ready(4), values: [1, 4]}
 
 from rows
 let has_value = (values: List<int>, minimum: int) -> any values (value -> value >= minimum)
 filter has_value values 3
+filter match state {
+  Pending => false
+  Ready(value) => value >= 4
+}
 select id"#,
     );
     assert_eq!(response.rows.len(), 1);
