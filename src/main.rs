@@ -1127,12 +1127,10 @@ fn run(args: Args) -> Result<(), String> {
 }
 
 fn run_project_command(args: &Args) -> Option<i32> {
-    let Command::Project {
-        command: ProjectCommand::Check { dir, format },
-    } = &args.command
-    else {
+    let Command::Project { command } = &args.command else {
         return None;
     };
+    let ProjectCommand::Check { dir, format } = command;
     let report = project::check(dir);
     if matches!(format, Format::Json) {
         println!(
