@@ -32,7 +32,7 @@ take 20
 | 能力 | 当前形式 | 状态 | 后续任务 |
 | --- | --- | --- | --- |
 | 数据源 | `from table` | 已实现 | — |
-| 布尔过滤 | `filter priority + bonus >= 10` | 已实现括号、`not/and/or`、有类型算术、字段间比较、Option 辅助函数与集合谓词 | — |
+| 布尔过滤 | `filter id in $ids` | 已实现括号、`not/and/or`、有类型算术、字段间比较、`in`/`not in`、Option 辅助函数与集合谓词 | — |
 | sum/option 模式过滤 | `filter (match field {...})` | 已实现 braced branches、unit/record/位置负载、递归 record/tuple/sum/option pattern，以及完整嵌套穷尽与不可达检查 | — |
 | 投影 | `select {field, nested.field}` | 已实现并可选择普通或 ADT 派生列 | — |
 | 排序 | `sort field` / `sort {-priority, created_at, id}` | 已实现单列与多列 | — |
@@ -402,14 +402,24 @@ filter
 select {id, priority}
 ```
 
+按一组 ID、状态或完整 ADT 值筛选时，使用比较级的 `in`／`not in`：
+
+```text
+from jobs
+filter id in $ids
+filter state not in [Done, Failed {retryable = false}]
+select {id, state}
+```
+
 - 比较的两侧可以是字段路径、literal 或 `length`。因此支持字段与字段、字段与 literal，以及 `length tags >= minimum_tags`；至少一侧必须能确定类型。
 - `==` 和 `!=` 支持类型一致的完整值，包括 record、tuple、sum、option 和 list。literal 会按另一侧的类型检查，因此 `contains [] 1` 是类型明确且恒为 false 的合法表达式。
+- `item in collection` 与 `item not in collection` 要求右侧是 `list T`，并按完整 typed equality 从左到右短路。列表字面量、字段和 prepared list 参数都可作为右侧；空列表分别恒为 false／true。元素和列表类型在扫描前统一，`id in $ids` 会把 `$ids` 推导为 `list int`，不会做数字／文本或命名 ADT 的隐式转换。
 - `>`、`>=`、`<`、`<=` 当前只支持 int、float 和 text。
 - Int 使用精确 i64 比较。Float 使用精确数值相等，`-0.0` 与 `0.0` 相等；拒绝 NaN、Infinity 和超出 i64 的整数。
 - Float 字段可接受能够精确表示的整数字面量；Int 字段不接受浮点字面量。数字不会自动转换成 text。
 - `contains collection item` 只接受 list，并按 list 元素的完整类型化相等语义判断；元素可以是命名 ADT。`length` 接受 list 或 text，分别返回元素数或 Unicode scalar 数。
 - `any items (item -> condition)` 与 `all items (item -> condition)` 对 list 元素建立有类型的词法绑定。绑定可访问 record 字段，predicate 也可引用外层行字段或 match binding，并可继续嵌套 `any/all`。局部绑定遮蔽同名外层字段。
-- `any` 从左到右执行并在首个 true 处短路，空 list 为 false；`all` 在首个 false 处短路，空 list 为 true。每条 pipeline 或 DML target 最多执行 100,000 次 list 元素 predicate，嵌套调用共享预算，超限返回 `E_LIMIT`。
+- `in`、`not in` 和 `any/all` 从左到右执行并短路。空 list 上 `in`/`any` 为 false，`not in`/`all` 为 true。每条 pipeline 或 DML target 最多执行 100,000 次 list 元素比较／predicate，组合与嵌套调用共享预算，超限返回 `E_LIMIT`。
 - `is_some value` 与 `is_none value` 只接受静态类型为 `option T` 的值。二者不提取 payload；需要读取 payload 时仍使用显式 match。孤立的 `None` 没有元素类型，必须从字段、binding 或 typed 参数获得类型。
 - bool 字段可以直接作为条件。其他类型不隐式转换为 bool；option 也不提供 truthiness，必须用 `is_some/is_none` 或显式 match。
 - 优先级从高到低为括号／比较／函数、`not`、`and`、`or`。混用 `and` 与 `or` 的规范源码使用括号明确分组。`and` 和 `or` 在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。

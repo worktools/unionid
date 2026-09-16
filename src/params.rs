@@ -348,6 +348,11 @@ fn visit_bool(expression: &BoolExpression, visitor: &mut impl FnMut(&ScalarExpre
         | BoolExpression::Contains {
             collection: left,
             item: right,
+        }
+        | BoolExpression::Membership {
+            item: left,
+            collection: right,
+            ..
         } => {
             visit_scalar(left, visitor);
             visit_scalar(right, visitor);
@@ -386,6 +391,11 @@ fn visit_bool_mut(
         | BoolExpression::Contains {
             collection: left,
             item: right,
+        }
+        | BoolExpression::Membership {
+            item: left,
+            collection: right,
+            ..
         } => {
             visit_scalar_mut(left, visitor);
             visit_scalar_mut(right, visitor);

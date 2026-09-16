@@ -44,6 +44,7 @@ type Job =
 - 按主键读取任务：当前可用 `filter id == "job-a" | take 1`，持久模式由主键索引执行；`explain from jobs | filter id == "job-a" | take 1` 可验证 lookup、候选数和结果 schema。
 - 原子 claim：按旧状态筛选，`sort {-priority, scheduled_at, id} | take 1` 稳定选出下一条，再用 `set state = match state {...}` 把 `Queued` 改成 `Running`。末尾 `returning {id, state}` 在同一请求中返回命中的新状态；没有候选时得到稳定 columns、空 rows 和 affected_rows 0，无需先查询 ID。
 - 查询高优先级且带 `sync` 标签的任务：`filter priority >= 10 and contains tags "sync"` 已实现并进入可执行示例；再与 `filter (match state {...})` 组合即可限定状态。
+- 按调度器给出的一批主键筛选任务：`filter id in $ids` 会把 prepared 参数推导为 `list text`；`filter state not in [Succeeded {finished_at = 0}]` 可直接比较完整 sum value。`in`/`not in` 同样可用于 derive 和 update/delete target，并与 `any/all` 共享有界集合求值预算。
 - 复用业务判断：`let important = value -> value >= 10` 和 `let has_tag = (values list text, tag text) -> contains values tag` 可在当前 pipeline 后续的 filter、derive 与 aggregate 输入中重复调用，避免复制长条件。
 - 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
 - 按状态计数：`derive state_label = match state {...}` 把 sum 分支归一为状态名，再用 `group state_label (aggregate {...})` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.unid](../examples/job_queue.unid)。

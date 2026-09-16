@@ -867,6 +867,96 @@ fn boolean_filters_compose_fields_lists_and_length() {
 }
 
 #[test]
+fn typed_membership_supports_adt_lists_parameters_derives_and_mutations() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type State = Queued | Running {worker text} | Done\ntype Job =\n  id int\n  state State\n  accepted list State\n  selected bool\ntable jobs Job\n  key id\ninsert jobs {id = 1, state = Queued, accepted = [Queued], selected = false}\ninsert jobs {id = 2, state = Running {worker = \"local\"}, accepted = [Queued, Running {worker = \"local\"}], selected = false}\ninsert jobs {id = 3, state = Done, accepted = [], selected = false}",
+    );
+
+    let adt = ok(
+        &mut e,
+        "from jobs\nfilter state in accepted\nfilter state in [Queued, Running {worker = \"local\"}]\nsort id\nselect {id}",
+    );
+    assert_eq!(
+        adt.rows
+            .iter()
+            .map(|row| row["id"].source_text())
+            .collect::<Vec<_>>(),
+        ["1", "2"]
+    );
+
+    let derived = ok(
+        &mut e,
+        "from jobs\nderive outside = id not in [1, 3]\nfilter outside\nselect {id, outside}",
+    );
+    assert_eq!(derived.rows.len(), 1);
+    assert!(derived.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(derived.rows[0]["outside"].cmp_eq(&Value::Bool(true)));
+
+    let prepared = e
+        .prepare("update jobs\nfilter id in $ids\nset selected = true\nreturning {id, selected}")
+        .unwrap();
+    assert_eq!(prepared.parameter_types()["ids"], "list int");
+    let updated = e.query(
+        &prepared,
+        [(
+            "ids".into(),
+            Value::List(vec![Value::Int(1), Value::Int(3)]),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    assert!(updated.ok, "{}", updated.message);
+    assert_eq!(updated.affected_rows, Some(2));
+    assert_eq!(updated.rows.len(), 2);
+
+    assert!(ok(&mut e, "from jobs | filter id in []").rows.is_empty());
+    assert_eq!(ok(&mut e, "from jobs | filter id not in []").rows.len(), 3);
+}
+
+#[test]
+fn typed_membership_is_checked_before_scanning() {
+    let setup = "type Row =\n  id int\n  tags list text\ntable rows Row";
+    for (query, message) in [
+        ("filter id in 1", "expects a list on the right"),
+        ("filter id in [\"1\"]", "expected int"),
+        ("filter [] in []", "cannot infer 'in' element type"),
+    ] {
+        let mut e = Engine::memory();
+        ok(&mut e, setup);
+        let result = e.execute(&format!("from rows\n{query}"));
+        assert!(!result.ok, "accepted {query}");
+        let error = result.error.unwrap();
+        assert_eq!(error.code, "E_TYPE", "{query}: {error}");
+        assert!(error.message.contains(message), "{query}: {error}");
+    }
+}
+
+#[test]
+fn typed_membership_shares_the_collection_evaluation_budget() {
+    let mut e = Engine::memory();
+    ok(
+        &mut e,
+        "type Row = {id int}\ntable rows Row\ninsert rows {id = 0}",
+    );
+    let prepared = e.prepare("from rows | filter id in $ids").unwrap();
+    let result = e.query(
+        &prepared,
+        [(
+            "ids".into(),
+            Value::List((1..=100_001).map(Value::Int).collect()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    assert!(!result.ok);
+    let error = result.error.unwrap();
+    assert_eq!(error.code, "E_LIMIT");
+    assert!(error.message.contains("100000"));
+}
+
+#[test]
 fn match_conditions_share_boolean_and_collection_expressions() {
     let mut e = Engine::memory();
     ok(

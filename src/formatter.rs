@@ -960,6 +960,16 @@ fn boolean(value: &BoolExpression, parent: u8, right: bool) -> String {
             scalar_argument(collection),
             scalar_argument(item)
         ),
+        BoolExpression::Membership {
+            item,
+            collection,
+            negated,
+        } => format!(
+            "{} {}in {}",
+            scalar(item, 0, false),
+            if *negated { "not " } else { "" },
+            scalar(collection, 0, false)
+        ),
         BoolExpression::Any {
             collection,
             binding,
