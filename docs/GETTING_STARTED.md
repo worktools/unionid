@@ -1,172 +1,251 @@
-# 五分钟开始使用 unionid
+# 五分钟开始使用 unionid / Start using unionid in five minutes
 
-这份教程从空目录开始，用同一组无分号 ADT 脚本完成建库、查询、更新、关闭重开和完整性检查。发布包内含 `bin/unionid` 和 `tutorial/`。解压后先进入包目录并把二进制加入当前 shell 的 PATH：
+## 中文
+
+这条首用路径从一个已安装的 `unionid` 二进制和空目录开始。它生成一个带 ADT schema、线性 migration、seed 和 typed query 的独立项目，然后验证重开、诊断、完整性检查与备份还原。`init` 和 `project check` 从 v0.6.0 起提供；运行项目不需要 clone unionid 仓库。
+
+### 1. 选择安装入口
+
+crates.io 安装需要 Rust 1.94 或更高版本：
 
 ```bash
-cd unionid-v0.5.0-<target>
-export PATH="$PWD/bin:$PATH"
+cargo install unionid --locked
 ```
 
-从源码运行时，先在仓库根目录执行 `cargo build --locked` 和 `export PATH="$PWD/target/debug:$PATH"`，再把下文的 `../tutorial` 替换为 `../examples/getting-started`。
+原生 release archive 解压后，把包内二进制加入当前 shell 的 `PATH`：
 
-先让自动化确认它拿到的二进制及兼容范围：
+```bash
+cd unionid-v<version>-<target>
+export PATH="$(pwd)/bin:$PATH"
+```
+
+从源码构建时，在仓库根目录执行：
+
+```bash
+cargo build --locked
+export PATH="$(pwd)/target/debug:$PATH"
+```
+
+三种入口从下一步开始使用完全相同的命令。先确认当前 shell 找到的版本与兼容范围：
 
 ```bash
 unionid version --format json
 unionid doctor --format json
 ```
 
-两条命令都不创建数据库。JSON 包含软件版本、Rust target、协议版本，以及可读和当前写入的 storage/codec 版本。
+这两条命令不会创建数据库。
 
-## 1. 创建持久数据库
+### 2. 生成并检查项目
 
-```bash
-mkdir unionid-demo
-cd unionid-demo
-unionid run --db tasks.redb --file ../tutorial/01_setup.unid
-```
-
-这个脚本声明两个积类型 `Contact`、`Task` 和一个和类型 `State`，再建立有主键的 `tasks` 表并写入嵌套数据：
-
-```text
-type State =
-  Pending
-  | Running {
-    worker text,
-    attempt int,
-  }
-  | Done {
-    result text,
-  }
-
-table tasks Task
-  key id
-```
-
-声明和写入在一个原子脚本内完成。成功后，`tasks.redb` 是 redb 持久数据库。
-
-## 2. 查询和类型化解构
+在任意空工作目录中运行：
 
 ```bash
-unionid run --db tasks.redb --file ../tutorial/02_running.unid
+mkdir unionid-first-use
+cd unionid-first-use
+unionid init tasks
+cd tasks
+unionid project check --dir .
 ```
 
-查询使用换行 pipeline。braced `match` 穷尽匹配 `State`，`select` 保留嵌套字段：
+`init` 只接受不存在或空目录，不覆盖已有文件。生成结果包含：
 
-```text
-from tasks
-filter (
-  match state {
-    Running {worker, attempt} => attempt >= 1,
-    _ => false,
-  }
-)
-select {id, title, owner.email, state}
-sort id
-```
+- `README.md`：简短的双语项目说明
+- `schema.unid`：当前声明式 schema
+- `migrations/0001_initial.unid`：可执行的初始 migration
+- `seed.unid`：两条 typed task
+- `queries/list_running.unid`：直接匹配 `State.Running` 的 query
+- `data/`：被 `.gitignore` 忽略的本地数据目录
 
-结果是一条 `Running` 任务。字段和 pattern 在扫描前按 schema 检查；拼错字段或遗漏 sum 分支会返回错误，而不会退化成动态值。
+`project check` 不创建数据库。它按 schema → migrations → queries 的固定顺序检查规范格式、migration 最终 schema 和 query binding；三个阶段都通过才返回 0。
 
-## 3. 原子更新
+### 3. 建库、写入并从新进程重开
 
 ```bash
-unionid run --db tasks.redb --file ../tutorial/03_update.unid
+unionid migration apply --db data/tasks.redb --dir migrations
+unionid run --db data/tasks.redb --file seed.unid
+unionid run --db data/tasks.redb --file queries/list_running.unid
 ```
 
-这次更新按主键找到第二条任务，并把 `Pending` 替换为带 record payload 的 `Running`。完整语句要么提交，要么不改变数据库。
+seed 写入两行，最后一条命令从新的 `unionid` 进程重新打开 redb，并返回 `id = 1`、标题为 `learn ADTs` 的 `Running` task。结果保留完整 sum variant 和 record payload；字段、constructor、pattern coverage 与 payload 类型会在扫描前检查。
 
-## 4. 关闭后重开
-
-每次 `run --db` 都在新进程中打开和关闭数据库。再次运行查询就验证了持久恢复：
+### 4. 诊断并检查原数据库
 
 ```bash
-unionid run --db tasks.redb --file ../tutorial/04_reopen.unid
-unionid doctor --db tasks.redb --format json
-unionid check --db tasks.redb
+unionid doctor --db data/tasks.redb --format json
+unionid check --db data/tasks.redb
 ```
 
-最终查询返回两行，并通过 `derive worker = match state` 解构 ADT 产生新列。`doctor` 不改动原文件，只通过临时副本报告存储版本、schema identity 和 ledger 摘要；`check` 则打开原数据库，先执行 redb 完整性检查，再验证 catalog、schema hash、row、稳定 RowId、索引和 migration ledger 的逻辑一致性。
+`doctor` 读取权限受限的临时副本，报告 storage、codec、schema identity 和 migration 摘要，不修改请求的文件。`check` 打开原数据库，执行 redb 完整性检查，并验证 catalog、schema hash、typed rows、RowId、索引和 migration ledger。
 
-## 5. 备份并还原
-
-先生成带 checksum 的 logical backup，再还原到不存在的新路径：
+### 5. 备份、还原并比较 typed 结果
 
 ```bash
-unionid backup --db tasks.redb --output tasks.backup.json --format json
-unionid restore --backup tasks.backup.json --db restored.redb --format json
-unionid run --db restored.redb --file ../tutorial/04_reopen.unid
-unionid check --db restored.redb
+unionid backup \
+  --db data/tasks.redb \
+  --output data/tasks.backup.json \
+  --format json
+unionid restore \
+  --backup data/tasks.backup.json \
+  --db data/restored.redb \
+  --format json
+unionid run \
+  --db data/restored.redb \
+  --file queries/list_running.unid
+unionid check --db data/restored.redb
 ```
 
-还原库保留 schema、typed rows、稳定 ID、migration ledger 与幂等回执。命令不会覆盖已有目标；增量 archive 与按 sequence 恢复见[备份说明](BACKUP.md)。
+restore 只写入不存在的新路径。还原后的 query rows、列类型和 schema identity 应与源数据库一致。增量 archive、按 sequence 恢复和保留策略见[备份说明](BACKUP.md)。
 
-## 6. 改用 TCP 服务
+### 下一步
 
-服务与本地命令共享同一个 `Engine` 语义。在一个终端启动：
+- 修改 schema 时新增 migration，再运行 `project check` 和 `migration plan/apply`；见[迁移说明](MIGRATIONS.md)。
+- 用 `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs` 生成共享 ADT、typed 参数、结果 row 和调用函数。
+- 用 `unionid server --db data/tasks.redb` 与 `unionid cli --addr 127.0.0.1:7878` 切换到 TCP；见 [CLI](CLI.md)、[协议](PROTOCOL.md)和[服务部署](DEPLOYMENT.md)。
+- Rust 应用可直接使用 `Engine::open_redb`、prepared parameters、`Value::from_serde` 和 `typed_rows`；完整类型边界见[应用数据边界](APPLICATION_DATA.md)。
+
+当前产品面向单机、一个数据库所有者和串行写入，约 10,000 行是舒适工作集；100,000 行只是已测试上限。通用扁平 join、window 和分布式执行不在当前范围内。
+
+### 自动验证
+
+源码构建可从空目录执行与本文相同的 starter 链路：
 
 ```bash
-unionid server --addr 127.0.0.1:7878 --db server.redb
+python3 scripts/validate-first-use.py \
+  --binary "$PWD/target/debug/unionid" \
+  --work-dir /tmp/unionid-first-use
 ```
 
-另一个终端通过 TCP 执行同样的脚本：
+release archive 提供同一个验证器：
 
 ```bash
-unionid cli --addr 127.0.0.1:7878 --file ../tutorial/01_setup.unid
-unionid cli --addr 127.0.0.1:7878 --file ../tutorial/03_update.unid
-unionid cli --addr 127.0.0.1:7878 --file ../tutorial/04_reopen.unid
-```
-
-省略 `--query` 和 `--file` 可进入 REPL；Tab 补全类型、表和字段，`.schema`、`.tables`、`.types`、`.storage` 查看当前 catalog。
-
-## 嵌入 Rust
-
-源码仓库中的 `examples/getting_started.rs` 使用 `Engine::open_redb` 执行完全相同的四个脚本：
-
-```bash
-cargo run --locked --example getting_started -- /tmp/unionid-embedded.redb
-```
-
-Rust API、本地 CLI 和 TCP 在同一 schema 下返回相同的 typed rows、列和 schema identity。应用可进一步使用 `prepare`、typed parameters 和 schema 前置条件，见[版本化接口与参数](PROTOCOL.md)。
-
-若 Rust 类型是 schema 的单一来源，可同时依赖 `unionid` 与 `unionid-derive`，为 struct/enum 派生 `UnionidSchema`，再用 `SchemaBuilder` 产生可执行 schema。`#[unionid(table = "jobs", key = "id")]` 声明表；字段上的 `default = "0"`、`index` 和 `unique` 分别声明数据库默认值、单字段索引和唯一索引。`build()` 会检查依赖顺序和完整 schema，避免把错误推迟到服务启动。默认值只允许 insert 省略字段；读取和 `typed_rows` 使用的 Rust row 仍包含完整字段。详细支持矩阵见 [Rust schema bindings RFC](rfc/0012-schema-rust-bindings.md)。
-
-若 schema 与查询文件是单一来源，可生成包含 ADT、参数、结果和调用函数的 Rust 文件：
-
-```bash
-unionid query rust \
-  --schema schema.unid \
-  --dir queries \
-  --output generated/queries.rs
-```
-
-bundle 只生成一份共享 ADT，每个 `.unid` 查询（兼容 `.uid`）位于一个公开子 module。应用通过生成的 `find_task::FindTaskParams` 调用 `find_task::find_task(&mut engine, params)`，无需手工构造 `Value`、结果 DTO 或在查询之间转换重复的领域类型。单个查询仍可使用 `--file`。返回类型根据查询保证为 row、`Option<row>` 或 `Vec<row>`；运行时 schema 漂移明确返回 `E_SCHEMA_CHANGED`。详细契约见 [静态查询 RFC](rfc/0015-static-query-contract.md)。
-
-完整的独立应用验收见[类型化应用记录](assessments/typed-application-2026-09-13.md)：它覆盖嵌套 option、精确标量、derive、aggregate、lookup、returning、redb 重开和两版 migration/客户端演进。
-
-冷热分离的 Rust 持久化示例见 [应用数据边界](APPLICATION_DATA.md)：摘要与 ADT 正文原子写入，摘要有界读取，正文按需获取并携带实际版本。
-
-## 自动验证整段教程
-
-发布包可在一个空目录中自检上面的本地和 TCP 链路：
-
-```bash
-python3 tutorial/validate.py \
+python3 tutorial/validate-first-use.py \
   --binary "$PWD/bin/unionid" \
-  --work-dir /tmp/unionid-tutorial
+  --work-dir /tmp/unionid-first-use
 ```
 
-验证脚本拒绝非空工作目录，避免覆盖已有数据库。生产升级前请继续阅读[升级与格式兼容](UPGRADING.md)和[备份说明](BACKUP.md)。
+验证器拒绝非空工作目录，并核对生成文件、项目检查阶段、typed rows、schema identity、完整性检查和备份还原。release archive 仍保留覆盖原子更新、TCP 与嵌入式 Engine 的进阶 `tutorial/validate.py`。
 
-## English walkthrough
+## English
 
-The four files under `tutorial/` form one executable five-minute journey. Start with `unionid version --format json`, run `01_setup.unid` against a new `--db` path, query the `Running` variant with `02_running.unid`, atomically change the pending row with `03_update.unid`, then launch a new process with `04_reopen.unid`. Finish with `doctor`, a full `check`, logical backup, restore to a new path, and the same typed query against the restored database before repeating the journey through TCP. Doctor reports compatibility and schema/ledger summaries from a private copy without changing the source, while check opens and verifies the actual database. The scripts declare named product and sum types, insert nested values, exhaustively match an ADT, project a nested field, update a variant payload, and derive a typed column.
+This first-use path starts with an installed `unionid` binary and an empty directory. It generates a standalone project with an ADT schema, linear migration, seed, and typed query, then validates reopen, diagnostics, integrity checking, backup, and restore. `init` and `project check` are available from v0.6.0, and running the project requires no unionid repository checkout.
 
-The TCP commands above execute the same files through `unionid cli --addr`. The Rust example calls `Engine::open_redb` with those same sources. `tutorial/validate.py` runs both paths from an empty directory and compares their typed rows, columns, and schema identity.
+### 1. Choose an installation entry
 
-When Rust types are the schema source of truth, depend on both `unionid` and `unionid-derive`, derive `UnionidSchema` for structs and enums, and assemble an executable schema with `SchemaBuilder`. `#[unionid(table = "jobs", key = "id")]` declares a table; field-level `default = "0"`, `index`, and `unique` declare database defaults and single-field indexes. `build()` checks dependency order and validates the complete schema before startup. Defaults allow insert input to omit a field, while rows returned through `typed_rows` remain complete. See the [Rust schema bindings RFC](rfc/0012-schema-rust-bindings.md) for the support matrix.
+A crates.io installation requires Rust 1.94 or newer:
 
-When schema and query files are the source of truth, `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs` emits one shared ADT model plus a public submodule for each query. Applications pass the generated `find_task::FindTaskParams` to `find_task::find_task(&mut engine, params)` without assembling `Value` maps, result DTOs, or conversions between duplicate domain types. Use `--file` for a single query. Return types follow query cardinality, and runtime schema drift fails with `E_SCHEMA_CHANGED`. See the [static query RFC](rfc/0015-static-query-contract.md).
+```bash
+cargo install unionid --locked
+```
 
-The [typed application record](assessments/typed-application-2026-09-13.md) runs the complete independent journey across nested options, exact scalars, derivation, aggregation, lookup, returning, redb reopen, and two-version migration/client evolution.
+After extracting a native release archive, add its binary to the current shell's `PATH`:
 
-For atomic summary/content writes and on-demand versioned ADT reads, see the Rust example in [Application data boundaries](APPLICATION_DATA.md).
+```bash
+cd unionid-v<version>-<target>
+export PATH="$(pwd)/bin:$PATH"
+```
+
+For a source build, run these commands at the repository root:
+
+```bash
+cargo build --locked
+export PATH="$(pwd)/target/debug:$PATH"
+```
+
+All three entries use exactly the same commands from the next step onward. First inspect the selected binary and compatibility range:
+
+```bash
+unionid version --format json
+unionid doctor --format json
+```
+
+Neither command creates a database.
+
+### 2. Generate and check a project
+
+Run these commands from any empty working directory:
+
+```bash
+mkdir unionid-first-use
+cd unionid-first-use
+unionid init tasks
+cd tasks
+unionid project check --dir .
+```
+
+`init` accepts only a missing or empty directory and never overwrites existing files. It generates:
+
+- `README.md`: a short bilingual project guide
+- `schema.unid`: the current declarative schema
+- `migrations/0001_initial.unid`: the executable initial migration
+- `seed.unid`: two typed tasks
+- `queries/list_running.unid`: a query that directly matches `State.Running`
+- `data/`: a local data directory ignored by Git
+
+`project check` creates no database. In the fixed schema → migrations → queries order, it checks canonical formatting, the migration target schema, and query binding. It exits zero only when all three phases pass.
+
+### 3. Create, write, and reopen from a new process
+
+```bash
+unionid migration apply --db data/tasks.redb --dir migrations
+unionid run --db data/tasks.redb --file seed.unid
+unionid run --db data/tasks.redb --file queries/list_running.unid
+```
+
+The seed writes two rows. The final command reopens redb in a new `unionid` process and returns the `Running` task with `id = 1` and title `learn ADTs`. The result preserves the complete sum variant and record payload. Fields, constructors, pattern coverage, and payload types are checked before scanning rows.
+
+### 4. Diagnose and check the original database
+
+```bash
+unionid doctor --db data/tasks.redb --format json
+unionid check --db data/tasks.redb
+```
+
+`doctor` reads a permission-restricted temporary copy and reports storage, codecs, schema identity, and migration summary without changing the requested file. `check` opens the original database, runs redb integrity checking, and validates the catalog, schema hash, typed rows, RowIds, indexes, and migration ledger.
+
+### 5. Back up, restore, and compare typed results
+
+```bash
+unionid backup \
+  --db data/tasks.redb \
+  --output data/tasks.backup.json \
+  --format json
+unionid restore \
+  --backup data/tasks.backup.json \
+  --db data/restored.redb \
+  --format json
+unionid run \
+  --db data/restored.redb \
+  --file queries/list_running.unid
+unionid check --db data/restored.redb
+```
+
+Restore writes only to a missing destination. Query rows, column types, and schema identity should match the source database. See [Backup](BACKUP.md) for incremental archives, sequence restore, and retention.
+
+### Next steps
+
+- Add a migration when changing the schema, then run `project check` and `migration plan/apply`; see [Migrations](MIGRATIONS.md).
+- Generate shared ADTs, typed parameters, result rows, and call functions with `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs`.
+- Move to TCP with `unionid server --db data/tasks.redb` and `unionid cli --addr 127.0.0.1:7878`; see [CLI](CLI.md), [Protocol](PROTOCOL.md), and [Deployment](DEPLOYMENT.md).
+- Rust applications can use `Engine::open_redb`, prepared parameters, `Value::from_serde`, and `typed_rows` directly; see [Application data boundaries](APPLICATION_DATA.md).
+
+The current product targets one machine, one database owner, serialized writes, and a comfortable working set around 10,000 rows; 100,000 rows is a tested upper bound. General flattened joins, windows, and distributed execution remain outside the current scope.
+
+### Automated validation
+
+A source build can run the same starter journey from an empty directory:
+
+```bash
+python3 scripts/validate-first-use.py \
+  --binary "$PWD/target/debug/unionid" \
+  --work-dir /tmp/unionid-first-use
+```
+
+The release archive provides the same validator:
+
+```bash
+python3 tutorial/validate-first-use.py \
+  --binary "$PWD/bin/unionid" \
+  --work-dir /tmp/unionid-first-use
+```
+
+The validator rejects a non-empty work directory and checks generated files, ordered project-check phases, typed rows, schema identity, integrity checks, backup, and restore. The release archive retains the advanced `tutorial/validate.py` journey covering atomic updates, TCP, and the embedded Engine.

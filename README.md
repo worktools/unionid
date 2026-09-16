@@ -24,6 +24,32 @@ It is designed around two defining ideas:
 
 A task state therefore does not need to be simulated with `status = "running"` and nullable payload columns. The schema describes every valid shape precisely, and queries match those shapes directly.
 
+## 快速开始 / Quick start
+
+`init` 与 `project check` 从 v0.6.0 起提供。需要 Rust 1.94 或更高版本；从 crates.io 安装后，可以在任意空目录完成首用流程，不需要 clone 本仓库：
+
+`init` and `project check` are available from v0.6.0. With Rust 1.94 or newer, a crates.io installation can complete the first-use journey in any empty directory without cloning this repository:
+
+```bash
+cargo install unionid --locked
+unionid init tasks
+cd tasks
+unionid project check --dir .
+unionid migration apply --db data/tasks.redb --dir migrations
+unionid run --db data/tasks.redb --file seed.unid
+unionid run --db data/tasks.redb --file queries/list_running.unid
+unionid doctor --db data/tasks.redb
+unionid check --db data/tasks.redb
+```
+
+`project check` 应依次报告 schema、migrations 和 queries 通过；seed 写入两行，随后查询从新进程重开数据库并返回 `id = 1`、标题为 `learn ADTs` 的 `Running` task。`doctor` 只读诊断副本，`check` 验证原数据库。原生压缩包用户把 `bin` 加入 `PATH`，源码构建用户把 `target/debug` 加入 `PATH` 后，执行的是完全相同的命令。备份还原、三种安装入口和下一步见[五分钟入门](docs/GETTING_STARTED.md)。
+
+`project check` should pass schema, migrations, and queries in that order. The seed writes two rows, then the query reopens the database in a new process and returns the `Running` task with `id = 1` and title `learn ADTs`. `doctor` diagnoses a private copy, while `check` verifies the original database. Native-archive users add `bin` to `PATH`, and source builds add `target/debug`; every entry then runs the same commands. See the [five-minute guide](docs/GETTING_STARTED.md) for backup/restore, all three installation entries, and next steps.
+
+当前产品面向单机、一个数据库所有者和串行写入，约 10,000 行是舒适工作集；100,000 行只是已测试上限。通用扁平 join、window 和分布式执行不在当前范围内。
+
+The current product targets one machine, one database owner, serialized writes, and a comfortable working set around 10,000 rows; 100,000 rows is a tested upper bound. General flattened joins, windows, and distributed execution remain outside the current scope.
+
 当前还可直接声明 `uuid`、`bytes`、`date`、`timestamp`、`duration` 与 `decimal P S`：UUID 可作为主键，bytes 支持索引与二进制查询，temporal 值提供显式 offset，decimal 提供固定 scale 与 checked 精确算术。可运行示例见 [`content_metadata.unid`](examples/content_metadata.unid)、[`session_events.unid`](examples/session_events.unid) 与 [`invoices.unid`](examples/invoices.unid)。
 
 The executable language also supports native `uuid`, `bytes`, `date`, `timestamp`, `duration`, and `decimal P S`: UUIDs can be primary keys, bytes support indexed binary queries, temporal values use explicit offsets, and decimals provide fixed-scale checked arithmetic. See [`content_metadata.unid`](examples/content_metadata.unid), [`session_events.unid`](examples/session_events.unid), and [`invoices.unid`](examples/invoices.unid).
@@ -117,46 +143,6 @@ Service observability uses the versioned, cardinality-bounded `ConcurrentEngine:
 
 For individual-request diagnosis, applications can explicitly configure value-free terminal and slow-query observers. Request IDs stay absent by default and may be represented by an opt-in HMAC digest. See [OBSERVABILITY.md](docs/OBSERVABILITY.md) for event, threshold, sampling, and retention rules.
 
-## 快速开始 / Quick start
-
-需要 Rust 1.94 或更高版本。可直接从 crates.io 安装 v0.5.0，然后生成一个包含 schema、migration、初始数据和 ADT query 的独立项目，无需 clone 源码仓库。
-
-Rust 1.94 or newer is required. Install v0.5.0 directly from crates.io, then generate a standalone project with a schema, migration, seed data, and an ADT query; no source checkout is required.
-
-```bash
-cargo install unionid --version 0.5.0 --locked
-unionid init tasks
-cd tasks
-unionid project check --dir .
-unionid migration apply --db data/tasks.redb --dir migrations
-unionid run --db data/tasks.redb --file seed.unid
-unionid run --db data/tasks.redb --file queries/list_running.unid
-```
-
-`init` 只接受不存在或空目录，不会覆盖已有文件，并在完成后输出可复制的后续命令。`project check` 一次检查声明式 schema、完整 migration 链和全部静态 query，不打开或创建数据库。`run` 默认使用临时内存库；传入 redb 路径即可持久化。一个源码请求是一个原子批次。
-
-`init` accepts only a missing or empty directory, never overwrites existing files, and prints copy-pasteable next commands. `project check` validates the declarative schema, complete migration chain, and every static query in one command without opening or creating a database. `run` uses a fresh in-memory database by default; pass a redb path for durable use. One source request is one atomic batch.
-
-```bash
-unionid run --db ./data/app.redb --file examples/tasks.unid
-unionid run --db ./data/app.redb --query 'from tasks | filter id == 1'
-unionid cli --db ./data/app.redb
-unionid check --db ./data/app.redb
-```
-
-启动普通 TCP 服务或明确的只读查询服务。Start a regular TCP service or an explicit read-only query service:
-
-```bash
-unionid server --db ./data/app.redb --addr 127.0.0.1:7878
-unionid server --db ./data/app.redb --read-only --addr 127.0.0.1:7878
-```
-
-只读模式只打开已有 redb，并在进入持久事务前以 `E_READ_ONLY` 拒绝整个 mutation 批次。Read-only mode opens an existing redb database and rejects the complete mutation batch with `E_READ_ONLY` before entering a durable transaction.
-
-跨主机使用时保持 Unionid 监听 loopback，并通过仓库维护的 Envoy mTLS 参考部署开放到受控网络；默认网关同样只绑定 `127.0.0.1`。完整证书、权限、审计、deadline 与关闭旅程见 [DEPLOYMENT.md](docs/DEPLOYMENT.md)。
-
-For cross-host access, keep Unionid on loopback and use the maintained Envoy mTLS reference to expose it on a controlled network. The gateway also binds only to `127.0.0.1` by default. See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for the certificate, authority, audit, deadline, and shutdown journey.
-
 ## Rust typed API
 
 Rust 应用可以把自己的 `struct`、`enum`、`Option`、tuple 和 `Vec` 直接绑定到 prepared operation，再把结果解码回应用类型。
@@ -232,9 +218,9 @@ Remote calls can use the synchronous `TcpClient`. With the `asynchronous` featur
 
 ## 当前边界 / Current boundaries
 
-v0.5.0 面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。format-5 Legacy0 和 format-6 active generation 的普通 open、indexed/page read、融合 full pipeline、完整 check 与 logical backup 使用有界 row source。显式启用增量备份会进入 format 7，并通过 portable baseline/segment chain 提供按 sequence 恢复。最新 100k M7 复验中 open p95 为 12.02 ms、主键查询 p95 为 24 µs、完整 check 为 1.54 s／96.33 MiB；完整 shadow migration p95 为 16.51 s／427.98 MiB，仍应按维护操作安排。详见 [M7 验收记录](docs/benchmarks/m7-acceptance-2026-09-10.md)。当前不提供通用扁平 join、window 或分布式执行；受控网络通过官方维护的 Envoy mTLS 部署路径接入。
+当前实现面向单机、单数据库所有者和约一万行的舒适工作集；十万行是已测试上限，不是日常目标。format-5 Legacy0 和 format-6 active generation 的普通 open、indexed/page read、融合 full pipeline、完整 check 与 logical backup 使用有界 row source。显式启用增量备份会进入 format 7，并通过 portable baseline/segment chain 提供按 sequence 恢复。最新 100k M7 复验中 open p95 为 12.02 ms、主键查询 p95 为 24 µs、完整 check 为 1.54 s／96.33 MiB；完整 shadow migration p95 为 16.51 s／427.98 MiB，仍应按维护操作安排。详见 [M7 验收记录](docs/benchmarks/m7-acceptance-2026-09-10.md)。当前不提供通用扁平 join、window 或分布式执行；受控网络通过官方维护的 Envoy mTLS 部署路径接入。
 
-v0.5.0 targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound rather than the routine target. Ordinary format-5 Legacy0 and format-6 active-generation open, indexed/page reads, fused full pipelines, explicit checks, and logical backups use bounded row sources. Explicit incremental-backup enablement enters format 7 and provides sequence restore through a portable baseline/segment chain. In the final 100k M7 run, open p95 was 12.02 ms, primary-key query p95 was 24 µs, and full check took 1.54 seconds and 96.33 MiB. Complete shadow-migration p95 was 16.51 seconds with 427.98 MiB peak RSS, so it remains a planned maintenance operation. See the [M7 acceptance record](docs/benchmarks/m7-acceptance-2026-09-10.md). General flattened joins, windows, and distributed execution remain out of scope; controlled networks use the officially maintained Envoy mTLS deployment path.
+The current implementation targets a single machine, one database owner, and a comfortable working set around 10,000 rows. A 100,000-row workload is a tested upper bound rather than the routine target. Ordinary format-5 Legacy0 and format-6 active-generation open, indexed/page reads, fused full pipelines, explicit checks, and logical backups use bounded row sources. Explicit incremental-backup enablement enters format 7 and provides sequence restore through a portable baseline/segment chain. In the final 100k M7 run, open p95 was 12.02 ms, primary-key query p95 was 24 µs, and full check took 1.54 seconds and 96.33 MiB. Complete shadow-migration p95 was 16.51 seconds with 427.98 MiB peak RSS, so it remains a planned maintenance operation. See the [M7 acceptance record](docs/benchmarks/m7-acceptance-2026-09-10.md). General flattened joins, windows, and distributed execution remain out of scope; controlled networks use the officially maintained Envoy mTLS deployment path.
 
 ## 文档 / Documentation
 
@@ -245,7 +231,7 @@ v0.5.0 targets a single machine, one database owner, and a comfortable working s
 | Rust、TCP 与 HTTP 数据协议 / Rust, TCP, and HTTP data protocol | [PROTOCOL.md](docs/PROTOCOL.md) · [HTTP.md](docs/HTTP.md) |
 | Schema 身份与 migration / Schema identity and migrations | [SCHEMA.md](docs/SCHEMA.md) · [MIGRATIONS.md](docs/MIGRATIONS.md) |
 | 持久化、备份与生产边界 / Storage, backup, and production boundaries | [STORAGE.md](docs/STORAGE.md) · [BACKUP.md](docs/BACKUP.md) · [SERVICE.md](docs/SERVICE.md) · [DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| v0.5 版本契约与发布说明 / v0.5 contract and release notes | [contract.json](release/contract.json) · [RELEASE-v0.5.0.md](docs/RELEASE-v0.5.0.md) · [UPGRADING.md](docs/UPGRADING.md) |
+| 发布契约、历史说明与升级 / Release contract, historical notes, and upgrades | [contract.json](release/contract.json) · [RELEASE-v0.5.0.md](docs/RELEASE-v0.5.0.md) · [UPGRADING.md](docs/UPGRADING.md) |
 | 实际场景与后续计划 / Real scenarios and roadmap | [SCENARIOS.md](docs/SCENARIOS.md) · [ROADMAP.md](docs/ROADMAP.md) |
 | 实现与验证记录 / Implementation and validation history | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | 贡献者与 agent 约定 / Contributor and agent conventions | [Agents.md](Agents.md) |
