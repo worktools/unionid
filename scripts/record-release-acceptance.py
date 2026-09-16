@@ -88,6 +88,7 @@ def main():
         {"name": "idempotency_cursor_cancel_limits", "status": "passed"},
         {"name": "incremental_backup_sequence_restore", "status": "passed"},
         {"name": "controlled_network_configuration", "status": "passed"},
+        {"name": "empty_directory_generated_starter", "status": "passed"},
         {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
     ]
     if args.controlled_network_journey:
@@ -134,6 +135,10 @@ def main():
             ),
             "controlled_network_configuration": (
                 "scripts/verify-envoy-deployment.py and docs/DEPLOYMENT.md"
+            ),
+            "empty_directory_generated_starter": (
+                "scripts/validate-first-use.py, tests/first_use.rs, and "
+                "docs/GETTING_STARTED.md"
             ),
             "controlled_network_mtls_journey": (
                 "deploy/envoy/verify.sh, scripts/verify-envoy-deployment.py, and "

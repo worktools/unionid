@@ -37,7 +37,9 @@ def reported_capabilities(report):
 
 def main():
     """Verify archive integrity, contract identity, and packaged user journeys."""
-    parser = argparse.ArgumentParser(description="Verify a unionid release archive and tutorial")
+    parser = argparse.ArgumentParser(
+        description="Verify a unionid release archive, first-use path, and tutorial"
+    )
     parser.add_argument("--dist", required=True, type=pathlib.Path)
     parser.add_argument(
         "--expected-sha256",
@@ -154,6 +156,7 @@ def main():
             root / "deploy" / "envoy" / "probe.py",
             root / "deploy" / "envoy" / "render.py",
             root / "deploy" / "envoy" / "verify.sh",
+            root / "tutorial" / "validate-first-use.py",
             root / "tutorial" / "validate.py",
             root / "tutorial" / "01_setup.unid",
             root / "tutorial" / "04_reopen.unid",
@@ -167,24 +170,47 @@ def main():
         for expected_help in ["--history <PATH>", ".schema", ".storage"]:
             if expected_help not in help_text:
                 raise RuntimeError(f"CLI help is missing {expected_help}")
-        work = temporary / "fresh-tutorial"
-        result = subprocess.run(
+        first_use = subprocess.run(
+            [
+                "python3",
+                root / "tutorial" / "validate-first-use.py",
+                "--binary",
+                binary,
+                "--work-dir",
+                temporary / "fresh-starter",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        if first_use.returncode:
+            raise RuntimeError(first_use.stderr)
+        tutorial = subprocess.run(
             [
                 "python3",
                 root / "tutorial" / "validate.py",
                 "--binary",
                 binary,
                 "--work-dir",
-                work,
+                temporary / "fresh-tutorial",
                 "--tutorial-dir",
                 root / "tutorial",
             ],
             text=True,
             capture_output=True,
         )
-        if result.returncode:
-            raise RuntimeError(result.stderr)
-        print(json.dumps({"ok": True, "archive": archive_path.name, "sha256": actual, "tutorial": json.loads(result.stdout)}))
+        if tutorial.returncode:
+            raise RuntimeError(tutorial.stderr)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "archive": archive_path.name,
+                    "sha256": actual,
+                    "first_use": json.loads(first_use.stdout),
+                    "tutorial": json.loads(tutorial.stdout),
+                }
+            )
+        )
 
 
 if __name__ == "__main__":

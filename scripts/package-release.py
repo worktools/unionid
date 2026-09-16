@@ -134,7 +134,14 @@ def main():
         f"{package}/bin/{executable}": (binary.read_bytes(), 0o755),
         f"{package}/README.md": ((ROOT / "README.md").read_bytes(), 0o644),
         f"{package}/release/contract.json": (CONTRACT_PATH.read_bytes(), 0o644),
-        f"{package}/tutorial/validate.py": ((ROOT / "scripts/validate-tutorial.py").read_bytes(), 0o755),
+        f"{package}/tutorial/validate-first-use.py": (
+            (ROOT / "scripts/validate-first-use.py").read_bytes(),
+            0o755,
+        ),
+        f"{package}/tutorial/validate.py": (
+            (ROOT / "scripts/validate-tutorial.py").read_bytes(),
+            0o755,
+        ),
     }
     for source in sorted((ROOT / "docs").rglob("*")):
         if source.is_file():

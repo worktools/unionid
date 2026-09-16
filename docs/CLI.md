@@ -13,11 +13,12 @@ unionid cli --addr 127.0.0.1:7878
 
 ## 项目初始化 / Project initialization
 
-安装二进制后可直接在不存在或空目录中生成最小 ADT 项目，不需要 clone 源码仓库：
+`init` 与 `project check` 从 v0.6.0 起提供。通过 crates.io、原生 release archive 或源码构建取得二进制后，都可以在不存在或空目录中执行同一条最小 ADT 项目链路；前两种入口不需要 clone 源码仓库。完整安装命令、预期结果与备份还原见 [GETTING_STARTED.md](GETTING_STARTED.md)：
 
-After installing the binary, generate a minimal ADT project in a missing or empty directory without cloning the source repository:
+`init` and `project check` are available from v0.6.0. A binary installed from crates.io, extracted from a native release archive, or built from source follows the same minimal ADT project journey in a missing or empty directory; the first two entries require no repository checkout. See [GETTING_STARTED.md](GETTING_STARTED.md) for complete installation commands, expected results, backup, and restore:
 
 ```bash
+cargo install unionid --locked
 unionid init tasks
 cd tasks
 unionid project check --dir .
