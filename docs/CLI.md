@@ -11,6 +11,26 @@ unionid cli --db app.redb --read-only
 unionid cli --addr 127.0.0.1:7878
 ```
 
+## 项目初始化 / Project initialization
+
+安装二进制后可直接在不存在或空目录中生成最小 ADT 项目，不需要 clone 源码仓库：
+
+After installing the binary, generate a minimal ADT project in a missing or empty directory without cloning the source repository:
+
+```bash
+unionid init tasks
+cd tasks
+unionid migration apply --db data/tasks.redb --dir migrations
+unionid run --db data/tasks.redb --file seed.unid
+unionid run --db data/tasks.redb --file queries/list_running.unid
+unionid doctor --db data/tasks.redb
+unionid check --db data/tasks.redb
+```
+
+骨架包含规范格式的 `schema.unid`、`migrations/0001_initial.unid`、`seed.unid`、一个直接匹配 enum variant 的 typed query，以及简短双语 README。`init` 会在写入前验证内置 schema、migration、seed 和 query；非空目录、普通文件或路径冲突会明确失败，已有内容保持不变。该命令只创建显式目录中的文件，不搜索工作目录、不创建项目 manifest，也不隐式创建数据库。
+
+The scaffold contains canonical `schema.unid`, `migrations/0001_initial.unid`, `seed.unid`, a typed query that matches an enum variant directly, and a short bilingual README. Before writing, `init` validates its built-in schema, migration, seed, and query. A non-empty directory, regular file, or path conflict fails explicitly and leaves existing content unchanged. The command only creates files under the explicit destination; it performs no working-directory discovery, creates no project manifest, and does not create a database implicitly.
+
 ## 版本与部署诊断
 
 部署脚本不需要解析面向人的句子。`version` 报告当前二进制及它明确支持的协议、存储和 codec；`doctor` 还可检查一个已经存在的数据库：

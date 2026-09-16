@@ -119,20 +119,22 @@ For individual-request diagnosis, applications can explicitly configure value-fr
 
 ## 快速开始 / Quick start
 
-需要 Rust 1.94 或更高版本。v0.5.0 发布后可直接从 crates.io 安装；发布前请从对应候选提交构建。
+需要 Rust 1.94 或更高版本。可直接从 crates.io 安装 v0.5.0，然后生成一个包含 schema、migration、初始数据和 ADT query 的独立项目，无需 clone 源码仓库。
 
-Rust 1.94 or newer is required. After publication, v0.5.0 can be installed directly from crates.io; build the matching candidate commit before then.
+Rust 1.94 or newer is required. Install v0.5.0 directly from crates.io, then generate a standalone project with a schema, migration, seed data, and an ADT query; no source checkout is required.
 
 ```bash
 cargo install unionid --version 0.5.0 --locked
-git clone --depth 1 https://github.com/worktools/unionid.git
-cd unionid
-unionid run --file examples/tasks.unid
+unionid init tasks
+cd tasks
+unionid migration apply --db data/tasks.redb --dir migrations
+unionid run --db data/tasks.redb --file seed.unid
+unionid run --db data/tasks.redb --file queries/list_running.unid
 ```
 
-`run` 默认使用临时内存库；传入 redb 路径即可持久化。一个源码请求是一个原子批次。
+`init` 只接受不存在或空目录，不会覆盖已有文件，并在完成后输出可复制的后续命令。`run` 默认使用临时内存库；传入 redb 路径即可持久化。一个源码请求是一个原子批次。
 
-`run` uses a fresh in-memory database by default; pass a redb path for durable use. One source request is one atomic batch.
+`init` accepts only a missing or empty directory, never overwrites existing files, and prints copy-pasteable next commands. `run` uses a fresh in-memory database by default; pass a redb path for durable use. One source request is one atomic batch.
 
 ```bash
 unionid run --db ./data/app.redb --file examples/tasks.unid
