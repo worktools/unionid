@@ -46,7 +46,7 @@ v0.8.0 可直接打开 v0.7.0 的 format-6/7 数据库，不要求 storage upgra
 
 v0.8.0 可直接打开 v0.6.0 的 format-6/7 数据库，不要求 storage upgrade 或应用 schema migration。升级的 breaking boundary 在源码：规范类型、值、pattern、bool operator 和 range 改为 Rust 形状。parser 暂时接受 v0.6 拼写，`unionid fmt` 可生成新规范形式；但旧 `take 2..4` 是闭区间，v0.7 的同一文本是半开区间。先逐条决定 `..` 或 `..=`，再运行 formatter、`project check` 和业务验收。静态查询生成物绑定软件版本，必须用 v0.8 `query rust` 重新生成并重新编译。
 
-完整 checklist 与能力边界见 [v0.7.0 发布说明](RELEASE-v0.7.0.md)。
+Rust 形状源码迁移的完整 checklist 见 [v0.7.0 发布说明](RELEASE-v0.7.0.md)；当前聚合与窗口能力及边界见 [v0.8.0 发布说明](RELEASE-v0.8.0.md)。
 
 ### 从 v0.3.0–v0.5.0 升级
 
@@ -131,7 +131,7 @@ v0.8.0 directly opens v0.7.0 format-6/7 databases without a storage upgrade, app
 
 ### Upgrading from v0.6.0
 
-v0.8.0 directly opens v0.6.0 format-6/7 databases without a storage upgrade or application schema migration. The breaking boundary is source code: canonical types, values, patterns, boolean operators, and ranges adopt the Rust-shaped form. The parser temporarily accepts v0.6 spellings and `unionid fmt` emits the new form, but legacy `take 2..4` was inclusive while v0.7 interprets the same text as half-open. Decide explicitly between `..` and `..=` before formatting, running `project check`, and repeating application acceptance. Regenerate version-bound static queries with the v0.8 `query rust` command and rebuild clients. See the [v0.7.0 release notes](RELEASE-v0.7.0.md) for the complete checklist.
+v0.8.0 directly opens v0.6.0 format-6/7 databases without a storage upgrade or application schema migration. The breaking boundary is source code: canonical types, values, patterns, boolean operators, and ranges adopt the Rust-shaped form. The parser temporarily accepts v0.6 spellings and `unionid fmt` emits the new form, but legacy `take 2..4` was inclusive while v0.7 interprets the same text as half-open. Decide explicitly between `..` and `..=` before formatting, running `project check`, and repeating application acceptance. Regenerate version-bound static queries with the v0.8 `query rust` command and rebuild clients. See the [v0.7.0 release notes](RELEASE-v0.7.0.md) for the Rust-shaped source migration checklist and the [v0.8.0 release notes](RELEASE-v0.8.0.md) for the current aggregate/window surface and limits.
 
 ### Upgrading from v0.3.0 through v0.5.0
 
