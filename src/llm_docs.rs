@@ -124,6 +124,13 @@ const TOPICS: &[BundledDocsTopic] = &[
         content: include_str!("../docs/APPLICATION_DATA.md"),
     },
     BundledDocsTopic {
+        name: "rust-query-macro",
+        category: DocsCategory::Application,
+        title: "Inline Rust queries / 内联 Rust 查询",
+        summary: "Compile inline pipelines into schema-checked typed Rust bindings.",
+        content: include_str!("../docs/RUST_QUERY_MACRO.md"),
+    },
+    BundledDocsTopic {
         name: "migrations",
         category: DocsCategory::Lifecycle,
         title: "Migrations / 数据迁移",
@@ -338,7 +345,7 @@ mod tests {
     fn bundled_docs_are_categorized_and_versioned() {
         let catalog = docs_catalog(None);
         assert_eq!(catalog.schema_version, 1);
-        assert_eq!(catalog.topics.len(), 18);
+        assert_eq!(catalog.topics.len(), 19);
         assert_eq!(catalog.topics[0].name, "getting-started");
         assert!(catalog.topics.iter().any(|topic| topic.name == "query"));
         assert!(

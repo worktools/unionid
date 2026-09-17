@@ -1,0 +1,17 @@
+enum State {
+  Pending
+  Running {worker: text}
+  Done {result: text}
+}
+
+struct Task {
+  id: int
+  title: text
+  state: State
+  priority: int
+  due_on: date
+}
+
+table tasks: Task {
+  key id
+}

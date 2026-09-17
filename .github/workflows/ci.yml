@@ -62,3 +62,9 @@ jobs:
           cargo check --locked --manifest-path derive/Cargo.toml
           cargo clippy --locked --manifest-path derive/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path derive/Cargo.toml
+      - name: Check inline query macro crate
+        run: |
+          cargo fmt --check --manifest-path query-macro/Cargo.toml
+          cargo check --locked --manifest-path query-macro/Cargo.toml
+          cargo clippy --locked --manifest-path query-macro/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path query-macro/Cargo.toml

@@ -1,0 +1,24 @@
+[package]
+name = "unionid-query"
+version = "0.8.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Compile-time checked inline Unionid queries for Rust applications"
+license = "MIT"
+repository = "https://github.com/worktools/unionid"
+homepage = "https://github.com/worktools/unionid"
+documentation = "https://docs.rs/unionid-query"
+keywords = ["database", "adt", "query", "proc-macro"]
+categories = ["database"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
+syn = { version = "2", features = ["full"] }
+unionid = { version = "=0.8.0", path = ".." }
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }

@@ -161,6 +161,10 @@ For individual-request diagnosis, applications can explicitly configure value-fr
 
 Rust 应用可以把自己的 `struct`、`enum`、`Option`、tuple 和 `Vec` 直接绑定到 prepared operation，再把结果解码回应用类型。
 
+短小且只由一个 Rust crate 使用的查询也可以通过 `unionid_query::queries!` 直接内联。宏在编译期读取声明式 schema，复用同一 parser/binder/codegen 生成共享 ADT、typed Params/Row 和执行函数；运行时仍检查 schema identity。完整用法与 migration 边界见 [内联 Rust 查询](docs/RUST_QUERY_MACRO.md)。独立 `.unid` 查询继续使用 `query describe` / `query rust`，适合跨语言、CLI、LLM 和较大查询。
+
+Short queries owned by one Rust crate can also use inline `unionid_query::queries!`. At compile time the macro reads a declarative schema and reuses the same parser, binder, and code generator to produce shared ADTs, typed Params/Rows, and execution functions; runtime schema-identity checks remain in place. See [Inline Rust queries](docs/RUST_QUERY_MACRO.md) for usage and migration boundaries. Standalone `.unid` queries retain `query describe` / `query rust` for cross-language, CLI, LLM, and larger-query workflows.
+
 Rust applications can bind their own structs, enums, options, tuples, and vectors directly to prepared operations, then decode rows back into application types.
 
 ```rust
