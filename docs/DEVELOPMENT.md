@@ -4,6 +4,7 @@
 
 ## 发布后进展
 
+- v0.8.0 交付完整 ADT equality 的 `count_distinct`、typed `avg` 与显式 partition/sort 的 `row_number`/`rank`/`dense_rank` 基础窗口；storage、codec、backup 与 protocol 不变，候选流程验证真实 v0.7 数据、backup 和客户端兼容。
 - v0.7.0 收敛 Rust 形状、无分号的规范源码，并交付 typed membership、相关 exists/not-exists 与同形 set operations。升级只在源码层 breaking：旧 `take start..end` 的闭区间语义需要人工改为 `..=`；storage、codec、backup 与 protocol 不变。候选流程使用真实 v0.6.0 原生包，分别验证 format 6 与启用 incremental journal 的 format 7 数据、logical backup 和旧 CLI → v0.7 server 的直接兼容路径。
 - v0.6.0 只收口首次接入：`init` 生成规范 `.unid` 项目，`project check` 在建库前联合验证 schema、migration 与 query，发布包从空目录验证运行、重开、诊断和备份还原。候选流程另外使用真实 v0.5.0 原生包验证数据、logical backup 和 v0.5 CLI → v0.6 server 的兼容路径；storage、codec、backup 与 protocol 数值保持不变。
 - v0.5 的跨主机安全入口选择官方网关路径：Unionid 继续只监听 loopback，`deploy/envoy` 用固定 Envoy 版本终止 TLS 1.3 mTLS、限制连接/缓冲并输出不含业务值的证书身份审计。Linux release job 执行真实有证书读取、无证书拒绝、优雅关闭、完整检查和只读写拒绝；普通 CI 只验证配置约束，不增加 macOS 日常运行。
