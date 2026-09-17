@@ -10,4 +10,5 @@
 /tools/incremental-backup-eval/target
 /tools/adt-interop-eval/target
 /derive/target
+/query-macro/target
 /dist
