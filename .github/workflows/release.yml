@@ -100,19 +100,21 @@ jobs:
           cargo run --locked --example cold_content -- "${RUNNER_TEMP}/unionid-cold-content.redb"
           cargo run --locked --example todolist -- "${RUNNER_TEMP}/unionid-todolist"
           python3 scripts/verify-current-consumer.py
-      - name: Verify published v0.5 package compatibility
+      - name: Verify published v0.6 package compatibility
         shell: bash
         run: |
-          archive="unionid-v0.5.0-${{ matrix.expected-target }}.tar.gz"
-          base="https://github.com/worktools/unionid/releases/download/v0.5.0"
+          archive="unionid-v0.6.0-${{ matrix.expected-target }}.tar.gz"
+          base="https://github.com/worktools/unionid/releases/download/v0.6.0"
           curl --fail --location --retry 3 --output "${RUNNER_TEMP}/${archive}" "${base}/${archive}"
           curl --fail --location --retry 3 --output "${RUNNER_TEMP}/${archive}.sha256" "${base}/${archive}.sha256"
           cargo build --locked --bin unionid
-          python3 scripts/verify-v050-compatibility.py \
+          python3 scripts/verify-previous-release-compatibility.py \
             --archive "${RUNNER_TEMP}/${archive}" \
             --checksum "${RUNNER_TEMP}/${archive}.sha256" \
             --current-binary target/debug/unionid \
-            --work-dir "${RUNNER_TEMP}/unionid-v050-compat"
+            --previous-version 0.6.0 \
+            --current-version 0.7.0 \
+            --work-dir "${RUNNER_TEMP}/unionid-v060-compat"
       - name: Package native artifact
         shell: bash
         run: |

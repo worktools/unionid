@@ -2,7 +2,7 @@
 
 规划日期：2026-09-12。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
-当前验收：[v0.6 #329](https://github.com/worktools/unionid/issues/329) · [v0.5 #320](https://github.com/worktools/unionid/issues/320) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
+当前验收：[v0.7 #343](https://github.com/worktools/unionid/issues/343) · [v0.6 #329](https://github.com/worktools/unionid/issues/329) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
 
 [2026-09-12 ADT 与语言互通评估](assessments/adt-adoption-2026-09-12.md)记录当前实现、独立消费探针、业界对照及采用建议；它是评估快照，不替代 issues 的实时范围与完成状态。 / The dated assessment records implementation evidence, consumer probes, industry comparisons, and adoption proposals; issues remain the source of current scope and status.
 
@@ -192,9 +192,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 版本里程碑（v0.3.0 起） / Version milestones
 
-M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.5.0`，以下未发布版本仍是目标，不表示已经发布。issue 的完整验收决定完成状态；计划整理不创建 tag，也不预设发布日期。软件版本与 storage/protocol 版本独立冻结。
+M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.6.0`，以下未发布版本仍是目标，不表示已经发布。issue 的完整验收决定完成状态；计划整理不创建 tag。软件版本与 storage/protocol 版本独立冻结。
 
-M0–M9 retain completed-stage evidence. The latest published release is `v0.5.0`; later unreleased versions below remain targets. Full issue acceptance determines completion. Planning does not create tags or promise dates. Software, storage and protocol versions are frozen independently.
+M0–M9 retain completed-stage evidence. The latest published release is `v0.6.0`; later unreleased versions below remain targets. Full issue acceptance determines completion. Planning does not create tags. Software, storage and protocol versions are frozen independently.
 
 ### v0.3.0 · 可靠 Rust 接入与应用闭环 / Reliable Rust integration and application workflows
 
@@ -253,19 +253,23 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 | [#328](https://github.com/worktools/unionid/issues/328) | 无需 checkout 的首用旅程 / no-checkout first-use journey | 已交付 / Delivered |
 | [#329](https://github.com/worktools/unionid/issues/329) | v0.6 契约与候选发布 / v0.6 contract and release candidate | 已交付 / Delivered |
 
-### v0.7.0 · 场景驱动的查询与类型扩展 / Scenario-driven query and type extensions
+### v0.7.0 · 类型化查询组合 / Typed query composition
 
-[Milestone 15](https://github.com/worktools/unionid/milestone/15)；从原 v0.4 通用表达力计划移入，为近期 ADT 接入留出范围。以真实场景、typed 语义和资源预算决定切片；更早版本遇到已验证的硬性阻塞时，可单独调整归属。
+[Milestone 15](https://github.com/worktools/unionid/milestone/15) 收口为短周期版本，只发布 Rust 形状的规范源码、typed membership、相关 exists/not-exists 与同形集合运算。数据库格式、backup 和 protocol 不变；更宽的类型、聚合与索引探索不阻塞发布。
 
-Move general expressiveness work from the former v0.4 plan to keep near-term releases focused on ADT integration. Define slices from real scenarios, typed semantics and resource budgets; evidence of an earlier blocker may justify rescheduling an individual issue.
+[Milestone 15](https://github.com/worktools/unionid/milestone/15) is a short-cycle release limited to canonical Rust-shaped source, typed membership, correlated exists/not-exists, and exact-schema set operations. Storage, backup, and protocol versions remain unchanged; broader type, aggregate, and index exploration does not block the release.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#244](https://github.com/worktools/unionid/issues/244) | 子查询、IN/EXISTS 与集合运算 / subqueries and set operations | P1 · `in`/`not in` 已交付，EXISTS/集合运算待续 / membership delivered, EXISTS/set operations pending |
-| [#245](https://github.com/worktools/unionid/issues/245) | 聚合扩展与基础窗口 / aggregates and basic windows | P1 |
-| [#246](https://github.com/worktools/unionid/issues/246) | Typed map 或显式 JSON 逃生通道 / typed map or explicit JSON escape hatch | P1 |
-| [#247](https://github.com/worktools/unionid/issues/247) | Decimal 与 calendar 算术 / decimal and calendar arithmetic | P1 |
-| [#248](https://github.com/worktools/unionid/issues/248) | 部分/表达式索引 / partial and expression indexes | P2 |
+| [#335](https://github.com/worktools/unionid/issues/335) | Rust 形状、无分号的 PRQL 语言 / Rust-shaped semicolon-free PRQL language | 已交付 / Delivered |
+| [#244](https://github.com/worktools/unionid/issues/244) | IN、相关 EXISTS 与集合运算 / IN, correlated EXISTS, and set operations | 已交付 / Delivered |
+| [#343](https://github.com/worktools/unionid/issues/343) | v0.7 契约、升级说明与候选发布 / v0.7 contract, upgrade guidance, and release candidate | P0 |
+
+### v0.8.0 · 聚合与基础窗口 / Aggregates and basic windows
+
+[Milestone 17](https://github.com/worktools/unionid/milestone/17) 只承接 [#245](https://github.com/worktools/unionid/issues/245)，以一个真实调用场景定义最小 typed aggregate/window 切片。目标窗口为 v0.7 之后约两周；如果完整原范围过大，缩小首版边界而不延迟已经完成的用户价值。
+
+[Milestone 17](https://github.com/worktools/unionid/milestone/17) contains only [#245](https://github.com/worktools/unionid/issues/245), with one concrete caller defining the minimum typed aggregate/window slice. Its target window is roughly two weeks after v0.7. If the original scope is too large, narrow the first acceptance boundary instead of delaying completed user value.
 
 ### 按需探索 · 版本待定 / Demand-driven exploration · version TBD
 
@@ -278,6 +282,9 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 | [#118](https://github.com/worktools/unionid/issues/118) | 用户泛型与互递归 / user generics and mutual recursion | P2 / deferred |
 | [#120](https://github.com/worktools/unionid/issues/120) | 服务器 named query/module / server-side named queries and modules | P2 / deferred |
 | [#192](https://github.com/worktools/unionid/issues/192) | 一个真实第二语言适配 / one real second-language adapter | P2 / deferred |
+| [#246](https://github.com/worktools/unionid/issues/246) | Typed map 或显式 JSON 逃生通道 / typed map or explicit JSON escape hatch | P1 / demand-driven |
+| [#247](https://github.com/worktools/unionid/issues/247) | Decimal 与 calendar 算术 / decimal and calendar arithmetic | P1 / demand-driven |
+| [#248](https://github.com/worktools/unionid/issues/248) | 部分/表达式索引 / partial and expression indexes | P2 / demand-driven |
 | [#252](https://github.com/worktools/unionid/issues/252) | 多写者、复制与 HA / multi-writer, replication and HA | P2 / deferred |
 | [#253](https://github.com/worktools/unionid/issues/253) | CDC、订阅与物化视图 / CDC, subscriptions and materialized views | P2 / deferred |
 | [#254](https://github.com/worktools/unionid/issues/254) | 超过 100k 的架构 / architecture beyond 100k rows | P2 / deferred |
@@ -288,7 +295,7 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 
 ## 当前执行顺序
 
-M0–M9、v0.3.0、v0.4.0 与 v0.5.0 已完成。当前只执行 [#329](https://github.com/worktools/unionid/issues/329)：冻结 v0.6 两个 crate 和 release contract，从空目录联合验证 init/project check/运行/重开/诊断/备份还原，再运行一次 Ubuntu/macOS Release workflow。此阶段不增加查询、类型、存储、备份策略或网络功能。tag 与公开发布不能由普通候选 PR 代替；完成发布核对后再进入 v0.7。
+M0–M9 与 v0.3.0–v0.6.0 已完成。当前只执行 [#343](https://github.com/worktools/unionid/issues/343)：冻结 v0.7 两个 crate、源码迁移边界和 release contract，验证 v0.6 数据／backup／客户端兼容，再运行一次 Ubuntu/macOS Release workflow。tag 与公开发布不能由普通候选 PR 代替；v0.7 发布后再进入 v0.8 的 #245。
 
 ## 维护约定
 
