@@ -262,6 +262,7 @@ pub enum Stage {
 #[derive(Debug, Clone)]
 pub struct ExistsFilter {
     pub pipeline: Box<Pipeline>,
+    pub negated: bool,
     pub correlations: Vec<ExistsCorrelation>,
     pub index: Option<String>,
     pub index_target: Option<String>,

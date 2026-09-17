@@ -129,7 +129,7 @@ take 20
 | 数据源 | `from tasks` | 开始查询 |
 | 布尔过滤 | `filter any attempts (attempt -> attempt.failed)` | 组合 bool、比较、Option 检查、list/text 长度、成员判断与元素字段谓词 |
 | 模式过滤 | `filter match state {...}` | 按 sum 变体及其 record 负载判断 |
-| 相关存在过滤 | `filter exists { from items ... }` | 用显式 `outer.path` 和目标索引保留至少有一个匹配子项的行 |
+| 相关存在过滤 | `filter exists { from items ... }` / `filter not exists {...}` | 用显式 `outer.path` 和目标索引保留有匹配子项或没有匹配子项的行 |
 | 普通派生 | `derive score = priority + bonus` | 产生 scalar 或 bool typed 列并加入后续 stage 作用域 |
 | ADT 派生 | `derive label = match state {...}` | 穷尽解构 sum/option，追加统一类型的结果列 |
 | 局部定义 | `let retryable = attempt -> attempt < 3` | 定义常量或有类型、非递归纯函数，供后续 stage 展开复用 |

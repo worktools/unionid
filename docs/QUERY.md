@@ -37,7 +37,7 @@ take 20
 | 截取 | `take 20` / `take 10..20` / `take 10..=20` | 已实现前 N 行与 Rust 风格半开／闭区间 | — |
 | 稳定分页 | `page 100` / `page 100 after "u1..."` | 已实现有界 keyset page、正反向 opaque cursor、sequence-pinned 一致性 | #114/#131 |
 | 有界关联展开 | `lookup lines from order_lines on order_id == id take 100` | 已实现索引驱动、一致快照、嵌套 typed list 与显式逐行基数上限 | #241 |
-| 有界相关 existence | `filter exists { from items ... }` | 已实现显式 `outer.path`、索引前置、首行短路与 10,000 driver 上限 | #337 |
+| 有界相关 existence | `filter exists { from items ... }` / `filter not exists {...}` | 已实现显式 `outer.path`、索引前置、首行短路、取反与 10,000 driver 上限 | #337/#339 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` / `upsert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91/#97 |
 | ADT 派生列 | `derive x = match field {...}` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
@@ -297,7 +297,7 @@ from tasks | filter id > 1 | take 1
 | `derive` | 追加或替换有静态类型的字段 | 每行求值一次 scalar 或 bool expression，行数与顺序不变 | 仍推导结果类型并检查完整表达式 |
 | `derive name = match source {...}` | 追加或替换有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
 | `lookup` | 追加目标表 row type 的 `list` 字段 | 按索引为每个 driver row 读取有界关联行；driver 行数与顺序不变 | 仍检查表、字段、索引、类型和上限 |
-| `filter exists` | 不变 | 只保留内层目标表至少有一条匹配的 driver row | 仍检查目标表、`outer` 路径、相关键类型、索引和 stage 边界 |
+| `filter exists` / `filter not exists` | 不变 | 分别保留内层目标表有匹配或无匹配的 driver row | 仍检查目标表、`outer` 路径、相关键类型、索引和 stage 边界；plan 用 `negated` 区分 |
 | `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/sum 为类型化零；min/max 为 None |
 | `group ... { aggregate {...} }` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
@@ -622,7 +622,7 @@ select {id, customer, lines}
 
 稳定分页时 lookup 必须放在 page 后面，让引擎先取出有界 driver page，再读取关联；page 后只允许 lookup 和 select。非分页查询应先用 indexed filter 或 take 限制 driver。`explain` 的 `lookups` 可确认目标索引和逐行预算。lookup 不能用于 update/delete target，也不是 SQL 的 inner/left/right/full join。
 
-### 有界相关 exists
+### 有界相关 exists 与 not exists
 
 `filter exists` 处理“只保留至少有一个匹配子项的任务”一类查询，不把子项装进结果：
 
@@ -638,9 +638,21 @@ sort id
 
 内层普通字段属于 `task_items`；`outer.id` 明确引用进入 exists stage 时的任务。至少一个内层 filter 必须包含类型一致的 `target.path == outer.path`，目标路径必须是主键或二级索引的首个 component。相关条件可以与其他纯 filter 组合，执行器始终把选中的相关等值条件下推到索引，并在第一条通过 residual filters 的目标行处停止。
 
-一个 exists stage 最多接收 10,000 个 driver rows，沿用同一 committed snapshot、deadline、取消、decode 与 working-memory 限制。首版内层只允许 filter；不支持嵌套 exists、derive、lookup、aggregate、sort、take、page、select，也不支持 mutation target 或 `not exists`。多个普通 filter 和 exists stage 可按 pipeline 顺序表达 conjunction。
+使用同一边界的 `filter not exists { ... }` 可以保留没有匹配子项的 driver row，包括完全没有子项，以及存在子项但都未通过 residual filters 的情况。它不是任意 bool expression 中的取反，而是语义明确的 anti-existence stage：
 
-`explain` 的 `exists` 数组公开 stage、目标表、`target`/`outer` 相关路径、实际索引和 driver limit；普通 explain 只绑定和规划，不执行目标查询，也不显示外层字段值。完整契约见 [RFC 0018](rfc/0018-bounded-correlated-exists.md)。
+```text
+from tasks
+filter not exists {
+  from task_items
+  filter task_id == outer.id
+  filter state != Done
+}
+sort id
+```
+
+一个 exists/not-exists stage 最多接收 10,000 个 driver rows，沿用同一 committed snapshot、deadline、取消、decode 与 working-memory 限制。首版内层只允许 filter；不支持嵌套 exists、derive、lookup、aggregate、sort、take、page、select，也不支持 mutation target。多个普通 filter 和 existence stage 可按 pipeline 顺序表达 conjunction。
+
+`explain` 的 `exists` 数组公开 stage、`negated`、目标表、`target`/`outer` 相关路径、实际索引和 driver limit；普通 explain 只绑定和规划，不执行目标查询，也不显示外层字段值。完整契约见 [RFC 0018](rfc/0018-bounded-correlated-exists.md)。
 
 ### 有界 keyset page
 

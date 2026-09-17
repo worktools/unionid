@@ -2,7 +2,7 @@
 
 - Status / 状态: Accepted / 已接受
 - Date / 日期: 2026-09-17
-- Tracking / 跟踪: [#337](https://github.com/worktools/unionid/issues/337)
+- Tracking / 跟踪: [#337](https://github.com/worktools/unionid/issues/337), [#339](https://github.com/worktools/unionid/issues/339)
 - Parent / 上级: [#244](https://github.com/worktools/unionid/issues/244)
 
 ## 中文说明
@@ -24,7 +24,7 @@ filter exists {
 
 执行器在每个外层行上把 `outer` 引用绑定成 typed value，通过目标索引执行内层 pipeline，并在第一条通过 residual filters 的行处停止。一个 exists stage 最多接受 10,000 个 driver rows；它沿用同一 committed snapshot、deadline、取消、解码和工作内存预算。`explain` 公开目标表、相关键、实际索引和 driver 上限，但不执行内层查询或暴露绑定值。
 
-`exists` 是独立 filter stage。多个普通 filter 与 exists stage 按 pipeline 顺序组成 conjunction；首版不把 exists 放进任意 bool expression，也不支持 `not exists`、嵌套 exists、内层 derive/lookup/aggregate/sort/take/page/select、mutation target 或顶层集合运算。这些能力只有在真实调用方需要且能保持明确预算时再分别设计。
+`exists` 是独立 filter stage。#339 在相同执行边界上增加 `filter not exists { ... }`，保留内层没有匹配行的 driver row；完全没有子项和所有子项均未通过 residual filters 都算作没有匹配。结构化 plan 通过 `exists[].negated` 区分两种形式，CLI 分别显示 `exists` 与 `not exists`。多个普通 filter 与 existence stage 按 pipeline 顺序组成 conjunction；首版不把 exists 放进任意 bool expression，也不支持嵌套 exists、内层 derive/lookup/aggregate/sort/take/page/select、mutation target 或顶层集合运算。这些能力只有在真实调用方需要且能保持明确预算时再分别设计。
 
 ### 理由
 
@@ -49,7 +49,7 @@ The inner read-only pipeline targets a separate table. Ordinary paths belong to 
 
 For each outer row, execution replaces `outer` references with typed values, runs the inner pipeline through the selected target index, and stops at the first row that passes residual filters. One exists stage accepts at most 10,000 driver rows and shares the committed snapshot, deadline, cancellation, decoding, and working-memory budgets. `explain` reports the target table, correlations, selected index, and driver limit without executing the inner query or exposing values.
 
-Exists remains a distinct filter stage. Multiple filters compose in pipeline order. This version excludes arbitrary boolean nesting, `not exists`, nested exists, inner derive/lookup/aggregate/sort/take/page/select, mutation targets, and top-level set operations. Those require separate caller-driven slices with explicit budgets.
+Exists remains a distinct filter stage. #339 adds `filter not exists { ... }` under the same execution boundaries and retains a driver row when the inner pipeline has no match; both no children and children rejected by residual filters count as no match. Structured plans distinguish the forms through `exists[].negated`, while the CLI prints `exists` or `not exists`. Multiple filters compose in pipeline order. This version excludes arbitrary boolean nesting, nested exists, inner derive/lookup/aggregate/sort/take/page/select, mutation targets, and top-level set operations. Those require separate caller-driven slices with explicit budgets.
 
 ### Rationale
 

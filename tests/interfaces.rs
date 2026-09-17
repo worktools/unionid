@@ -58,6 +58,37 @@ fn local_cli_prints_value_free_explain_analysis() {
 }
 
 #[test]
+fn local_cli_distinguishes_not_exists_in_explain() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "run",
+            "--query",
+            r#"struct Task { id: int }
+struct Item { id: int, task_id: int }
+table tasks: Task { key id }
+table items: Item { key id }
+create index items (task_id)
+explain from tasks
+filter not exists {
+  from items
+  filter task_id == outer.id
+}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("not exists | items where task_id == outer.id via items.task_id"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn migration_advance_resumes_build_and_reclaim_across_cli_processes() {
     const EXPECTED_FIRST_BATCH_ROWS: u64 = 1_024;
 

@@ -1650,6 +1650,13 @@ impl Parser {
 
     fn filter_stage(&mut self) -> Result<Stage> {
         self.expect_word("filter")?;
+        let checkpoint = self.pos;
+        let negated = if self.word("not") {
+            self.bump();
+            true
+        } else {
+            false
+        };
         if self.word("exists") {
             self.bump();
             self.expect(Kind::Open('{'))?;
@@ -1661,12 +1668,20 @@ impl Parser {
             self.expect(Kind::Close('}'))?;
             Ok(Stage::FilterExists(crate::query::ExistsFilter {
                 pipeline: Box::new(pipeline),
+                negated,
                 correlations: Vec::new(),
                 index: None,
                 index_target: None,
                 index_shape: None,
             }))
-        } else if self.word("match") || self.parenthesized_match_starts() {
+        } else {
+            self.pos = checkpoint;
+            self.filter_non_exists_stage()
+        }
+    }
+
+    fn filter_non_exists_stage(&mut self) -> Result<Stage> {
+        if self.word("match") || self.parenthesized_match_starts() {
             let parenthesized = self.eat(Kind::Open('('));
             self.newlines();
             let predicate = self.match_predicate()?;
