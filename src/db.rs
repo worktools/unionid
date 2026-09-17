@@ -2337,7 +2337,7 @@ impl Database {
                     "E_INDEX",
                     format!("primary-key index for '{name}.{key}' references a missing row"),
                 )
-            });
+            })?;
             let before = rows[position].clone();
             let after = Arc::new(Row { id, fields });
             rows.set(position, after.clone());
