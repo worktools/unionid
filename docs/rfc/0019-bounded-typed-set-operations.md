@@ -58,7 +58,7 @@ union {
 
 ### Types and equality
 
-The binder requires identical field count, names, order, and types. Stable type IDs make structurally similar but differently named ADTs incompatible. Runtime membership uses `Value::cmp_eq` as the final equality decision; hashing only narrows candidates and collisions still perform full value comparison. Nested enums, named values, records, tuples, options, and lists compare recursively.
+The binder requires identical field count, names, order, and types. Stable type IDs make structurally similar but differently named ADTs incompatible. Runtime membership uses `Value::cmp_eq` as the final equality decision; hashing only narrows candidates and collisions still perform full value comparison. Following that equality contract, `-0.0` and `0.0` deduplicate as the same value. Nested enums, named values, records, tuples, options, and lists compare recursively.
 
 All operators return distinct rows. `union` preserves first occurrence across the left then right side. `intersect` and `except` preserve first occurrence on the left. An explicit later `sort` establishes application ordering.
 

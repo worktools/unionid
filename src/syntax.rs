@@ -2028,7 +2028,7 @@ impl Parser {
             } else {
                 if piped {
                     return Err(self.error(
-                        "expected let / filter / derive / lookup / aggregate / group / select / sort / take / page after '|'",
+                        "expected let / filter / derive / lookup / aggregate / group / union / intersect / except / select / sort / take / page after '|'",
                     ));
                 }
                 break;
