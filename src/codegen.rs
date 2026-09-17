@@ -75,6 +75,24 @@ pub fn rust_query_bundle(schema_source: &str, queries: &[(String, String)]) -> R
     render_rust_query_bundle(schema_source, &descriptions)
 }
 
+/// Generate one shared-model Rust bundle from queries already bound against
+/// `schema_source`.
+///
+/// This is useful to compile-time integrations that need to preserve which
+/// individual source produced a binding diagnostic. Callers should obtain each
+/// description with [`crate::query_contract::describe`] before rendering.
+pub fn rust_query_bundle_from_descriptions(
+    schema_source: &str,
+    queries: &[(String, QueryDescription)],
+) -> Result<String> {
+    let mut descriptions = queries
+        .iter()
+        .map(|(name, description)| (name.as_str(), description.clone()))
+        .collect::<Vec<_>>();
+    descriptions.sort_by(|left, right| left.0.cmp(right.0));
+    render_rust_query_bundle(schema_source, &descriptions)
+}
+
 /// Generate a shared-model query bundle against an exact live catalog.
 pub fn rust_query_bundle_for_engine(
     engine: &crate::Engine,
