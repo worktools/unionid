@@ -33,9 +33,45 @@ enum DocsFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DocsCategoryArg {
+    Learn,
+    Language,
+    Application,
+    Lifecycle,
+    Integration,
+    Operations,
+}
+
+impl From<DocsCategoryArg> for unionid::DocsCategory {
+    fn from(value: DocsCategoryArg) -> Self {
+        match value {
+            DocsCategoryArg::Learn => Self::Learn,
+            DocsCategoryArg::Language => Self::Language,
+            DocsCategoryArg::Application => Self::Application,
+            DocsCategoryArg::Lifecycle => Self::Lifecycle,
+            DocsCategoryArg::Integration => Self::Integration,
+            DocsCategoryArg::Operations => Self::Operations,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum DocsCommand {
-    /// Print an offline, version-matched query reference and runnable examples for LLMs.
+    /// List bundled topics, optionally within one category. / 列出内置主题，可按类别筛选。
+    List {
+        #[arg(long, value_enum)]
+        category: Option<DocsCategoryArg>,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
+    /// Read one bundled topic. / 阅读一个内置主题。
+    Show {
+        topic: String,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: DocsFormat,
+    },
+    /// Print compact query guidance and runnable examples for LLMs. / 输出适合 LLM 的查询规则与示例。
     Query {
         #[arg(long, value_enum, default_value = "markdown")]
         format: DocsFormat,
@@ -173,7 +209,7 @@ enum Command {
     /// Read version-matched language documentation bundled with this binary. / 读取二进制内置且版本匹配的语言文档。
     Docs {
         #[command(subcommand)]
-        command: DocsCommand,
+        command: Option<DocsCommand>,
     },
     /// Create a runnable starter project in a new or empty directory. / 在新目录或空目录创建可运行的入门项目。
     Init { directory: PathBuf },
@@ -642,6 +678,20 @@ impl Args {
                 query_response: false,
                 integrity: false,
             },
+            Command::Docs {
+                command: Some(DocsCommand::List { format, .. }),
+            } => ErrorOutput {
+                json: matches!(format, Format::Json),
+                query_response: false,
+                integrity: false,
+            },
+            Command::Docs {
+                command: Some(DocsCommand::Show { format, .. } | DocsCommand::Query { format, .. }),
+            } => ErrorOutput {
+                json: matches!(format, DocsFormat::Json),
+                query_response: false,
+                integrity: false,
+            },
             Command::Version { format }
             | Command::Doctor { format, .. }
             | Command::Project {
@@ -786,6 +836,49 @@ fn print_query_docs(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn print_docs_catalog(category: Option<DocsCategoryArg>, json: bool) -> Result<(), String> {
+    let catalog = unionid::docs_catalog(category.map(Into::into));
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&catalog).map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+
+    println!("Unionid {} bundled documentation", catalog.software_version);
+    let mut current_category = None;
+    for topic in catalog.topics {
+        let category = topic.category.as_str();
+        if current_category != Some(category) {
+            if current_category.is_some() {
+                println!();
+            }
+            println!("{category}");
+            current_category = Some(category);
+        }
+        println!("  {:<20} {}", topic.name, topic.title);
+        println!("                       {}", topic.summary);
+    }
+    println!("\nRead a topic: unionid docs show <topic>");
+    println!("LLM query bundle: unionid docs query");
+    Ok(())
+}
+
+fn print_bundled_document(topic: &str, json: bool) -> Result<(), String> {
+    let document = unionid::bundled_document(topic)
+        .ok_or_else(|| format!("unknown documentation topic `{topic}`; run `unionid docs list`"))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&document).map_err(|error| error.to_string())?
+        );
+    } else {
+        print!("{}", unionid::render_bundled_document_markdown(&document));
+    }
+    Ok(())
+}
+
 fn doctor(db: Option<PathBuf>, json: bool) -> Result<(), String> {
     let database = match db {
         Some(path) => {
@@ -846,7 +939,16 @@ fn run(args: Args) -> Result<(), String> {
     match args.command {
         Command::Version { format } => print_version(matches!(format, Format::Json)),
         Command::Doctor { db, format } => doctor(db, matches!(format, Format::Json)),
-        Command::Docs { command } => match command {
+        Command::Docs { command: None } => print_docs_catalog(None, false),
+        Command::Docs {
+            command: Some(command),
+        } => match command {
+            DocsCommand::List { category, format } => {
+                print_docs_catalog(category, matches!(format, Format::Json))
+            }
+            DocsCommand::Show { topic, format } => {
+                print_bundled_document(&topic, matches!(format, DocsFormat::Json))
+            }
             DocsCommand::Query { format } => print_query_docs(matches!(format, DocsFormat::Json)),
         },
         Command::Init { directory } => project::init(directory),

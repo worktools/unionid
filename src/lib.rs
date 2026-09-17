@@ -74,7 +74,9 @@ pub use idempotency::{
 };
 pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
 pub use llm_docs::{
-    LLM_QUERY_DOCS_VERSION, LlmQueryDocs, LlmQueryExample, QUERY_LANGUAGE_VERSION, query_docs,
+    BundledDocsCatalog, BundledDocsTopic, BundledDocument, DOCS_CATEGORIES, DocsCategory,
+    LLM_QUERY_DOCS_VERSION, LlmQueryDocs, LlmQueryExample, QUERY_LANGUAGE_VERSION,
+    bundled_document, docs_catalog, query_docs, render_bundled_document_markdown,
     render_query_docs_markdown,
 };
 pub use metrics::{
