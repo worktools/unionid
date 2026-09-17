@@ -129,6 +129,136 @@ def require_query(response, label):
     return {key: response[key] for key in ["columns", "rows", "schema"]}
 
 
+def verify_database_case(previous, current, work, previous_label, current_label, case):
+    database = work / f"previous-{case}.redb"
+    source = work / f"setup-{case}.unid"
+    source.write_text(SOURCE)
+    previous_rows = require_query(
+        run([previous, "run", "--db", database, "--file", source, "--format", "json"]),
+        f"{previous_label} {case} setup",
+    )
+    if case == "format7":
+        run(
+            [
+                previous,
+                "backup",
+                "incremental",
+                "init",
+                "--db",
+                database,
+                "--repo",
+                work / "incremental-format7",
+                "--format",
+                "json",
+            ]
+        )
+    run([previous, "check", "--db", database, "--format", "json"])
+    backup = work / f"previous-{case}.backup.json"
+    run(
+        [
+            previous,
+            "backup",
+            "--db",
+            database,
+            "--output",
+            backup,
+            "--format",
+            "json",
+        ]
+    )
+
+    diagnosis = run([current, "doctor", "--db", database, "--format", "json"])
+    storage_format = (
+        diagnosis.get("database", {}).get("storage_versions", {}).get("format")
+    )
+    if storage_format != int(case[-1]):
+        raise RuntimeError(f"{current_label} did not diagnose {case} as expected")
+    integrity = run([current, "check", "--db", database, "--format", "json"])
+    first_backend_clean = integrity.get("backend_clean")
+    if integrity.get("backend") != "redb" or not isinstance(first_backend_clean, bool):
+        raise RuntimeError(
+            f"{current_label} did not cleanly check the {previous_label} {case} database"
+        )
+    if not first_backend_clean:
+        reopened = run([current, "check", "--db", database, "--format", "json"])
+        if reopened.get("backend") != "redb" or reopened.get("backend_clean") is not True:
+            raise RuntimeError(
+                f"{current_label} did not converge the {previous_label} {case} "
+                "database to a clean reopen"
+            )
+    current_rows = require_query(
+        run([current, "run", "--db", database, "--query", QUERY, "--format", "json"]),
+        f"{current_label} {case} query",
+    )
+    if current_rows != previous_rows:
+        raise RuntimeError(
+            f"{current_label} changed the {previous_label} {case} typed query result "
+            "or schema identity"
+        )
+
+    restored = work / f"restored-{case}.redb"
+    run(
+        [
+            current,
+            "restore",
+            "--backup",
+            backup,
+            "--db",
+            restored,
+            "--format",
+            "json",
+        ]
+    )
+    restored_rows = require_query(
+        run([current, "run", "--db", restored, "--query", QUERY, "--format", "json"]),
+        f"{current_label} restored {case} query",
+    )
+    if restored_rows != previous_rows:
+        raise RuntimeError(
+            f"{current_label} did not preserve the {previous_label} {case} logical backup"
+        )
+
+    address = unused_local_address()
+    server = subprocess.Popen(
+        [current, "server", "--db", database, "--addr", address, "--read-only"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        wait_for_server(server, address, current_label)
+        client_rows = require_query(
+            run(
+                [
+                    previous,
+                    "cli",
+                    "--addr",
+                    address,
+                    "--query",
+                    QUERY,
+                    "--format",
+                    "json",
+                    "--no-history",
+                ]
+            ),
+            f"{previous_label} client against {current_label} {case} server",
+        )
+    finally:
+        stop_server(server)
+    if client_rows != previous_rows:
+        raise RuntimeError(
+            f"{previous_label} client observed a changed {current_label} {case} result"
+        )
+    return {
+        "storage_format": int(case[-1]),
+        "first_backend_clean": first_backend_clean,
+        "rows": len(current_rows["rows"]),
+        "data_compatible": True,
+        "backup_compatible": True,
+        "client_compatible": True,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", required=True, type=pathlib.Path)
@@ -173,96 +303,12 @@ def main():
         if current_version.get(key) != previous_version.get(key):
             raise RuntimeError(f"{current_label} changed the frozen {key} capability")
 
-    database = work / "previous.redb"
-    source = work / "setup.unid"
-    source.write_text(SOURCE)
-    previous_rows = require_query(
-        run([previous, "run", "--db", database, "--file", source, "--format", "json"]),
-        f"{previous_label} setup",
-    )
-    run([previous, "check", "--db", database, "--format", "json"])
-    backup = work / "previous.backup.json"
-    run(
-        [
-            previous,
-            "backup",
-            "--db",
-            database,
-            "--output",
-            backup,
-            "--format",
-            "json",
-        ]
-    )
-
-    run([current, "doctor", "--db", database, "--format", "json"])
-    integrity = run([current, "check", "--db", database, "--format", "json"])
-    if integrity.get("backend") != "redb" or integrity.get("backend_clean") is not True:
-        raise RuntimeError(
-            f"{current_label} did not cleanly check the {previous_label} database"
+    cases = {
+        case: verify_database_case(
+            previous, current, work, previous_label, current_label, case
         )
-    current_rows = require_query(
-        run([current, "run", "--db", database, "--query", QUERY, "--format", "json"]),
-        f"{current_label} query",
-    )
-    if current_rows != previous_rows:
-        raise RuntimeError(
-            f"{current_label} changed the {previous_label} typed query result or schema identity"
-        )
-
-    restored = work / "restored.redb"
-    run(
-        [
-            current,
-            "restore",
-            "--backup",
-            backup,
-            "--db",
-            restored,
-            "--format",
-            "json",
-        ]
-    )
-    restored_rows = require_query(
-        run([current, "run", "--db", restored, "--query", QUERY, "--format", "json"]),
-        f"{current_label} restored query",
-    )
-    if restored_rows != previous_rows:
-        raise RuntimeError(
-            f"{current_label} did not preserve the {previous_label} logical backup"
-        )
-
-    address = unused_local_address()
-    server = subprocess.Popen(
-        [current, "server", "--db", database, "--addr", address, "--read-only"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        wait_for_server(server, address, current_label)
-        client_rows = require_query(
-            run(
-                [
-                    previous,
-                    "cli",
-                    "--addr",
-                    address,
-                    "--query",
-                    QUERY,
-                    "--format",
-                    "json",
-                    "--no-history",
-                ]
-            ),
-            f"{previous_label} client against {current_label} server",
-        )
-    finally:
-        stop_server(server)
-    if client_rows != previous_rows:
-        raise RuntimeError(
-            f"{previous_label} client observed a changed {current_label} protocol result"
-        )
+        for case in ["format6", "format7"]
+    }
 
     print(
         json.dumps(
@@ -272,10 +318,7 @@ def main():
                 "archive_sha256": archive_digest,
                 "previous_version": previous_version["software_version"],
                 "current_version": current_version["software_version"],
-                "rows": len(current_rows["rows"]),
-                "data_compatible": True,
-                "backup_compatible": True,
-                "client_compatible": True,
+                "cases": cases,
             },
             sort_keys=True,
         )

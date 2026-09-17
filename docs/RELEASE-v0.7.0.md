@@ -28,7 +28,7 @@ parser 暂时继续读取 v0.6 的 `type` record/sum、`.` 限定 constructor、
 
 ## 兼容与边界
 
-v0.7.0 不改变数据库内部格式、component codec、logical backup 或网络协议。最低 Rust 仍为 1.94，redb 仍固定为 4.1.0；新数据库仍创建为 storage format 6，二进制继续读取 format 1–7。logical backup 当前格式仍为 4、可读 1–4；JSON Lines protocol 仍为 1/2，stream protocol 仍为 1。v0.6 数据库无需 storage upgrade 或 schema migration 即可直接打开。
+v0.7.0 不改变数据库内部格式、component codec、logical backup 或网络协议。最低 Rust 仍为 1.94，redb 仍固定为 4.1.0；新数据库仍创建为 storage format 6，二进制继续读取 format 1–7。logical backup 当前格式仍为 4、可读 1–4；JSON Lines protocol 仍为 1/2，stream protocol 仍为 1。v0.6 format-6/7 数据库无需 storage upgrade 或 schema migration 即可直接打开；如果旧 format-7 文件首次 `check` 报告 `backend_clean=false`，该次完整逻辑检查仍须成功，并应立即再运行一次 `check`，确认重开后为 `true`。
 
 集合运算首版不支持 `union all`、隐式 coercion、嵌套 set tree、跨来源 cursor 或磁盘 spill。相关 exists 首版只接受有索引的 typed 等值关联和内层 filter，不提供任意 join 或任意嵌套子查询。产品边界仍是单机、单数据库所有者、串行写入和约 10,000 行舒适工作集；100,000 行只是已测试上限。
 
@@ -62,6 +62,6 @@ Recommended upgrade sequence:
 
 ### Compatibility and limits
 
-v0.7.0 does not change the database format, component codecs, logical backup, or network protocols. Rust 1.94 remains the minimum and redb remains pinned to 4.1.0. Fresh databases still use storage format 6 and the binary reads formats 1–7. Logical backup remains current at 4 with formats 1–4 readable; JSON Lines protocols remain 1/2 and stream protocol remains 1. A v0.6 database opens directly without a storage upgrade or schema migration.
+v0.7.0 does not change the database format, component codecs, logical backup, or network protocols. Rust 1.94 remains the minimum and redb remains pinned to 4.1.0. Fresh databases still use storage format 6 and the binary reads formats 1–7. Logical backup remains current at 4 with formats 1–4 readable; JSON Lines protocols remain 1/2 and stream protocol remains 1. v0.6 format-6/7 databases open directly without a storage upgrade or schema migration. If the first `check` of an old format-7 file reports `backend_clean=false`, that complete logical check must still succeed; run `check` again immediately and require `true` after reopen.
 
 The first set-operation release excludes `union all`, implicit coercion, nested set trees, cross-source cursors, and disk spilling. Correlated exists accepts indexed typed equality correlations and inner filters rather than arbitrary joins or arbitrary nested subqueries. The product boundary remains one machine, one database owner, serialized writes, and a comfortable working set around 10,000 rows; 100,000 rows is only a tested upper bound.
