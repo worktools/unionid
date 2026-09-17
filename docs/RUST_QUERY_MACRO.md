@@ -11,9 +11,9 @@ unionid = { path = "../unionid" }
 unionid-query = { path = "../unionid/query-macro" }
 ```
 
-以上 path 写法用于 v0.9 开发分支尚未发布的源码 checkout。正式发布后改为 crates.io 的同一个精确版本，例如 `unionid = "=0.9.0"` 与 `unionid-query = "=0.9.0"`；两个 crate 不支持跨版本混用。
+以上 path 写法用于源码 checkout。使用正式发布包时改为 crates.io 的同一个精确版本，例如 `unionid = "=0.9.0"` 与 `unionid-query = "=0.9.0"`；两个 crate 不支持跨版本混用。
 
-The path dependencies above are for a source checkout while the v0.9 development line is unpublished. After release, use the same exact crates.io version for both crates, for example `unionid = "=0.9.0"` and `unionid-query = "=0.9.0"`; mixed versions are unsupported.
+The path dependencies above are for a source checkout. With published packages, use the same exact crates.io version for both crates, for example `unionid = "=0.9.0"` and `unionid-query = "=0.9.0"`; mixed versions are unsupported.
 
 ```rust
 unionid_query::queries! {
@@ -61,6 +61,8 @@ unionid query rust --db app.redb --dir queries --output generated/queries.rs
 
 完整契约与后续边界见 [RFC 0020](rfc/0020-inline-rust-query-macros.md)。
 
+编译成本、schema/query 重展开验收、诊断精度和 migrated catalog 决策见 [v0.9 编译记录](benchmarks/query-macro-2026-09-18.md)。宏会让 compile host 再编译当前 Unionid compiler 路径，适合短小、crate 私有且需要 typed binding 的查询；大量或跨语言查询继续使用 `.unid` 文件。
+
 ## English Description
 
 The `queries!` macro from `unionid-query` declares a group of Unionid operations directly at Rust module scope. It reads one explicit declarative schema and reuses the Unionid parser, binder, static query contract, and code generator during Rust compilation, producing shared ADTs plus typed parameters, result rows, and execution functions for every query.
@@ -74,3 +76,5 @@ Binding diagnostics point at the corresponding `query name { ... }` body rather 
 The first version never opens redb during compilation. Applications that require migration-established live IDs continue to generate from `query rust --db`. Standalone `.unid` remains the better boundary for cross-language use, CLI and LLM tooling, independent formatting, and large queries. The inline macro targets short queries owned by one Rust crate. rustfmt does not format the inner Unionid block; query digests still use the canonical Unionid formatter.
 
 See [RFC 0020](rfc/0020-inline-rust-query-macros.md) for the complete contract and follow-up boundaries.
+
+See the [v0.9 compile record](benchmarks/query-macro-2026-09-18.md) for compile cost, schema/query re-expansion acceptance, diagnostic precision, and the migrated-catalog decision. The macro compiles the current Unionid compiler path for the host, so it is intended for short crate-owned queries that benefit from typed bindings; large or cross-language query sets should remain in `.unid` files.

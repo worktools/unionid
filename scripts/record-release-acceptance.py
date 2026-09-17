@@ -90,11 +90,11 @@ def main():
         {"name": "controlled_network_configuration", "status": "passed"},
         {"name": "empty_directory_generated_starter", "status": "passed"},
         {
-            "name": "published_v070_data_client_package_compatibility",
+            "name": "published_v080_data_client_package_compatibility",
             "status": "passed",
         },
         {
-            "name": "typed_aggregates_and_basic_ranking_windows",
+            "name": "inline_rust_query_macro",
             "status": "passed",
         },
         {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
@@ -148,12 +148,13 @@ def main():
                 "scripts/validate-first-use.py, tests/first_use.rs, and "
                 "docs/GETTING_STARTED.md"
             ),
-            "published_v070_data_client_package_compatibility": (
+            "published_v080_data_client_package_compatibility": (
                 "scripts/verify-previous-release-compatibility.py and "
                 "docs/UPGRADING.md"
             ),
-            "typed_aggregates_and_basic_ranking_windows": (
-                "tests/query.rs and docs/QUERY.md"
+            "inline_rust_query_macro": (
+                "query-macro, scripts/evaluate-query-macro.py, and "
+                "docs/benchmarks/query-macro-2026-09-18.md"
             ),
             "controlled_network_mtls_journey": (
                 "deploy/envoy/verify.sh, scripts/verify-envoy-deployment.py, and "

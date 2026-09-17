@@ -2,7 +2,7 @@
 
 规划日期：2026-09-12。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
-当前验收：[v0.8 #349](https://github.com/worktools/unionid/issues/349) · [v0.7 #343](https://github.com/worktools/unionid/issues/343) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
+当前验收：[v0.9 #357](https://github.com/worktools/unionid/issues/357) · [v0.8 #349](https://github.com/worktools/unionid/issues/349) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
 
 [2026-09-12 ADT 与语言互通评估](assessments/adt-adoption-2026-09-12.md)记录当前实现、独立消费探针、业界对照及采用建议；它是评估快照，不替代 issues 的实时范围与完成状态。 / The dated assessment records implementation evidence, consumer probes, industry comparisons, and adoption proposals; issues remain the source of current scope and status.
 
@@ -192,9 +192,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 版本里程碑（v0.3.0 起） / Version milestones
 
-M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.7.0`，以下未发布版本仍是目标，不表示已经发布。issue 的完整验收决定完成状态；计划整理不创建 tag。软件版本与 storage/protocol 版本独立冻结。
+M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.8.0`，以下未发布版本仍是目标，不表示已经发布。issue 的完整验收决定完成状态；计划整理不创建 tag。软件版本与 storage/protocol 版本独立冻结。
 
-M0–M9 retain completed-stage evidence. The latest published release is `v0.7.0`; later unreleased versions below remain targets. Full issue acceptance determines completion. Planning does not create tags. Software, storage and protocol versions are frozen independently.
+M0–M9 retain completed-stage evidence. The latest published release is `v0.8.0`; later unreleased versions below remain targets. Full issue acceptance determines completion. Planning does not create tags. Software, storage and protocol versions are frozen independently.
 
 ### v0.3.0 · 可靠 Rust 接入与应用闭环 / Reliable Rust integration and application workflows
 
@@ -267,14 +267,27 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 
 ### v0.8.0 · 聚合与基础窗口 / Aggregates and basic windows
 
-[Milestone 17](https://github.com/worktools/unionid/milestone/17) 收口 count_distinct、typed avg 与基础排名窗口。功能 issue [#245](https://github.com/worktools/unionid/issues/245) 已交付，发布验收由 [#349](https://github.com/worktools/unionid/issues/349) 跟踪；storage、backup 与 protocol 不变。
+[Milestone 17](https://github.com/worktools/unionid/milestone/17) 已收口 count_distinct、typed avg 与基础排名窗口。功能 issue [#245](https://github.com/worktools/unionid/issues/245) 与发布验收 [#349](https://github.com/worktools/unionid/issues/349) 均已交付；storage、backup 与 protocol 不变。
 
-[Milestone 17](https://github.com/worktools/unionid/milestone/17) closes count_distinct, typed averages, and basic ranking windows. Feature issue [#245](https://github.com/worktools/unionid/issues/245) is delivered, and [#349](https://github.com/worktools/unionid/issues/349) tracks release acceptance. Storage, backup, and protocol versions remain unchanged.
+[Milestone 17](https://github.com/worktools/unionid/milestone/17) delivered count_distinct, typed averages, and basic ranking windows. Feature issue [#245](https://github.com/worktools/unionid/issues/245) and release acceptance [#349](https://github.com/worktools/unionid/issues/349) are complete. Storage, backup, and protocol versions remain unchanged.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
 | [#245](https://github.com/worktools/unionid/issues/245) | count_distinct、typed avg 与基础排名窗口 / count_distinct, typed averages, and basic ranking windows | 已交付 / Delivered |
-| [#349](https://github.com/worktools/unionid/issues/349) | v0.8 契约、文档、升级说明与候选发布 / v0.8 contract, docs, upgrade guidance, and release candidate | P0 |
+| [#349](https://github.com/worktools/unionid/issues/349) | v0.8 契约、文档、升级说明与候选发布 / v0.8 contract, docs, upgrade guidance, and release candidate | 已交付 / Delivered |
+
+### v0.9.0 · 内联 Rust 查询 / Inline Rust queries
+
+[Milestone 18](https://github.com/worktools/unionid/milestone/18) 提供 crate 私有短查询的 schema-aware `queries!` 宏，不改变 `.unid`、storage、backup 或 protocol 契约。设计 #352 与 P0 实现 #353 已交付；#354 记录编译成本、重建、诊断与 migrated catalog 边界，#357 负责三个 crate 的版本冻结和双平台候选发布。
+
+[Milestone 18](https://github.com/worktools/unionid/milestone/18) provides a schema-aware `queries!` macro for short crate-owned queries without changing `.unid`, storage, backup, or protocol contracts. Design #352 and P0 implementation #353 are delivered. #354 records compile cost, rebuild behavior, diagnostics, and the migrated-catalog boundary, while #357 owns three-crate version freezing and the dual-platform candidate.
+
+| Issue | 交付 / Deliverable | 优先级 / Priority |
+| --- | --- | --- |
+| [#352](https://github.com/worktools/unionid/issues/352) | 内联查询宏契约 / inline query macro contract | 已交付 / Delivered |
+| [#353](https://github.com/worktools/unionid/issues/353) | schema-aware `queries!` 与 consumer 验收 / macro and consumer acceptance | 已交付 / Delivered |
+| [#354](https://github.com/worktools/unionid/issues/354) | 编译成本、重建、诊断与 migration 边界 / compile cost, rebuild, diagnostics, and migration boundary | P1 |
+| [#357](https://github.com/worktools/unionid/issues/357) | v0.9 契约、三个 crate 与候选发布 / contract, three crates, and release candidate | P0 |
 
 ### 按需探索 · 版本待定 / Demand-driven exploration · version TBD
 
@@ -300,7 +313,7 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 
 ## 当前执行顺序
 
-M0–M9 与 v0.3.0–v0.7.0 已完成。当前只执行 [#349](https://github.com/worktools/unionid/issues/349)：冻结 v0.8 两个 crate、文档和 release contract，验证 v0.7 数据／backup／客户端兼容，再运行一次 Ubuntu/macOS Release workflow。tag 与公开发布不能由普通候选 PR 代替。
+M0–M9 与 v0.3.0–v0.8.0 已完成。当前只执行 [#354](https://github.com/worktools/unionid/issues/354) 与 [#357](https://github.com/worktools/unionid/issues/357)：冻结 v0.9 三个 crate、宏质量证据、文档和 release contract，验证 v0.8 数据／backup／客户端兼容，再运行一次 Ubuntu/macOS Release workflow。tag 与公开发布不能由普通候选 PR 代替。
 
 ## 维护约定
 
