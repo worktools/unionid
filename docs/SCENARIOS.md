@@ -291,7 +291,7 @@ table payments Payment
 | 复用重复业务表达式 | 已实现查询局部常量、单/多参数非递归纯函数、有限推断、词法遮蔽和展开预算 | 泛型、高阶与递归函数延后 | #61，P0 |
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none；filter、普通／match derive、typed set 和 migration conversion 共享这些 bool 结果 | 通用高阶函数延后 | #36/#100，已满足核心 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take、类型化索引访问计划、explain、有界双向 cursor page、一致并发读快照，以及可取消且有背压的 NDJSON stream 已实现 | 成功写入会使旧 cursor 过期；partial stream 不支持续传，可靠遍历使用 page | #34/#16/#116/#131/#132/#135 |
-| UUID、时间、定点数与 binary | 六类生产标量已接通语言、Rust、wire、redb、backup、cursor、索引和 migration；duration/decimal 精确算术已实现 | 乘除、avg、rounding 与 calendar arithmetic 按 RFC deferred | #115/#137–#140，M5 P1 |
+| UUID、时间、定点数与 binary | 六类生产标量已接通语言、Rust、wire、redb、backup、cursor、索引和 migration；duration/decimal 精确算术已实现 | 乘除、decimal avg、rounding 与 calendar arithmetic 按 RFC deferred | #115/#137–#140，M5 P1 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | option helper/元素谓词可继续扩展 | #10/#22/#36/#91 |
 | 批量写入 typed row list | `insert many` 与 `upsert many` 已实现默认值、嵌套 ADT、输入内主键去重、整批主键／unique index 验证、稳定 RowId/returning/action 顺序和 memory/redb/TCP 原子提交 | 流式导入单独设计 | #89/#97，P1 核心 |
 | 小型一对多关联读 | `lookup` 已实现索引前置、相同快照、typed list、逐行/driver/内存预算、稳定分页与 explain | 通用扁平 join、图遍历和 mutation lookup 延后 | #241，M10 P0 |
