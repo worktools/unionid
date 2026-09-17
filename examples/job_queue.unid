@@ -155,6 +155,23 @@ group state_label {
 sort state_label
 
 from jobs
+derive lane = match state {
+  Queued {..} => "ready"
+  Failed {retry_at: Some(_), ..} => "ready"
+  Failed {retry_at: None, ..} => "blocked"
+  Running {..} => "active"
+  Succeeded {..} => "done"
+}
+window {
+  partition lane
+  sort {-priority, created_at}
+  position = row_number
+  placing = rank
+}
+filter position <= 2
+select {id, lane, position, placing}
+
+from jobs
 let important = value -> value >= 10
 let has_tag = (values: List<text>, tag: text) -> contains values tag
 filter important priority && has_tag tags "sync"

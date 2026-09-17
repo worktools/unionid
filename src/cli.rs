@@ -2082,6 +2082,7 @@ fn query_stage_name(stage: &QueryStageKind) -> &'static str {
         QueryStageKind::DeriveMatch => "derive_match",
         QueryStageKind::Lookup => "lookup",
         QueryStageKind::Aggregate => "aggregate",
+        QueryStageKind::Window => "window",
         QueryStageKind::SetOperation => "set_operation",
         QueryStageKind::Select => "select",
         QueryStageKind::Sort => "sort",

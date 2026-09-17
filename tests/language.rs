@@ -1545,6 +1545,139 @@ fn avg_has_explicit_integer_float_duration_and_empty_input_semantics() {
 }
 
 #[test]
+fn ranking_window_partitions_ties_and_later_stages_are_explicit() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"enum Team {
+  Api
+  Worker
+}
+struct Job {
+  id int
+  team Team
+  score int
+}
+table jobs Job {key id}
+insert many jobs [
+  {id = 1, team = Api, score = 10}
+  {id = 2, team = Api, score = 10}
+  {id = 3, team = Api, score = 5}
+  {id = 4, team = Worker, score = 7}
+  {id = 5, team = Worker, score = 3}
+]"#,
+    );
+
+    let result = ok(
+        &mut engine,
+        r#"from jobs
+window {
+  partition team
+  sort -score
+  position = row_number
+  placing = rank
+  dense = dense_rank
+}"#,
+    );
+    assert_eq!(result.rows.len(), 5);
+    for column in [&result.columns[3], &result.columns[4], &result.columns[5]] {
+        assert_eq!(column.ty, "int");
+    }
+    let expected = [(1, 1, 1), (2, 1, 1), (3, 3, 2), (1, 1, 1), (2, 2, 2)];
+    for (row, (position, rank, dense)) in result.rows.iter().zip(expected) {
+        assert!(row["position"].cmp_eq(&Value::Int(position)));
+        assert!(row["placing"].cmp_eq(&Value::Int(rank)));
+        assert!(row["dense"].cmp_eq(&Value::Int(dense)));
+    }
+
+    let top_two = ok(
+        &mut engine,
+        r#"from jobs
+window {
+  partition team
+  sort -score
+  position = row_number
+}
+filter position <= 2
+sort id
+select id"#,
+    );
+    assert_eq!(
+        top_two
+            .rows
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![Value::Int(1), Value::Int(2), Value::Int(4), Value::Int(5)]
+    );
+
+    let explained = ok(
+        &mut engine,
+        "explain from jobs | window {sort -score, position = row_number}",
+    );
+    let plan = explained.plan.unwrap();
+    assert_eq!(plan.stages[0].kind, QueryStageKind::Window);
+    assert_eq!(plan.result_schema.last().unwrap().name, "position");
+    assert_eq!(plan.result_schema.last().unwrap().ty, "int");
+
+    let mut empty = Engine::memory();
+    ok(&mut empty, "type Row = {score int}\ntable rows Row");
+    assert!(
+        ok(
+            &mut empty,
+            "from rows | window {sort -score, position = row_number}"
+        )
+        .rows
+        .is_empty()
+    );
+}
+
+#[test]
+fn ranking_window_rejects_ambiguous_or_unsupported_shapes() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Row = {id int, values List<int>}\ntable rows Row",
+    );
+    for (stage, code, message) in [
+        (
+            "window {position = row_number}",
+            "E_SYNTAX",
+            "explicit sort",
+        ),
+        (
+            "window {sort id, position = row_number, position = rank}",
+            "E_SYNTAX",
+            "duplicate window field",
+        ),
+        (
+            "window {sort missing, position = row_number}",
+            "E_FIELD",
+            "unknown field",
+        ),
+        (
+            "window {sort id, id = row_number}",
+            "E_FIELD",
+            "already exists",
+        ),
+        (
+            "window {sort id, position = median}",
+            "E_SYNTAX",
+            "unknown window function",
+        ),
+    ] {
+        let response = engine.execute(&format!("from rows | {stage}"));
+        assert!(!response.ok, "{stage}");
+        assert_eq!(response.code.as_deref(), Some(code), "{stage}");
+        assert!(response.message.contains(message), "{}", response.message);
+    }
+    let page =
+        engine.execute("from rows | window {sort id, position = row_number} | sort id | page 10");
+    assert!(!page.ok);
+    assert_eq!(page.code.as_deref(), Some("E_PAGE_SHAPE"));
+}
+
+#[test]
 fn grouped_aggregates_support_adt_keys_and_later_stages() {
     let mut e = Engine::memory();
     ok(

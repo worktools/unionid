@@ -253,6 +253,7 @@ pub enum Stage {
     DeriveMatch(DeriveMatch),
     Lookup(Lookup),
     Aggregate(Aggregate),
+    Window(Window),
     SetOperation(SetOperation),
     Select(Vec<String>),
     Sort(Vec<SortKey>),
@@ -379,6 +380,26 @@ pub enum AggregateFunction {
     Sum,
     Min,
     Max,
+}
+
+#[derive(Debug, Clone)]
+pub struct Window {
+    pub partition_by: Vec<String>,
+    pub order_by: Vec<SortKey>,
+    pub assignments: Vec<WindowAssignment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WindowAssignment {
+    pub name: String,
+    pub function: WindowFunction,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WindowFunction {
+    RowNumber,
+    Rank,
+    DenseRank,
 }
 
 #[derive(Debug, Clone)]

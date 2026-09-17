@@ -45,6 +45,7 @@ take 20
 | 布尔表达式与集合函数 | `&&`/`\|\|`/`!`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于 filter、普通／match derive、typed set 和 migration conversion；bytes 支持连续子序列 contains 与 octet length | #100/#138 |
 | 其他派生列 | `derive score = priority + bonus` | 已实现 scalar 与 bool expression、typed 参数及后续 stage 作用域 | — |
 | 分组与汇总 | `aggregate {...}` / `group {key} { aggregate {...} }` | 已实现 count/count_distinct/avg/sum/min/max、typed 空输入语义与资源上限 | — |
+| 基础排名窗口 | `window {...}`，块内显式写 partition、sort 与命名输出 | 已实现显式 partition/order、row_number/rank/dense_rank、typed 并列与资源上限 | #245 |
 | 查询局部定义 | `let retryable = attempt -> attempt < 3` | 已实现常量、单/多参数非递归纯函数、有限推断、词法遮蔽与展开预算 | — |
 | 有限自递归 ADT | `enum Tree { Leaf(text) Branch { children: List<Tree> } }` | 已实现声明、严格值、match coverage、精确索引、持久化与 migration；运行时值仍是有限树 | #81 |
 | 执行计划 | `explain from tasks \| filter id == 1` | 已实现 full scan、主键／二级索引 lookup、候选行估计、stage 顺序与结果 schema | — |
@@ -54,7 +55,7 @@ take 20
 | 批量插入 | `insert many table <list>` | 已实现 literal／参数 row list、逐行默认值和 ADT 检查、整批约束、稳定 RowId／returning 顺序与 memory/redb/TCP 原子提交 | #89 |
 | 批量 Upsert | `upsert many table <list>` | 已实现 literal／参数 row list、输入内主键去重、完整 replace、稳定 RowId、逐项 action 与整批原子约束 | #97 |
 | schema migration | `migration name` | 已实现显式 ADT schema 操作、typed conversion、全引用路径重写、版本化 runner/ledger 与原子索引维护 | #19 继续补声明式 diff 与更细 plan 报告 |
-| join、window、递归查询函数和高阶函数 | — | 延后；自递归数据类型已实现，不包含任意深度 fold/map | #25 |
+| 通用 join、窗口 frame、lag/lead、递归查询函数和高阶函数 | — | 延后；基础排名窗口与自递归数据类型已实现 | #25/#245 |
 
 “未实现”的词只在状态表和限制说明中出现。除明确标为反例的片段外，本页其余查询代码均可由当前 parser 执行。
 
@@ -82,7 +83,7 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 query             = "from" table pipeline-stage*
 explain           = "explain" "analyze"? query | "explain" "analyze"? newline indent query dedent
 pipeline-stage    = newline stage | "|" stage
-stage             = local-binding | value-filter | exists-filter | match-filter | derive-expression | derive-match | lookup | aggregate | group-aggregate | set-operation | select | sort | take | page
+stage             = local-binding | value-filter | exists-filter | match-filter | derive-expression | derive-match | lookup | aggregate | group-aggregate | window | set-operation | select | sort | take | page
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
@@ -110,6 +111,8 @@ aggregate         = "aggregate" "{" aggregate-field (separator+ aggregate-field)
 group-aggregate   = "group" group-fields "{" aggregate "}"
 group-fields      = field-path | "{" field-path (separator+ field-path)* separator* "}"
 aggregate-field   = identifier "=" ("count" | (("count_distinct" | "avg" | "sum" | "min" | "max") scalar-expression)) newline?
+window            = "window" "{" ("partition" group-fields separator+)? "sort" sort-keys separator+ window-field (separator+ window-field)* separator* "}"
+window-field      = identifier "=" ("row_number" | "rank" | "dense_rank")
 nested-match-expression = match-expression
 match-expression  = "match" field-path "{" match-value-arm (separator+ match-value-arm)* separator* "}"
 match-value-arm   = arm-pattern "=>" result-expression
@@ -123,6 +126,7 @@ list-value        = "[" (match-value (separator+ match-value)* separator*)? "]"
 select            = "select" select-field | "select" "{" select-field (separator+ select-field)* separator* "}"
 select-field      = field-path | derived-field
 sort              = "sort" sort-key | "sort" "{" sort-key (separator+ sort-key)* separator* "}"
+sort-keys         = sort-key | "{" sort-key (separator+ sort-key)* separator* "}"
 sort-key          = "-"? field-path
 take              = "take" nonnegative-integer | "take" positive-integer (".." | "..=") positive-integer
 page              = "page" positive-integer (("after" | "before") string)?
@@ -302,6 +306,7 @@ from tasks | filter id > 1 | take 1
 | `filter exists` / `filter not exists` | 不变 | 分别保留内层目标表有匹配或无匹配的 driver row | 仍检查目标表、`outer` 路径、相关键类型、索引和 stage 边界；plan 用 `negated` 区分 |
 | `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/count_distinct 为 0，avg/min/max 为 None，sum 为类型化零 |
 | `group ... { aggregate {...} }` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
+| `window {...}` | 保留输入 schema 并追加 `int` 排名字段 | 在显式 partition 与 sort 内计算排名；输出行数和原输入顺序不变 | 返回零行但仍检查全部字段、类型和函数 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
 | `sort` | 不变 | 单列或多列词典序；全部键相同的次序不承诺 | 返回空结果但仍检查全部键 |
 | `take` | 不变 | 保留前 N 行，或一基 Rust 风格半开／闭区间内的行；无 sort 时位置不稳定 | 返回空结果但仍检查范围 |
@@ -589,7 +594,30 @@ take 20
 
 aggregate 输入是 scalar expression，可以引用字段路径、前一 stage 的普通或 ADT 派生列，以及查询局部纯函数。group key 使用完整 typed equality，可包含 record、tuple、sum、option 或 list；输出中保留原静态类型。未显式 sort 时不承诺 group 行顺序。group inner pipeline 当前必须包含一个 aggregate，aggregate 后的 filter/select/sort/take 针对汇总后的 schema 执行。
 
-每条 aggregate 最多声明 256 个输出、产生 100,000 个 group 和 1,000,000 个 accumulator cell，估算 group state 上限为 64 MiB；`count_distinct` 的去重键也计入该 state 预算。同时仍受 250,000 输入工作行、100,000 结果行与服务 deadline 限制。任一边界超限返回 `E_LIMIT`。用户定义 aggregate、window 和 join 尚未实现。
+每条 aggregate 最多声明 256 个输出、产生 100,000 个 group 和 1,000,000 个 accumulator cell，估算 group state 上限为 64 MiB；`count_distinct` 的去重键也计入该 state 预算。同时仍受 250,000 输入工作行、100,000 结果行与服务 deadline 限制。任一边界超限返回 `E_LIMIT`。用户定义 aggregate 尚未实现。
+
+## 基础排名窗口
+
+`window` 保留每一行并追加一个或多个 `int` 排名字段。partition 可省略，表示把全部输入作为一个分区；sort 必须显式给出，避免排名依赖物理扫描顺序：
+
+```text
+from jobs
+window {
+  partition queue
+  sort {-priority, created_at}
+  position = row_number
+  placing = rank
+  dense = dense_rank
+}
+filter position <= 3
+sort {queue, position}
+```
+
+`row_number` 在每个分区内依次返回 1、2、3。`rank` 对相同完整 typed sort tuple 返回相同名次，并在下一组留下位置空缺，例如 1、1、3；`dense_rank` 不留空缺，例如 1、1、2。并列行的 `row_number` 使用进入 window stage 时的稳定顺序区分，因此需要跨写入和恢复稳定时，应在 window 的 sort 末尾加入主键；加入唯一键后自然不会出现并列。
+
+window 的 partition 使用完整 typed equality，可包含 sum、record、tuple、option、list 与有限递归 ADT；sort 复用普通 sort 的 typed total order 和升降序规则。stage 只计算排名，不改变输出行顺序，后续可继续 filter、select、sort 或 take。输出名不能覆盖现有字段，空输入仍返回带完整结果 schema 的零行。
+
+window 是 blocking stage，每个 stage 最多声明 256 个输出字段。输入 materialized rows、partition equality key、行位置与新增排名字段共同计入 250,000 行和 64 MiB working-state 上限，并响应 deadline、取消和 stream materialization 限制。首版不支持 frame、lag/lead、窗口 aggregate 或用户定义窗口函数。`page` 与 window 明确拒绝组合；稳定分页需要先把窗口结果收敛为独立表或改用普通唯一 sort。
 
 ## 投影、排序与截取
 
@@ -685,7 +713,7 @@ sort state
 
 ### 有界 keyset page
 
-`page N` 开始正向遍历，N 必须在 1..=1000。查询必须有显式 `sort`，最后一个排序键必须是源表主键；绑定器根据 schema 证明完整 tuple 唯一，不根据当前样本数据猜测。最终 sort 与 page 之间只允许 `select`，page 后只允许上述有界 lookup 和 `select`，因此可以投影掉排序字段而不把主键暴露给客户端。page 不与 `take`、`aggregate`、`group` 或 mutation target 混用。
+`page N` 开始正向遍历，N 必须在 1..=1000。查询必须有显式 `sort`，最后一个排序键必须是源表主键；绑定器根据 schema 证明完整 tuple 唯一，不根据当前样本数据猜测。最终 sort 与 page 之间只允许 `select`，page 后只允许上述有界 lookup 和 `select`，因此可以投影掉排序字段而不把主键暴露给客户端。page 不与 `take`、`aggregate`、`group`、`window` 或 mutation target 混用。
 
 成功响应的 `page` 包含 `limit`、`direction`、十进制 string `snapshot_sequence`、`has_more` 以及可用的 `next_cursor`／`previous_cursor`。继续向后读取时使用：
 
@@ -714,7 +742,7 @@ take 20
 
 ## 布局与语句边界
 
-- 顶层 `from` 开始一条查询。同层 `let`、`filter`、`derive`、`group`、`aggregate`、`select`、`sort`、`take`、`page` 或兼容的 `limit` 延续当前 pipeline。
+- 顶层 `from` 开始一条查询。同层 `let`、`filter`、`derive`、`group`、`aggregate`、`window`、`select`、`sort`、`take`、`page` 或兼容的 `limit` 延续当前 pipeline。
 - 顶层 `update table` 开始修改，后续同层 filter、sort、take、set 和 returning 延续当前语句；顶层 `delete table` 开始删除，后续同层 filter、sort、take 和 returning 延续当前语句。
 - `{}` 包围 record、projection、match branches 与 aggregate fields，`()` 包围 precedence、tuple、位置 payload 和嵌套调用，`[]` 包围 list；delimiter 内换行分隔多行项，逗号分隔紧凑单行项。旧缩进 match/group 与表达式 block 继续作为兼容输入。table、migration 和 explain 的外层 block 仍由缩进进入和退出；缩进不能使用 tab。
 - 空行与 `#` 注释不结束查询。文件和非交互 stdin 在 EOF 提交完整脚本。
@@ -772,7 +800,7 @@ filter match state {
 | 任务状态 | [tasks.unid](../examples/tasks.unid) | sum、record、option/list、braced match、select/sort/take | `tests/language.rs::executable_examples`、CLI/TCP/恢复测试 |
 | 嵌套配置 | [config.unid](../examples/config.unid) | 嵌套字段过滤与投影 | `tests/language.rs::executable_examples` |
 | 事件记录 | [events.unid](../examples/events.unid) | typed 批量 insert、sum 完整值比较、typed derive 和字符串中的 `\|` | `tests/language.rs::executable_examples`、`typed_bulk_insert_*`、`versioned_tcp_bulk_inserts_*` |
-| 后台任务队列 | [job_queue.unid](../examples/job_queue.unid) | 嵌套 sum/record/option/list、局部纯函数、布尔/集合 filter、普通与 ADT derive、group/aggregate、typed arithmetic、嵌套 pattern、多键 sort 与范围 take | `tests/language.rs::executable_examples` |
+| 后台任务队列 | [job_queue.unid](../examples/job_queue.unid) | 嵌套 sum/record/option/list、局部纯函数、布尔/集合 filter、普通与 ADT derive、group/aggregate、分区排名 window、typed arithmetic、嵌套 pattern、多键 sort 与范围 take | `tests/language.rs::executable_examples`、`ranking_window_*` |
 | 离线同步冲突 | [sync_conflicts.unid](../examples/sync_conflicts.unid) | 同一 `Conflict` constructor 的互补嵌套分支、typed derive 与 Option | `tests/language.rs::executable_examples` |
 | Pipeline 顺序 | 测试内脚本 | take/filter 顺序与投影作用域 | `stage_order_and_projection_paths_are_preserved` |
 | 单行/多行 | 测试内脚本 | 两种 pipeline 布局等价 | `newline_and_inline_pipelines_have_identical_results` |
@@ -780,6 +808,7 @@ filter match state {
 | ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
 | 普通派生 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | scalar/bool 结果、命名类型、完整 ADT 复制、typed 参数、短路、空表检查和后续 stage 作用域 | `regular_derives_*` |
 | 分组汇总 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | count/count_distinct/avg/sum/min/max、命名数值、完整 typed ADT 去重与 key、空输入、溢出、后续 stage 与资源上限 | `basic_aggregates_*`、`count_distinct_*`、`avg_*`、`grouped_aggregates_*`、`aggregates_reject_*`、`aggregate_group_limits_*` |
+| 基础排名窗口 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 显式 partition/order、row_number/rank/dense_rank、typed 并列、空输入、后续 filter、explain、page 拒绝与资源上限 | `ranking_window_*` |
 | 查询局部定义 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 常量、单/多参数纯函数、match binding、aggregate 输入、显式类型、词法遮蔽、prepared 参数、调用与展开预算 | `query_local_*`、`local_function_*`、`prepared_queries_infer_parameters_through_local_functions` |
 | 布尔与集合表达式 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 数值表达式 | [invoices.unid](../examples/invoices.unid) 与测试内脚本 | int/float/decimal 类型、固定 scale、逐步 precision、优先级、跨行括号、整数除法、短路及运行时错误 | `decimal_*`、`typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |

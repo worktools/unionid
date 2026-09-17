@@ -2,7 +2,7 @@
 
 本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.unid)、[任务修改](../examples/task_mutations.unid)、[schema migration](../examples/schema_migration.unid)、[后台队列](../examples/job_queue.unid)、[配置](../examples/config.unid)、[事件](../examples/events.unid)、[同步冲突](../examples/sync_conflicts.unid)、[有限递归树](../examples/recursive_tree.unid)、[UUID/bytes 内容元数据](../examples/content_metadata.unid)、[时间/session](../examples/session_events.unid)、[decimal 账单](../examples/invoices.unid)。
 
-当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys { aggregate {...} }`、typed `union`/`intersect`/`except`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`!`/`&&`/`||`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys { aggregate {...} }`、基础排名 `window`、typed `union`/`intersect`/`except`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`!`/`&&`/`||`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
 LLM 或代码生成器可通过 `unionid docs query` 读取当前二进制内置的紧凑参考与可运行示例，或用 `--format json` 取得分离的 reference/examples。生成真实查询时还应提供 `unionid schema print --db <path> --format json` 的 exact schema，并用 `query describe` 在执行前绑定检查。完整 prompt-oriented 内容见 [LLM_QUERY.md](LLM_QUERY.md)。
 
@@ -135,6 +135,7 @@ take 20
 | ADT 派生 | `derive label = match state {...}` | 穷尽解构 sum/option，追加统一类型的结果列 |
 | 局部定义 | `let retryable = attempt -> attempt < 3` | 定义常量或有类型、非递归纯函数，供后续 stage 展开复用 |
 | 汇总 | `aggregate {...}` / `group state { aggregate {...} }` | count/count_distinct/avg/sum/min/max；输入与分组键保留完整 ADT 类型和值 |
+| 排名窗口 | `window {...}` | 显式 partition/sort，追加 row_number/rank/dense_rank typed `int` 字段 |
 | 投影 | `select {id, owner.email}` | 保留列，响应按声明的列顺序展示 |
 | 排序 | `sort id` / `sort {-priority, created_at, id}` | 单列或多列词典序；支持 primitive、命名类型及完整有限 ADT |
 | 截取 | `take 20` / `take 10..20` / `take 10..=20` | 保留前 N 行，或使用 Rust 风格半开／闭区间 |
@@ -152,6 +153,18 @@ take 20
 `explain` 可直接放在单行查询前，也可把完整查询缩进到下一层。它执行与真实查询相同的静态绑定，返回结构化访问计划，但不读取或执行数据行。`explain analyze` 使用相同布局，在同一读快照上额外执行 pipeline 并返回 value-free `analysis`，不会返回业务 rows 或 cursor。只有开头的单纯有索引等值 filter（允许前置 let）使用 lookup；planner 不越过其他 stage。完整字段与测量规则见 [Explain、实际剖析与类型化索引计划](QUERY.md#explain实际剖析与类型化索引计划)。
 
 未分组 `aggregate` 在空输入上返回一行：count/count_distinct 为 0、sum 为输入数值类型的零、avg/min/max 为 `None`；分组空输入返回零行。avg 支持 int、float 和 duration；decimal avg 在精度与舍入规则明确前拒绝。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
+
+基础窗口使用明确的块结构：
+
+```text
+window {
+  partition team
+  sort -score
+  position = row_number
+}
+```
+
+partition 可省略，sort 必须显式给出，输出可命名为任意未占用字段。row_number 对并列行按进入 stage 的稳定顺序编号，rank 留名次空缺，dense_rank 不留空缺；window 自身不重排输出行。完整语法、资源边界与 page 拒绝规则见[基础排名窗口](QUERY.md#基础排名窗口)。
 
 兼容入口 `=`、`limit`、无花括号的多字段 `select id,name`，以及旧缩进 record/match/group 仍可执行。新代码与 formatter 使用 `==`、`take`、`select {id, name}`、braced match 和 group inner pipeline。filter、match condition、derive 数值表达式与 update `set` 可引用 `$name`；完整单行 insert/upsert 写成 `insert tasks $row` / `upsert tasks $row`，批量写入写成 `insert many tasks $rows` / `upsert many tasks $rows`。参数由调用端提供 typed value，在 AST 上绑定并在扫描前按上下文检查，详见[版本化接口与参数](PROTOCOL.md)。
 
@@ -202,7 +215,7 @@ delete tasks | filter id == 2 | returning
 ```
 
 - `update table` 与 `delete table` 不带 filter 时作用于整张表；这是显式有效操作。
-- mutation target 接受普通 `filter`、braced match filter、`sort` 和 `take`，严格按书写顺序选择稳定 RowId；sort 并列时保持输入顺序，生产语句仍应以唯一键结束排序。`select`、`derive` 和 aggregate 不属于修改目标。
+- mutation target 接受普通 `filter`、braced match filter、`sort` 和 `take`，严格按书写顺序选择稳定 RowId；sort 并列时保持输入顺序，生产语句仍应以唯一键结束排序。`select`、`derive`、aggregate 和 window 不属于修改目标。
 - 所有 target stage 必须写在第一个 `set` 前。`take n`、半开区间 `take start..end` 与闭区间 `take start..=end` 沿用查询语义。多个 `set` 同时求值：每个右侧读取该行修改前的值，因此 `set left = right` 和 `set right = left` 会交换两列。
 - `set` 右侧接受字段、literal、ADT constructor、`length`、有类型算术和完整 bool 表达式，也可写 `match source {...}`，使用与 ADT derive 相同的递归 pattern、bool 结果和 option/sum/product/list 构造。目标字段给出结果类型；bool 表达式只能写入 bool 字段。未知字段、非穷尽／不可达分支和错误结果即使目标表为空也报错。
 - 顶层小写 binding 是带类型的不可反驳 pattern，必须是最后一支；`current => current` 可保留其余 constructor 的完整原值。分支可使用 typed 参数和自己的 pattern bindings。

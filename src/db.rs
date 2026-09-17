@@ -17,7 +17,7 @@ use crate::profile::ExecutionObservation;
 use crate::query::{
     Aggregate, AggregateAssignment, AggregateFunction, CmpOp, ExistsCorrelation, ExistsFilter,
     IndexComponent, PageDirection, PageSpec, Pipeline, Returning, SetAssignment, SetOperator,
-    SetValue, SortKey, Stage, Statement,
+    SetValue, SortKey, Stage, Statement, Window, WindowFunction,
 };
 use crate::row_source::{
     CandidateRowSource, EncodedIndexBounds, GENERAL_WORKING_MAX_BYTES, IndexHit, IndexHitCursor,
@@ -39,6 +39,7 @@ pub const MAX_BULK_INSERT_ROWS: usize = 100_000;
 pub const MAX_RETURNING_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_GROUPS: usize = 100_000;
 pub const MAX_AGGREGATE_OUTPUTS: usize = 256;
+pub const MAX_WINDOW_OUTPUTS: usize = 256;
 pub const MAX_AGGREGATE_CELLS: usize = 1_000_000;
 pub const MAX_GROUP_WORKING_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_LOOKUP_DRIVERS: usize = 10_000;
@@ -1189,6 +1190,7 @@ pub enum QueryStageKind {
     DeriveMatch,
     Lookup,
     Aggregate,
+    Window,
     SetOperation,
     Select,
     Sort,
@@ -3367,6 +3369,7 @@ impl Database {
                 | Stage::DeriveMatch(_)
                 | Stage::Lookup(_)
                 | Stage::Aggregate(_)
+                | Stage::Window(_)
                 | Stage::SetOperation(_)
                 | Stage::Select(_) => {
                     return Err(Error::new(
@@ -3574,6 +3577,7 @@ impl Database {
                 | Stage::DeriveMatch(_)
                 | Stage::Lookup(_)
                 | Stage::Aggregate(_)
+                | Stage::Window(_)
                 | Stage::SetOperation(_)
                 | Stage::Select(_) => unreachable!("mutation target stages were bound"),
             }
@@ -3828,6 +3832,9 @@ impl Database {
                         }
                     }
                     schema = self.bind_aggregate(&schema, aggregate)?;
+                }
+                Stage::Window(window) => {
+                    self.bind_window(&mut schema, window)?;
                 }
                 Stage::SetOperation(operation) => {
                     if pipeline_has_set_operation(&operation.pipeline) {
@@ -4235,6 +4242,46 @@ impl Database {
         Ok(output)
     }
 
+    fn bind_window(&self, schema: &mut Vec<Column>, window: &mut Window) -> Result<()> {
+        if window.assignments.len() > MAX_WINDOW_OUTPUTS {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "window has {} output fields; limit is {MAX_WINDOW_OUTPUTS}",
+                    window.assignments.len()
+                ),
+            ));
+        }
+        for path in &window.partition_by {
+            self.catalog.field_type(schema, path)?;
+        }
+        for key in &mut window.order_by {
+            let ty = self.catalog.field_type(schema, &key.column)?.clone();
+            if !self.orderable(&ty)? {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!("window sort field '{}' has no ordering", key.column),
+                ));
+            }
+            key.ty = Some(ty);
+        }
+        for assignment in &window.assignments {
+            if schema.iter().any(|column| column.name == assignment.name) {
+                return Err(Error::new(
+                    "E_FIELD",
+                    format!("window field '{}' already exists", assignment.name),
+                ));
+            }
+            schema.push(Column {
+                name: assignment.name.clone(),
+                ty: ScalarType::Int,
+                default: None,
+                id: 0,
+            });
+        }
+        Ok(())
+    }
+
     fn aggregate_input_type(
         &self,
         schema: &[Column],
@@ -4337,6 +4384,102 @@ impl Database {
         Ok(output)
     }
 
+    fn apply_window(
+        &self,
+        rows: &mut [BTreeMap<String, Value>],
+        window: &Window,
+        control: Option<&ExecutionControl>,
+    ) -> Result<usize> {
+        let mut partitions = BTreeMap::<Vec<String>, Vec<usize>>::new();
+        let mut state_bytes = 0_usize;
+        for (position, row) in rows.iter().enumerate() {
+            check_deadline_periodically(control, position)?;
+            let mut key = Vec::with_capacity(window.partition_by.len());
+            for path in &window.partition_by {
+                let value = row_field(row, path).ok_or_else(|| {
+                    Error::new(
+                        "E_FIELD",
+                        format!("missing window partition field '{path}' during execution"),
+                    )
+                })?;
+                let encoded = value.index_key();
+                state_bytes = state_bytes.saturating_add(encoded.len());
+                key.push(encoded);
+            }
+            state_bytes = state_bytes.saturating_add(std::mem::size_of::<usize>());
+            if state_bytes > GENERAL_WORKING_MAX_BYTES {
+                return Err(Error::new(
+                    "E_LIMIT",
+                    format!(
+                        "window state exceeds {GENERAL_WORKING_MAX_BYTES} encoded bytes; add filter or take before window"
+                    ),
+                ));
+            }
+            partitions.entry(key).or_default().push(position);
+        }
+
+        for (partition_position, indexes) in partitions.values_mut().enumerate() {
+            check_deadline_periodically(control, partition_position)?;
+            sort_by_typed(indexes, &self.catalog, &window.order_by, |index| {
+                &rows[*index]
+            })?;
+            let mut rank = 1_usize;
+            let mut dense_rank = 1_usize;
+            for position in 0..indexes.len() {
+                check_deadline_periodically(control, position)?;
+                if position > 0 {
+                    let previous = indexes[position - 1];
+                    let current = indexes[position];
+                    if compare_rows_by_typed_keys(
+                        &self.catalog,
+                        &window.order_by,
+                        &rows[previous],
+                        &rows[current],
+                    )? != std::cmp::Ordering::Equal
+                    {
+                        rank = position + 1;
+                        dense_rank = dense_rank.saturating_add(1);
+                    }
+                }
+                let row_number = position + 1;
+                let row = &mut rows[indexes[position]];
+                for assignment in &window.assignments {
+                    let value = match assignment.function {
+                        WindowFunction::RowNumber => row_number,
+                        WindowFunction::Rank => rank,
+                        WindowFunction::DenseRank => dense_rank,
+                    };
+                    row.insert(
+                        assignment.name.clone(),
+                        Value::Int(i64::try_from(value).map_err(|_| {
+                            Error::new("E_LIMIT", "window rank exceeds the int range")
+                        })?),
+                    );
+                }
+            }
+        }
+
+        let materialized_bytes = check_materialized_rows(rows, control)?;
+        let peak_bytes = materialized_bytes.saturating_add(state_bytes);
+        if peak_bytes > GENERAL_WORKING_MAX_BYTES {
+            return Err(Error::new(
+                "E_LIMIT",
+                format!(
+                    "window working state exceeds {GENERAL_WORKING_MAX_BYTES} encoded bytes; add filter or take before window"
+                ),
+            ));
+        }
+        if let Some(limit) = control.and_then(ExecutionControl::materialized_bytes_limit)
+            && peak_bytes > limit
+        {
+            return Err(Error::new(
+                "E_STREAM_LIMIT",
+                format!("window working state exceeds {limit} encoded bytes"),
+            ));
+        }
+        Ok(peak_bytes)
+    }
+
     fn prepare_page(&self, pipeline: &Pipeline) -> Result<Option<PreparedPage>> {
         let page_positions = pipeline
             .stages
@@ -4384,14 +4527,15 @@ impl Database {
                 ),
             ));
         }
-        if pipeline
-            .stages
-            .iter()
-            .any(|stage| matches!(stage, Stage::Take { .. } | Stage::Aggregate(_)))
-        {
+        if pipeline.stages.iter().any(|stage| {
+            matches!(
+                stage,
+                Stage::Take { .. } | Stage::Aggregate(_) | Stage::Window(_)
+            )
+        }) {
             return Err(Error::new(
                 "E_PAGE_SHAPE",
-                "page does not support take, aggregate, or group stages",
+                "page does not support take, aggregate, group, or window stages",
             ));
         }
         let sort_position = pipeline.stages[..page_position]
@@ -5296,6 +5440,7 @@ impl Database {
                     | Stage::FilterMatch(_)
                     | Stage::Lookup(_)
                     | Stage::Aggregate(_)
+                    | Stage::Window(_)
                     | Stage::SetOperation(_)
                     | Stage::Sort(_) => {
                         can_bound = false;
@@ -5486,6 +5631,7 @@ impl Database {
                 Stage::FilterExists(_)
                 | Stage::Lookup(_)
                 | Stage::Aggregate(_)
+                | Stage::Window(_)
                 | Stage::SetOperation(_)
                 | Stage::Page(_) => true,
                 Stage::Sort(_) => access.ordered_sort != Some(position),
@@ -5741,6 +5887,10 @@ impl Database {
                 }
                 Stage::Aggregate(aggregate) => {
                     rows = self.aggregate_rows(rows, &aggregate, control)?;
+                }
+                Stage::Window(window) => {
+                    let window_bytes = self.apply_window(&mut rows, &window, control)?;
+                    observation.observe_working_bytes(window_bytes);
                 }
                 Stage::SetOperation(operation) => {
                     let right = self.query_from(source, *operation.pipeline, control)?;
@@ -6134,6 +6284,7 @@ impl Database {
                 Stage::FilterExists(_)
                 | Stage::Lookup(_)
                 | Stage::Aggregate(_)
+                | Stage::Window(_)
                 | Stage::SetOperation(_)
                 | Stage::Page(_) => {
                     unreachable!("blocking stages are excluded from the streaming prefix")
@@ -7202,6 +7353,7 @@ fn query_stage_kind(stage: &Stage) -> QueryStageKind {
         Stage::DeriveMatch(_) => QueryStageKind::DeriveMatch,
         Stage::Lookup(_) => QueryStageKind::Lookup,
         Stage::Aggregate(_) => QueryStageKind::Aggregate,
+        Stage::Window(_) => QueryStageKind::Window,
         Stage::SetOperation(_) => QueryStageKind::SetOperation,
         Stage::Select(_) => QueryStageKind::Select,
         Stage::Sort(_) => QueryStageKind::Sort,
@@ -7410,41 +7562,47 @@ fn sort_by_typed<T>(
         if error.is_some() {
             return std::cmp::Ordering::Equal;
         }
-        for key in keys {
-            let result = (|| {
-                let ty = key.ty.as_ref().ok_or_else(|| {
-                    Error::new(
-                        "E_TYPE",
-                        format!("sort field '{}' was not bound", key.column),
-                    )
-                })?;
-                let left = row_field(fields(left), &key.column).ok_or_else(|| {
-                    Error::new("E_FIELD", format!("sort field '{}' is missing", key.column))
-                })?;
-                let right = row_field(fields(right), &key.column).ok_or_else(|| {
-                    Error::new("E_FIELD", format!("sort field '{}' is missing", key.column))
-                })?;
-                catalog.cmp_typed(ty, left, right)
-            })();
-            let ordering = match result {
-                Ok(ordering) => ordering,
-                Err(sort_error) => {
-                    error = Some(sort_error);
-                    return std::cmp::Ordering::Equal;
-                }
-            };
-            let ordering = if key.descending {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-            if ordering != std::cmp::Ordering::Equal {
-                return ordering;
+        match compare_rows_by_typed_keys(catalog, keys, fields(left), fields(right)) {
+            Ok(ordering) => ordering,
+            Err(sort_error) => {
+                error = Some(sort_error);
+                std::cmp::Ordering::Equal
             }
         }
-        std::cmp::Ordering::Equal
     });
     error.map_or(Ok(()), Err)
+}
+
+fn compare_rows_by_typed_keys(
+    catalog: &Catalog,
+    keys: &[SortKey],
+    left: &BTreeMap<String, Value>,
+    right: &BTreeMap<String, Value>,
+) -> Result<std::cmp::Ordering> {
+    for key in keys {
+        let ty = key.ty.as_ref().ok_or_else(|| {
+            Error::new(
+                "E_TYPE",
+                format!("sort field '{}' was not bound", key.column),
+            )
+        })?;
+        let left = row_field(left, &key.column).ok_or_else(|| {
+            Error::new("E_FIELD", format!("sort field '{}' is missing", key.column))
+        })?;
+        let right = row_field(right, &key.column).ok_or_else(|| {
+            Error::new("E_FIELD", format!("sort field '{}' is missing", key.column))
+        })?;
+        let ordering = catalog.cmp_typed(ty, left, right)?;
+        let ordering = if key.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering != std::cmp::Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(std::cmp::Ordering::Equal)
 }
 
 fn leading_index_constraints(pipeline: &Pipeline) -> Vec<IndexConstraint> {
