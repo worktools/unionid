@@ -2337,7 +2337,7 @@ impl Database {
                     "E_INDEX",
                     format!("primary-key index for '{name}.{key}' references a missing row"),
                 )
-            })?;
+            });
             let before = rows[position].clone();
             let after = Arc::new(Row { id, fields });
             rows.set(position, after.clone());
@@ -4420,9 +4420,27 @@ impl Database {
 
         for (partition_position, indexes) in partitions.values_mut().enumerate() {
             check_deadline_periodically(control, partition_position)?;
-            sort_by_typed(indexes, &self.catalog, &window.order_by, |index| {
-                &rows[*index]
-            })?;
+            let mut sort_error = None;
+            indexes.sort_by(|left, right| {
+                if sort_error.is_some() {
+                    return std::cmp::Ordering::Equal;
+                }
+                match compare_rows_by_typed_keys(
+                    &self.catalog,
+                    &window.order_by,
+                    &rows[*left],
+                    &rows[*right],
+                ) {
+                    Ok(ordering) => ordering,
+                    Err(error) => {
+                        sort_error = Some(error);
+                        std::cmp::Ordering::Equal
+                    }
+                }
+            });
+            if let Some(error) = sort_error {
+                return Err(error);
+            }
             let mut rank = 1_usize;
             let mut dense_rank = 1_usize;
             for position in 0..indexes.len() {
