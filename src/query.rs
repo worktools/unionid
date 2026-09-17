@@ -375,6 +375,7 @@ pub struct AggregateAssignment {
 pub enum AggregateFunction {
     Count,
     CountDistinct,
+    Average,
     Sum,
     Min,
     Max,

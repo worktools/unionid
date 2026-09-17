@@ -54,6 +54,13 @@ select {id, amount, with_fee, reversed}"#,
         aggregate.rows[0]["total"].source_text(),
         "decimal \"24.90\""
     );
+
+    let average = engine.execute("from invoices | aggregate {mean = avg amount}");
+    let error = average
+        .error
+        .expect("decimal avg must require explicit rounding");
+    assert_eq!(error.code, "E_TYPE");
+    assert!(error.message.contains("precision and rounding"));
 }
 
 #[test]

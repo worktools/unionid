@@ -2365,6 +2365,10 @@ impl Parser {
                     AggregateFunction::CountDistinct,
                     Some(self.scalar_expression(0, braced)?),
                 ),
+                "avg" => (
+                    AggregateFunction::Average,
+                    Some(self.scalar_expression(0, braced)?),
+                ),
                 "sum" => (
                     AggregateFunction::Sum,
                     Some(self.scalar_expression(0, braced)?),
@@ -2379,7 +2383,7 @@ impl Parser {
                 ),
                 _ => {
                     return Err(self.error(format!(
-                        "unknown aggregate function '{function_name}'; expected count, count_distinct, sum, min, or max"
+                        "unknown aggregate function '{function_name}'; expected count, count_distinct, avg, sum, min, or max"
                     )));
                 }
             };

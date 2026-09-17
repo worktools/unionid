@@ -1502,6 +1502,49 @@ fn count_distinct_supports_typed_adt_values_groups_and_empty_input() {
 }
 
 #[test]
+fn avg_has_explicit_integer_float_duration_and_empty_input_semantics() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Score = float\ntype Wait = duration\ntype Sample = {bucket text, points int, score Score, wait Wait}\ntable samples Sample\ninsert samples {bucket = \"a\", points = 1, score = 1.0, wait = 1millisecond}\ninsert samples {bucket = \"a\", points = 2, score = 2.0, wait = 2milliseconds}\ninsert samples {bucket = \"b\", points = -2, score = -2.0, wait = -2milliseconds}",
+    );
+
+    let result = ok(
+        &mut engine,
+        "from samples\nfilter bucket == \"a\"\naggregate {\n  points = avg points\n  score = avg score\n  wait = avg wait\n}",
+    );
+    assert_eq!(result.columns[0].ty, "Option<float>");
+    assert_eq!(result.columns[1].ty, "Option<Score>");
+    assert_eq!(result.columns[2].ty, "Option<Wait>");
+    for name in ["points", "score"] {
+        let Value::Option(Some(value)) = result.rows[0][name].unwrapped() else {
+            panic!("{name} was not Some");
+        };
+        assert!(value.unwrapped().cmp_eq(&Value::Float(1.5)));
+    }
+    let Value::Option(Some(wait)) = result.rows[0]["wait"].unwrapped() else {
+        panic!("wait was not Some");
+    };
+    assert_eq!(wait.unwrapped().source_text(), "1500microseconds");
+
+    let grouped = ok(
+        &mut engine,
+        "from samples\ngroup bucket {aggregate {points = avg points}}\nfilter match points {\n  Some(value) => value > 0.0\n  None => false\n}\nsort bucket",
+    );
+    assert_eq!(grouped.rows.len(), 1);
+    assert!(grouped.rows[0]["bucket"].cmp_eq(&Value::Text("a".into())));
+
+    let mut empty = Engine::memory();
+    ok(&mut empty, "type Row = {value int}\ntable rows Row");
+    let result = ok(&mut empty, "from rows\naggregate {mean = avg value}");
+    assert!(matches!(
+        result.rows[0]["mean"].unwrapped(),
+        Value::Option(None)
+    ));
+    assert_eq!(result.columns[0].ty, "Option<float>");
+}
+
+#[test]
 fn grouped_aggregates_support_adt_keys_and_later_stages() {
     let mut e = Engine::memory();
     ok(
@@ -1700,6 +1743,7 @@ fn aggregates_reject_invalid_types_layout_and_runtime_overflow() {
     let setup = "type Row =\n  id int\n  label text\n  active bool\ntable rows Row";
     for (pipeline, code, message) in [
         ("aggregate\n  total = sum label", "E_TYPE", "sum expects"),
+        ("aggregate\n  mean = avg label", "E_TYPE", "avg expects"),
         (
             "aggregate\n  total = sum missing",
             "E_FIELD",
@@ -1728,6 +1772,7 @@ fn aggregates_reject_invalid_types_layout_and_runtime_overflow() {
     for pipeline in [
         "aggregate\n  rows = count id",
         "aggregate\n  rows = count_distinct",
+        "aggregate\n  mean = avg",
         "aggregate\n  total = sum",
         "aggregate\n  rows = median id",
         "group id\n  filter id > 0",
@@ -1757,6 +1802,12 @@ fn aggregates_reject_invalid_types_layout_and_runtime_overflow() {
     );
     let error = floats
         .execute("from rows\naggregate\n  total = sum value")
+        .error
+        .unwrap();
+    assert_eq!(error.code, "E_ARITH");
+
+    let error = floats
+        .execute("from rows\naggregate\n  mean = avg value")
         .error
         .unwrap();
     assert_eq!(error.code, "E_ARITH");
