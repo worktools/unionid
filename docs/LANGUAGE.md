@@ -2,7 +2,7 @@
 
 本页是 unionid 当前可执行语言的规范入口。第一次使用可先走完[五分钟持久数据库教程](GETTING_STARTED.md)。示例和规则都由现有实现支持；查询的完整语义见 [QUERY.md](QUERY.md)，schema 演进见 [MIGRATIONS.md](MIGRATIONS.md)，声明式目标结构见 [SCHEMA-DIFF.md](SCHEMA-DIFF.md)，实际应用覆盖见 [SCENARIOS.md](SCENARIOS.md)，未来设计单独放在 [DESIGN.md](DESIGN.md)。[RFC 0005](rfc/0005-structured-prql-query-syntax.md) 的结构化 delimiter、braced match、group inner pipeline 与 canonical formatter 已进入当前语法；多项 derive/select、computed select 与 set 字段集已实现。完整脚本可运行：[任务](../examples/tasks.unid)、[任务修改](../examples/task_mutations.unid)、[schema migration](../examples/schema_migration.unid)、[后台队列](../examples/job_queue.unid)、[配置](../examples/config.unid)、[事件](../examples/events.unid)、[同步冲突](../examples/sync_conflicts.unid)、[有限递归树](../examples/recursive_tree.unid)、[UUID/bytes 内容元数据](../examples/content_metadata.unid)、[时间/session](../examples/session_events.unid)、[decimal 账单](../examples/invoices.unid)。
 
-当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys { aggregate {...} }`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`!`/`&&`/`||`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
+当前包含类型与表声明、单行／批量 insert 和 upsert、update/delete 及 typed `returning`、版本化 schema migration、布尔 filter、sum/option 的 braced match、查询局部 let/纯函数、普通与 ADT `derive`、`group keys { aggregate {...} }`、typed `union`/`intersect`/`except`、select、sort、take、有界 keyset `page`，以及结构化 `explain`。filter、普通／match derive、typed set 和 migration conversion 共享有类型的 int/float 算术与 bool 表达式；比较、`!`/`&&`/`||`、Option helper 及 `contains/length/any/all` 可直接产生 bool 结果。`$name` 参数通过 Rust API 或版本化 TCP 协议绑定。
 
 LLM 或代码生成器可通过 `unionid docs query` 读取当前二进制内置的紧凑参考与可运行示例，或用 `--format json` 取得分离的 reference/examples。生成真实查询时还应提供 `unionid schema print --db <path> --format json` 的 exact schema，并用 `query describe` 在执行前绑定检查。完整 prompt-oriented 内容见 [LLM_QUERY.md](LLM_QUERY.md)。
 
@@ -130,6 +130,7 @@ take 20
 | 布尔过滤 | `filter any attempts (attempt -> attempt.failed)` | 组合 bool、比较、Option 检查、list/text 长度、成员判断与元素字段谓词 |
 | 模式过滤 | `filter match state {...}` | 按 sum 变体及其 record 负载判断 |
 | 相关存在过滤 | `filter exists { from items ... }` / `filter not exists {...}` | 用显式 `outer.path` 和目标索引保留有匹配子项或没有匹配子项的行 |
+| 类型化集合运算 | `union { from archived ... }` / `intersect` / `except` | 合并 schema 完全一致的 pipeline，以完整 typed row 去重并保持首次出现顺序 |
 | 普通派生 | `derive score = priority + bonus` | 产生 scalar 或 bool typed 列并加入后续 stage 作用域 |
 | ADT 派生 | `derive label = match state {...}` | 穷尽解构 sum/option，追加统一类型的结果列 |
 | 局部定义 | `let retryable = attempt -> attempt < 3` | 定义常量或有类型、非递归纯函数，供后续 stage 展开复用 |

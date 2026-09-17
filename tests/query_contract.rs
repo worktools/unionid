@@ -81,6 +81,20 @@ fn describes_aggregate_and_bounded_read_cardinality() {
 
     let bounded = unionid::query_contract::describe(SCHEMA, "from tasks | take 1").unwrap();
     assert_eq!(bounded.result.cardinality, QueryCardinality::AtMostOne);
+
+    let union = unionid::query_contract::describe(
+        SCHEMA,
+        "from tasks\naggregate {total = count}\nunion {\n  from tasks\n  aggregate {total = count}\n}",
+    )
+    .unwrap();
+    assert_eq!(union.result.cardinality, QueryCardinality::Many);
+
+    let except = unionid::query_contract::describe(
+        SCHEMA,
+        "from tasks\naggregate {total = count}\nexcept {\n  from tasks\n  aggregate {total = count}\n}",
+    )
+    .unwrap();
+    assert_eq!(except.result.cardinality, QueryCardinality::AtMostOne);
 }
 
 #[test]

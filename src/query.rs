@@ -253,10 +253,37 @@ pub enum Stage {
     DeriveMatch(DeriveMatch),
     Lookup(Lookup),
     Aggregate(Aggregate),
+    SetOperation(SetOperation),
     Select(Vec<String>),
     Sort(Vec<SortKey>),
     Take { offset: usize, limit: usize },
     Page(PageSpec),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetOperator {
+    Union,
+    Intersect,
+    Except,
+}
+
+impl SetOperator {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Union => "union",
+            Self::Intersect => "intersect",
+            Self::Except => "except",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SetOperation {
+    pub operator: SetOperator,
+    pub pipeline: Box<Pipeline>,
+    /// Schema at the set boundary, populated during binding.
+    pub columns: Vec<Column>,
 }
 
 #[derive(Debug, Clone)]

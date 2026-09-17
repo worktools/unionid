@@ -7,7 +7,7 @@ use crate::Engine;
 use crate::engine::PreparedQuery;
 use crate::error::{Error, Result};
 use crate::portable::{PortableSchemaIdentity, TypeShape};
-use crate::query::{Pipeline, Stage, Statement};
+use crate::query::{Pipeline, SetOperator, Stage, Statement};
 
 pub const QUERY_DESCRIPTION_VERSION: u32 = 1;
 
@@ -208,6 +208,17 @@ fn pipeline_cardinality(pipeline: &Pipeline) -> QueryCardinality {
             }
             Stage::Page(page) => {
                 cardinality = bounded_cardinality(cardinality, 0, page.limit);
+            }
+            Stage::SetOperation(operation) => {
+                cardinality = match operation.operator {
+                    SetOperator::Union => QueryCardinality::Many,
+                    SetOperator::Intersect | SetOperator::Except
+                        if cardinality == QueryCardinality::ExactlyOne =>
+                    {
+                        QueryCardinality::AtMostOne
+                    }
+                    SetOperator::Intersect | SetOperator::Except => cardinality,
+                };
             }
             _ => {}
         }

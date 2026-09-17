@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,8 +16,8 @@ use crate::model::{
 use crate::profile::ExecutionObservation;
 use crate::query::{
     Aggregate, AggregateAssignment, AggregateFunction, CmpOp, ExistsCorrelation, ExistsFilter,
-    IndexComponent, PageDirection, PageSpec, Pipeline, Returning, SetAssignment, SetValue, SortKey,
-    Stage, Statement,
+    IndexComponent, PageDirection, PageSpec, Pipeline, Returning, SetAssignment, SetOperator,
+    SetValue, SortKey, Stage, Statement,
 };
 use crate::row_source::{
     CandidateRowSource, EncodedIndexBounds, GENERAL_WORKING_MAX_BYTES, IndexHit, IndexHitCursor,
@@ -583,6 +584,198 @@ fn project_row(row: BTreeMap<String, Value>, columns: &[String]) -> BTreeMap<Str
         .collect()
 }
 
+fn apply_set_operation(
+    left: Vec<BTreeMap<String, Value>>,
+    right: Vec<BTreeMap<String, Value>>,
+    operator: SetOperator,
+    columns: &[Column],
+    control: Option<&ExecutionControl>,
+) -> Result<Vec<BTreeMap<String, Value>>> {
+    if operator == SetOperator::Union {
+        let mut output = Vec::with_capacity(left.len().saturating_add(right.len()));
+        let mut output_buckets = HashMap::<u64, Vec<usize>>::new();
+        for (position, row) in left.into_iter().chain(right).enumerate() {
+            check_deadline_periodically(control, position)?;
+            let hash = typed_row_hash(&row, columns);
+            if !row_in_buckets(&row, hash, &output, &output_buckets, columns) {
+                let index = output.len();
+                output.push(row);
+                output_buckets.entry(hash).or_default().push(index);
+            }
+        }
+        return Ok(output);
+    }
+
+    let mut right_buckets = HashMap::<u64, Vec<usize>>::new();
+    for (position, row) in right.iter().enumerate() {
+        check_deadline_periodically(control, position)?;
+        right_buckets
+            .entry(typed_row_hash(row, columns))
+            .or_default()
+            .push(position);
+    }
+
+    let mut output = Vec::with_capacity(left.len());
+    let mut output_buckets = HashMap::<u64, Vec<usize>>::new();
+    for (position, row) in left.into_iter().enumerate() {
+        check_deadline_periodically(control, position)?;
+        let hash = typed_row_hash(&row, columns);
+        let in_right = row_in_buckets(&row, hash, &right, &right_buckets, columns);
+        let include = match operator {
+            SetOperator::Union => unreachable!("union returns before membership construction"),
+            SetOperator::Intersect => in_right,
+            SetOperator::Except => !in_right,
+        };
+        if include && !row_in_buckets(&row, hash, &output, &output_buckets, columns) {
+            let index = output.len();
+            output.push(row);
+            output_buckets.entry(hash).or_default().push(index);
+        }
+    }
+    Ok(output)
+}
+
+fn row_in_buckets(
+    needle: &BTreeMap<String, Value>,
+    hash: u64,
+    rows: &[BTreeMap<String, Value>],
+    buckets: &HashMap<u64, Vec<usize>>,
+    columns: &[Column],
+) -> bool {
+    buckets.get(&hash).is_some_and(|positions| {
+        positions
+            .iter()
+            .any(|position| typed_rows_equal(needle, &rows[*position], columns))
+    })
+}
+
+fn typed_rows_equal(
+    left: &BTreeMap<String, Value>,
+    right: &BTreeMap<String, Value>,
+    columns: &[Column],
+) -> bool {
+    columns.iter().all(|column| {
+        left.get(&column.name)
+            .zip(right.get(&column.name))
+            .is_some_and(|(left, right)| left.cmp_eq(right))
+    })
+}
+
+fn typed_row_hash(row: &BTreeMap<String, Value>, columns: &[Column]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for column in columns {
+        column.name.hash(&mut hasher);
+        if let Some(value) = row.get(&column.name) {
+            hash_typed_value(value, &mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_typed_value(value: &Value, state: &mut impl Hasher) {
+    match value {
+        Value::Int(value) => {
+            0_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Float(value) => {
+            1_u8.hash(state);
+            let bits = if *value == 0.0 { 0 } else { value.to_bits() };
+            bits.hash(state);
+        }
+        Value::Bool(value) => {
+            2_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Text(value) => {
+            3_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Uuid(value) => {
+            4_u8.hash(state);
+            value.to_string().hash(state);
+        }
+        Value::Date(value) => {
+            5_u8.hash(state);
+            value.to_string().hash(state);
+        }
+        Value::Timestamp(value) => {
+            6_u8.hash(state);
+            value.to_string().hash(state);
+        }
+        Value::Duration(value) => {
+            7_u8.hash(state);
+            value.to_string().hash(state);
+        }
+        Value::Decimal(value) => {
+            8_u8.hash(state);
+            value.to_string().hash(state);
+        }
+        Value::Bytes(value) => {
+            9_u8.hash(state);
+            value.to_string().hash(state);
+        }
+        Value::Null => 10_u8.hash(state),
+        Value::Enum(value) => {
+            11_u8.hash(state);
+            value.id.hash(state);
+            if value.id == 0 {
+                value.variant.hash(state);
+            }
+            for argument in &value.args {
+                hash_typed_value(argument, state);
+            }
+        }
+        Value::Record(fields) => {
+            12_u8.hash(state);
+            fields.len().hash(state);
+            for (name, value) in fields {
+                name.hash(state);
+                hash_typed_value(value, state);
+            }
+        }
+        Value::Tuple(values) => {
+            13_u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                hash_typed_value(value, state);
+            }
+        }
+        Value::List(values) => {
+            14_u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                hash_typed_value(value, state);
+            }
+        }
+        Value::Option(value) => {
+            15_u8.hash(state);
+            value.is_some().hash(state);
+            if let Some(value) = value {
+                hash_typed_value(value, state);
+            }
+        }
+        Value::Named { type_id, value } => {
+            16_u8.hash(state);
+            type_id.hash(state);
+            hash_typed_value(value, state);
+        }
+    }
+}
+
+fn merge_execution_observation(target: &mut ExecutionObservation, nested: ExecutionObservation) {
+    target.index_entries_examined = target
+        .index_entries_examined
+        .saturating_add(nested.index_entries_examined);
+    target.rows_decoded = target.rows_decoded.saturating_add(nested.rows_decoded);
+    target.row_cache_hits = target.row_cache_hits.saturating_add(nested.row_cache_hits);
+    target.row_cache_misses = target
+        .row_cache_misses
+        .saturating_add(nested.row_cache_misses);
+    target.batches = target.batches.saturating_add(nested.batches);
+    target.observe_working_bytes(nested.working_peak_bytes);
+}
+
 fn check_deadline(control: Option<&ExecutionControl>) -> Result<()> {
     control.map_or(Ok(()), ExecutionControl::checkpoint)
 }
@@ -895,6 +1088,7 @@ pub enum QueryStageKind {
     DeriveMatch,
     Lookup,
     Aggregate,
+    SetOperation,
     Select,
     Sort,
     Take,
@@ -950,6 +1144,14 @@ pub struct ExistsCorrelationPlan {
     pub outer: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetOperationPlan {
+    pub stage: usize,
+    pub operator: SetOperator,
+    pub table: String,
+    pub access: QueryAccessPlan,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryPlan {
     pub table: String,
@@ -960,6 +1162,8 @@ pub struct QueryPlan {
     pub lookups: Vec<LookupPlan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exists: Vec<ExistsPlan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub set_operations: Vec<SetOperationPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PagePlan>,
 }
@@ -3062,6 +3266,7 @@ impl Database {
                 | Stage::DeriveMatch(_)
                 | Stage::Lookup(_)
                 | Stage::Aggregate(_)
+                | Stage::SetOperation(_)
                 | Stage::Select(_) => {
                     return Err(Error::new(
                         "E_QUERY",
@@ -3268,6 +3473,7 @@ impl Database {
                 | Stage::DeriveMatch(_)
                 | Stage::Lookup(_)
                 | Stage::Aggregate(_)
+                | Stage::SetOperation(_)
                 | Stage::Select(_) => unreachable!("mutation target stages were bound"),
             }
         }
@@ -3522,6 +3728,31 @@ impl Database {
                     }
                     schema = self.bind_aggregate(&schema, aggregate)?;
                 }
+                Stage::SetOperation(operation) => {
+                    if pipeline_has_set_operation(&operation.pipeline) {
+                        return Err(Error::new(
+                            "E_QUERY",
+                            "nested set operations are not supported",
+                        ));
+                    }
+                    if pipeline_has_page(&operation.pipeline) {
+                        return Err(Error::new(
+                            "E_PAGE_SHAPE",
+                            "page cannot be used inside a set operation",
+                        ));
+                    }
+                    let right = self.prepare_pipeline(&mut operation.pipeline)?;
+                    if !schemas_match(&schema, &right) {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!(
+                                "{} requires identical field names, order, and types on both sides",
+                                operation.operator.keyword()
+                            ),
+                        ));
+                    }
+                    operation.columns = schema.clone();
+                }
                 Stage::Select(columns) => {
                     schema = columns
                         .iter()
@@ -3549,6 +3780,12 @@ impl Database {
                 }
                 Stage::Take { .. } | Stage::Page(_) => {}
             }
+        }
+        if pipeline_has_set_operation(pipeline) && pipeline_has_page(pipeline) {
+            return Err(Error::new(
+                "E_PAGE_SHAPE",
+                "page cannot be combined with a set operation",
+            ));
         }
         self.prepare_page(pipeline)?;
         Ok(schema)
@@ -4440,6 +4677,25 @@ impl Database {
                 })
             })
             .collect();
+        let set_operations = pipeline
+            .stages
+            .iter()
+            .enumerate()
+            .filter_map(|(position, stage)| {
+                let Stage::SetOperation(operation) = stage else {
+                    return None;
+                };
+                let access = self
+                    .plan_access(source, &operation.pipeline, None, true)
+                    .map(|planned| planned.plan);
+                Some(access.map(|access| SetOperationPlan {
+                    stage: position + 1,
+                    operator: operation.operator,
+                    table: operation.pipeline.from.clone(),
+                    access,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut response = QueryResponse::ok_message("query plan");
         let page = prepared_page.as_ref().map(|page| PagePlan {
             limit: page.spec.limit,
@@ -4485,6 +4741,7 @@ impl Database {
             result_schema,
             lookups,
             exists,
+            set_operations,
             page,
         });
         Ok(response)
@@ -4911,6 +5168,7 @@ impl Database {
                     | Stage::FilterMatch(_)
                     | Stage::Lookup(_)
                     | Stage::Aggregate(_)
+                    | Stage::SetOperation(_)
                     | Stage::Sort(_) => {
                         can_bound = false;
                         break;
@@ -5100,6 +5358,7 @@ impl Database {
                 Stage::FilterExists(_)
                 | Stage::Lookup(_)
                 | Stage::Aggregate(_)
+                | Stage::SetOperation(_)
                 | Stage::Page(_) => true,
                 Stage::Sort(_) => access.ordered_sort != Some(position),
                 Stage::Select(_) => {
@@ -5354,6 +5613,59 @@ impl Database {
                 }
                 Stage::Aggregate(aggregate) => {
                     rows = self.aggregate_rows(rows, &aggregate, control)?;
+                }
+                Stage::SetOperation(operation) => {
+                    let right = self.query_from(source, *operation.pipeline, control)?;
+                    if let Some(nested) = right.execution {
+                        merge_execution_observation(&mut observation, nested);
+                    }
+                    let combined_rows = rows.len().saturating_add(right.rows.len());
+                    if combined_rows > MAX_QUERY_WORKING_ROWS {
+                        return Err(Error::new(
+                            "E_LIMIT",
+                            format!(
+                                "{} needs {combined_rows} working rows; limit is {MAX_QUERY_WORKING_ROWS}; add filter or take to either side",
+                                operation.operator.keyword()
+                            ),
+                        ));
+                    }
+                    let left_bytes = check_materialized_rows(&rows, control)?;
+                    let right_bytes = check_materialized_rows(&right.rows, control)?;
+                    let membership_bytes = combined_rows.saturating_mul(
+                        std::mem::size_of::<u64>() + 2 * std::mem::size_of::<usize>(),
+                    );
+                    let set_working_bytes = left_bytes
+                        .saturating_add(right_bytes)
+                        .saturating_add(membership_bytes);
+                    if set_working_bytes > GENERAL_WORKING_MAX_BYTES {
+                        return Err(Error::new(
+                            "E_LIMIT",
+                            format!(
+                                "{} working state exceeds {GENERAL_WORKING_MAX_BYTES} encoded bytes",
+                                operation.operator.keyword()
+                            ),
+                        ));
+                    }
+                    if let Some(limit) =
+                        control.and_then(ExecutionControl::materialized_bytes_limit)
+                        && set_working_bytes > limit
+                    {
+                        return Err(Error::new(
+                            "E_STREAM_LIMIT",
+                            format!(
+                                "{} working state exceeds {limit} encoded bytes",
+                                operation.operator.keyword()
+                            ),
+                        ));
+                    }
+                    observation.observe_working_bytes(set_working_bytes);
+                    rows = apply_set_operation(
+                        rows,
+                        right.rows,
+                        operation.operator,
+                        &operation.columns,
+                        control,
+                    )?;
                 }
                 Stage::Select(columns) => {
                     if prepared_page.is_some()
@@ -5694,6 +6006,7 @@ impl Database {
                 Stage::FilterExists(_)
                 | Stage::Lookup(_)
                 | Stage::Aggregate(_)
+                | Stage::SetOperation(_)
                 | Stage::Page(_) => {
                     unreachable!("blocking stages are excluded from the streaming prefix")
                 }
@@ -6761,6 +7074,7 @@ fn query_stage_kind(stage: &Stage) -> QueryStageKind {
         Stage::DeriveMatch(_) => QueryStageKind::DeriveMatch,
         Stage::Lookup(_) => QueryStageKind::Lookup,
         Stage::Aggregate(_) => QueryStageKind::Aggregate,
+        Stage::SetOperation(_) => QueryStageKind::SetOperation,
         Stage::Select(_) => QueryStageKind::Select,
         Stage::Sort(_) => QueryStageKind::Sort,
         Stage::Take { .. } => QueryStageKind::Take,
@@ -7026,6 +7340,27 @@ fn leading_index_constraints(pipeline: &Pipeline) -> Vec<IndexConstraint> {
         }
     }
     constraints
+}
+
+fn pipeline_has_set_operation(pipeline: &Pipeline) -> bool {
+    pipeline
+        .stages
+        .iter()
+        .any(|stage| matches!(stage, Stage::SetOperation(_)))
+}
+
+fn pipeline_has_page(pipeline: &Pipeline) -> bool {
+    pipeline
+        .stages
+        .iter()
+        .any(|stage| matches!(stage, Stage::Page(_)))
+}
+
+fn schemas_match(left: &[Column], right: &[Column]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.name == right.name && crate::expression::same_type(&left.ty, &right.ty)
+        })
 }
 
 fn constraint_matches(
