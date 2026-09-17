@@ -48,6 +48,7 @@ type Job =
 - 复用业务判断：`let important = value -> value >= 10` 和 `let has_tag = (values list text, tag text) -> contains values tag` 可在当前 pipeline 后续的 filter、derive 与 aggregate 输入中重复调用，避免复制长条件。
 - 检查嵌套执行历史：`derive has_retry = any history (attempt -> any attempt.checkpoints (checkpoint -> checkpoint >= 3) and is_some attempt.note)` 可以逐层绑定 record/list 元素并把判断追加成 typed bool 列；`all` 提供空 list 为 true 的全称语义。完整示例和预算边界见查询参考。
 - 按状态计数：`derive state_label = match state {...}` 把 sum 分支归一为状态名，再用 `group state_label { aggregate {...} }` 得到每种状态的任务数、总优先级和最早创建时间；可执行示例见 [job_queue.unid](../examples/job_queue.unid)。
+- 按队列选出前 N 个任务：`window` 以 queue 分区并按 priority/时间排序，追加 `row_number` 后用普通 filter 保留每组前几行；rank/dense_rank 可保留并列业务名次。
 
 列表查询必须提供唯一的最终排序键，例如 `sort {-priority, created_at, id}`。只按 priority 分页会让相同优先级的跨请求边界不稳定。
 
@@ -297,18 +298,18 @@ table payments Payment
 | 小型一对多关联读 | `lookup` 已实现索引前置、相同快照、typed list、逐行/driver/内存预算、稳定分页与 explain | 通用扁平 join、图遍历和 mutation lookup 延后 | #241，M10 P0 |
 | 多来源同形结果 | `union`/`intersect`/`except` 已实现精确 schema 绑定、嵌套 ADT typed equality、稳定首次出现顺序、预算与 explain | 不支持嵌套集合运算或跨来源 cursor page | #341，v0.7 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match/sort/take target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 多写者／skip-locked 不在当前单写模型内 | #15/#83/#85/#87 |
-| count/count_distinct/avg/sum/min/max 与分组 | 已实现 typed 空输入、int→float avg、命名 float/duration avg、完整 ADT 去重与 key、后续 stage 与有界资源 | decimal avg、window 和用户定义 aggregate 继续由 #245 跟踪 | #60/#245 |
+| count/count_distinct/avg/sum/min/max、分组与基础排名窗口 | 已实现 typed 空输入、int→float avg、命名 float/duration avg、完整 ADT 去重与 key、显式 partition/order 的 row_number/rank/dense_rank、后续 stage 与有界资源 | decimal avg、frame、lag/lead 和用户定义 aggregate/window 延后 | #60/#245 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |
 | 持久提交、恢复和备份 | redb Engine、原子提交、完整性检查、进程退出恢复、备份还原与三条端到端升级恢复场景已实现 | 物理设备故障不在当前测试声明内 | #13/#14/#20/#74，P0 |
 
 ## 对查询语言的约束
 
-1. pipeline stage 保持正交：filter 改变行，derive 增加列，select 选择列，sort 建立顺序，take 选择位置，aggregate 缩减行。不会因在 select 中出现 aggregate 而隐式改变行数。
+1. pipeline stage 保持正交：filter 改变行，derive 和 window 增加列，select 选择列，sort 建立顺序，take 选择位置，aggregate 缩减行。不会因在 select 中出现 aggregate 而隐式改变行数。
 2. sum/option 的分支字段只能经 match 解构，不能用“缺失就 null”的路径访问破坏类型。list 元素查询也必须有类型化谓词。
 3. 所有字段、pattern、函数和参数在扫描前绑定；空表不会掩盖错误。schema revision 改变时 plan 重新绑定。
 4. 没有 sort 就没有跨请求顺序承诺；分页查询以唯一键结束排序。offset range 适合小工作集，大页或频繁翻页后续增加显式 cursor，而不是暗中改变 `take`。
 5. 时间、随机数、网络和文件不是查询表达式的隐含副作用。当前时间由参数传入；外部 I/O 留在应用层。
-6. 核心版本只提供索引驱动、基数保持且显式有界的 lookup，不以通用扁平 join、window、递归查询函数和高阶泛型换取表面覆盖率。有限自递归 ADT 只表示整行拥有的有限树；若一个场景主要依赖大规模关联、任意图遍历、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
+6. 核心版本只提供索引驱动、基数保持且显式有界的 lookup 与基础排名窗口，不以通用扁平 join、任意 window frame、递归查询函数和高阶泛型换取表面覆盖率。有限自递归 ADT 只表示整行拥有的有限树；若一个场景主要依赖大规模关联、任意图遍历、任意 JSON 分析或 OLAP，应选择 SQLite/DuckDB/PostgreSQL 等系统。
 
 实现顺序按用户可完成的工作流安排：#34–#36 与 #59–#61 已补齐列表读取、ADT 表达式、普通派生、基础汇总和查询局部纯函数；#11 已收口查询核心，#16 已补齐共享索引访问计划与 explain。#74 用任务队列、嵌套配置和 session/cache 走通持久重启、migration 与 backup/restore，#75、#70 和 #76 已收敛工作负载、日常体验与安装发布；#81 从 #25 中切出有限自递归 ADT，先补树形核心模型，再依据真实反馈决定互递归与泛型。
 

@@ -230,6 +230,7 @@ type Task = {
   priority int,
   state State,
 }
+
 table tasks Task
   key id
 insert tasks {
@@ -272,4 +273,21 @@ group label (
         serde_json::to_value(structured_response).unwrap()
     );
     assert_eq!(legacy_engine.schema_info(), structured_engine.schema_info());
+}
+
+#[test]
+fn ranking_window_formats_with_explicit_hierarchy() {
+    let source = "from jobs | window {partition {team, region}, sort {-score, created_at}, position = row_number, placing = rank, dense = dense_rank}";
+    let expected = r#"from jobs
+window {
+  partition {team, region}
+  sort {-score, created_at}
+  position = row_number
+  placing = rank
+  dense = dense_rank
+}
+"#;
+    let formatted = format_source(source).unwrap();
+    assert_eq!(formatted, expected);
+    assert_eq!(format_source(&formatted).unwrap(), expected);
 }

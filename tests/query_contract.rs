@@ -90,6 +90,21 @@ fn describes_aggregate_and_bounded_read_cardinality() {
     let bounded = unionid::query_contract::describe(SCHEMA, "from tasks | take 1").unwrap();
     assert_eq!(bounded.result.cardinality, QueryCardinality::AtMostOne);
 
+    let window = unionid::query_contract::describe(
+        SCHEMA,
+        "from tasks | window {partition state, sort -score, position = row_number, placing = rank}",
+    )
+    .unwrap();
+    assert_eq!(window.result.cardinality, QueryCardinality::Many);
+    assert!(matches!(
+        window.result.fields[3].shape,
+        TypeShape::Int { .. }
+    ));
+    assert!(matches!(
+        window.result.fields[4].shape,
+        TypeShape::Int { .. }
+    ));
+
     let union = unionid::query_contract::describe(
         SCHEMA,
         "from tasks\naggregate {total = count}\nunion {\n  from tasks\n  aggregate {total = count}\n}",

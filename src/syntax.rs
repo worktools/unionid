@@ -12,7 +12,7 @@ use crate::query::{
     MatchArm, MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
     MatchValueField, MatchValuePayload, MigrationTransform, PageDirection, PageSpec, Pipeline,
     Returning, ScalarExpression, SchemaMigration, SetAssignment, SetValue, SortKey, Stage,
-    Statement,
+    Statement, Window, WindowAssignment, WindowFunction,
 };
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -1959,6 +1959,8 @@ impl Parser {
                 continue;
             } else if self.word("aggregate") {
                 Stage::Aggregate(self.aggregate(Vec::new())?)
+            } else if self.word("window") {
+                self.window_stage()?
             } else if self.word("lookup") {
                 self.lookup_stage()?
             } else if self.word("union") || self.word("intersect") || self.word("except") {
@@ -2128,6 +2130,7 @@ impl Parser {
             "except",
             "aggregate",
             "group",
+            "window",
             "select",
             "sort",
             "take",
@@ -2199,6 +2202,70 @@ impl Parser {
             self.expect(Kind::Close('}'))?;
         }
         Ok(Stage::Sort(keys))
+    }
+
+    fn window_stage(&mut self) -> Result<Stage> {
+        self.expect_word("window")?;
+        self.expect(Kind::Open('{'))?;
+        self.newlines();
+
+        let partition_by = if self.word("partition") {
+            self.bump();
+            let fields = self.path_list("window partition", "partition field")?;
+            self.eat(Kind::Comma);
+            self.newlines();
+            fields
+        } else {
+            Vec::new()
+        };
+
+        if !self.word("sort") {
+            return Err(self.error("window requires an explicit sort"));
+        }
+        let Stage::Sort(order_by) = self.sort_stage()? else {
+            unreachable!("sort_stage always returns a sort stage")
+        };
+        self.eat(Kind::Comma);
+        self.newlines();
+
+        let mut assignments = Vec::new();
+        let mut seen = BTreeSet::new();
+        while *self.kind() != Kind::Close('}') {
+            let name = self.identifier()?;
+            if !seen.insert(name.clone()) {
+                return Err(self.error(format!("duplicate window field '{name}'")));
+            }
+            self.expect(Kind::Op("=".into()))?;
+            let function_name = self.identifier()?;
+            let function = match function_name.as_str() {
+                "row_number" => WindowFunction::RowNumber,
+                "rank" => WindowFunction::Rank,
+                "dense_rank" => WindowFunction::DenseRank,
+                _ => {
+                    return Err(self.error(format!(
+                        "unknown window function '{function_name}'; expected row_number, rank, or dense_rank"
+                    )));
+                }
+            };
+            assignments.push(WindowAssignment { name, function });
+            let newline = self.separated_newlines();
+            if *self.kind() == Kind::Close('}') {
+                break;
+            }
+            if !self.eat(Kind::Comma) && !newline {
+                return Err(self.error("expected a newline or comma between window fields"));
+            }
+            self.newlines();
+        }
+        self.expect(Kind::Close('}'))?;
+        if assignments.is_empty() {
+            return Err(self.error("window requires at least one output field"));
+        }
+        Ok(Stage::Window(Window {
+            partition_by,
+            order_by,
+            assignments,
+        }))
     }
 
     fn take_stage(&mut self) -> Result<Stage> {

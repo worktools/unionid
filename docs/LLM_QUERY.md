@@ -69,7 +69,7 @@ take 11..31
 ```
 
 Available stages are `let`, `filter`, `filter exists`, `filter not exists`, `filter match`, `derive`, `lookup`, `aggregate`,
-`group`, `union`, `intersect`, `except`, `select`, `sort`, `take`, and `page`. A compact single-line query may join stages
+`group`, `window`, `union`, `intersect`, `except`, `select`, `sort`, `take`, and `page`. A compact single-line query may join stages
 with `|`. Do not reorder stages: `filter` after `take` observes only the taken rows, and
 fields removed by `select` are unavailable later.
 
@@ -107,7 +107,7 @@ against the supplied schema before execution.
 ## Aggregation and bounded relation lookup
 
 Use `aggregate` for ungrouped results and `group keys { aggregate {...} }` for grouped
-results. Functions are `count`, `sum`, `min`, and `max`.
+results. Functions are `count`, `count_distinct`, `avg`, `sum`, `min`, and `max`.
 
 ```text
 from tasks
@@ -119,6 +119,26 @@ group state {
 }
 sort state
 ```
+
+Use a ranking window when rows must remain rows while receiving a position inside each
+group. Always emit an explicit window `sort`; omit `partition` only for one global group:
+
+```text
+from tasks
+window {
+  partition state
+  sort {-priority, created_at}
+  position = row_number
+  placing = rank
+  dense = dense_rank
+}
+filter position <= 3
+sort {state, position}
+```
+
+`row_number` distinguishes ties by the stable input order, `rank` leaves gaps after ties,
+and `dense_rank` does not. A window appends `int` fields without reordering output rows.
+Do not combine `window` with `page`, and do not invent frames, `lag`, or `lead`.
 
 `lookup lines from order_lines on order_id == id take 100` attaches a bounded typed list.
 The target key must be indexed. Unionid intentionally has no general SQL-style flattened

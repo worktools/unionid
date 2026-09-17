@@ -6,7 +6,7 @@ use crate::query::{
     Aggregate, AggregateFunction, ArithmeticOp, BoolExpression, DeriveMatch, IndexComponent,
     LocalBinding, MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue,
     MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
-    SchemaMigration, SetValue, Stage, Statement,
+    SchemaMigration, SetValue, Stage, Statement, WindowFunction,
 };
 
 /// Parse a script and return its canonical semicolon-free representation.
@@ -457,6 +457,41 @@ fn stage_text(output: &mut String, stage: &Stage, depth: usize) {
             ),
         ),
         Stage::Aggregate(aggregate) => aggregate_text(output, aggregate, depth),
+        Stage::Window(window) => {
+            line(output, depth, "window {");
+            if !window.partition_by.is_empty() {
+                let fields = if window.partition_by.len() == 1 {
+                    window.partition_by[0].clone()
+                } else {
+                    format!("{{{}}}", window.partition_by.join(", "))
+                };
+                line(output, depth + 1, &format!("partition {fields}"));
+            }
+            let keys = window
+                .order_by
+                .iter()
+                .map(|key| format!("{}{}", if key.descending { "-" } else { "" }, key.column))
+                .collect::<Vec<_>>();
+            let keys = if keys.len() == 1 {
+                keys[0].clone()
+            } else {
+                format!("{{{}}}", keys.join(", "))
+            };
+            line(output, depth + 1, &format!("sort {keys}"));
+            for assignment in &window.assignments {
+                let function = match assignment.function {
+                    WindowFunction::RowNumber => "row_number",
+                    WindowFunction::Rank => "rank",
+                    WindowFunction::DenseRank => "dense_rank",
+                };
+                line(
+                    output,
+                    depth + 1,
+                    &format!("{} = {function}", assignment.name),
+                );
+            }
+            line(output, depth, "}");
+        }
         Stage::SetOperation(operation) => {
             line(
                 output,
