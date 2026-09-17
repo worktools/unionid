@@ -134,7 +134,7 @@ take 20
 | 普通派生 | `derive score = priority + bonus` | 产生 scalar 或 bool typed 列并加入后续 stage 作用域 |
 | ADT 派生 | `derive label = match state {...}` | 穷尽解构 sum/option，追加统一类型的结果列 |
 | 局部定义 | `let retryable = attempt -> attempt < 3` | 定义常量或有类型、非递归纯函数，供后续 stage 展开复用 |
-| 汇总 | `aggregate {...}` / `group state { aggregate {...} }` | count/sum/min/max；分组键保留完整 ADT 类型和值 |
+| 汇总 | `aggregate {...}` / `group state { aggregate {...} }` | count/count_distinct/sum/min/max；输入与分组键保留完整 ADT 类型和值 |
 | 投影 | `select {id, owner.email}` | 保留列，响应按声明的列顺序展示 |
 | 排序 | `sort id` / `sort {-priority, created_at, id}` | 单列或多列词典序；支持 primitive、命名类型及完整有限 ADT |
 | 截取 | `take 20` / `take 10..20` / `take 10..=20` | 保留前 N 行，或使用 Rust 风格半开／闭区间 |
@@ -151,7 +151,7 @@ take 20
 
 `explain` 可直接放在单行查询前，也可把完整查询缩进到下一层。它执行与真实查询相同的静态绑定，返回结构化访问计划，但不读取或执行数据行。`explain analyze` 使用相同布局，在同一读快照上额外执行 pipeline 并返回 value-free `analysis`，不会返回业务 rows 或 cursor。只有开头的单纯有索引等值 filter（允许前置 let）使用 lookup；planner 不越过其他 stage。完整字段与测量规则见 [Explain、实际剖析与类型化索引计划](QUERY.md#explain实际剖析与类型化索引计划)。
 
-未分组 `aggregate` 在空输入上返回一行：count 为 0、sum 为输入数值类型的零、min/max 为 `None`；分组空输入返回零行。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
+未分组 `aggregate` 在空输入上返回一行：count/count_distinct 为 0、sum 为输入数值类型的零、min/max 为 `None`；分组空输入返回零行。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
 
 兼容入口 `=`、`limit`、无花括号的多字段 `select id,name`，以及旧缩进 record/match/group 仍可执行。新代码与 formatter 使用 `==`、`take`、`select {id, name}`、braced match 和 group inner pipeline。filter、match condition、derive 数值表达式与 update `set` 可引用 `$name`；完整单行 insert/upsert 写成 `insert tasks $row` / `upsert tasks $row`，批量写入写成 `insert many tasks $rows` / `upsert many tasks $rows`。参数由调用端提供 typed value，在 AST 上绑定并在扫描前按上下文检查，详见[版本化接口与参数](PROTOCOL.md)。
 

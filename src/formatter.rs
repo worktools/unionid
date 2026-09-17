@@ -724,6 +724,7 @@ fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
     for assignment in &aggregate.assignments {
         let function = match assignment.function {
             AggregateFunction::Count => "count",
+            AggregateFunction::CountDistinct => "count_distinct",
             AggregateFunction::Sum => "sum",
             AggregateFunction::Min => "min",
             AggregateFunction::Max => "max",

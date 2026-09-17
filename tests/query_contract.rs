@@ -63,13 +63,17 @@ select {id, retryable}"#,
 fn describes_aggregate_and_bounded_read_cardinality() {
     let aggregate = unionid::query_contract::describe(
         SCHEMA,
-        "from tasks\naggregate\n  total = count\n  highest = max score",
+        "from tasks\naggregate\n  total = count\n  unique_scores = count_distinct score\n  highest = max score",
     )
     .unwrap();
     assert_eq!(aggregate.result.cardinality, QueryCardinality::ExactlyOne);
     assert!(matches!(
-        aggregate.result.fields[1].shape,
+        aggregate.result.fields[2].shape,
         TypeShape::Option { .. }
+    ));
+    assert!(matches!(
+        aggregate.result.fields[1].shape,
+        TypeShape::Int { .. }
     ));
 
     let filtered = unionid::query_contract::describe(

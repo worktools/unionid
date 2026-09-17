@@ -1466,6 +1466,42 @@ fn basic_aggregates_define_typed_results_and_empty_input() {
 }
 
 #[test]
+fn count_distinct_supports_typed_adt_values_groups_and_empty_input() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type Actor = Anonymous | User {id int}\ntype Event =\n  source text\n  actor Actor\n  tags List<text>\n  attempt Option<int>\ntable events Event\ninsert events {source = \"api\", actor = User {id = 1}, tags = [\"write\"], attempt = Some(1)}\ninsert events {source = \"api\", actor = User {id = 1}, tags = [\"write\"], attempt = Some(1)}\ninsert events {source = \"api\", actor = User {id = 2}, tags = [\"read\", \"write\"], attempt = None}\ninsert events {source = \"worker\", actor = Anonymous, tags = [\"write\"], attempt = None}",
+    );
+
+    let result = ok(
+        &mut engine,
+        "from events\naggregate {\n  actors = count_distinct actor\n  tag_sets = count_distinct tags\n  attempts = count_distinct attempt\n}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["actors"].cmp_eq(&Value::Int(3)));
+    assert!(result.rows[0]["tag_sets"].cmp_eq(&Value::Int(2)));
+    assert!(result.rows[0]["attempts"].cmp_eq(&Value::Int(2)));
+    assert!(result.columns.iter().all(|column| column.ty == "int"));
+
+    let grouped = ok(
+        &mut engine,
+        "from events\ngroup source {\n  aggregate {unique_actors = count_distinct actor}\n}\nfilter unique_actors > 1\nsort source",
+    );
+    assert_eq!(grouped.rows.len(), 1);
+    assert!(grouped.rows[0]["source"].cmp_eq(&Value::Text("api".into())));
+    assert!(grouped.rows[0]["unique_actors"].cmp_eq(&Value::Int(2)));
+
+    let mut empty = Engine::memory();
+    ok(&mut empty, "type Row = {value Option<int>}\ntable rows Row");
+    let result = ok(
+        &mut empty,
+        "from rows\naggregate {unique_values = count_distinct value}",
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["unique_values"].cmp_eq(&Value::Int(0)));
+}
+
+#[test]
 fn grouped_aggregates_support_adt_keys_and_later_stages() {
     let mut e = Engine::memory();
     ok(
@@ -1691,6 +1727,7 @@ fn aggregates_reject_invalid_types_layout_and_runtime_overflow() {
 
     for pipeline in [
         "aggregate\n  rows = count id",
+        "aggregate\n  rows = count_distinct",
         "aggregate\n  total = sum",
         "aggregate\n  rows = median id",
         "group id\n  filter id > 0",

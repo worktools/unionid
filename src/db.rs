@@ -282,6 +282,7 @@ struct GroupAccumulator {
 
 enum AggregateState {
     Count(i64),
+    CountDistinct(BTreeSet<String>),
     Sum(Option<Value>),
     Min(Option<Value>),
     Max(Option<Value>),
@@ -293,6 +294,7 @@ impl GroupAccumulator {
             .iter()
             .map(|assignment| match assignment.function {
                 AggregateFunction::Count => AggregateState::Count(0),
+                AggregateFunction::CountDistinct => AggregateState::CountDistinct(BTreeSet::new()),
                 AggregateFunction::Sum => AggregateState::Sum(None),
                 AggregateFunction::Min => AggregateState::Min(None),
                 AggregateFunction::Max => AggregateState::Max(None),
@@ -306,6 +308,7 @@ impl GroupAccumulator {
         catalog: &Catalog,
         row: &BTreeMap<String, Value>,
         assignments: &[AggregateAssignment],
+        working_bytes: &mut usize,
     ) -> Result<()> {
         for (state, assignment) in self.states.iter_mut().zip(assignments) {
             match state {
@@ -313,6 +316,14 @@ impl GroupAccumulator {
                     *count = count
                         .checked_add(1)
                         .ok_or_else(|| Error::new("E_ARITH", "count overflowed int"))?;
+                }
+                AggregateState::CountDistinct(values) => {
+                    let key = aggregate_input(catalog, row, assignment)?.index_key();
+                    if !values.contains(&key) {
+                        *working_bytes = working_bytes
+                            .saturating_add(key.len().saturating_mul(2).saturating_add(32));
+                        values.insert(key);
+                    }
                 }
                 AggregateState::Sum(total) => {
                     let value = aggregate_input(catalog, row, assignment)?;
@@ -410,6 +421,10 @@ impl GroupAccumulator {
                 .ok_or_else(|| Error::new("E_TYPE", "aggregate output has no bound result type"))?;
             let raw = match state {
                 AggregateState::Count(count) => Value::Int(count),
+                AggregateState::CountDistinct(values) => Value::Int(
+                    i64::try_from(values.len())
+                        .map_err(|_| Error::new("E_ARITH", "count_distinct overflowed int"))?,
+                ),
                 AggregateState::Sum(Some(Value::Float(value))) => {
                     Value::Float(if value == 0.0 { 0.0 } else { value })
                 }
@@ -488,6 +503,7 @@ fn update_extreme(
 fn aggregate_function_name(function: AggregateFunction) -> &'static str {
     match function {
         AggregateFunction::Count => "count",
+        AggregateFunction::CountDistinct => "count_distinct",
         AggregateFunction::Sum => "sum",
         AggregateFunction::Min => "min",
         AggregateFunction::Max => "max",
@@ -4062,6 +4078,10 @@ impl Database {
             }
             let ty = match assignment.function {
                 AggregateFunction::Count => ScalarType::Int,
+                AggregateFunction::CountDistinct => {
+                    self.aggregate_input_type(schema, assignment)?;
+                    ScalarType::Int
+                }
                 AggregateFunction::Sum => {
                     let ty = self.aggregate_input_type(schema, assignment)?;
                     if !matches!(
@@ -4188,11 +4208,11 @@ impl Database {
                 GroupAccumulator::new(values, &aggregate.assignments),
             );
         }
-        groups.get_mut(&key).expect("group was initialized").update(
-            &self.catalog,
-            row,
-            &aggregate.assignments,
-        )
+        groups
+            .get_mut(&key)
+            .expect("group was initialized")
+            .update(&self.catalog, row, &aggregate.assignments, working_bytes)?;
+        check_group_limits(groups.len(), aggregate.assignments.len(), *working_bytes)
     }
 
     fn finish_aggregate_groups(
