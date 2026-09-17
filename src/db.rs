@@ -283,9 +283,18 @@ struct GroupAccumulator {
 enum AggregateState {
     Count(i64),
     CountDistinct(BTreeSet<String>),
+    Average {
+        total: Option<AverageTotal>,
+        count: i64,
+    },
     Sum(Option<Value>),
     Min(Option<Value>),
     Max(Option<Value>),
+}
+
+enum AverageTotal {
+    Float(f64),
+    Duration(i128),
 }
 
 impl GroupAccumulator {
@@ -295,6 +304,10 @@ impl GroupAccumulator {
             .map(|assignment| match assignment.function {
                 AggregateFunction::Count => AggregateState::Count(0),
                 AggregateFunction::CountDistinct => AggregateState::CountDistinct(BTreeSet::new()),
+                AggregateFunction::Average => AggregateState::Average {
+                    total: None,
+                    count: 0,
+                },
                 AggregateFunction::Sum => AggregateState::Sum(None),
                 AggregateFunction::Min => AggregateState::Min(None),
                 AggregateFunction::Max => AggregateState::Max(None),
@@ -324,6 +337,48 @@ impl GroupAccumulator {
                             .saturating_add(key.len().saturating_mul(2).saturating_add(32));
                         values.insert(key);
                     }
+                }
+                AggregateState::Average { total, count } => {
+                    let value = aggregate_input(catalog, row, assignment)?;
+                    *count = count
+                        .checked_add(1)
+                        .ok_or_else(|| Error::new("E_ARITH", "avg count overflowed int"))?;
+                    *total = Some(match (total.take(), value.unwrapped()) {
+                        (None, Value::Int(value)) => AverageTotal::Float(*value as f64),
+                        (None, Value::Float(value)) => AverageTotal::Float(*value),
+                        (None, Value::Duration(value)) => {
+                            AverageTotal::Duration(i128::from(value.microseconds()))
+                        }
+                        (Some(AverageTotal::Float(total)), Value::Int(value)) => {
+                            let result = total + *value as f64;
+                            if !result.is_finite() {
+                                return Err(Error::new(
+                                    "E_ARITH",
+                                    "avg sum produced a non-finite value",
+                                ));
+                            }
+                            AverageTotal::Float(result)
+                        }
+                        (Some(AverageTotal::Float(total)), Value::Float(value)) => {
+                            let result = total + value;
+                            if !result.is_finite() {
+                                return Err(Error::new(
+                                    "E_ARITH",
+                                    "avg sum produced a non-finite value",
+                                ));
+                            }
+                            AverageTotal::Float(result)
+                        }
+                        (Some(AverageTotal::Duration(total)), Value::Duration(value)) => {
+                            AverageTotal::Duration(total + i128::from(value.microseconds()))
+                        }
+                        _ => {
+                            return Err(Error::new(
+                                "E_TYPE",
+                                "bound avg received values with inconsistent numeric types",
+                            ));
+                        }
+                    });
                 }
                 AggregateState::Sum(total) => {
                     let value = aggregate_input(catalog, row, assignment)?;
@@ -425,6 +480,35 @@ impl GroupAccumulator {
                     i64::try_from(values.len())
                         .map_err(|_| Error::new("E_ARITH", "count_distinct overflowed int"))?,
                 ),
+                AggregateState::Average { total, count } => {
+                    let value = match total {
+                        None => None,
+                        Some(AverageTotal::Float(total)) => {
+                            let result = total / count as f64;
+                            if !result.is_finite() {
+                                return Err(Error::new(
+                                    "E_ARITH",
+                                    "avg produced a non-finite value",
+                                ));
+                            }
+                            Some(Box::new(Value::Float(if result == 0.0 {
+                                0.0
+                            } else {
+                                result
+                            })))
+                        }
+                        Some(AverageTotal::Duration(total)) => {
+                            let micros =
+                                i64::try_from(total / i128::from(count)).map_err(|_| {
+                                    Error::new("E_ARITH", "duration avg overflowed duration")
+                                })?;
+                            Some(Box::new(Value::Duration(
+                                crate::scalars::Duration::from_microseconds(micros),
+                            )))
+                        }
+                    };
+                    Value::Option(value)
+                }
                 AggregateState::Sum(Some(Value::Float(value))) => {
                     Value::Float(if value == 0.0 { 0.0 } else { value })
                 }
@@ -504,6 +588,7 @@ fn aggregate_function_name(function: AggregateFunction) -> &'static str {
     match function {
         AggregateFunction::Count => "count",
         AggregateFunction::CountDistinct => "count_distinct",
+        AggregateFunction::Average => "avg",
         AggregateFunction::Sum => "sum",
         AggregateFunction::Min => "min",
         AggregateFunction::Max => "max",
@@ -4081,6 +4166,29 @@ impl Database {
                 AggregateFunction::CountDistinct => {
                     self.aggregate_input_type(schema, assignment)?;
                     ScalarType::Int
+                }
+                AggregateFunction::Average => {
+                    let ty = self.aggregate_input_type(schema, assignment)?;
+                    let result = match self.catalog.underlying(&ty)? {
+                        ScalarType::Int => ScalarType::Float,
+                        ScalarType::Float | ScalarType::Duration => ty,
+                        ScalarType::Decimal { .. } => {
+                            return Err(Error::new(
+                                "E_TYPE",
+                                "avg does not support decimal until precision and rounding are explicit",
+                            ));
+                        }
+                        _ => {
+                            return Err(Error::new(
+                                "E_TYPE",
+                                format!(
+                                    "avg expects int, float, or duration, got {}",
+                                    self.catalog.describe(&ty)
+                                ),
+                            ));
+                        }
+                    };
+                    ScalarType::Option(Box::new(result))
                 }
                 AggregateFunction::Sum => {
                     let ty = self.aggregate_input_type(schema, assignment)?;

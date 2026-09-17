@@ -44,7 +44,7 @@ take 20
 | ADT 派生列 | `derive x = match field {...}` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
 | 布尔表达式与集合函数 | `&&`/`\|\|`/`!`、`contains/length`、`any/all`、`is_some/is_none` | 已实现于 filter、普通／match derive、typed set 和 migration conversion；bytes 支持连续子序列 contains 与 octet length | #100/#138 |
 | 其他派生列 | `derive score = priority + bonus` | 已实现 scalar 与 bool expression、typed 参数及后续 stage 作用域 | — |
-| 分组与汇总 | `aggregate {...}` / `group {key} { aggregate {...} }` | 已实现 count/count_distinct/sum/min/max、typed 空输入语义与资源上限 | — |
+| 分组与汇总 | `aggregate {...}` / `group {key} { aggregate {...} }` | 已实现 count/count_distinct/avg/sum/min/max、typed 空输入语义与资源上限 | — |
 | 查询局部定义 | `let retryable = attempt -> attempt < 3` | 已实现常量、单/多参数非递归纯函数、有限推断、词法遮蔽与展开预算 | — |
 | 有限自递归 ADT | `enum Tree { Leaf(text) Branch { children: List<Tree> } }` | 已实现声明、严格值、match coverage、精确索引、持久化与 migration；运行时值仍是有限树 | #81 |
 | 执行计划 | `explain from tasks \| filter id == 1` | 已实现 full scan、主键／二级索引 lookup、候选行估计、stage 顺序与结果 schema | — |
@@ -109,7 +109,7 @@ lookup            = "lookup" identifier "from" table "on" field-path "==" field-
 aggregate         = "aggregate" "{" aggregate-field (separator+ aggregate-field)* separator* "}"
 group-aggregate   = "group" group-fields "{" aggregate "}"
 group-fields      = field-path | "{" field-path (separator+ field-path)* separator* "}"
-aggregate-field   = identifier "=" ("count" | (("count_distinct" | "sum" | "min" | "max") scalar-expression)) newline?
+aggregate-field   = identifier "=" ("count" | (("count_distinct" | "avg" | "sum" | "min" | "max") scalar-expression)) newline?
 nested-match-expression = match-expression
 match-expression  = "match" field-path "{" match-value-arm (separator+ match-value-arm)* separator* "}"
 match-value-arm   = arm-pattern "=>" result-expression
@@ -300,7 +300,7 @@ from tasks | filter id > 1 | take 1
 | `derive name = match source {...}` | 追加或替换有静态类型的字段 | 每行执行唯一分支，行数与顺序不变 | 仍统一分支结果类型 |
 | `lookup` | 追加目标表 row type 的 `list` 字段 | 按索引为每个 driver row 读取有界关联行；driver 行数与顺序不变 | 仍检查表、字段、索引、类型和上限 |
 | `filter exists` / `filter not exists` | 不变 | 分别保留内层目标表有匹配或无匹配的 driver row | 仍检查目标表、`outer` 路径、相关键类型、索引和 stage 边界；plan 用 `negated` 区分 |
-| `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/count_distinct 为 0，sum 为类型化零；min/max 为 None |
+| `aggregate` | 只保留 aggregate 输出 | 未分组时把全部输入行归约为一行 | count/count_distinct 为 0，avg/min/max 为 None，sum 为类型化零 |
 | `group ... { aggregate {...} }` | group key 后接 aggregate 输出 | 按完整 typed equality 分组；无 sort 时组顺序不承诺 | 返回零行但仍检查 key、输入和输出类型 |
 | `select` | 按书写顺序组成新 schema | 每行只保留选择的字段 | 返回带投影 schema 的空结果 |
 | `sort` | 不变 | 单列或多列词典序；全部键相同的次序不承诺 | 返回空结果但仍检查全部键 |
@@ -386,7 +386,7 @@ let no_value: Option<int> = value -> None
 
 作用域从 let 所在位置延续到当前 pipeline 结束。定义只能调用更早出现的函数，因此前向引用和直接递归会在扫描前返回 `E_QUERY`，间接调用环也无法形成。后续同名 let 会遮蔽旧定义，但旧函数保留定义时捕获的词法环境；函数参数和 `any/all` 元素 binding 遮蔽同名外层局部值。局部表达式按使用位置展开，不是隐藏的 derive 列；如果中间 select 或 aggregate 移除了它引用的字段，之后使用仍会得到字段错误。
 
-let 可用于普通 filter/derive、match condition、ADT derive 的 scalar result，以及 count_distinct/sum/min/max 输入。所有定义只包含现有纯 expression IR，没有写入、文件、网络、时钟、随机或全局状态入口。每条 pipeline 最多 256 个 local binding、32 层函数调用和 100,000 个展开步骤；超限返回 `E_LIMIT`。调用错误定位到调用 token，定义期错误至少定位到对应 let；执行前展开完成，因此运行时不存在动态函数分派。
+let 可用于普通 filter/derive、match condition、ADT derive 的 scalar result，以及 count_distinct/avg/sum/min/max 输入。所有定义只包含现有纯 expression IR，没有写入、文件、网络、时钟、随机或全局状态入口。每条 pipeline 最多 256 个 local binding、32 层函数调用和 100,000 个展开步骤；超限返回 `E_LIMIT`。调用错误定位到调用 token，定义期错误至少定位到对应 let；执行前展开完成，因此运行时不存在动态函数分派。
 
 ## 布尔过滤表达式
 
@@ -549,6 +549,7 @@ filter received_at >= $since
 aggregate {
   events = count
   actors = count_distinct actor
+  average_amount = avg amount_cents
   amount = sum amount_cents
   earliest = min received_at
   latest = max received_at
@@ -577,11 +578,14 @@ take 20
 | --- | --- | --- | --- |
 | `count` | 不接参数，统计输入行 | `int` | `0` |
 | `count_distinct expression` | 任意具有静态类型的值，包括 sum/product/option/list | `int` | `0` |
+| `avg int-expression` | `int`，包括命名 int；逐项转换为 float 后求和 | `Option<float>` | `None` |
+| `avg float-expression` | `float`，包括命名 float | `Option<T>`，保留命名类型 | `None` |
+| `avg duration-expression` | `duration`，包括命名 duration | `Option<T>`，保留命名类型 | `None` |
 | `sum expression` | `int` / `float`，包括命名数值类型 | 与输入相同 | 同类型的零 |
 | `min expression` | `int` / `float` / `text`，包括相应命名类型 | `Option<T>` | `None` |
 | `max expression` | `int` / `float` / `text`，包括相应命名类型 | `Option<T>` | `None` |
 
-`count_distinct` 使用完整 typed equality，因此不同 constructor、record/tuple 字段、option 状态和 list 内容都参与去重，`None` 也是一个值。`sum` 的 int 使用 checked addition，溢出返回 `E_ARITH`；float 每一步都必须保持有限，正负零最终归一为正零。min/max 接受所有具有静态类型的有限 ADT，并与 filter、sort 和 cursor boundary 共用 total order；它们用 Option 明确表达空输入，不引入 null 或三值逻辑。分组空输入没有 group，因此返回零行。
+`count_distinct` 使用完整 typed equality，因此不同 constructor、record/tuple 字段、option 状态和 list 内容都参与去重，`None` 也是一个值。`avg int` 明确返回 float，不做整数截断；它使用 IEEE-754 转换与除法，因此极大整数可能失去低位精度。`avg float` 的累计和与最终结果必须有限，溢出返回 `E_ARITH`。`avg duration` 用 i128 累计微秒，除法向零取整到整微秒。decimal avg 在精度扩展与舍入规则确定前以 `E_TYPE` 拒绝，不做隐式截断。`sum` 的 int 使用 checked addition，溢出返回 `E_ARITH`；float 每一步都必须保持有限，正负零最终归一为正零。min/max 接受所有具有静态类型的有限 ADT，并与 filter、sort 和 cursor boundary 共用 total order；avg/min/max 用 Option 明确表达空输入，不引入 null 或三值逻辑。分组空输入没有 group，因此返回零行。
 
 aggregate 输入是 scalar expression，可以引用字段路径、前一 stage 的普通或 ADT 派生列，以及查询局部纯函数。group key 使用完整 typed equality，可包含 record、tuple、sum、option 或 list；输出中保留原静态类型。未显式 sort 时不承诺 group 行顺序。group inner pipeline 当前必须包含一个 aggregate，aggregate 后的 filter/select/sort/take 针对汇总后的 schema 执行。
 
@@ -775,7 +779,7 @@ filter match state {
 | 模式检查 | 测试内脚本 | 嵌套穷尽性、不可达分支、积类型相关性、名义构造器、绑定和错误路径 | `match_filters_*`、`match_is_checked_*`、`match_rejects_*`、`complementary_nested_*`、`nested_pattern_coverage_*` |
 | ADT 派生 | 测试内脚本 | 递归 pattern、option/sum/product/list 构造、类型统一、空表诊断与后续 stage | `derive_match_*`、`option_and_positional_*`、`nested_patterns_*`、`constructed_match_*` |
 | 普通派生 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | scalar/bool 结果、命名类型、完整 ADT 复制、typed 参数、短路、空表检查和后续 stage 作用域 | `regular_derives_*` |
-| 分组汇总 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | count/count_distinct/sum/min/max、命名数值、完整 typed ADT 去重与 key、空输入、溢出、后续 stage 与资源上限 | `basic_aggregates_*`、`count_distinct_*`、`grouped_aggregates_*`、`aggregates_reject_*`、`aggregate_group_limits_*` |
+| 分组汇总 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | count/count_distinct/avg/sum/min/max、命名数值、完整 typed ADT 去重与 key、空输入、溢出、后续 stage 与资源上限 | `basic_aggregates_*`、`count_distinct_*`、`avg_*`、`grouped_aggregates_*`、`aggregates_reject_*`、`aggregate_group_limits_*` |
 | 查询局部定义 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 常量、单/多参数纯函数、match binding、aggregate 输入、显式类型、词法遮蔽、prepared 参数、调用与展开预算 | `query_local_*`、`local_function_*`、`prepared_queries_infer_parameters_through_local_functions` |
 | 布尔与集合表达式 | [job_queue.unid](../examples/job_queue.unid) 与测试内脚本 | 优先级、括号、短路结构、字段间比较、命名 ADT list、`contains/length`、嵌套 `any/all`、Option helper、词法作用域、typed 参数、预算和空表错误 | `boolean_filters_*`、`list_predicates_*`、`list_and_option_predicates_*`、`match_conditions_share_*`、`boolean_expressions_are_checked_*` |
 | 数值表达式 | [invoices.unid](../examples/invoices.unid) 与测试内脚本 | int/float/decimal 类型、固定 scale、逐步 precision、优先级、跨行括号、整数除法、短路及运行时错误 | `decimal_*`、`typed_arithmetic_*`、`arithmetic_*`、`boolean_short_circuit_*` |
