@@ -1606,9 +1606,14 @@ select id"#,
         top_two
             .rows
             .iter()
-            .map(|row| row["id"].clone())
+            .map(|row| row["id"].source_text())
             .collect::<Vec<_>>(),
-        vec![Value::Int(1), Value::Int(2), Value::Int(4), Value::Int(5)]
+        vec![
+            "1".to_owned(),
+            "2".to_owned(),
+            "4".to_owned(),
+            "5".to_owned()
+        ]
     );
 
     let explained = ok(
@@ -1668,13 +1673,13 @@ fn ranking_window_rejects_ambiguous_or_unsupported_shapes() {
     ] {
         let response = engine.execute(&format!("from rows | {stage}"));
         assert!(!response.ok, "{stage}");
-        assert_eq!(response.code.as_deref(), Some(code), "{stage}");
+        assert_eq!(response.error.as_ref().unwrap().code, code, "{stage}");
         assert!(response.message.contains(message), "{}", response.message);
     }
     let page =
         engine.execute("from rows | window {sort id, position = row_number} | sort id | page 10");
     assert!(!page.ok);
-    assert_eq!(page.code.as_deref(), Some("E_PAGE_SHAPE"));
+    assert_eq!(page.error.as_ref().unwrap().code, "E_PAGE_SHAPE");
 }
 
 #[test]
