@@ -89,7 +89,14 @@ def main():
         {"name": "incremental_backup_sequence_restore", "status": "passed"},
         {"name": "controlled_network_configuration", "status": "passed"},
         {"name": "empty_directory_generated_starter", "status": "passed"},
-        {"name": "published_v050_data_client_package_compatibility", "status": "passed"},
+        {
+            "name": "published_v060_data_client_package_compatibility",
+            "status": "passed",
+        },
+        {
+            "name": "rust_shaped_language_and_typed_query_composition",
+            "status": "passed",
+        },
         {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
     ]
     if args.controlled_network_journey:
@@ -141,8 +148,15 @@ def main():
                 "scripts/validate-first-use.py, tests/first_use.rs, and "
                 "docs/GETTING_STARTED.md"
             ),
-            "published_v050_data_client_package_compatibility": (
-                "scripts/verify-v050-compatibility.py and docs/UPGRADING.md"
+            "published_v060_data_client_package_compatibility": (
+                "scripts/verify-previous-release-compatibility.py and "
+                "docs/UPGRADING.md"
+            ),
+            "rust_shaped_language_and_typed_query_composition": (
+                "tests/language.rs, tests/exists.rs, tests/set_operations.rs, "
+                "docs/rfc/0017-rust-shaped-prql-language.md, "
+                "docs/rfc/0018-bounded-correlated-exists.md, and "
+                "docs/rfc/0019-bounded-typed-set-operations.md"
             ),
             "controlled_network_mtls_journey": (
                 "deploy/envoy/verify.sh, scripts/verify-envoy-deployment.py, and "
