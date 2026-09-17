@@ -1962,6 +1962,16 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                     exists.driver_limit
                 );
             }
+            for operation in &plan.set_operations {
+                println!(
+                    "{} | {} via {} ({} of {} row(s))",
+                    operation.operator.keyword(),
+                    operation.table,
+                    query_access_name(operation.access.kind),
+                    operation.access.estimated_rows,
+                    operation.access.table_rows
+                );
+            }
             println!(
                 "result | {}",
                 plan.result_schema
@@ -2050,6 +2060,18 @@ fn page_direction_name(direction: PageDirection) -> &'static str {
     }
 }
 
+fn query_access_name(access: QueryAccessKind) -> &'static str {
+    match access {
+        QueryAccessKind::FullScan => "full_scan",
+        QueryAccessKind::PrimaryKeyLookup => "primary_key_lookup",
+        QueryAccessKind::SecondaryIndexLookup => "secondary_index_lookup",
+        QueryAccessKind::CompositeLookup => "composite_lookup",
+        QueryAccessKind::RangeScan => "range_scan",
+        QueryAccessKind::OrderedScan => "ordered_scan",
+        QueryAccessKind::PageSeek => "page_seek",
+    }
+}
+
 fn query_stage_name(stage: &QueryStageKind) -> &'static str {
     match stage {
         QueryStageKind::Let => "let",
@@ -2060,6 +2082,7 @@ fn query_stage_name(stage: &QueryStageKind) -> &'static str {
         QueryStageKind::DeriveMatch => "derive_match",
         QueryStageKind::Lookup => "lookup",
         QueryStageKind::Aggregate => "aggregate",
+        QueryStageKind::SetOperation => "set_operation",
         QueryStageKind::Select => "select",
         QueryStageKind::Sort => "sort",
         QueryStageKind::Take => "take",

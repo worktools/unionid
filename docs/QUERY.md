@@ -38,6 +38,7 @@ take 20
 | 稳定分页 | `page 100` / `page 100 after "u1..."` | 已实现有界 keyset page、正反向 opaque cursor、sequence-pinned 一致性 | #114/#131 |
 | 有界关联展开 | `lookup lines from order_lines on order_id == id take 100` | 已实现索引驱动、一致快照、嵌套 typed list 与显式逐行基数上限 | #241 |
 | 有界相关 existence | `filter exists { from items ... }` / `filter not exists {...}` | 已实现显式 `outer.path`、索引前置、首行短路、取反与 10,000 driver 上限 | #337/#339 |
+| 类型化集合运算 | `union { from archived ... }` / `intersect` / `except` | 已实现精确 schema 检查、完整 typed row 去重、稳定首次出现顺序和共享资源预算 | #341 |
 | 单行 pipeline | `from tasks \| filter id == 1 \| take 1` | 已实现 | — |
 | 参数 | `$id` / `insert table $row` / `upsert many table $rows` | 已实现 typed AST 绑定、缺失/多余检查、versioned protocol，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | #22/#89/#91/#97 |
 | ADT 派生列 | `derive x = match field {...}` | 已实现递归 pattern、完整嵌套覆盖分析、数值表达式与 option/sum/product/list 值构造，并可在 scalar result 中调用局部函数 | — |
@@ -81,7 +82,7 @@ from config | filter endpoint.port >= 8000 | select {name, mode} | take 10
 query             = "from" table pipeline-stage*
 explain           = "explain" "analyze"? query | "explain" "analyze"? newline indent query dedent
 pipeline-stage    = newline stage | "|" stage
-stage             = local-binding | value-filter | exists-filter | match-filter | derive-expression | derive-match | lookup | aggregate | group-aggregate | select | sort | take | page
+stage             = local-binding | value-filter | exists-filter | match-filter | derive-expression | derive-match | lookup | aggregate | group-aggregate | set-operation | select | sort | take | page
 
 update            = "update" table update-stage* set-stage+
 update-stage      = newline filter-stage | "|" filter-stage
@@ -94,6 +95,7 @@ upsert            = "upsert" (table (record-value | parameter) | "many" table (l
 
 value-filter      = "filter" nested-bool-expression
 exists-filter     = "filter" "exists" "{" pipeline "}"
+set-operation     = ("union" | "intersect" | "except") "{" pipeline "}"
 local-binding     = "let" identifier type? "=" (local-parameters "->")? nested-bool-expression
 local-parameters  = binding | "(" local-parameter (separator+ local-parameter)* separator* ")"
 local-parameter   = binding type?
@@ -343,7 +345,7 @@ explain analyze
 
 取消、deadline、行数和工作内存上限与普通查询完全相同；执行失败时直接返回对应错误，不返回不完整的分析对象。计数描述 unionid 执行器可观察到的逻辑工作量，不代表物理磁盘读取或分配器精确 RSS。重复测量可比较计划与工作量，wall-clock 时间仍会受机器负载和缓存状态影响。
 
-成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`、相关存在过滤 `exists`，以及最终结果 schema。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限；每个 exists 计划公开目标表、相关路径、实际索引和 driver 上限。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
+成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`、相关存在过滤 `exists`、集合运算 `set_operations`，以及最终结果 schema。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限；每个 exists 计划公开目标表、相关路径、实际索引和 driver 上限；每个 set-operation 计划公开 operator、右侧表与右侧访问计划。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
 
 planner 跳过开头的 row-independent `let`，然后只从连续的简单 `field op bound` filter 提取边界；`op` 可以是 `==`、`>`、`>=`、`<` 或 `<=`。复合索引使用从首 component 开始的连续 equality prefix，并在紧邻的下一个 component 上合并至多一组 lower/upper range；range 后或 key gap 后的条件仍作为 residual filter。遇到 compound bool、`filter match`、derive、select、aggregate/group、sort、take 或其他语义边界后停止抽取，也不从 `&&`／`||` 内部拆条件。
 
@@ -653,6 +655,27 @@ sort id
 一个 exists/not-exists stage 最多接收 10,000 个 driver rows，沿用同一 committed snapshot、deadline、取消、decode 与 working-memory 限制。首版内层只允许 filter；不支持嵌套 exists、derive、lookup、aggregate、sort、take、page、select，也不支持 mutation target。多个普通 filter 和 existence stage 可按 pipeline 顺序表达 conjunction。
 
 `explain` 的 `exists` 数组公开 stage、`negated`、目标表、`target`/`outer` 相关路径、实际索引和 driver limit；普通 explain 只绑定和规划，不执行目标查询，也不显示外层字段值。完整契约见 [RFC 0018](rfc/0018-bounded-correlated-exists.md)。
+
+### 类型化集合运算
+
+`union`、`intersect` 和 `except` 用花括号界定独立的右侧 pipeline。两侧在集合 stage 处必须具有完全相同的字段名、字段顺序和字段类型；命名 struct/enum 比较 stable type ID，不做 int/float、匿名/named record 或不同命名 ADT 之间的隐式提升：
+
+```text
+from active_tasks
+select {state, tags}
+union {
+  from archived_tasks
+  filter state != Done
+  select {state, tags}
+}
+sort state
+```
+
+三种运算都以完整 typed row 为单位去重，包括 enum variant/payload、record、tuple、Option 和 list。`union` 先输出左侧第一次出现的值，再输出右侧尚未出现的值；`intersect` 按左侧首次出现顺序保留也存在于右侧的值；`except` 按左侧首次出现顺序保留右侧不存在的值。该顺序只定义集合 stage 自身的确定行为；调用方需要业务排序时仍应在其后显式 `sort`。
+
+首版右侧可以使用普通 read pipeline stage，但不允许嵌套集合运算。任一侧都不能使用 cursor `page`，因为跨来源结果不属于单表 sequence-pinned traversal；可在两侧先 `filter`/`take`，集合运算后再 `sort`/`take`。左右 materialized rows、typed membership 索引和 encoded bytes 合并计入 working-state 上限，并沿用 deadline、取消与最终结果上限。
+
+`explain` 的 `set_operations` 数组公开 stage、operator、右侧源表与右侧访问计划，且不会读取任一侧的数据行。完整边界见 [RFC 0019](rfc/0019-bounded-typed-set-operations.md)。
 
 ### 有界 keyset page
 

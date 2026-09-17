@@ -1,0 +1,40 @@
+enum TaskState {
+  Pending
+  Running {
+    worker: text
+  }
+  Done
+}
+
+struct Task {
+  id: int
+  state: TaskState
+  tags: List<text>
+}
+
+table active_tasks: Task {
+  key id
+}
+
+table archived_tasks: Task {
+  key id
+}
+
+insert active_tasks {
+  id: 1
+  state: Running {worker: "local"}
+  tags: ["release"]
+}
+
+insert archived_tasks {
+  id: 2
+  state: Done
+  tags: ["release"]
+}
+
+from active_tasks
+select {state, tags}
+union {
+  from archived_tasks
+  select {state, tags}
+}

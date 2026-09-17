@@ -61,7 +61,7 @@ pub use db::{
     ExecutionPlanObservation, ExistsCorrelationPlan, ExistsPlan, IndexRangePlan, IndexTraversal,
     LookupPlan, MAX_EXECUTION_PLAN_STAGES, MAX_EXISTS_DRIVERS, PageAccessKind, PageInfo, PageOrder,
     PagePlan, QueryAccessKind, QueryAccessPlan, QueryAnalysis, QueryPlan, QueryPlanStage,
-    QueryResponse, QueryStageKind, SchemaInfo, TypedPage, UpsertAction,
+    QueryResponse, QueryStageKind, SchemaInfo, SetOperationPlan, TypedPage, UpsertAction,
 };
 pub use engine::{
     Engine, MutationProfile, PreparedQuery, StorageCompaction, StorageIntegrity, StorageUpgrade,
@@ -105,6 +105,7 @@ pub use protocol::{
     IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,
     Response as ProtocolResponse, WireValue,
 };
+pub use query::SetOperator;
 pub use query::{PageDirection, PageSpec};
 pub use query_contract::{
     QUERY_DESCRIPTION_VERSION, QueryCardinality, QueryDescription, QueryFieldDescription,

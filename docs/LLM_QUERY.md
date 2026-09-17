@@ -69,7 +69,7 @@ take 11..31
 ```
 
 Available stages are `let`, `filter`, `filter exists`, `filter not exists`, `filter match`, `derive`, `lookup`, `aggregate`,
-`group`, `select`, `sort`, `take`, and `page`. A compact single-line query may join stages
+`group`, `union`, `intersect`, `except`, `select`, `sort`, `take`, and `page`. A compact single-line query may join stages
 with `|`. Do not reorder stages: `filter` after `take` observes only the taken rows, and
 fields removed by `select` are unavailable later.
 
@@ -123,6 +123,23 @@ sort state
 `lookup lines from order_lines on order_id == id take 100` attaches a bounded typed list.
 The target key must be indexed. Unionid intentionally has no general SQL-style flattened
 join.
+
+Use a braced right-hand pipeline to combine two result sets with exactly the same field
+names, order, and types:
+
+```text
+from active_tasks
+select {state, tags}
+union {
+  from archived_tasks
+  select {state, tags}
+}
+```
+
+`union`, `intersect`, and `except` compare the complete typed row, including named and
+nested ADTs. They remove duplicates while preserving first occurrence order. Do not emit
+implicit casts, nested set operations, or `page` on either side; use `sort` after the set
+stage when the caller needs an explicit final order.
 
 Use an indexed correlated existence filter when the related rows are not needed in the result:
 

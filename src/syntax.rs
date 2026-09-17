@@ -1961,6 +1961,8 @@ impl Parser {
                 Stage::Aggregate(self.aggregate(Vec::new())?)
             } else if self.word("lookup") {
                 self.lookup_stage()?
+            } else if self.word("union") || self.word("intersect") || self.word("except") {
+                self.set_operation_stage()?
             } else if self.word("group") {
                 self.bump();
                 let group_by = self.path_list("group", "group field")?;
@@ -2026,7 +2028,7 @@ impl Parser {
             } else {
                 if piped {
                     return Err(self.error(
-                        "expected let / filter / derive / lookup / aggregate / group / select / sort / take / page after '|'",
+                        "expected let / filter / derive / lookup / aggregate / group / union / intersect / except / select / sort / take / page after '|'",
                     ));
                 }
                 break;
@@ -2121,6 +2123,9 @@ impl Parser {
             "let",
             "derive",
             "lookup",
+            "union",
+            "intersect",
+            "except",
             "aggregate",
             "group",
             "select",
@@ -2131,6 +2136,31 @@ impl Parser {
         ]
         .iter()
         .any(|word| self.word(word))
+    }
+
+    fn set_operation_stage(&mut self) -> Result<Stage> {
+        let operator = if self.word("union") {
+            self.bump();
+            crate::query::SetOperator::Union
+        } else if self.word("intersect") {
+            self.bump();
+            crate::query::SetOperator::Intersect
+        } else {
+            self.expect_word("except")?;
+            crate::query::SetOperator::Except
+        };
+        self.expect(Kind::Open('{'))?;
+        self.newlines();
+        let Statement::Pipeline(pipeline) = self.pipeline()? else {
+            unreachable!("set-operation source always parses as a pipeline")
+        };
+        self.newlines();
+        self.expect(Kind::Close('}'))?;
+        Ok(Stage::SetOperation(crate::query::SetOperation {
+            operator,
+            pipeline: Box::new(pipeline),
+            columns: Vec::new(),
+        }))
     }
 
     fn sort_stage(&mut self) -> Result<Stage> {

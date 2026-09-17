@@ -295,6 +295,7 @@ table payments Payment
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | option helper/元素谓词可继续扩展 | #10/#22/#36/#91 |
 | 批量写入 typed row list | `insert many` 与 `upsert many` 已实现默认值、嵌套 ADT、输入内主键去重、整批主键／unique index 验证、稳定 RowId/returning/action 顺序和 memory/redb/TCP 原子提交 | 流式导入单独设计 | #89/#97，P1 核心 |
 | 小型一对多关联读 | `lookup` 已实现索引前置、相同快照、typed list、逐行/driver/内存预算、稳定分页与 explain | 通用扁平 join、图遍历和 mutation lookup 延后 | #241，M10 P0 |
+| 多来源同形结果 | `union`/`intersect`/`except` 已实现精确 schema 绑定、嵌套 ADT typed equality、稳定首次出现顺序、预算与 explain | 不支持嵌套集合运算或跨来源 cursor page | #341，v0.7 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match/sort/take target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 多写者／skip-locked 不在当前单写模型内 | #15/#83/#85/#87 |
 | count/sum/min/max 与分组 | 已实现 typed 空输入、命名数值、完整 ADT key、后续 stage 与有界资源 | distinct aggregate、window 和用户定义 aggregate 延后 | #60，P0 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |

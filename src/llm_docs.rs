@@ -38,6 +38,11 @@ const EXAMPLES: &[LlmQueryExample] = &[
         description: "Perform a typed update with simultaneous assignments and returning.",
         source: include_str!("../examples/llm/mutation.unid"),
     },
+    LlmQueryExample {
+        name: "set-operations",
+        description: "Combine schema-identical ADT projections with stable typed deduplication.",
+        source: include_str!("../examples/llm/set-operations.unid"),
+    },
 ];
 
 pub fn query_docs() -> LlmQueryDocs {

@@ -457,6 +457,15 @@ fn stage_text(output: &mut String, stage: &Stage, depth: usize) {
             ),
         ),
         Stage::Aggregate(aggregate) => aggregate_text(output, aggregate, depth),
+        Stage::SetOperation(operation) => {
+            line(
+                output,
+                depth,
+                &format!("{} {{", operation.operator.keyword()),
+            );
+            pipeline_text(output, &operation.pipeline, depth + 1);
+            line(output, depth, "}");
+        }
         Stage::Select(fields) => {
             let fields = if fields.len() == 1 {
                 fields[0].clone()
