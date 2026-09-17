@@ -145,8 +145,10 @@ jobs:
         run: |
           version="$(python3 -c 'import json; print(json.load(open("release/contract.json"))["software_version"])')"
           network_args=()
+          macro_args=()
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             network_args+=(--controlled-network-journey)
+            macro_args+=(--query-macro-evidence "${RUNNER_TEMP}/unionid-query-macro-eval.json")
           fi
           python3 scripts/record-release-acceptance.py \
             --dist dist \
@@ -157,6 +159,7 @@ jobs:
             --runner-os "${{ runner.os }}" \
             --runner-arch "${{ runner.arch }}" \
             "${network_args[@]}" \
+            "${macro_args[@]}" \
             --output "${RUNNER_TEMP}/unionid-v${version}-acceptance.json"
       - uses: actions/upload-artifact@v7
         with:
@@ -165,7 +168,13 @@ jobs:
             dist/*
             ${{ runner.temp }}/unionid-v*-acceptance.json
             ${{ runner.temp }}/unionid-incremental-backup-*.json
-            ${{ runner.temp }}/unionid-query-macro-eval.json
+          if-no-files-found: error
+      - name: Upload inline query macro evidence
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: unionid-query-macro-eval
+          path: ${{ runner.temp }}/unionid-query-macro-eval.json
           if-no-files-found: error
 
   crate-derive:

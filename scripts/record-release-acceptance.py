@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--runner-os", required=True)
     parser.add_argument("--runner-arch", required=True)
     parser.add_argument("--controlled-network-journey", action="store_true")
+    parser.add_argument("--query-macro-evidence", type=pathlib.Path)
     parser.add_argument("--output", required=True, type=pathlib.Path)
     args = parser.parse_args()
 
@@ -73,6 +74,15 @@ def main():
     if release["source_commit"] != args.candidate.lower() or release["source_dirty"] is not False:
         raise RuntimeError("release provenance does not match the clean candidate commit")
 
+    if args.query_macro_evidence is not None:
+        if args.runner_os != "Linux":
+            raise RuntimeError("query macro evidence is accepted only from the Linux evaluator")
+        if not args.query_macro_evidence.is_file():
+            raise RuntimeError("query macro evidence must be a regular file")
+        macro_evidence = json.loads(args.query_macro_evidence.read_text())
+        if macro_evidence.get("schema_version") != 1 or macro_evidence.get("ok") is not True:
+            raise RuntimeError("query macro evaluator did not produce passing version 1 evidence")
+
     validation_results = [
         {"name": "locked_release_build", "status": "passed"},
         {"name": "formatter", "status": "passed"},
@@ -93,12 +103,12 @@ def main():
             "name": "published_v080_data_client_package_compatibility",
             "status": "passed",
         },
-        {
-            "name": "inline_rust_query_macro",
-            "status": "passed",
-        },
         {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
     ]
+    if args.query_macro_evidence is not None:
+        validation_results.append(
+            {"name": "inline_rust_query_macro", "status": "passed"}
+        )
     if args.controlled_network_journey:
         validation_results.append(
             {"name": "controlled_network_mtls_journey", "status": "passed"}
@@ -168,6 +178,8 @@ def main():
     }
     if not args.controlled_network_journey:
         report["evidence"].pop("controlled_network_mtls_journey")
+    if args.query_macro_evidence is None:
+        report["evidence"].pop("inline_rust_query_macro")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"ok": True, "output": str(args.output), "target": release["target"]}))
