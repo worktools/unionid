@@ -285,7 +285,8 @@ window {
   position = row_number
   placing = rank
   dense = dense_rank
-}"#;
+}
+"#;
     let formatted = format_source(source).unwrap();
     assert_eq!(formatted, expected);
     assert_eq!(format_source(&formatted).unwrap(), expected);
