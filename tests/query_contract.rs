@@ -293,6 +293,19 @@ fn generates_multiple_queries_with_one_shared_schema_model() {
         ),
     ];
     let generated = unionid::codegen::rust_query_bundle(SCHEMA, &queries).unwrap();
+    let descriptions = queries
+        .iter()
+        .map(|(name, source)| {
+            (
+                name.clone(),
+                unionid::query_contract::describe(SCHEMA, source).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        generated,
+        unionid::codegen::rust_query_bundle_from_descriptions(SCHEMA, &descriptions).unwrap()
+    );
     assert_eq!(generated.matches("pub enum State {").count(), 1);
     assert_eq!(generated.matches("pub struct Task {").count(), 1);
     assert!(generated.contains("pub mod create_task {"));

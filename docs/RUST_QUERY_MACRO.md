@@ -49,6 +49,8 @@ let rows = find_pending::find_pending(
 
 宏会在编译期拒绝未知字段、错误 constructor、参数类型冲突、非穷尽 match 和不支持的 operation。schema 文件通过 `include_str!` 进入 Rust dependency graph，修改后会重新展开。生成函数在运行时再次核对 schema revision/hash，并通过 `Engine::prepare` 执行；连接到漂移后的 catalog 会在扫描或写入前返回 `E_SCHEMA_CHANGED`。
 
+绑定错误会标在对应的 `query name { ... }` 正文上，而不是 schema 参数上。错误消息保留 Unionid 错误码，以及 core binder 提供的 query 相对行列；Rust underline 用来找到失败的 query，行列进一步指出相关 stage 或 token。部分 stage 级错误目前只报告语句起点，更细的 token 映射由后续诊断工作跟踪。一个 invocation 中的查询彼此独立绑定，编译在第一个无效查询处失败。
+
 首版不在编译期间打开 redb。以 migration 建立 stable ID、需要按 live catalog 生成绑定的应用继续使用：
 
 ```bash
@@ -66,6 +68,8 @@ The `queries!` macro from `unionid-query` declares a group of Unionid operations
 The schema path is relative to the caller's `CARGO_MANIFEST_DIR` and must name a regular UTF-8 file no larger than 1 MiB. An invocation contains at least one Rust-identifier query name. Bodies use exactly the `.unid` language and `$parameter` typed bindings; strings and arbitrary Rust-expression interpolation are not accepted.
 
 The generated API matches `unionid query rust --dir`, as shown above. Invalid fields, constructors, parameter unification, match coverage, or unsupported operations fail Rust compilation. `include_str!` tracks schema changes. Generated calls still check schema revision/hash and prepare through the Engine, returning `E_SCHEMA_CHANGED` before a scan or mutation when the runtime catalog drifts.
+
+Binding diagnostics point at the corresponding `query name { ... }` body rather than the schema argument. The message preserves the Unionid error code and any query-relative line/column supplied by the core binder. The Rust underline identifies the query, while that position narrows the failure to a stage or token. Some stage-level errors currently report only the statement start; finer token mapping remains tracked as diagnostics follow-up. Queries in one invocation are bound independently and compilation stops at the first invalid query.
 
 The first version never opens redb during compilation. Applications that require migration-established live IDs continue to generate from `query rust --db`. Standalone `.unid` remains the better boundary for cross-language use, CLI and LLM tooling, independent formatting, and large queries. The inline macro targets short queries owned by one Rust crate. rustfmt does not format the inner Unionid block; query digests still use the canonical Unionid formatter.
 

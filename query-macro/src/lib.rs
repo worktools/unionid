@@ -3,6 +3,61 @@
 //! `queries!` binds one or more inline Unionid operations against an explicit
 //! declarative schema, then expands to the same typed Rust bindings produced by
 //! `unionid query rust --dir`.
+//!
+//! Binding errors are reported while compiling the Rust crate. For example,
+//! this unknown field is rejected before the application can run:
+//!
+//! ```compile_fail
+//! unionid_query::queries! {
+//!     schema "tests/schema.unid"
+//!     query unknown_field {
+//!         from tasks
+//!         filter missing == 1
+//!     }
+//! }
+//! ```
+//!
+//! Constructors are checked against the schema:
+//!
+//! ```compile_fail
+//! unionid_query::queries! {
+//!     schema "tests/schema.unid"
+//!     query invalid_constructor {
+//!         from tasks
+//!         filter match state {
+//!             Missing => true
+//!             _ => false
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! A parameter must have one inferred type throughout a query:
+//!
+//! ```compile_fail
+//! unionid_query::queries! {
+//!     schema "tests/schema.unid"
+//!     query parameter_conflict {
+//!         from tasks
+//!         filter id == $value && title == $value
+//!     }
+//! }
+//! ```
+//!
+//! Matches must cover every constructor:
+//!
+//! ```compile_fail
+//! unionid_query::queries! {
+//!     schema "tests/schema.unid"
+//!     query non_exhaustive_match {
+//!         from tasks
+//!         filter match state {
+//!             Pending => true
+//!             Running {..} => false
+//!         }
+//!     }
+//! }
+//! ```
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +80,7 @@ struct QueriesInput {
 struct InlineQuery {
     name: Ident,
     source: String,
+    body_span: Span,
 }
 
 impl Parse for QueriesInput {
@@ -42,7 +98,11 @@ impl Parse for QueriesInput {
             if source.trim().is_empty() {
                 return Err(syn::Error::new(name.span(), "query body cannot be empty"));
             }
-            queries.push(InlineQuery { name, source });
+            queries.push(InlineQuery {
+                name,
+                source,
+                body_span: braces.span.join(),
+            });
         }
         if queries.is_empty() {
             return Err(syn::Error::new(
@@ -168,15 +228,25 @@ fn read_schema(path: &Path, span: Span) -> Result<String> {
 fn expand(input: QueriesInput) -> Result<TokenStream2> {
     let path = schema_path(&input.schema)?;
     let schema = read_schema(&path, input.schema.span())?;
-    let queries = input
+    let descriptions = input
         .queries
         .iter()
-        .map(|query| (query.name.to_string(), query.source.clone()))
-        .collect::<Vec<_>>();
-    let generated = unionid::codegen::rust_query_bundle(&schema, &queries).map_err(|error| {
+        .map(|query| {
+            unionid::query_contract::describe(&schema, &query.source)
+                .map(|description| (query.name.to_string(), description))
+                .map_err(|error| {
+                    syn::Error::new(
+                        query.body_span,
+                        format!("Unionid query '{}' failed to bind: {error}", query.name),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let generated = unionid::codegen::rust_query_bundle_from_descriptions(&schema, &descriptions)
+        .map_err(|error| {
         syn::Error::new(
             input.schema.span(),
-            format!("Unionid inline query binding failed: {error}"),
+            format!("Unionid inline query generation failed: {error}"),
         )
     })?;
     let generated = generated.parse::<TokenStream2>().map_err(|error| {
