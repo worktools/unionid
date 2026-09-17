@@ -701,7 +701,7 @@ fn validate_task_columns(response: &Response) -> AnyResult<()> {
         ("tenant", "int"),
         ("title", "text"),
         ("state", "State"),
-        ("tags", "list text"),
+        ("tags", "List<text>"),
         ("touches", "int"),
     ];
     if response.columns.len() != expected.len()
@@ -711,7 +711,15 @@ fn validate_task_columns(response: &Response) -> AnyResult<()> {
             .zip(expected)
             .any(|(column, (name, ty))| column.name != name || column.ty != ty)
     {
-        return Err("task result schema mismatch".into());
+        return Err(format!(
+            "task result schema mismatch: expected {expected:?}, got {:?}",
+            response
+                .columns
+                .iter()
+                .map(|column| (column.name.as_str(), column.ty.as_str()))
+                .collect::<Vec<_>>()
+        )
+        .into());
     }
     Ok(())
 }
