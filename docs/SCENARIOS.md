@@ -297,7 +297,7 @@ table payments Payment
 | 小型一对多关联读 | `lookup` 已实现索引前置、相同快照、typed list、逐行/driver/内存预算、稳定分页与 explain | 通用扁平 join、图遍历和 mutation lookup 延后 | #241，M10 P0 |
 | 多来源同形结果 | `union`/`intersect`/`except` 已实现精确 schema 绑定、嵌套 ADT typed equality、稳定首次出现顺序、预算与 explain | 不支持嵌套集合运算或跨来源 cursor page | #341，v0.7 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match/sort/take target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 多写者／skip-locked 不在当前单写模型内 | #15/#83/#85/#87 |
-| count/sum/min/max 与分组 | 已实现 typed 空输入、命名数值、完整 ADT key、后续 stage 与有界资源 | distinct aggregate、window 和用户定义 aggregate 延后 | #60，P0 |
+| count/count_distinct/sum/min/max 与分组 | 已实现 typed 空输入、命名数值、完整 ADT 去重与 key、后续 stage 与有界资源 | avg、window 和用户定义 aggregate 继续由 #245 跟踪 | #60/#245 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |
 | 持久提交、恢复和备份 | redb Engine、原子提交、完整性检查、进程退出恢复、备份还原与三条端到端升级恢复场景已实现 | 物理设备故障不在当前测试声明内 | #13/#14/#20/#74，P0 |
 

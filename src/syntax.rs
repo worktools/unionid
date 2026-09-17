@@ -2361,6 +2361,10 @@ impl Parser {
             let function_name = self.identifier()?;
             let (function, input) = match function_name.as_str() {
                 "count" => (AggregateFunction::Count, None),
+                "count_distinct" => (
+                    AggregateFunction::CountDistinct,
+                    Some(self.scalar_expression(0, braced)?),
+                ),
                 "sum" => (
                     AggregateFunction::Sum,
                     Some(self.scalar_expression(0, braced)?),
@@ -2375,7 +2379,7 @@ impl Parser {
                 ),
                 _ => {
                     return Err(self.error(format!(
-                        "unknown aggregate function '{function_name}'; expected count, sum, min, or max"
+                        "unknown aggregate function '{function_name}'; expected count, count_distinct, sum, min, or max"
                     )));
                 }
             };
