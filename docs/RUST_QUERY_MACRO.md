@@ -7,9 +7,13 @@
 ```toml
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-unionid = "=0.9.0"
-unionid-query = "=0.9.0"
+unionid = { path = "../unionid" }
+unionid-query = { path = "../unionid/query-macro" }
 ```
+
+以上 path 写法用于 v0.9 开发分支尚未发布的源码 checkout。正式发布后改为 crates.io 的同一个精确版本，例如 `unionid = "=0.9.0"` 与 `unionid-query = "=0.9.0"`；两个 crate 不支持跨版本混用。
+
+The path dependencies above are for a source checkout while the v0.9 development line is unpublished. After release, use the same exact crates.io version for both crates, for example `unionid = "=0.9.0"` and `unionid-query = "=0.9.0"`; mixed versions are unsupported.
 
 ```rust
 unionid_query::queries! {

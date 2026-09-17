@@ -78,9 +78,11 @@ let rows = find_pending::find_pending(
 
 ```toml
 [dependencies]
-unionid = "=0.9.0"
-unionid-query = "=0.9.0"
+unionid = { path = "../unionid" }
+unionid-query = { path = "../unionid/query-macro" }
 ```
+
+源码开发阶段使用上述 path；release candidate 会统一更新两个 manifest，发布后的应用必须为两个 crate 选择相同的精确版本。
 
 宏依赖完整 Unionid compiler 会增加首次编译成本。v0.9 记录 clean/incremental build 时间；只有证据表明成本不可接受时，才把 schema/query compiler 抽成第三个无运行时依赖的 crate。首版不复制内部模块来换取较小依赖。
 
@@ -129,6 +131,8 @@ Core-language changes made for macros must also improve `.unid` consistency, amb
 ### 4. Crate boundary
 
 The first release uses a separate `unionid-query` proc-macro crate that depends on the same `unionid` version on the compile host and directly calls its public contract/codegen API. Core `unionid` neither depends on nor re-exports the macro, avoiding a dependency cycle. Applications explicitly depend on matching versions of both crates.
+
+The source checkout uses the paths shown above. Release preparation updates both manifests together, and published applications must select the same exact version of both crates.
 
 Compiling the full Unionid compiler on the host adds clean-build cost. v0.9 records clean and incremental build time. A third compiler-only crate is justified only if measurements show that cost is unacceptable; the first implementation will not duplicate internal modules to reduce dependencies.
 
