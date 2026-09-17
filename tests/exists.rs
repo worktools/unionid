@@ -83,10 +83,64 @@ filter exists {
     assert_eq!(plan.stages[0].kind, QueryStageKind::FilterExists);
     assert_eq!(plan.exists.len(), 1);
     assert_eq!(plan.exists[0].table, "items");
+    assert!(!plan.exists[0].negated);
     assert_eq!(plan.exists[0].index, "items.task_id");
     assert_eq!(plan.exists[0].correlations[0].target, "task_id");
     assert_eq!(plan.exists[0].correlations[0].outer, "id");
     assert_eq!(plan.exists[0].driver_limit, unionid::MAX_EXISTS_DRIVERS);
+}
+
+#[test]
+fn correlated_not_exists_is_the_complement_and_formats_canonically() {
+    let mut engine = setup();
+    let exists = ok(
+        &mut engine,
+        r#"from tasks
+filter exists {
+  from items
+  filter task_id == outer.id
+  filter state == Open
+}
+sort id
+select id"#,
+    );
+    let source = r#"from tasks
+filter not exists {
+  from items
+  filter task_id == outer.id
+  filter state == Open
+}
+sort id
+select id"#;
+    let formatted = format_source(source).unwrap();
+    assert_eq!(formatted.trim_end(), source);
+    assert_eq!(format_source(&formatted).unwrap(), formatted);
+    let not_exists = ok(&mut engine, &formatted);
+
+    assert_eq!(exists.rows.len(), 1);
+    assert!(exists.rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert_eq!(not_exists.rows.len(), 2);
+    assert!(not_exists.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(not_exists.rows[1]["id"].cmp_eq(&Value::Int(3)));
+}
+
+#[test]
+fn explain_reports_not_exists_without_executing_rows() {
+    let mut engine = setup();
+    let response = ok(
+        &mut engine,
+        r#"explain from tasks
+filter not exists {
+  from items
+  filter task_id == outer.id
+  filter note == "ship"
+}"#,
+    );
+    assert!(response.rows.is_empty());
+    let plan = response.plan.unwrap();
+    assert_eq!(plan.stages[0].kind, QueryStageKind::FilterExists);
+    assert!(plan.exists[0].negated);
+    assert_eq!(plan.exists[0].index, "items.task_id");
 }
 
 #[test]
@@ -240,6 +294,34 @@ select id"#,
     assert!(response.ok, "{}", response.message);
     assert_eq!(response.rows.len(), 1);
     assert!(response.rows[0]["id"].cmp_eq(&Value::Int(1)));
+}
+
+#[test]
+fn not_exists_inner_filters_bind_prepared_parameters() {
+    let mut engine = setup();
+    let prepared = engine
+        .prepare(
+            r#"from tasks
+filter not exists {
+  from items
+  filter task_id == outer.id
+  filter note == $note
+}
+sort id
+select id"#,
+        )
+        .unwrap();
+    assert_eq!(prepared.parameter_types()["note"], "text");
+    let response = engine.query(
+        &prepared,
+        [("note".into(), Value::Text("ship".into()))]
+            .into_iter()
+            .collect(),
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 2);
+    assert!(response.rows[0]["id"].cmp_eq(&Value::Int(2)));
+    assert!(response.rows[1]["id"].cmp_eq(&Value::Int(3)));
 }
 
 #[test]

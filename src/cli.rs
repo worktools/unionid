@@ -1942,7 +1942,12 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
             }
             for exists in &plan.exists {
                 println!(
-                    "exists | {} where {} via {} (at most {} driver row(s))",
+                    "{} | {} where {} via {} (at most {} driver row(s))",
+                    if exists.negated {
+                        "not exists"
+                    } else {
+                        "exists"
+                    },
                     exists.table,
                     exists
                         .correlations

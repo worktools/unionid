@@ -428,7 +428,15 @@ fn stage_text(output: &mut String, stage: &Stage, depth: usize) {
         Stage::Let(binding) => line(output, depth, &local_binding(binding)),
         Stage::Filter(value) => expression(output, depth, "filter ", value),
         Stage::FilterExists(exists) => {
-            line(output, depth, "filter exists {");
+            line(
+                output,
+                depth,
+                if exists.negated {
+                    "filter not exists {"
+                } else {
+                    "filter exists {"
+                },
+            );
             pipeline_text(output, &exists.pipeline, depth + 1);
             line(output, depth, "}");
         }

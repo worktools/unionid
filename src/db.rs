@@ -937,6 +937,8 @@ pub struct LookupPlan {
 pub struct ExistsPlan {
     pub stage: usize,
     pub table: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub negated: bool,
     pub correlations: Vec<ExistsCorrelationPlan>,
     pub index: String,
     pub driver_limit: usize,
@@ -4421,6 +4423,7 @@ impl Database {
                 Some(ExistsPlan {
                     stage: position + 1,
                     table: exists.pipeline.from.clone(),
+                    negated: exists.negated,
                     correlations: exists
                         .correlations
                         .iter()
@@ -5275,10 +5278,15 @@ impl Database {
                 }
                 Stage::FilterExists(exists) => {
                     if rows.len() > MAX_EXISTS_DRIVERS {
+                        let stage = if exists.negated {
+                            "not exists"
+                        } else {
+                            "exists"
+                        };
                         return Err(Error::new(
                             "E_LIMIT",
                             format!(
-                                "exists has {} driver rows; limit is {MAX_EXISTS_DRIVERS}; add filter or take before exists",
+                                "{stage} has {} driver rows; limit is {MAX_EXISTS_DRIVERS}; add filter or take before {stage}",
                                 rows.len()
                             ),
                         ));
@@ -5286,7 +5294,9 @@ impl Database {
                     let mut filtered = Vec::with_capacity(rows.len());
                     for (position, row) in rows.into_iter().enumerate() {
                         check_deadline_periodically(control, position)?;
-                        if self.evaluate_exists(source, &exists, &row, control, &mut observation)? {
+                        let matched =
+                            self.evaluate_exists(source, &exists, &row, control, &mut observation)?;
+                        if matched != exists.negated {
                             filtered.push(row);
                         }
                     }

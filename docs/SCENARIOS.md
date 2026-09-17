@@ -213,6 +213,21 @@ take 100
 
 `order_id` 必须由目标索引支持，`outer.id` 明确来自当前订单。执行器找到第一条异常明细即停止；一个 stage 最多检查 10,000 个订单。需要返回明细时仍使用 lookup。
 
+如果要找出没有异常明细的订单，保持同一相关条件并改用 anti-existence：
+
+```text
+from orders
+filter not exists {
+  from order_lines
+  filter order_id == outer.id
+  filter quantity <= 0
+}
+sort id
+take 100
+```
+
+这同时覆盖完全没有明细和所有明细都通过校验的订单；执行仍使用相同索引、driver 上限与首行短路。
+
 ## 7. 有限树、原因链与规则 AST
 
 固定层数的嵌套 record 无法表达目录、评论树或规则表达式。把节点拆成父子表会引入 join 和跨行一致性，而这些小型结构通常随所属对象整行读取和原子替换。直接自递归 named ADT 保留 constructor 约束：

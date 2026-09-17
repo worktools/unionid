@@ -68,7 +68,7 @@ select {id, title, state, urgent}
 take 11..31
 ```
 
-Available stages are `let`, `filter`, `filter exists`, `filter match`, `derive`, `lookup`, `aggregate`,
+Available stages are `let`, `filter`, `filter exists`, `filter not exists`, `filter match`, `derive`, `lookup`, `aggregate`,
 `group`, `select`, `sort`, `take`, and `page`. A compact single-line query may join stages
 with `|`. Do not reorder stages: `filter` after `take` observes only the taken rows, and
 fields removed by `select` are unavailable later.
@@ -135,9 +135,21 @@ filter exists {
 }
 ```
 
+Use the complementary form when no target row may match:
+
+```text
+from tasks
+filter not exists {
+  from task_items
+  filter task_id == outer.id
+  filter state != Done
+}
+```
+
 The inner pipeline currently accepts only `filter`. It must contain a typed equality between
-an indexed target path and an explicit `outer.<path>`. Do not invent `not exists`, nested
-subqueries, or unindexed correlations.
+an indexed target path and an explicit `outer.<path>`. Use `filter not exists { ... }` when the
+driver row must have no matching target row. Do not invent nested subqueries or unindexed
+correlations.
 
 ## Mutation
 
