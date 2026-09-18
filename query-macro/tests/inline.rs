@@ -1,3 +1,10 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct CallerOwnedModel {
+    label: String,
+}
+
 unionid_query::queries! {
     schema "tests/schema.unid"
 
@@ -35,6 +42,11 @@ unionid_query::queries! {
 
 #[test]
 fn inline_queries_generate_shared_typed_bindings() {
+    let caller_model = CallerOwnedModel {
+        label: "caller import remains usable".into(),
+    };
+    assert_eq!(caller_model.label, "caller import remains usable");
+
     let mut engine = unionid::Engine::memory();
     let schema = include_str!("schema.unid");
     let created = engine.execute(schema);

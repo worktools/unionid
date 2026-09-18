@@ -18,7 +18,11 @@ fn generates_rust_bindings_for_example_schema() {
     assert!(generated.contains("    pub title: String,"));
     assert!(generated.contains("    pub state: State,"));
     assert!(generated.contains("    pub priority: i64,"));
-    assert!(generated.contains("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]"));
+    assert!(
+        generated
+            .contains("#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]")
+    );
+    assert!(!generated.contains("use serde::"));
 }
 
 #[test]
