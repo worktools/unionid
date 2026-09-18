@@ -8,13 +8,13 @@ v0.9 发布包同时携带 `RELEASE.json` 和独立的 `release/contract.json`�
 
 | 层 | v0.9 值 |
 | --- | --- |
-| unionid / 最低 Rust / redb | 0.9.0 / 1.94 / 4.1.0 |
+| unionid / 最低 Rust / redb | 0.9.1 / 1.94 / 4.1.0 |
 | storage / catalog / ADT value | 可读 1–7，默认当前 6 / 4 / 2；maintenance codec 1 |
 | index key / migration ledger / receipt | 3 / 1 / 2 |
 | incremental journal | 默认 0；显式启用的 format 7 使用 1 |
 | logical backup / JSON Lines protocol / stream | 可读 1–4，当前 4 / 1–2 / 1 |
 
-公开 v0.1.0 使用 storage/catalog/value/index/migration/backup/protocol version 1，并不包含 receipt、cursor identity、生产标量、复合索引或 generation envelope。v0.2.0 引入 format 6；v0.3.0 增加 Rust 接入、关联读取与 migration 使用体验；v0.4.0 增加可移植 ADT 契约与静态查询绑定；v0.5.0 增加显式 format-7 增量备份 journal；v0.6.0 增加安全项目骨架和项目级静态检查；v0.7.0 采用 Rust 形状的规范源码，并增加 typed membership、相关 exists 与集合运算；v0.8.0 增加 count_distinct、typed avg 和基础排名窗口；v0.9.0 增加 schema-aware 内联 Rust 查询宏。v0.9 不改变持久化、backup 或协议数值。上表描述 v0.9.0 二进制的默认写入格式和全部可读范围，不追溯改写旧版本契约。
+公开 v0.1.0 使用 storage/catalog/value/index/migration/backup/protocol version 1，并不包含 receipt、cursor identity、生产标量、复合索引或 generation envelope。v0.2.0 引入 format 6；v0.3.0 增加 Rust 接入、关联读取与 migration 使用体验；v0.4.0 增加可移植 ADT 契约与静态查询绑定；v0.5.0 增加显式 format-7 增量备份 journal；v0.6.0 增加安全项目骨架和项目级静态检查；v0.7.0 采用 Rust 形状的规范源码，并增加 typed membership、相关 exists 与集合运算；v0.8.0 增加 count_distinct、typed avg 和基础排名窗口；v0.9.0 增加 schema-aware 内联 Rust 查询宏；v0.9.1 修复宏生成代码与调用模块 serde imports 的名称冲突。v0.9 不改变持久化、backup 或协议数值。上表描述 v0.9.1 二进制的默认写入格式和全部可读范围，不追溯改写旧版本契约。
 
 当前二进制读取 storage format 1–7；新数据库直接创建为 format 6，使用 catalog/value/index-key/receipt/maintenance/journal codec 4/2/3/2/1/0。format 1/2 仍会补齐 cursor 身份并升级到 format 3；format 3 可显式升级到 4 以使用生产标量，format 4 可继续读写已有单列升序索引。创建复合或降序索引前必须先升级到 format 5。
 
@@ -119,9 +119,9 @@ unionid migration status --db app.redb --dir migrations
 
 unionid separates application schema migrations from internal database-format changes. Versioned migration files evolve fields, variants, types, constraints, indexes, and their data. A unionid binary opens only the internal codec versions it explicitly knows and fails before mutation when it encounters an unknown version.
 
-The v0.9 archive contains both `RELEASE.json` and an independent `release/contract.json`. Packaging and verification require Cargo metadata, the binary version report, the manifest, and this contract to agree. v0.9.0 requires Rust 1.94, uses redb 4.1.0, reads storage formats 1–7 and logical backup formats 1–4, creates storage format 6 by default, writes logical backup format 4, supports data protocols 1/2, and supports stream protocol 1. The detailed component codecs are frozen in the contract.
+The v0.9 archive contains both `RELEASE.json` and an independent `release/contract.json`. Packaging and verification require Cargo metadata, the binary version report, the manifest, and this contract to agree. v0.9.1 requires Rust 1.94, uses redb 4.1.0, reads storage formats 1–7 and logical backup formats 1–4, creates storage format 6 by default, writes logical backup format 4, supports data protocols 1/2, and supports stream protocol 1. The detailed component codecs are frozen in the contract.
 
-The public v0.1.0 release used version 1 for storage, catalog, values, index keys, migration records, backup, and the JSON Lines protocol. It did not contain receipts, cursor identity, production scalars, composite indexes, or generation envelopes. v0.2.0 introduced format 6; v0.3.0 added Rust integration, relational reads, and migration UX; v0.4.0 added portable ADT contracts and static query bindings; v0.5.0 added the explicitly enabled format-7 incremental-backup journal; v0.6.0 added safe project scaffolding and project-level static checking; v0.7.0 adopted canonical Rust-shaped source and added typed membership, correlated exists, and set operations; v0.8.0 added count_distinct, typed averages, and basic ranking windows; v0.9.0 adds schema-aware inline Rust query macros. v0.9 does not change persistence, backup, or protocol values. The v0.9 contract describes default current writes and the complete readable range without changing older release contracts.
+The public v0.1.0 release used version 1 for storage, catalog, values, index keys, migration records, backup, and the JSON Lines protocol. It did not contain receipts, cursor identity, production scalars, composite indexes, or generation envelopes. v0.2.0 introduced format 6; v0.3.0 added Rust integration, relational reads, and migration UX; v0.4.0 added portable ADT contracts and static query bindings; v0.5.0 added the explicitly enabled format-7 incremental-backup journal; v0.6.0 added safe project scaffolding and project-level static checking; v0.7.0 adopted canonical Rust-shaped source and added typed membership, correlated exists, and set operations; v0.8.0 added count_distinct, typed averages, and basic ranking windows; v0.9.0 added schema-aware inline Rust query macros; v0.9.1 fixes generated-name conflicts with caller serde imports. v0.9 does not change persistence, backup, or protocol values. The v0.9 contract describes default current writes and the complete readable range without changing older release contracts.
 
 The current binary reads storage formats 1–7. New databases start at format 6 with catalog/value/index-key/receipt/maintenance/journal codecs 4/2/3/2/1/0. Formats 1 and 2 still gain cursor identity and move to format 3; format 3 can be explicitly upgraded to 4 for production scalars. Format 4 remains readable and writable for existing ascending single-column indexes, but composite or descending declarations first require format 5.
 

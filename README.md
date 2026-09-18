@@ -251,7 +251,7 @@ The current implementation targets a single machine, one database owner, and a c
 | Rust、TCP 与 HTTP 数据协议 / Rust, TCP, and HTTP data protocol | [PROTOCOL.md](docs/PROTOCOL.md) · [HTTP.md](docs/HTTP.md) |
 | Schema 身份与 migration / Schema identity and migrations | [SCHEMA.md](docs/SCHEMA.md) · [MIGRATIONS.md](docs/MIGRATIONS.md) |
 | 持久化、备份与生产边界 / Storage, backup, and production boundaries | [STORAGE.md](docs/STORAGE.md) · [BACKUP.md](docs/BACKUP.md) · [SERVICE.md](docs/SERVICE.md) · [DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| 发布契约、历史说明与升级 / Release contract, historical notes, and upgrades | [contract.json](release/contract.json) · [RELEASE-v0.9.0.md](docs/RELEASE-v0.9.0.md) · [UPGRADING.md](docs/UPGRADING.md) |
+| 发布契约、历史说明与升级 / Release contract, historical notes, and upgrades | [contract.json](release/contract.json) · [RELEASE-v0.9.1.md](docs/RELEASE-v0.9.1.md) · [UPGRADING.md](docs/UPGRADING.md) |
 | 实际场景与后续计划 / Real scenarios and roadmap | [SCENARIOS.md](docs/SCENARIOS.md) · [ROADMAP.md](docs/ROADMAP.md) |
 | 实现与验证记录 / Implementation and validation history | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | 贡献者与 agent 约定 / Contributor and agent conventions | [Agents.md](Agents.md) |
