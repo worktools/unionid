@@ -251,11 +251,13 @@ enum Command {
     },
     /// Connect to a server, or use --memory for a local interactive session.
     #[command(
-        after_long_help = "Examples:\n  unionid cli --memory\n  unionid cli --db app.redb\n  unionid cli --addr 127.0.0.1:7878 --query \"from tasks | take 10\"\n\nInteractive commands:\n  .schema  .tables  .types  .storage  .help  .quit"
+        after_long_help = "Examples:\n  unionid cli --memory\n  unionid cli --db app.redb --read-only --query .tables\n  unionid cli --addr 127.0.0.1:7878 --query \"from tasks | take 10\"\n\nIntrospection commands (interactive or sole --query/--file/stdin input):\n  .schema  .tables  .types  .storage\n\nInteractive-only commands:\n  .help  .quit"
     )]
     Cli {
+        /// Connect to this TCP server unless --memory or --db is used.
         #[arg(long, default_value = "127.0.0.1:7878")]
         addr: String,
+        /// Use a fresh in-memory database instead of TCP.
         #[arg(long)]
         memory: bool,
         /// Use a local durable redb database instead of connecting over TCP.
@@ -264,8 +266,10 @@ enum Command {
         /// Reject every mutating script; requires --db.
         #[arg(long, requires = "db")]
         read_only: bool,
+        /// Execute one script or introspection command and exit.
         #[arg(short, long, conflicts_with = "file")]
         query: Option<String>,
+        /// Execute one script or introspection command from a file and exit.
         #[arg(short, long)]
         file: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "table")]
@@ -1007,7 +1011,7 @@ fn run(args: Args) -> Result<(), String> {
                 path: history,
             };
             if let Some(path) = db {
-                cli::run_local_redb_read_only_with_options(
+                cli::run_local_redb_cli_read_only_with_options(
                     path,
                     source,
                     matches!(format, Format::Json),
@@ -1015,7 +1019,7 @@ fn run(args: Args) -> Result<(), String> {
                     read_only,
                 )
             } else if memory {
-                cli::run_local_with_options(source, matches!(format, Format::Json), history)
+                cli::run_local_cli_with_options(source, matches!(format, Format::Json), history)
             } else {
                 cli::run_cli_with_options(&addr, source, matches!(format, Format::Json), history)
             }
