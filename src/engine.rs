@@ -2670,6 +2670,12 @@ impl Engine {
         let mut durable_profile = None;
         let mut durable_view = None;
         if let Some(durable) = &mut self.durable {
+            if candidate.requires_map_storage() {
+                return Err(Error::new(
+                    "E_STORAGE_UPGRADE_REQUIRED",
+                    "typed maps are available in memory, but durable redb map storage requires format 8",
+                ));
+            }
             let receipts = receipt_state
                 .as_ref()
                 .unwrap_or_else(|| self.committed.receipts.as_ref());

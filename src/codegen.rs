@@ -292,6 +292,10 @@ fn format_shape(shape: &TypeShape, suggested: &str, helpers: &mut String) -> Res
         TypeShape::List { item, .. } => {
             format!("Vec<{}>", format_shape(item, suggested, helpers)?)
         }
+        TypeShape::Map { value, .. } => format!(
+            "std::collections::BTreeMap<String, {}>",
+            format_shape(value, suggested, helpers)?
+        ),
         TypeShape::Tuple { items } => {
             let mut rendered = items
                 .iter()
@@ -745,7 +749,7 @@ fn self_referential(ty: &ScalarType, owner: &str, names: &BTreeMap<u64, String>)
     match ty {
         ScalarType::Ref(id) => names.get(id).is_some_and(|name| name == owner),
         ScalarType::Named(name) => name == owner,
-        ScalarType::Option(inner) => self_referential(inner, owner, names),
+        ScalarType::Option(inner) | ScalarType::Map(inner) => self_referential(inner, owner, names),
         ScalarType::Record(fields) => fields
             .iter()
             .any(|field| self_referential(&field.ty, owner, names)),
@@ -777,6 +781,10 @@ fn format_type(ty: &ScalarType, names: &BTreeMap<u64, String>) -> Result<String>
         ScalarType::Bytes => "unionid::scalars::Bytes".into(),
         ScalarType::Option(inner) => format!("Option<{}>", format_type(inner, names)?),
         ScalarType::List(inner) => format!("Vec<{}>", format_type(inner, names)?),
+        ScalarType::Map(inner) => format!(
+            "std::collections::BTreeMap<String, {}>",
+            format_type(inner, names)?
+        ),
         ScalarType::Tuple(items) => {
             let mut parts = items
                 .iter()

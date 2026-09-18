@@ -1307,6 +1307,7 @@ fn type_text(value: &ScalarType) -> String {
         ScalarType::Ref(id) => format!("type#{id}"),
         ScalarType::Option(value) => format!("Option<{}>", type_text(value)),
         ScalarType::List(value) => format!("List<{}>", type_text(value)),
+        ScalarType::Map(value) => format!("Map<text, {}>", type_text(value)),
         ScalarType::Tuple(values) => format!(
             "({})",
             values.iter().map(type_text).collect::<Vec<_>>().join(", ")

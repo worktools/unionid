@@ -242,6 +242,17 @@ fn encode_value(
             }
             _ => return Err(mismatch()),
         },
+        ScalarType::Map(inner) => match value {
+            Value::Map(entries) => {
+                for (key, value) in entries {
+                    output.push(1);
+                    encode_escaped(key.as_bytes(), output);
+                    encode_value(catalog, inner, value, output, depth + 1)?;
+                }
+                output.push(0);
+            }
+            _ => return Err(mismatch()),
+        },
         ScalarType::Named(name) => {
             return Err(Error::new(
                 "E_SCHEMA",

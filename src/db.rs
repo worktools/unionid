@@ -889,6 +889,14 @@ fn hash_typed_value(value: &Value, state: &mut impl Hasher) {
                 hash_typed_value(value, state);
             }
         }
+        Value::Map(entries) => {
+            17_u8.hash(state);
+            entries.len().hash(state);
+            for (key, value) in entries {
+                key.hash(state);
+                hash_typed_value(value, state);
+            }
+        }
         Value::Option(value) => {
             15_u8.hash(state);
             value.is_some().hash(state);
@@ -6637,7 +6645,9 @@ impl Database {
                         }
                     }
                 }
-                ScalarType::Option(inner) | ScalarType::List(inner) => collect(inner, fields),
+                ScalarType::Option(inner) | ScalarType::List(inner) | ScalarType::Map(inner) => {
+                    collect(inner, fields)
+                }
                 ScalarType::Tuple(items) => {
                     for item in items {
                         collect(item, fields);
@@ -6802,6 +6812,18 @@ impl Database {
             primary_key: table.primary_key.clone(),
             next_row_id: table.next_row_id,
         }))
+    }
+
+    pub(crate) fn requires_map_storage(&self) -> bool {
+        self.catalog.types.values().any(|definition| {
+            type_contains_map(&self.catalog, &definition.ty, &mut BTreeSet::new())
+        }) || self.objects.values().any(|object| {
+            let DbObject::Table(table) = object;
+            table
+                .schema
+                .iter()
+                .any(|column| type_contains_map(&self.catalog, &column.ty, &mut BTreeSet::new()))
+        })
     }
 
     pub(crate) fn durable_row_with_codec(
@@ -7587,8 +7609,46 @@ fn type_reaches(catalog: &Catalog, ty: &ScalarType, target: u64, seen: &mut BTre
         ScalarType::Tuple(items) => items
             .iter()
             .any(|item| type_reaches(catalog, item, target, seen)),
-        ScalarType::Option(inner) | ScalarType::List(inner) => {
+        ScalarType::Option(inner) | ScalarType::List(inner) | ScalarType::Map(inner) => {
             type_reaches(catalog, inner, target, seen)
+        }
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes
+        | ScalarType::Named(_) => false,
+    }
+}
+
+fn type_contains_map(catalog: &Catalog, ty: &ScalarType, seen: &mut BTreeSet<u64>) -> bool {
+    match ty {
+        ScalarType::Map(_) => true,
+        ScalarType::Ref(id) => {
+            seen.insert(*id)
+                && catalog
+                    .definition(*id)
+                    .is_ok_and(|definition| type_contains_map(catalog, &definition.ty, seen))
+        }
+        ScalarType::Record(fields) => fields
+            .iter()
+            .any(|field| type_contains_map(catalog, &field.ty, seen)),
+        ScalarType::Enum(sum) => sum.variants.iter().any(|variant| {
+            variant
+                .args
+                .iter()
+                .any(|argument| type_contains_map(catalog, argument, seen))
+        }),
+        ScalarType::Tuple(items) => items
+            .iter()
+            .any(|item| type_contains_map(catalog, item, seen)),
+        ScalarType::Option(inner) | ScalarType::List(inner) => {
+            type_contains_map(catalog, inner, seen)
         }
         ScalarType::Int
         | ScalarType::Float

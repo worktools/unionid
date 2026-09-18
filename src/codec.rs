@@ -8,6 +8,7 @@ use crate::model::{Catalog, MAX_DEPTH, ScalarType, Value};
 const MAGIC: &[u8; 4] = b"UIDV";
 pub const VALUE_CODEC_VERSION: u16 = 1;
 pub const PRODUCTION_VALUE_CODEC_VERSION: u16 = 2;
+pub const MAP_VALUE_CODEC_VERSION: u16 = 3;
 pub const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COLLECTION_ITEMS: usize = 1_000_000;
 
@@ -19,6 +20,10 @@ pub fn encode_value(catalog: &Catalog, ty: &ScalarType, value: &Value) -> Result
 /// Existing storage callers continue to use the explicit legacy entry point.
 pub fn encode_value_v2(catalog: &Catalog, ty: &ScalarType, value: &Value) -> Result<Vec<u8>> {
     encode_value_version(catalog, ty, value, PRODUCTION_VALUE_CODEC_VERSION)
+}
+
+pub fn encode_value_v3(catalog: &Catalog, ty: &ScalarType, value: &Value) -> Result<Vec<u8>> {
+    encode_value_version(catalog, ty, value, MAP_VALUE_CODEC_VERSION)
 }
 
 fn encode_value_version(
@@ -34,6 +39,7 @@ fn encode_value_version(
     let mut encoder = Encoder {
         catalog,
         bytes: Vec::new(),
+        version,
     };
     encoder.bytes(MAGIC)?;
     encoder.u16(version)?;
@@ -51,16 +57,21 @@ pub fn decode_value(catalog: &Catalog, ty: &ScalarType, bytes: &[u8]) -> Result<
         catalog,
         bytes,
         pos: 0,
+        version: 0,
     };
     if decoder.take(MAGIC.len())? != MAGIC {
         return Err(codec_error("invalid value codec magic"));
     }
     let version = decoder.u16()?;
-    if version != VALUE_CODEC_VERSION && version != PRODUCTION_VALUE_CODEC_VERSION {
+    if version != VALUE_CODEC_VERSION
+        && version != PRODUCTION_VALUE_CODEC_VERSION
+        && version != MAP_VALUE_CODEC_VERSION
+    {
         return Err(codec_error(format!(
             "unsupported value codec version {version}"
         )));
     }
+    decoder.version = version;
     if catalog.requires_protocol_v2(ty)? && version < PRODUCTION_VALUE_CODEC_VERSION {
         return Err(codec_error("production scalars require value codec 2"));
     }
@@ -81,6 +92,7 @@ fn codec_error(message: impl Into<String>) -> Error {
 struct Encoder<'a> {
     catalog: &'a Catalog,
     bytes: Vec<u8>,
+    version: u16,
 }
 
 impl Encoder<'_> {
@@ -211,6 +223,27 @@ impl Encoder<'_> {
                 }
                 Ok(())
             }
+            ScalarType::Map(inner) => {
+                if self.version < MAP_VALUE_CODEC_VERSION {
+                    return Err(codec_error("maps require value codec 3"));
+                }
+                let Value::Map(entries) = value else {
+                    return Err(type_mismatch(path));
+                };
+                if entries.len() > crate::model::MAX_MAP_ENTRIES {
+                    return Err(codec_error(format!("{path}: map exceeds entry limit")));
+                }
+                self.len(entries.len(), path)?;
+                for (key, value) in entries {
+                    if key.len() > crate::model::MAX_MAP_KEY_BYTES {
+                        return Err(codec_error(format!("{path}: map key exceeds byte limit")));
+                    }
+                    self.len(key.len(), path)?;
+                    self.bytes(key.as_bytes())?;
+                    self.value(inner, value, &format!("{path}[{key:?}]"), depth + 1)?;
+                }
+                Ok(())
+            }
             ScalarType::Enum(enum_type) => {
                 let Value::Enum(value) = value else {
                     return Err(type_mismatch(path));
@@ -281,6 +314,7 @@ struct Decoder<'a> {
     catalog: &'a Catalog,
     bytes: &'a [u8],
     pos: usize,
+    version: u16,
 }
 
 impl Decoder<'_> {
@@ -412,6 +446,35 @@ impl Decoder<'_> {
                     values.push(self.value(inner, &format!("{path}[{index}]"), depth + 1)?);
                 }
                 Value::List(values)
+            }
+            ScalarType::Map(inner) => {
+                if self.version < MAP_VALUE_CODEC_VERSION {
+                    return Err(codec_error("maps require value codec 3"));
+                }
+                let count = self.length()?;
+                if count > crate::model::MAX_MAP_ENTRIES {
+                    return Err(codec_error(format!("{path}: map exceeds entry limit")));
+                }
+                let mut entries = BTreeMap::new();
+                let mut previous: Option<String> = None;
+                for _ in 0..count {
+                    let length = self.length()?;
+                    if length > crate::model::MAX_MAP_KEY_BYTES {
+                        return Err(codec_error(format!("{path}: map key exceeds byte limit")));
+                    }
+                    let key = std::str::from_utf8(self.take(length)?)
+                        .map_err(|error| codec_error(format!("{path}: invalid map key: {error}")))?
+                        .to_owned();
+                    if previous.as_ref().is_some_and(|previous| previous >= &key) {
+                        return Err(codec_error(format!(
+                            "{path}: map keys are not strictly ordered"
+                        )));
+                    }
+                    let value = self.value(inner, &format!("{path}[{key:?}]"), depth + 1)?;
+                    previous = Some(key.clone());
+                    entries.insert(key, value);
+                }
+                Value::Map(entries)
             }
             ScalarType::Enum(enum_type) => {
                 let variant_id = self.u64()?;

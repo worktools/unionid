@@ -6474,6 +6474,14 @@ fn encode_ordered_value(value: &Value, output: &mut Vec<u8>, depth: usize) -> Re
             output.push(0x0f);
             encode_ordered_items(values, output, depth)?;
         }
+        Value::Map(entries) => {
+            output.push(0x11);
+            output.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+            for (key, value) in entries {
+                encode_escaped(key.as_bytes(), output);
+                encode_ordered_value(value, output, depth + 1)?;
+            }
+        }
         Value::Option(None) => output.extend_from_slice(&[0x10, 0x00]),
         Value::Option(Some(value)) => {
             output.extend_from_slice(&[0x10, 0x01]);

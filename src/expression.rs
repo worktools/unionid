@@ -930,7 +930,12 @@ fn infer_literal(value: &Value) -> Result<Option<ScalarType>> {
                 None
             }
         }
-        Value::Record(_) | Value::Enum(_) | Value::List(_) | Value::Option(_) | Value::Null => None,
+        Value::Record(_)
+        | Value::Map(_)
+        | Value::Enum(_)
+        | Value::List(_)
+        | Value::Option(_)
+        | Value::Null => None,
     })
 }
 

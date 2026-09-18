@@ -105,7 +105,7 @@ pub use profile::{
 };
 pub use protocol::{
     IdempotencyMetadata, ReceiptOperation, ReceiptOperationResult, Request as ProtocolRequest,
-    Response as ProtocolResponse, WireValue,
+    Response as ProtocolResponse, WireMapEntry, WireValue,
 };
 pub use query::SetOperator;
 pub use query::{PageDirection, PageSpec};

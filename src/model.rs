@@ -8,6 +8,8 @@ use crate::error::{Error, Result};
 use crate::scalars::{Bytes, Date, Decimal, Duration, Timestamp, Uuid};
 
 pub const MAX_DEPTH: usize = 64;
+pub const MAX_MAP_ENTRIES: usize = 4_096;
+pub const MAX_MAP_KEY_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ScalarType {
@@ -19,13 +21,18 @@ pub enum ScalarType {
     Date,
     Timestamp,
     Duration,
-    Decimal { precision: u8, scale: u8 },
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
     Bytes,
     Enum(EnumType),
     Record(Vec<Column>),
     Tuple(Vec<ScalarType>),
     Option(Box<ScalarType>),
     List(Box<ScalarType>),
+    /// A bounded map with text keys and one declared value type.
+    Map(Box<ScalarType>),
     // Named exists only in parsed syntax; registered definitions use stable Ref IDs.
     Named(String),
     Ref(u64),
@@ -70,6 +77,7 @@ pub enum Value {
     Record(BTreeMap<String, Value>),
     Tuple(Vec<Value>),
     List(Vec<Value>),
+    Map(BTreeMap<String, Value>),
     Option(Option<Box<Value>>),
     Named { type_id: u64, value: Box<Value> },
 }
@@ -128,6 +136,11 @@ impl Value {
                 a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.cmp_eq(w)))
             }
             (Self::Tuple(a), Self::Tuple(b)) | (Self::List(a), Self::List(b)) => equal_items(a, b),
+            (Self::Map(a), Self::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(key, value)| b.get(key).is_some_and(|other| value.cmp_eq(other)))
+            }
             (Self::Option(None), Self::Option(None)) => true,
             (Self::Option(Some(a)), Self::Option(Some(b))) => a.cmp_eq(b),
             _ => false,
@@ -173,6 +186,7 @@ impl Value {
             Self::Named { value, .. } | Self::Option(Some(value)) => value.requires_protocol_v2(),
             Self::Enum(value) => value.args.iter().any(Self::requires_protocol_v2),
             Self::Record(fields) => fields.values().any(Self::requires_protocol_v2),
+            Self::Map(_) => true,
             Self::Tuple(items) | Self::List(items) => items.iter().any(Self::requires_protocol_v2),
             _ => false,
         }
@@ -219,6 +233,12 @@ impl Value {
             Self::List(v) => {
                 serde_json::json!(["list", v.iter().map(Self::index_value).collect::<Vec<_>>()])
             }
+            Self::Map(v) => serde_json::json!([
+                "map",
+                v.iter()
+                    .map(|(key, value)| (key, value.index_value()))
+                    .collect::<Vec<_>>()
+            ]),
             Self::Option(v) => serde_json::json!(["option", v.as_ref().map(|v| v.index_value())]),
         }
     }
@@ -438,6 +458,7 @@ impl Catalog {
                 ScalarType::Option(Box::new(self.resolve_inner(*t, depth + 1)?))
             }
             ScalarType::List(t) => ScalarType::List(Box::new(self.resolve_inner(*t, depth + 1)?)),
+            ScalarType::Map(t) => ScalarType::Map(Box::new(self.resolve_inner(*t, depth + 1)?)),
             ScalarType::Tuple(ts) => ScalarType::Tuple(
                 ts.into_iter()
                     .map(|t| self.resolve_inner(t, depth + 1))
@@ -503,6 +524,9 @@ impl Catalog {
             }
             ScalarType::List(inner) => {
                 ScalarType::List(Box::new(self.normalize_defaults(*inner, depth + 1)?))
+            }
+            ScalarType::Map(inner) => {
+                ScalarType::Map(Box::new(self.normalize_defaults(*inner, depth + 1)?))
             }
             other => other,
         })
@@ -792,6 +816,28 @@ impl Catalog {
                 }
                 _ => return Err(mismatch()),
             },
+            ScalarType::Map(inner) => match (left, right) {
+                (Value::Map(left), Value::Map(right)) => {
+                    let mut ordering = Ordering::Equal;
+                    for ((left_key, left_value), (right_key, right_value)) in left.iter().zip(right)
+                    {
+                        ordering = left_key.as_bytes().cmp(right_key.as_bytes());
+                        if ordering == Ordering::Equal {
+                            ordering =
+                                self.cmp_typed_inner(inner, left_value, right_value, depth + 1)?;
+                        }
+                        if ordering != Ordering::Equal {
+                            break;
+                        }
+                    }
+                    if ordering == Ordering::Equal {
+                        left.len().cmp(&right.len())
+                    } else {
+                        ordering
+                    }
+                }
+                _ => return Err(mismatch()),
+            },
             ScalarType::Named(name) => {
                 return Err(Error::new(
                     "E_SCHEMA",
@@ -871,6 +917,7 @@ impl Catalog {
                 ScalarType::Option(inner) | ScalarType::List(inner) => {
                     visit(catalog, inner, seen, depth + 1)?
                 }
+                ScalarType::Map(_) => true,
                 ScalarType::Named(name) => {
                     return Err(Error::new("E_SCHEMA", format!("unresolved type '{name}'")));
                 }
@@ -974,6 +1021,38 @@ impl Catalog {
                     .map(|(i, v)| self.coerce_inner(v, t, &format!("{path}[{i}]"), depth + 1))
                     .collect::<Result<_>>()?,
             ),
+            (Value::Map(entries), ScalarType::Map(value_type)) => {
+                if entries.len() > MAX_MAP_ENTRIES {
+                    return Err(Error::new(
+                        "E_MAP_LIMIT",
+                        format!("{path}: map exceeds {MAX_MAP_ENTRIES} entry limit"),
+                    ));
+                }
+                Value::Map(
+                    entries
+                        .iter()
+                        .map(|(key, value)| {
+                            if key.len() > MAX_MAP_KEY_BYTES {
+                                return Err(Error::new(
+                                    "E_MAP_LIMIT",
+                                    format!(
+                                        "{path}[{key:?}]: map key exceeds {MAX_MAP_KEY_BYTES} UTF-8 byte limit"
+                                    ),
+                                ));
+                            }
+                            Ok((
+                                key.clone(),
+                                self.coerce_inner(
+                                    value,
+                                    value_type,
+                                    &format!("{path}[{key:?}]"),
+                                    depth + 1,
+                                )?,
+                            ))
+                        })
+                        .collect::<Result<_>>()?,
+                )
+            }
             (Value::Enum(v), ScalarType::Option(_)) if v.variant == "None" && v.args.is_empty() => {
                 Value::Option(None)
             }
@@ -1066,6 +1145,7 @@ impl Catalog {
             ScalarType::Named(name) => name.clone(),
             ScalarType::Option(t) => format!("Option<{}>", self.describe(t)),
             ScalarType::List(t) => format!("List<{}>", self.describe(t)),
+            ScalarType::Map(t) => format!("Map<text, {}>", self.describe(t)),
             ScalarType::Tuple(ts) => format!(
                 "({})",
                 ts.iter()
@@ -1154,7 +1234,7 @@ fn type_is_finite(ty: &ScalarType, finite: &BTreeSet<u64>) -> bool {
         | ScalarType::Decimal { .. }
         | ScalarType::Bytes => true,
         ScalarType::Ref(id) => finite.contains(id),
-        ScalarType::Option(_) | ScalarType::List(_) => true,
+        ScalarType::Option(_) | ScalarType::List(_) | ScalarType::Map(_) => true,
         ScalarType::Tuple(items) => items.iter().all(|item| type_is_finite(item, finite)),
         ScalarType::Record(fields) => fields.iter().all(|field| type_is_finite(&field.ty, finite)),
         ScalarType::Enum(sum) => sum.variants.iter().any(|variant| {
@@ -1193,7 +1273,7 @@ fn validate_type_references(catalog: &Catalog, ty: &ScalarType, depth: usize) ->
                 validate_type_references(catalog, item, depth + 1)?;
             }
         }
-        ScalarType::Option(inner) | ScalarType::List(inner) => {
+        ScalarType::Option(inner) | ScalarType::List(inner) | ScalarType::Map(inner) => {
             validate_type_references(catalog, inner, depth + 1)?;
         }
         ScalarType::Named(name) => {
@@ -1280,7 +1360,7 @@ fn collect_type_references(ty: &ScalarType, references: &mut BTreeSet<u64>) {
                 collect_type_references(item, references);
             }
         }
-        ScalarType::Option(inner) | ScalarType::List(inner) => {
+        ScalarType::Option(inner) | ScalarType::List(inner) | ScalarType::Map(inner) => {
             collect_type_references(inner, references);
         }
         ScalarType::Int
@@ -1323,7 +1403,7 @@ fn structural_id_count(ty: &ScalarType, depth: usize) -> Result<u64> {
                 .checked_add(structural_id_count(item, depth + 1)?)
                 .ok_or_else(|| Error::new("E_SCHEMA", "catalog ID space exhausted"))
         })?,
-        ScalarType::Option(inner) | ScalarType::List(inner) => {
+        ScalarType::Option(inner) | ScalarType::List(inner) | ScalarType::Map(inner) => {
             structural_id_count(inner, depth + 1)?
         }
         ScalarType::Int
@@ -1378,6 +1458,18 @@ impl Value {
                 values
                     .iter()
                     .map(Self::source_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Map(entries) => format!(
+                "map {{{}}}",
+                entries
+                    .iter()
+                    .map(|(key, value)| format!(
+                        "{}: {}",
+                        serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into()),
+                        value.source_text()
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),

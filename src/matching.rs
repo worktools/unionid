@@ -780,6 +780,7 @@ fn constructor_specs(catalog: &Catalog, ty: &ScalarType) -> Result<Option<Vec<Co
         | ScalarType::Decimal { .. }
         | ScalarType::Bytes
         | ScalarType::List(_)
+        | ScalarType::Map(_)
         | ScalarType::Named(_)
         | ScalarType::Ref(_) => None,
     })
@@ -798,7 +799,9 @@ fn type_contains_ref(ty: &ScalarType, target: u64) -> bool {
                 .any(|argument| type_contains_ref(argument, target))
         }),
         ScalarType::Tuple(items) => items.iter().any(|item| type_contains_ref(item, target)),
-        ScalarType::Option(inner) | ScalarType::List(inner) => type_contains_ref(inner, target),
+        ScalarType::Option(inner) | ScalarType::List(inner) | ScalarType::Map(inner) => {
+            type_contains_ref(inner, target)
+        }
         ScalarType::Int
         | ScalarType::Float
         | ScalarType::Bool
@@ -1178,7 +1181,9 @@ fn literal_type(catalog: &Catalog, value: &Value) -> Result<Option<ScalarType>> 
             .rsplit_once('.')
             .and_then(|(qualifier, _)| catalog.types.get(qualifier))
             .map(|definition| ScalarType::Ref(definition.id)),
-        Value::Null | Value::Record(_) | Value::List(_) | Value::Option(None) => None,
+        Value::Null | Value::Record(_) | Value::Map(_) | Value::List(_) | Value::Option(None) => {
+            None
+        }
     })
 }
 
