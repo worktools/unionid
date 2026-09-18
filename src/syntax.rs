@@ -14,8 +14,20 @@ use crate::query::{
     Returning, ScalarExpression, SchemaMigration, SetAssignment, SetValue, SortKey, Stage,
     Statement, Window, WindowAssignment, WindowFunction,
 };
+use crate::scalars::DecimalRounding;
 
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+
+fn decimal_aggregate_u8(expression: ScalarExpression, name: &str) -> Result<u8> {
+    match expression {
+        ScalarExpression::Literal(Value::Int(value)) => u8::try_from(value)
+            .map_err(|_| Error::new("E_DECIMAL_TYPE", format!("decimal {name} is out of range"))),
+        _ => Err(Error::new(
+            "E_DECIMAL_TYPE",
+            format!("decimal {name} must be an integer literal"),
+        )),
+    }
+}
 
 /// Canonical extension for Unionid source files (schema, query, migration).
 pub const SOURCE_EXTENSION: &str = "unid";
@@ -2436,6 +2448,31 @@ impl Parser {
                     AggregateFunction::Average,
                     Some(self.scalar_expression(0, braced)?),
                 ),
+                "decimal_avg" => {
+                    let input = self.scalar_argument(0, braced)?;
+                    let precision =
+                        decimal_aggregate_u8(self.scalar_argument(0, braced)?, "precision")?;
+                    let scale = decimal_aggregate_u8(self.scalar_argument(0, braced)?, "scale")?;
+                    crate::scalars::validate_decimal_type(precision, scale)?;
+                    let rounding = match self.scalar_argument(0, braced)? {
+                        ScalarExpression::Literal(Value::Text(value)) => {
+                            value.parse::<DecimalRounding>()?
+                        }
+                        _ => {
+                            return Err(
+                                self.error("decimal_avg rounding mode must be a text literal")
+                            );
+                        }
+                    };
+                    (
+                        AggregateFunction::DecimalAverage {
+                            precision,
+                            scale,
+                            rounding,
+                        },
+                        Some(input),
+                    )
+                }
                 "sum" => (
                     AggregateFunction::Sum,
                     Some(self.scalar_expression(0, braced)?),
@@ -2450,7 +2487,7 @@ impl Parser {
                 ),
                 _ => {
                     return Err(self.error(format!(
-                        "unknown aggregate function '{function_name}'; expected count, count_distinct, avg, sum, min, or max"
+                        "unknown aggregate function '{function_name}'; expected count, count_distinct, avg, decimal_avg, sum, min, or max"
                     )));
                 }
             };

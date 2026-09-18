@@ -104,10 +104,15 @@ Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `
 `is_some`, `is_none`, `any`, and `all`. Parameters start with `$` and are type-checked
 against the supplied schema before execution.
 
+Decimal `*` and `/` are intentionally explicit: use `decimal_mul left right P S "mode"`,
+`decimal_div left right P S "mode"`, or `decimal_round value P S "mode"`. Modes are
+`exact`, `toward_zero`, `away_from_zero`, `floor`, `ceil`, `half_up`, and `half_even`.
+
 ## Aggregation and bounded relation lookup
 
 Use `aggregate` for ungrouped results and `group keys { aggregate {...} }` for grouped
-results. Functions are `count`, `count_distinct`, `avg`, `sum`, `min`, and `max`.
+results. Functions are `count`, `count_distinct`, `avg`, `decimal_avg`, `sum`, `min`, and `max`.
+Decimal average requires the explicit form `decimal_avg amount 18 2 "half_even"`.
 
 ```text
 from tasks

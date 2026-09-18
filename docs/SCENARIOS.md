@@ -292,13 +292,13 @@ table payments Payment
 | 复用重复业务表达式 | 已实现查询局部常量、单/多参数非递归纯函数、有限推断、词法遮蔽和展开预算 | 泛型、高阶与递归函数延后 | #61，P0 |
 | 多条件、标签和集合判断 | 已实现括号、not/and/or、比较、contains/length、any/all 与 is_some/is_none；filter、普通／match derive、typed set 和 migration conversion 共享这些 bool 结果 | 通用高阶函数延后 | #36/#100，已满足核心 |
 | 可复现列表顺序与分页 | 复合 sort、范围 take、类型化索引访问计划、explain、有界双向 cursor page、一致并发读快照，以及可取消且有背压的 NDJSON stream 已实现 | 成功写入会使旧 cursor 过期；partial stream 不支持续传，可靠遍历使用 page | #34/#16/#116/#131/#132/#135 |
-| UUID、时间、定点数与 binary | 六类生产标量已接通语言、Rust、wire、redb、backup、cursor、索引和 migration；duration/decimal 精确算术已实现 | 乘除、decimal avg、rounding 与 calendar arithmetic 按 RFC deferred | #115/#137–#140，M5 P1 |
+| UUID、时间、定点数与 binary | 六类生产标量已接通语言、Rust、wire、redb、backup、cursor、索引和 migration；decimal 已提供显式目标 P/S 与舍入模式的乘除、round 和 avg | calendar arithmetic 继续 deferred；普通 decimal `*`/`/` 不做隐式结果推断 | #115/#137–#140/#247 |
 | 参数化 key/time/user 输入 | 已实现 typed AST 参数、version 1 wire codec，以及 query/insert/upsert/update/delete 的 schema-aware prepared operation | option helper/元素谓词可继续扩展 | #10/#22/#36/#91 |
 | 批量写入 typed row list | `insert many` 与 `upsert many` 已实现默认值、嵌套 ADT、输入内主键去重、整批主键／unique index 验证、稳定 RowId/returning/action 顺序和 memory/redb/TCP 原子提交 | 流式导入单独设计 | #89/#97，P1 核心 |
 | 小型一对多关联读 | `lookup` 已实现索引前置、相同快照、typed list、逐行/driver/内存预算、稳定分页与 explain | 通用扁平 join、图遍历和 mutation lookup 延后 | #241，M10 P0 |
 | 多来源同形结果 | `union`/`intersect`/`except` 已实现精确 schema 绑定、嵌套 ADT typed equality、稳定首次出现顺序、预算与 explain | 不支持嵌套集合运算或跨来源 cursor page | #341，v0.7 |
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match/sort/take target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 多写者／skip-locked 不在当前单写模型内 | #15/#83/#85/#87 |
-| count/count_distinct/avg/sum/min/max、分组与基础排名窗口 | 已实现 typed 空输入、int→float avg、命名 float/duration avg、完整 ADT 去重与 key、显式 partition/order 的 row_number/rank/dense_rank、后续 stage 与有界资源 | decimal avg、frame、lag/lead 和用户定义 aggregate/window 延后 | #60/#245 |
+| count/count_distinct/avg/sum/min/max、分组与基础排名窗口 | 已实现 typed 空输入、int→float avg、命名 float/duration avg、显式 P/S/mode 的 decimal_avg、完整 ADT 去重与 key、显式 partition/order 的 row_number/rank/dense_rank、后续 stage 与有界资源 | frame、lag/lead 和用户定义 aggregate/window 延后 | #60/#245/#247 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |
 | 持久提交、恢复和备份 | redb Engine、原子提交、完整性检查、进程退出恢复、备份还原与三条端到端升级恢复场景已实现 | 物理设备故障不在当前测试声明内 | #13/#14/#20/#74，P0 |
 

@@ -22,7 +22,15 @@ insert many invoices [
 ]
 
 from invoices
-derive total = subtotal + fee
+aggregate {
+  average_subtotal = decimal_avg subtotal 18 2 "half_even"
+}
+
+from invoices
+derive {
+  total = subtotal + fee
+  tax = decimal_mul subtotal decimal "0.13" 18 2 "half_even"
+}
 filter subtotal >= decimal "100"
-select {id, total, currency}
+select {id, total, tax, currency}
 sort id

@@ -4,6 +4,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Instant;
 
+use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -296,6 +297,7 @@ enum AggregateState {
 enum AverageTotal {
     Float(f64),
     Duration(i128),
+    Decimal { coefficient: BigInt, scale: u8 },
 }
 
 impl GroupAccumulator {
@@ -305,10 +307,12 @@ impl GroupAccumulator {
             .map(|assignment| match assignment.function {
                 AggregateFunction::Count => AggregateState::Count(0),
                 AggregateFunction::CountDistinct => AggregateState::CountDistinct(BTreeSet::new()),
-                AggregateFunction::Average => AggregateState::Average {
-                    total: None,
-                    count: 0,
-                },
+                AggregateFunction::Average | AggregateFunction::DecimalAverage { .. } => {
+                    AggregateState::Average {
+                        total: None,
+                        count: 0,
+                    }
+                }
                 AggregateFunction::Sum => AggregateState::Sum(None),
                 AggregateFunction::Min => AggregateState::Min(None),
                 AggregateFunction::Max => AggregateState::Max(None),
@@ -350,6 +354,10 @@ impl GroupAccumulator {
                         (None, Value::Duration(value)) => {
                             AverageTotal::Duration(i128::from(value.microseconds()))
                         }
+                        (None, Value::Decimal(value)) => AverageTotal::Decimal {
+                            coefficient: BigInt::from(value.coefficient()),
+                            scale: value.scale(),
+                        },
                         (Some(AverageTotal::Float(total)), Value::Int(value)) => {
                             let result = total + *value as f64;
                             if !result.is_finite() {
@@ -373,6 +381,13 @@ impl GroupAccumulator {
                         (Some(AverageTotal::Duration(total)), Value::Duration(value)) => {
                             AverageTotal::Duration(total + i128::from(value.microseconds()))
                         }
+                        (
+                            Some(AverageTotal::Decimal { coefficient, scale }),
+                            Value::Decimal(value),
+                        ) if scale == value.scale() => AverageTotal::Decimal {
+                            coefficient: coefficient + BigInt::from(value.coefficient()),
+                            scale,
+                        },
                         _ => {
                             return Err(Error::new(
                                 "E_TYPE",
@@ -507,6 +522,29 @@ impl GroupAccumulator {
                                 crate::scalars::Duration::from_microseconds(micros),
                             )))
                         }
+                        Some(AverageTotal::Decimal { coefficient, scale }) => {
+                            let AggregateFunction::DecimalAverage {
+                                precision,
+                                scale: target_scale,
+                                rounding,
+                            } = assignment.function
+                            else {
+                                return Err(Error::new(
+                                    "E_TYPE",
+                                    "bound avg received decimal values without decimal_avg",
+                                ));
+                            };
+                            Some(Box::new(Value::Decimal(
+                                crate::scalars::Decimal::average_coefficients(
+                                    coefficient,
+                                    scale,
+                                    count,
+                                    precision,
+                                    target_scale,
+                                    rounding,
+                                )?,
+                            )))
+                        }
                     };
                     Value::Option(value)
                 }
@@ -590,6 +628,7 @@ fn aggregate_function_name(function: AggregateFunction) -> &'static str {
         AggregateFunction::Count => "count",
         AggregateFunction::CountDistinct => "count_distinct",
         AggregateFunction::Average => "avg",
+        AggregateFunction::DecimalAverage { .. } => "decimal_avg",
         AggregateFunction::Sum => "sum",
         AggregateFunction::Min => "min",
         AggregateFunction::Max => "max",
@@ -4196,6 +4235,21 @@ impl Database {
                         }
                     };
                     ScalarType::Option(Box::new(result))
+                }
+                AggregateFunction::DecimalAverage {
+                    precision, scale, ..
+                } => {
+                    let ty = self.aggregate_input_type(schema, assignment)?;
+                    if !matches!(self.catalog.underlying(&ty)?, ScalarType::Decimal { .. }) {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!(
+                                "decimal_avg expects decimal, got {}",
+                                self.catalog.describe(&ty)
+                            ),
+                        ));
+                    }
+                    ScalarType::Option(Box::new(ScalarType::Decimal { precision, scale }))
                 }
                 AggregateFunction::Sum => {
                     let ty = self.aggregate_input_type(schema, assignment)?;

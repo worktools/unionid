@@ -289,9 +289,22 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 | [#354](https://github.com/worktools/unionid/issues/354) | 编译成本、重建、诊断与 migration 边界 / compile cost, rebuild, diagnostics, and migration boundary | P1 |
 | [#357](https://github.com/worktools/unionid/issues/357) | v0.9 契约、三个 crate 与候选发布 / contract, three crates, and release candidate | P0 |
 
+### v0.10.0 · 日常使用闭环 / Daily-use closure
+
+[Milestone 20](https://github.com/worktools/unionid/milestone/20) 只保留四条日常业务会直接遇到的链路：bounded typed map、显式 decimal 乘除/舍入/平均值、partial unique index，以及基于真实试用反馈的 CLI/诊断改进。优先完成不改变持久格式的 decimal 能力；partial unique index 需要新的 catalog/storage 兼容边界，单独设计与验收。
+
+[Milestone 20](https://github.com/worktools/unionid/milestone/20) contains four direct daily-use paths: bounded typed maps, explicit decimal multiplication/division/rounding/average, partial unique indexes, and CLI/diagnostic improvements driven by real trials. Decimal ships first without a durable-format change; partial unique indexes require a separately reviewed catalog/storage compatibility boundary.
+
+| Issue | 交付 / Deliverable | 优先级 / Priority |
+| --- | --- | --- |
+| [#246](https://github.com/worktools/unionid/issues/246) | 有界 typed map / bounded typed map | P1 |
+| [#247](https://github.com/worktools/unionid/issues/247) | Decimal 显式乘除、舍入与平均值 / explicit decimal multiply, divide, rounding, and average | P1，进行中 / in progress |
+| [#248](https://github.com/worktools/unionid/issues/248) | Partial unique index | P1 |
+| [#363](https://github.com/worktools/unionid/issues/363) | 试用反馈驱动的 CLI、诊断和错误提示 / trial-driven CLI, diagnostics, and errors | P1 |
+
 ### 按需探索 · 版本待定 / Demand-driven exploration · version TBD
 
-[Milestone 14](https://github.com/worktools/unionid/milestone/14) 是候选池，原“v1.0 生产规模化探索”名称已移除，不把探索等同于 v1.0 发布承诺。进入条件是具体调用方/工作负载、最小范围、正确性与资源预算以及验收方式；满足后移入具体版本。v1.0 的长期稳定性与兼容承诺以后另行确定。
+没有 milestone 的 P2/deferred issues 是候选池，不把探索等同于 v1.0 发布承诺。进入条件是具体调用方/工作负载、最小范围、正确性与资源预算以及验收方式；满足后移入具体版本。v1.0 的长期稳定性与兼容承诺以后另行确定。
 
 This candidate backlog replaces the former “v1.0 production scale exploration” label without making exploratory capabilities a v1.0 promise. Require a caller/workload, minimal scope, correctness/resource budgets and acceptance before assigning a release. Define v1.0 stability and compatibility commitments separately.
 
@@ -300,9 +313,6 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 | [#118](https://github.com/worktools/unionid/issues/118) | 用户泛型与互递归 / user generics and mutual recursion | P2 / deferred |
 | [#120](https://github.com/worktools/unionid/issues/120) | 服务器 named query/module / server-side named queries and modules | P2 / deferred |
 | [#192](https://github.com/worktools/unionid/issues/192) | 一个真实第二语言适配 / one real second-language adapter | P2 / deferred |
-| [#246](https://github.com/worktools/unionid/issues/246) | Typed map 或显式 JSON 逃生通道 / typed map or explicit JSON escape hatch | P1 / demand-driven |
-| [#247](https://github.com/worktools/unionid/issues/247) | Decimal 与 calendar 算术 / decimal and calendar arithmetic | P1 / demand-driven |
-| [#248](https://github.com/worktools/unionid/issues/248) | 部分/表达式索引 / partial and expression indexes | P2 / demand-driven |
 | [#252](https://github.com/worktools/unionid/issues/252) | 多写者、复制与 HA / multi-writer, replication and HA | P2 / deferred |
 | [#253](https://github.com/worktools/unionid/issues/253) | CDC、订阅与物化视图 / CDC, subscriptions and materialized views | P2 / deferred |
 | [#254](https://github.com/worktools/unionid/issues/254) | 超过 100k 的架构 / architecture beyond 100k rows | P2 / deferred |

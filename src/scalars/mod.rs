@@ -7,8 +7,8 @@ mod serde;
 pub(crate) use serde::decode_marker;
 mod temporal;
 
-pub use decimal::Decimal;
 pub(crate) use decimal::validate_type as validate_decimal_type;
+pub use decimal::{Decimal, DecimalRounding};
 pub use temporal::{Date, Duration, Timestamp};
 
 use crate::error::{Error, Result};

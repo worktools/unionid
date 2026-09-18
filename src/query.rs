@@ -1,5 +1,6 @@
 use crate::error::Span;
 use crate::model::{Column, ScalarType, Value};
+use crate::scalars::DecimalRounding;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_INDEX_COMPONENTS: usize = 16;
@@ -377,6 +378,11 @@ pub enum AggregateFunction {
     Count,
     CountDistinct,
     Average,
+    DecimalAverage {
+        precision: u8,
+        scale: u8,
+        rounding: DecimalRounding,
+    },
     Sum,
     Min,
     Max,

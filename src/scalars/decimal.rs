@@ -1,5 +1,56 @@
 use crate::error::{Error, Result};
+use num_bigint::BigInt;
+use num_traits::{Signed, ToPrimitive, Zero};
 use std::fmt;
+use std::str::FromStr;
+
+/// Explicit rounding used by decimal operations which can discard digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecimalRounding {
+    Exact,
+    TowardZero,
+    AwayFromZero,
+    Floor,
+    Ceil,
+    HalfUp,
+    HalfEven,
+}
+
+impl DecimalRounding {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::TowardZero => "toward_zero",
+            Self::AwayFromZero => "away_from_zero",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::HalfUp => "half_up",
+            Self::HalfEven => "half_even",
+        }
+    }
+}
+
+impl FromStr for DecimalRounding {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "exact" => Ok(Self::Exact),
+            "toward_zero" => Ok(Self::TowardZero),
+            "away_from_zero" => Ok(Self::AwayFromZero),
+            "floor" => Ok(Self::Floor),
+            "ceil" => Ok(Self::Ceil),
+            "half_up" => Ok(Self::HalfUp),
+            "half_even" => Ok(Self::HalfEven),
+            _ => Err(Error::new(
+                "E_DECIMAL_ROUNDING",
+                format!(
+                    "unknown decimal rounding mode '{value}'; expected exact, toward_zero, away_from_zero, floor, ceil, half_up, or half_even"
+                ),
+            )),
+        }
+    }
+}
 
 /// Exact coefficient and scale. Precision belongs to the target schema type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -10,6 +61,51 @@ pub struct Decimal {
 
 fn range(message: &str) -> Error {
     Error::new("E_DECIMAL_RANGE", message)
+}
+
+fn arithmetic(message: impl Into<String>) -> Error {
+    Error::new("E_ARITH", message)
+}
+
+fn power_of_ten(exponent: u32) -> BigInt {
+    BigInt::from(10_u8).pow(exponent)
+}
+
+fn round_ratio(
+    numerator: BigInt,
+    denominator: BigInt,
+    rounding: DecimalRounding,
+) -> Result<BigInt> {
+    if denominator.is_zero() {
+        return Err(arithmetic("decimal division by zero"));
+    }
+    let negative = numerator.is_negative() != denominator.is_negative();
+    let numerator = numerator.abs();
+    let denominator = denominator.abs();
+    let quotient = &numerator / &denominator;
+    let remainder = numerator % &denominator;
+    if remainder.is_zero() {
+        return Ok(if negative { -quotient } else { quotient });
+    }
+    if rounding == DecimalRounding::Exact {
+        return Err(arithmetic(
+            "decimal operation requires rounding but mode is exact",
+        ));
+    }
+    let increment = match rounding {
+        DecimalRounding::Exact | DecimalRounding::TowardZero => false,
+        DecimalRounding::AwayFromZero => true,
+        DecimalRounding::Floor => negative,
+        DecimalRounding::Ceil => !negative,
+        DecimalRounding::HalfUp => remainder * 2 >= denominator,
+        DecimalRounding::HalfEven => {
+            let doubled = &remainder * 2;
+            doubled > denominator
+                || (doubled == denominator && (&quotient % 2_u8) != BigInt::zero())
+        }
+    };
+    let rounded = quotient + u8::from(increment);
+    Ok(if negative { -rounded } else { rounded })
 }
 
 pub fn validate_type(precision: u8, scale: u8) -> Result<()> {
@@ -115,6 +211,104 @@ impl Decimal {
             self.coefficient / divisor
         };
         Self::new(coefficient, precision, scale)
+    }
+
+    pub fn rescale_with_rounding(
+        self,
+        precision: u8,
+        scale: u8,
+        rounding: DecimalRounding,
+    ) -> Result<Self> {
+        validate_type(precision, scale)?;
+        let coefficient = if scale >= self.scale {
+            BigInt::from(self.coefficient) * power_of_ten((scale - self.scale).into())
+        } else {
+            round_ratio(
+                BigInt::from(self.coefficient),
+                power_of_ten((self.scale - scale).into()),
+                rounding,
+            )?
+        };
+        Self::from_bigint(coefficient, precision, scale, "decimal rounding")
+    }
+
+    pub fn checked_mul_to(
+        self,
+        other: Self,
+        precision: u8,
+        scale: u8,
+        rounding: DecimalRounding,
+    ) -> Result<Self> {
+        validate_type(precision, scale)?;
+        let product = BigInt::from(self.coefficient) * BigInt::from(other.coefficient);
+        let source_scale = u32::from(self.scale) + u32::from(other.scale);
+        let coefficient = if u32::from(scale) >= source_scale {
+            product * power_of_ten(u32::from(scale) - source_scale)
+        } else {
+            round_ratio(
+                product,
+                power_of_ten(source_scale - u32::from(scale)),
+                rounding,
+            )?
+        };
+        Self::from_bigint(coefficient, precision, scale, "decimal multiplication")
+    }
+
+    pub fn checked_div_to(
+        self,
+        other: Self,
+        precision: u8,
+        scale: u8,
+        rounding: DecimalRounding,
+    ) -> Result<Self> {
+        validate_type(precision, scale)?;
+        if other.coefficient == 0 {
+            return Err(arithmetic("decimal division by zero"));
+        }
+        let numerator_exponent = u32::from(scale) + u32::from(other.scale);
+        let denominator_exponent = u32::from(self.scale);
+        let mut numerator = BigInt::from(self.coefficient);
+        let mut denominator = BigInt::from(other.coefficient);
+        if numerator_exponent >= denominator_exponent {
+            numerator *= power_of_ten(numerator_exponent - denominator_exponent);
+        } else {
+            denominator *= power_of_ten(denominator_exponent - numerator_exponent);
+        }
+        let coefficient = round_ratio(numerator, denominator, rounding)?;
+        Self::from_bigint(coefficient, precision, scale, "decimal division")
+    }
+
+    pub(crate) fn average_coefficients(
+        coefficient: BigInt,
+        source_scale: u8,
+        count: i64,
+        precision: u8,
+        scale: u8,
+        rounding: DecimalRounding,
+    ) -> Result<Self> {
+        validate_type(precision, scale)?;
+        let mut numerator = coefficient;
+        let mut denominator = BigInt::from(count);
+        if scale >= source_scale {
+            numerator *= power_of_ten((scale - source_scale).into());
+        } else {
+            denominator *= power_of_ten((source_scale - scale).into());
+        }
+        let coefficient = round_ratio(numerator, denominator, rounding)?;
+        Self::from_bigint(coefficient, precision, scale, "decimal average")
+    }
+
+    fn from_bigint(coefficient: BigInt, precision: u8, scale: u8, operation: &str) -> Result<Self> {
+        let coefficient = coefficient
+            .to_i128()
+            .ok_or_else(|| arithmetic(format!("{operation} exceeds 38 digits")))?;
+        Self::new(coefficient, precision, scale).map_err(|error| {
+            if error.code == "E_DECIMAL_RANGE" {
+                arithmetic(format!("{operation} exceeds decimal {precision} {scale}"))
+            } else {
+                error
+            }
+        })
     }
 
     pub(crate) fn checked_add(self, other: Self) -> Result<Self> {

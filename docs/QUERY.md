@@ -218,7 +218,17 @@ derive next_attempt = match state {
 
 `int / int` 使用向零截断的整数除法。整数加减乘除和一元负号执行 checked 运算；溢出与除零返回 `E_ARITH`。float 运算拒绝除以正负零，也拒绝产生 NaN 或无限值；负零归一为正零。`&&`/`||` 继续短路求值，因此未执行分支中的算术错误不会触发。
 
-`decimal P S` 只与完全相同的 decimal 类型做 `+`、`-` 和一元负号；literal 可由字段上下文精确补零到目标 scale。每个中间结果与 `sum` 的每一步都检查 P 位范围，超限返回 `E_ARITH` 并回滚请求。乘法、除法、avg、隐式 rescale 和舍入未定义，使用时返回 `E_TYPE`。
+`Decimal<P, S>` 只与完全相同的 decimal 类型做 `+`、`-` 和一元负号；literal 可由字段上下文精确补零到目标 scale。每个中间结果与 `sum` 的每一步都检查 P 位范围，超限返回 `E_ARITH` 并回滚请求。乘法、除法和舍入必须同时声明结果 precision、scale 与 mode：
+
+```text
+derive {
+  tax = decimal_mul subtotal rate 18 2 "half_even"
+  unit_price = decimal_div total quantity 18 4 "half_up"
+  whole = decimal_round total 18 0 "floor"
+}
+```
+
+可用 mode 为 `exact`、`toward_zero`、`away_from_zero`、`floor`、`ceil`、`half_up` 和 `half_even`。`exact` 在需要丢弃非零位时返回 `E_ARITH`；除零、目标精度溢出也返回 `E_ARITH`。绑定阶段要求 P/S 为合法整数 literal、mode 为已知 text literal，因此不会由数据决定舍入策略。普通 decimal `*`、`/` 继续返回 `E_TYPE`，避免隐式推导结果类型。`decimal_rescale value P S` 仍保持原有 exact 语义。
 
 ## Typed 批量写入
 
@@ -586,11 +596,12 @@ take 20
 | `avg int-expression` | `int`，包括命名 int；逐项转换为 float 后求和 | `Option<float>` | `None` |
 | `avg float-expression` | `float`，包括命名 float | `Option<T>`，保留命名类型 | `None` |
 | `avg duration-expression` | `duration`，包括命名 duration | `Option<T>`，保留命名类型 | `None` |
+| `decimal_avg expression P S "mode"` | `decimal`，P/S 与 mode 显式声明 | `Option<Decimal<P, S>>` | `None` |
 | `sum expression` | `int` / `float`，包括命名数值类型 | 与输入相同 | 同类型的零 |
 | `min expression` | `int` / `float` / `text`，包括相应命名类型 | `Option<T>` | `None` |
 | `max expression` | `int` / `float` / `text`，包括相应命名类型 | `Option<T>` | `None` |
 
-`count_distinct` 使用完整 typed equality，因此不同 constructor、record/tuple 字段、option 状态和 list 内容都参与去重，`None` 也是一个值。`avg int` 明确返回 float，不做整数截断；它使用 IEEE-754 转换与除法，因此极大整数可能失去低位精度。`avg float` 的累计和与最终结果必须有限，溢出返回 `E_ARITH`。`avg duration` 用 i128 累计微秒，除法向零取整到整微秒。decimal avg 在精度扩展与舍入规则确定前以 `E_TYPE` 拒绝，不做隐式截断。`sum` 的 int 使用 checked addition，溢出返回 `E_ARITH`；float 每一步都必须保持有限，正负零最终归一为正零。min/max 接受所有具有静态类型的有限 ADT，并与 filter、sort 和 cursor boundary 共用 total order；avg/min/max 用 Option 明确表达空输入，不引入 null 或三值逻辑。分组空输入没有 group，因此返回零行。
+`count_distinct` 使用完整 typed equality，因此不同 constructor、record/tuple 字段、option 状态和 list 内容都参与去重，`None` 也是一个值。`avg int` 明确返回 float，不做整数截断；它使用 IEEE-754 转换与除法，因此极大整数可能失去低位精度。`avg float` 的累计和与最终结果必须有限，溢出返回 `E_ARITH`。`avg duration` 用 i128 累计微秒，除法向零取整到整微秒。`decimal_avg` 用任意精度整数累计 coefficient，再按显式目标 P/S 和 mode 做一次最终舍入；普通 `avg decimal` 仍返回 `E_TYPE`。`sum` 的 int 使用 checked addition，溢出返回 `E_ARITH`；float 每一步都必须保持有限，正负零最终归一为正零。min/max 接受所有具有静态类型的有限 ADT，并与 filter、sort 和 cursor boundary 共用 total order；avg/decimal_avg/min/max 用 Option 明确表达空输入，不引入 null 或三值逻辑。分组空输入没有 group，因此返回零行。
 
 aggregate 输入是 scalar expression，可以引用字段路径、前一 stage 的普通或 ADT 派生列，以及查询局部纯函数。group key 使用完整 typed equality，可包含 record、tuple、sum、option 或 list；输出中保留原静态类型。未显式 sort 时不承诺 group 行顺序。group inner pipeline 当前必须包含一个 aggregate，aggregate 后的 filter/select/sort/take 针对汇总后的 schema 执行。
 
