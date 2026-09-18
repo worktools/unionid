@@ -302,6 +302,8 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 | [#248](https://github.com/worktools/unionid/issues/248) | Partial unique index | P1 |
 | [#363](https://github.com/worktools/unionid/issues/363) | 试用反馈驱动的 CLI、诊断和错误提示 / trial-driven CLI, diagnostics, and errors | P1 |
 
+#363 的首轮试用记录见 [CLI trials for v0.10](assessments/cli-trials-v0.10.md)：完整项目生命周期已经可用，直接查看 redb 的单次 introspection 是首个被修复的摩擦点。后续改动仍以能够复现的试用反馈为准。 / The first #363 trial record is [CLI trials for v0.10](assessments/cli-trials-v0.10.md): the full project lifecycle works, while one-shot introspection of a redb file was the first corrected friction point. Further changes remain evidence-driven.
+
 ### 按需探索 · 版本待定 / Demand-driven exploration · version TBD
 
 没有 milestone 的 P2/deferred issues 是候选池，不把探索等同于 v1.0 发布承诺。进入条件是具体调用方/工作负载、最小范围、正确性与资源预算以及验收方式；满足后移入具体版本。v1.0 的长期稳定性与兼容承诺以后另行确定。

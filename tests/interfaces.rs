@@ -747,8 +747,11 @@ fn cli_help_uses_current_structured_examples_that_execute() {
     for expected in [
         "unionid cli --memory",
         "unionid cli --db app.redb",
+        "--read-only --query .tables",
         "from tasks | take 10",
-        ".schema  .tables  .types  .storage  .help  .quit",
+        ".schema  .tables  .types  .storage",
+        ".help  .quit",
+        "sole --query/--file/stdin input",
         "--history <PATH>",
         "--no-history",
     ] {
@@ -1465,6 +1468,70 @@ fn introspection_is_consistent_across_memory_redb_and_all_tcp_commands() {
     let disconnected =
         cli::send_introspection("127.0.0.1:0", IntrospectionKind::Tables).unwrap_err();
     assert!(disconnected.contains("connect 127.0.0.1:0"));
+}
+
+#[test]
+fn cli_accepts_introspection_as_one_shot_query_file_stdin_and_tcp_input() {
+    let setup = "struct Task { id: int, title: text }\ntable tasks: Task { key id }";
+    let dir = TempDir::new();
+    let path = dir.0.join("inspect.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(engine.execute(setup).ok);
+    drop(engine);
+
+    let local = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["cli", "--db", path.to_str().unwrap(), "--read-only"])
+        .args(["--query", ".tables", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        local.status.success(),
+        "{}",
+        String::from_utf8_lossy(&local.stderr)
+    );
+    let local: serde_json::Value = serde_json::from_slice(&local.stdout).unwrap();
+    assert_eq!(local["kind"], "tables");
+    assert_eq!(
+        local["introspection"]["tables"],
+        serde_json::json!(["tasks"])
+    );
+    assert_eq!(local["introspection"]["read_only"], true);
+
+    let command_file = dir.0.join("inspect.txt");
+    std::fs::write(&command_file, ".types\n").unwrap();
+    let file = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["cli", "--db", path.to_str().unwrap(), "--read-only"])
+        .args(["--file", command_file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(file.status.success());
+    assert_eq!(String::from_utf8(file.stdout).unwrap(), "Task\n");
+
+    let mut stdin = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["cli", "--db", path.to_str().unwrap(), "--read-only"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    stdin.stdin.take().unwrap().write_all(b".schema\n").unwrap();
+    let stdin = stdin.wait_with_output().unwrap();
+    assert!(stdin.status.success());
+    assert_eq!(
+        String::from_utf8(stdin.stdout).unwrap(),
+        "struct Task {\n  id: int\n  title: text\n}\ntable tasks: Task {\n  key id\n}\n"
+    );
+
+    let server = Server::start(&[]);
+    assert!(cli::send_one(&server.addr, setup).unwrap().ok);
+    let remote = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["cli", "--addr", &server.addr])
+        .args(["--query", ".storage", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(remote.status.success());
+    let remote: serde_json::Value = serde_json::from_slice(&remote.stdout).unwrap();
+    assert_eq!(remote["kind"], "storage");
+    assert_eq!(remote["introspection"]["storage"], "memory");
 }
 
 #[test]

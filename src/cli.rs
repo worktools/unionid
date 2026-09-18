@@ -29,7 +29,15 @@ pub fn run_local_with_options(
     json: bool,
     history: HistoryOptions,
 ) -> Result<(), String> {
-    run_local_engine(Engine::memory(), source, json, history)
+    run_local_engine(Engine::memory(), source, json, history, false)
+}
+
+pub fn run_local_cli_with_options(
+    source: Option<String>,
+    json: bool,
+    history: HistoryOptions,
+) -> Result<(), String> {
+    run_local_engine(Engine::memory(), source, json, history, true)
 }
 
 pub fn format_source(source: &str, check: bool) -> Result<(), String> {
@@ -83,7 +91,23 @@ pub fn run_local_redb_read_only_with_options(
         Engine::open_redb(path)
     }
     .map_err(|error| error.to_string())?;
-    run_local_engine(engine, source, json, history)
+    run_local_engine(engine, source, json, history, false)
+}
+
+pub fn run_local_redb_cli_read_only_with_options(
+    path: impl Into<std::path::PathBuf>,
+    source: Option<String>,
+    json: bool,
+    history: HistoryOptions,
+    read_only: bool,
+) -> Result<(), String> {
+    let engine = if read_only {
+        Engine::open_redb_read_only(path)
+    } else {
+        Engine::open_redb(path)
+    }
+    .map_err(|error| error.to_string())?;
+    run_local_engine(engine, source, json, history, true)
 }
 
 pub fn check_redb(path: impl Into<std::path::PathBuf>, json: bool) -> Result<(), String> {
@@ -1409,8 +1433,12 @@ fn run_local_engine(
     source: Option<String>,
     json: bool,
     history: HistoryOptions,
+    one_shot_introspection: bool,
 ) -> Result<(), String> {
     if let Some(source) = source {
+        if one_shot_introspection && let Some(kind) = introspection_command(source.trim()) {
+            return print_introspection(&engine.introspection(), kind, json);
+        }
         return print_response(&engine.execute(&source), json);
     }
     repl(Some(&mut engine), "", json, history)
@@ -1427,6 +1455,9 @@ pub fn run_cli_with_options(
     history: HistoryOptions,
 ) -> Result<(), String> {
     if let Some(source) = source {
+        if let Some(kind) = introspection_command(source.trim()) {
+            return print_introspection(&send_introspection(addr, kind)?, kind, json);
+        }
         return print_response(&send_one(addr, &source)?, json);
     }
     repl(None, addr, json, history)
@@ -1444,6 +1475,13 @@ fn repl(
         let source = read_source(stdin.lock())?;
         if source.trim().is_empty() {
             return Ok(());
+        }
+        if let Some(kind) = introspection_command(source.trim()) {
+            return print_introspection(
+                &load_introspection(engine.as_deref(), addr, kind)?,
+                kind,
+                json,
+            );
         }
         let response = match engine {
             Some(engine) => engine.execute(&source),

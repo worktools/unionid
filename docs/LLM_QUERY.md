@@ -6,7 +6,14 @@ application supplies its current schema. For a durable database, obtain that sch
 
 ```console
 unionid schema print --db app.redb --format json
+unionid cli --db app.redb --read-only --query .schema
 ```
+
+The first command returns the schema-specific machine-readable contract. The second prints
+canonical source and is convenient for a human or an LLM context. Use `.tables`, `.types`, or
+`.storage` in the same one-shot form when only catalog or storage context is needed. With
+`--format json`, these CLI introspection commands return a stable envelope containing `kind` and
+`introspection`; do not infer schema from raw redb bytes.
 
 ## Source rules
 

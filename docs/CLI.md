@@ -244,6 +244,17 @@ REPL 使用 `unionid>` 开始新脚本，`..>` 表示语法还需继续，`ready
 | `.help` | 交互命令和提交方式 |
 | `.quit` | 退出 |
 
+前四个 introspection 命令也可以作为 `--query`、`--file` 或标准输入中的唯一命令执行，适合不进入交互界面就直接查看 redb 文件，也适合脚本和工具调用：
+
+```bash
+unionid cli --db app.redb --read-only --query .tables
+unionid cli --db app.redb --read-only --query .schema
+printf '.storage\n' | unionid cli --db app.redb --read-only --format json
+unionid cli --addr 127.0.0.1:7878 --query .types
+```
+
+`.help` 和 `.quit` 只用于交互会话。单次 introspection 必须是输入中的完整内容，不能和查询脚本混写；`run` 继续只接受 Unionid 语言源码。
+
 空 catalog 会明确显示 `(empty schema)`、`(no tables)` 或 `(no types)`。TCP introspection 是 version 1 JSON Lines 协议的一部分；旧 query 请求继续兼容。远端断开时，meta command 显示连接错误，Tab 仍可补全本地语言关键字。
 
 ## 补全
