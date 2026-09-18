@@ -26,11 +26,11 @@
 ### 场景三：像 DuckDB 一样直接查看数据库文件
 
 - **任务：** 不进入交互界面，查看已有 redb 的表、类型、schema 和存储状态。
-- **输入与最小状态：** 一个包含 `Task` schema 和两行数据的 redb；运行 `unionid cli --db tasks.redb --read-only --query .tables`，并对 `.schema`、`.types`、`.storage` 重复验证 `--query`、`--file`、stdin、本地和 TCP 路径。
+- **输入与最小状态：** 一个包含 `Task` schema 和两行数据的 redb，以及一个带相同 schema 的内存 TCP 服务；分别验证本地 redb `--query .tables`、本地 redb `--file .types`、本地 redb stdin `.schema` 和 TCP `--query .storage`。
 - **期望：** introspection 使用与 REPL 相同的人类输出；`--format json` 返回由 `kind` 和 typed `introspection` 构成的稳定、脱敏 envelope。
 - **修复前：** typed row query 可用，但 `.tables` 被当作查询语言并返回 `E_SYNTAX`。这会阻塞 shell 和 LLM 工具的非交互 catalog 查看。
 - **修复后：** PR #368 让四个命令可作为 `cli` 的唯一 `--query`、`--file` 或 stdin 输入；memory、redb 和 version 1 TCP introspection 一致。`.help`、`.quit` 仍只属于交互会话，`run` 仍只执行 Unionid 源码。
-- **回归验收：** `cli_accepts_introspection_as_one_shot_query_file_stdin_and_tcp_input` 覆盖本地只读 redb、命令文件、stdin、TCP、人类输出与 JSON；CLI help、CLI 文档和 LLM 文档同步说明同一边界。
+- **回归验收：** `cli_accepts_introspection_as_one_shot_query_file_stdin_and_tcp_input` 覆盖上述四个代表性组合，同时检查本地 JSON envelope、redb read-only 状态、本地人类输出和 TCP JSON 输出；CLI help、CLI 文档和 LLM 文档同步说明能力边界。
 - **阻塞：** 修复前会阻塞自动化查看；修复后解除。
 
 三条场景没有引入无试用依据的命令。人类输出保持可行动，JSON 复用现有 version 1 introspection 协议且不包含业务行；错误继续通过既有稳定 code 和退出码返回。
@@ -58,11 +58,11 @@ This record is the reproducible acceptance evidence for [#363](https://github.co
 ### Scenario three: inspect a database file directly, like DuckDB
 
 - **Task:** Inspect tables, types, schema, and storage state without entering an interactive session.
-- **Input and minimal state:** A redb containing a `Task` schema and two rows; run `unionid cli --db tasks.redb --read-only --query .tables`, then exercise `.schema`, `.types`, and `.storage` through `--query`, `--file`, stdin, local, and TCP paths.
+- **Input and minimal state:** A redb containing a `Task` schema and two rows, plus an in-memory TCP server with the same schema. Exercise local redb `--query .tables`, local redb `--file .types`, local redb stdin `.schema`, and TCP `--query .storage`.
 - **Expected:** Introspection uses the same human output as the REPL; `--format json` returns a stable, redacted envelope containing `kind` and typed `introspection`.
 - **Before:** Typed row queries worked, but `.tables` was parsed as query language and returned `E_SYNTAX`. This blocked noninteractive catalog inspection from shell and LLM tooling.
 - **After:** PR #368 accepts each of the four commands as the sole `cli` input through `--query`, `--file`, or stdin; memory, redb, and version 1 TCP introspection agree. `.help` and `.quit` remain interactive-only, while `run` continues to execute Unionid source exclusively.
-- **Regression acceptance:** `cli_accepts_introspection_as_one_shot_query_file_stdin_and_tcp_input` covers local read-only redb, command files, stdin, TCP, human output, and JSON. CLI help, CLI documentation, and LLM guidance describe the same boundary.
+- **Regression acceptance:** `cli_accepts_introspection_as_one_shot_query_file_stdin_and_tcp_input` covers those four representative combinations and checks the local JSON envelope, redb read-only state, local human output, and TCP JSON output. CLI help, CLI documentation, and LLM guidance describe the capability boundary.
 - **Blocking:** It blocked automated inspection before the fix and no longer does.
 
 These scenarios add no command without trial evidence. Human output remains actionable; JSON reuses the existing version 1 introspection protocol and contains no business rows. Errors continue to use the established stable codes and exit classes.
