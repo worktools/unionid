@@ -342,26 +342,49 @@ pub(crate) fn bind_scalar(
         ScalarExpression::Call {
             name, arguments, ..
         } if is_builtin_scalar_function(name) => {
-            if matches!(name.as_str(), "decimal_parse" | "decimal_rescale") {
-                if arguments.len() != 3 {
+            if matches!(
+                name.as_str(),
+                "decimal_parse"
+                    | "decimal_rescale"
+                    | "decimal_round"
+                    | "decimal_mul"
+                    | "decimal_div"
+            ) {
+                let expected_arity = builtin_scalar_arity(name).expect("known decimal builtin");
+                if arguments.len() != expected_arity {
                     return Err(Error::new(
                         "E_TYPE",
-                        format!("{name} expects 3 arguments, got {}", arguments.len()),
+                        format!(
+                            "{name} expects {expected_arity} arguments, got {}",
+                            arguments.len()
+                        ),
                     ));
                 }
-                let target = decimal_target(&arguments[1], &arguments[2])?;
+                let (precision_index, scale_index) =
+                    if matches!(name.as_str(), "decimal_mul" | "decimal_div") {
+                        (2, 3)
+                    } else {
+                        (1, 2)
+                    };
+                let target = decimal_target(&arguments[precision_index], &arguments[scale_index])?;
+                if matches!(
+                    name.as_str(),
+                    "decimal_round" | "decimal_mul" | "decimal_div"
+                ) {
+                    decimal_rounding(&arguments[scale_index + 1])?;
+                }
                 let input = if name == "decimal_parse" {
                     ScalarType::Text
                 } else {
                     infer_scalar(catalog, scope, &arguments[0], reference_kind)?
-                        .ok_or_else(|| Error::new("E_TYPE", "cannot infer decimal_rescale input"))?
+                        .ok_or_else(|| Error::new("E_TYPE", format!("cannot infer {name} input")))?
                 };
-                if name == "decimal_rescale"
+                if name != "decimal_parse"
                     && !matches!(catalog.underlying(&input)?, ScalarType::Decimal { .. })
                 {
                     return Err(Error::new(
                         "E_TYPE",
-                        "decimal_rescale expects decimal input",
+                        format!("{name} expects decimal input"),
                     ));
                 }
                 bind_scalar(
@@ -371,6 +394,25 @@ pub(crate) fn bind_scalar(
                     Some(&input),
                     reference_kind,
                 )?;
+                if matches!(name.as_str(), "decimal_mul" | "decimal_div") {
+                    let right = infer_scalar(catalog, scope, &arguments[1], reference_kind)?
+                        .ok_or_else(|| {
+                            Error::new("E_TYPE", format!("cannot infer {name} right input"))
+                        })?;
+                    if !matches!(catalog.underlying(&right)?, ScalarType::Decimal { .. }) {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!("{name} expects decimal inputs"),
+                        ));
+                    }
+                    bind_scalar(
+                        catalog,
+                        scope,
+                        &mut arguments[1],
+                        Some(&right),
+                        reference_kind,
+                    )?;
+                }
                 return Ok(target);
             }
             if arguments.len() != 1 {
@@ -488,24 +530,58 @@ pub(crate) fn infer_scalar(
         ScalarExpression::Call {
             name, arguments, ..
         } if is_builtin_scalar_function(name) => {
-            if matches!(name.as_str(), "decimal_parse" | "decimal_rescale") {
-                if arguments.len() != 3 {
+            if matches!(
+                name.as_str(),
+                "decimal_parse"
+                    | "decimal_rescale"
+                    | "decimal_round"
+                    | "decimal_mul"
+                    | "decimal_div"
+            ) {
+                let expected_arity = builtin_scalar_arity(name).expect("known decimal builtin");
+                if arguments.len() != expected_arity {
                     return Err(Error::new(
                         "E_TYPE",
-                        format!("{name} expects 3 arguments, got {}", arguments.len()),
+                        format!(
+                            "{name} expects {expected_arity} arguments, got {}",
+                            arguments.len()
+                        ),
                     ));
                 }
-                if name == "decimal_rescale"
-                    && let Some(input) =
-                        infer_scalar(catalog, scope, &arguments[0], reference_kind)?
-                    && !matches!(catalog.underlying(&input)?, ScalarType::Decimal { .. })
-                {
-                    return Err(Error::new(
-                        "E_TYPE",
-                        "decimal_rescale expects decimal input",
-                    ));
+                let (precision_index, scale_index) =
+                    if matches!(name.as_str(), "decimal_mul" | "decimal_div") {
+                        (2, 3)
+                    } else {
+                        (1, 2)
+                    };
+                if name != "decimal_parse" {
+                    for argument in
+                        &arguments[..if matches!(name.as_str(), "decimal_mul" | "decimal_div") {
+                            2
+                        } else {
+                            1
+                        }]
+                    {
+                        if let Some(input) = infer_scalar(catalog, scope, argument, reference_kind)?
+                            && !matches!(catalog.underlying(&input)?, ScalarType::Decimal { .. })
+                        {
+                            return Err(Error::new(
+                                "E_TYPE",
+                                format!("{name} expects decimal input"),
+                            ));
+                        }
+                    }
                 }
-                return Ok(Some(decimal_target(&arguments[1], &arguments[2])?));
+                if matches!(
+                    name.as_str(),
+                    "decimal_round" | "decimal_mul" | "decimal_div"
+                ) {
+                    decimal_rounding(&arguments[scale_index + 1])?;
+                }
+                return Ok(Some(decimal_target(
+                    &arguments[precision_index],
+                    &arguments[scale_index],
+                )?));
             }
             if arguments.len() != 1 {
                 return Err(Error::new(
@@ -743,12 +819,19 @@ pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
             | "duration_parse"
             | "decimal_parse"
             | "decimal_rescale"
+            | "decimal_round"
+            | "decimal_mul"
+            | "decimal_div"
     )
 }
 
 pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
     if matches!(name, "decimal_parse" | "decimal_rescale") {
         Some(3)
+    } else if name == "decimal_round" {
+        Some(4)
+    } else if matches!(name, "decimal_mul" | "decimal_div") {
+        Some(5)
     } else if is_builtin_scalar_function(name) {
         Some(1)
     } else {
@@ -780,6 +863,16 @@ fn decimal_target(precision: &ScalarExpression, scale: &ScalarExpression) -> Res
     let scale = literal(scale, "scale")?;
     crate::scalars::validate_decimal_type(precision, scale)?;
     Ok(ScalarType::Decimal { precision, scale })
+}
+
+fn decimal_rounding(expression: &ScalarExpression) -> Result<crate::scalars::DecimalRounding> {
+    let ScalarExpression::Literal(Value::Text(value)) = expression else {
+        return Err(Error::new(
+            "E_DECIMAL_ROUNDING",
+            "decimal rounding mode must be a text literal",
+        ));
+    };
+    value.parse()
 }
 
 fn reference_type<'a>(
@@ -1152,25 +1245,84 @@ fn evaluate_scalar<'expression, 'values>(
         ScalarExpression::Call {
             name, arguments, ..
         } if is_builtin_scalar_function(name) => {
-            if matches!(name.as_str(), "decimal_parse" | "decimal_rescale") {
-                let target = decimal_target(&arguments[1], &arguments[2])?;
+            if matches!(
+                name.as_str(),
+                "decimal_parse"
+                    | "decimal_rescale"
+                    | "decimal_round"
+                    | "decimal_mul"
+                    | "decimal_div"
+            ) {
+                let binary = matches!(name.as_str(), "decimal_mul" | "decimal_div");
+                let precision_index = if binary { 2 } else { 1 };
+                let scale_index = if binary { 3 } else { 2 };
+                let target = decimal_target(&arguments[precision_index], &arguments[scale_index])?;
                 let ScalarType::Decimal { precision, scale } = target else {
                     unreachable!()
                 };
                 let Some(argument) = evaluate_scalar(catalog, &arguments[0], values)? else {
                     return Ok(None);
                 };
-                let decimal = match (name.as_str(), argument.as_value().unwrapped()) {
+                let left = argument.as_value().unwrapped();
+                let right = if binary {
+                    let Some(argument) = evaluate_scalar(catalog, &arguments[1], values)? else {
+                        return Ok(None);
+                    };
+                    Some(argument.as_value().unwrapped().clone())
+                } else {
+                    None
+                };
+                let rounding = if matches!(
+                    name.as_str(),
+                    "decimal_round" | "decimal_mul" | "decimal_div"
+                ) {
+                    Some(decimal_rounding(&arguments[scale_index + 1])?)
+                } else {
+                    None
+                };
+                let decimal = match (name.as_str(), left) {
                     ("decimal_parse", Value::Text(source)) => {
                         crate::scalars::Decimal::parse(source, precision, scale)?
                     }
                     ("decimal_rescale", Value::Decimal(value)) => {
                         value.rescale(precision, scale)?
                     }
+                    ("decimal_round", Value::Decimal(value)) => value.rescale_with_rounding(
+                        precision,
+                        scale,
+                        rounding.expect("rounding was parsed"),
+                    )?,
+                    ("decimal_mul", Value::Decimal(value)) => {
+                        let Some(Value::Decimal(right)) = right else {
+                            return Err(Error::new("E_TYPE", "decimal_mul expects decimal inputs"));
+                        };
+                        value.checked_mul_to(
+                            right,
+                            precision,
+                            scale,
+                            rounding.expect("rounding was parsed"),
+                        )?
+                    }
+                    ("decimal_div", Value::Decimal(value)) => {
+                        let Some(Value::Decimal(right)) = right else {
+                            return Err(Error::new("E_TYPE", "decimal_div expects decimal inputs"));
+                        };
+                        value.checked_div_to(
+                            right,
+                            precision,
+                            scale,
+                            rounding.expect("rounding was parsed"),
+                        )?
+                    }
                     ("decimal_parse", _) => {
                         return Err(Error::new("E_TYPE", "decimal_parse expects text"));
                     }
-                    _ => return Err(Error::new("E_TYPE", "decimal_rescale expects decimal")),
+                    _ => {
+                        return Err(Error::new(
+                            "E_TYPE",
+                            format!("{name} expects decimal input"),
+                        ));
+                    }
                 };
                 return Ok(Some(Evaluated::Owned(Value::Decimal(decimal))));
             }

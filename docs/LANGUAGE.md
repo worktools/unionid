@@ -43,7 +43,7 @@ insert tasks {
 
 - duration 支持 checked `+`、`-`、一元负号和 `sum`；`timestamp +/- duration` 得到 timestamp，`timestamp - timestamp` 得到 duration。溢出返回 `E_ARITH`。date 不做 calendar 算术，也没有隐式当前时间、本地时区或 DST 规则。旧 text 数据可在 migration 中用 `date_parse`、`timestamp_parse` 和 `duration_parse` 精确转换。
 
-- 相同 `Decimal<P, S>` 支持 checked `+`、`-`、一元负号和 `sum`，每个中间结果都按目标 precision 检查。乘法、除法、avg 和任何舍入保持未实现；旧 text 用 `decimal_parse old P S`，已有 decimal 用 `decimal_rescale old P S` 精确迁移，丢弃非零位时返回 `E_DECIMAL_RANGE`。
+- 相同 `Decimal<P, S>` 支持 checked `+`、`-`、一元负号和 `sum`，每个中间结果都按目标 precision 检查。可能改变 scale 的运算显式写成 `decimal_mul left right P S "mode"`、`decimal_div ...`、`decimal_round value P S "mode"`；`decimal_avg value P S "mode"` 用相同规则汇总。mode 为 `exact`、`toward_zero`、`away_from_zero`、`floor`、`ceil`、`half_up` 或 `half_even`。普通 decimal `*`、`/` 不推断结果类型。旧 text 用 `decimal_parse old P S`，精确 rescale 继续用 `decimal_rescale old P S`。
 - 支持命名 struct/enum、嵌套积类型、tuple，以及内建 `Option<T>`、`List<T>`，例如 `type Point = (float, float)`、`Option<List<Contact>>`。
 - product type 规范写成 `struct Name { field: Type }`；enum 的 record payload 同样使用 `{}`。旧 `type` record/sum 继续作为 migration、WAL 和已有脚本的兼容输入，formatter 只输出 Rust 形状。
 - record 值使用 `field: value`；列表如 `[1, 2]`，tuple 如 `(1, "x")`。位置负载写成 `Pair(1, "x")`；单个 tuple 负载需要额外一层括号，如 `Pair((1, "x"))`。
@@ -152,7 +152,7 @@ take 20
 
 `explain` 可直接放在单行查询前，也可把完整查询缩进到下一层。它执行与真实查询相同的静态绑定，返回结构化访问计划，但不读取或执行数据行。`explain analyze` 使用相同布局，在同一读快照上额外执行 pipeline 并返回 value-free `analysis`，不会返回业务 rows 或 cursor。只有开头的单纯有索引等值 filter（允许前置 let）使用 lookup；planner 不越过其他 stage。完整字段与测量规则见 [Explain、实际剖析与类型化索引计划](QUERY.md#explain实际剖析与类型化索引计划)。
 
-未分组 `aggregate` 在空输入上返回一行：count/count_distinct 为 0、sum 为输入数值类型的零、avg/min/max 为 `None`；分组空输入返回零行。avg 支持 int、float 和 duration；decimal avg 在精度与舍入规则明确前拒绝。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
+未分组 `aggregate` 在空输入上返回一行：count/count_distinct 为 0、sum 为输入数值类型的零、avg/decimal_avg/min/max 为 `None`；分组空输入返回零行。普通 avg 支持 int、float 和 duration；decimal 使用显式目标类型与舍入的 `decimal_avg amount 18 2 "half_even"`。aggregate 后可继续 filter/select/sort/take。输入类型、顺序语义和资源上限见[分组与基础汇总](QUERY.md#分组与基础汇总)。
 
 基础窗口使用明确的块结构：
 

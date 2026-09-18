@@ -2,7 +2,7 @@
 
 ## 当前可用范围
 
-`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`，并已接入源码语言、原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2、value codec 2、索引/cursor、migration 与 storage format 4–5。decimal 使用 schema 固定 precision/scale，并只提供精确 checked 运算。
+`unionid::scalars` 提供 `Uuid`、`Date`、`Timestamp`、`Duration`、`Decimal` 和 `Bytes`，并已接入源码语言、原生 `ScalarType` / `Value`、嵌套 ADT serde、protocol v2、value codec 2、索引/cursor、migration 与 storage format 4–5。decimal 使用 schema 固定 precision/scale；加减保持精确，乘除、舍入与平均值要求显式目标类型和 `DecimalRounding`。
 
 完整标量契约见 [RFC 0004](rfc/0004-production-scalars.md)。format 4 仍是生产标量兼容边界，使用 catalog/value/index-key/receipt codec 3/2/2/2；当前新 redb 数据库使用 format 6 和逻辑 codec 4/2/3/2，并增加 maintenance codec 1，逻辑 backup 使用 format 4。旧 format 1–3 和过渡 snapshot 仍拒绝新 schema/receipt，持久写请求包含新标量参数时返回 `E_STORAGE_UPGRADE_REQUIRED`；显式升级到 4 会校验并重写标量相关 durable state，复合/降序索引要求继续升级到 5，generation envelope 要求从 5 升级到 6。失败保留完整旧格式。
 
@@ -17,10 +17,10 @@
 | `Decimal` | `i128` coefficient，最多 38 位；scale 为 0–38 | `{"coefficient":"1990","scale":2}` |
 | `Bytes` | 最大 16 MiB；文本解析和 Display 使用 hex | 无 padding 的 canonical base64url 字符串 |
 
-`FromStr` 负责 UUID、日期、时间戳、时长和 bytes 的输入解析；decimal 用 `Decimal::parse(text, precision, scale)` 指定目标类型，或用 `Decimal::infer(text)` 推断最小 precision。`Decimal::rescale` 只接受精确转换，不舍入。wrapper 保存 coefficient 和 scale；目标 schema 的 precision 需在绑定时单独校验，serde 不保存 precision。
+`FromStr` 负责 UUID、日期、时间戳、时长和 bytes 的输入解析；decimal 用 `Decimal::parse(text, precision, scale)` 指定目标类型，或用 `Decimal::infer(text)` 推断最小 precision。`Decimal::rescale` 只接受精确转换；`rescale_with_rounding`、`checked_mul_to` 与 `checked_div_to` 要求目标 P/S 和 `DecimalRounding`。wrapper 保存 coefficient 和 scale；目标 schema 的 precision 需在绑定时单独校验，serde 不保存 precision。
 
 ```rust
-use unionid::scalars::{Bytes, Decimal, Timestamp};
+use unionid::scalars::{Bytes, Decimal, DecimalRounding, Timestamp};
 
 let at: Timestamp = "1970-01-01T08:00:00.000001+08:00".parse()?;
 assert_eq!(at.to_string(), "1970-01-01T00:00:00.000001Z");
@@ -28,6 +28,10 @@ assert_eq!(at.to_string(), "1970-01-01T00:00:00.000001Z");
 let price = Decimal::parse("19.9", 18, 2)?;
 assert_eq!(price.to_string(), "19.90");
 assert!(price.rescale(18, 0).is_err());
+assert_eq!(
+    price.rescale_with_rounding(18, 0, DecimalRounding::HalfEven)?.to_string(),
+    "20"
+);
 
 let digest: Bytes = "deadbeef".parse()?;
 assert_eq!(digest.to_base64url(), "3q2-7w");
@@ -49,11 +53,11 @@ wrapper 调用 `serialize_newtype_struct`，marker 使用保留前缀 `unionid::
 
 `Request` 保持默认 version 1；用 `.with_version(2)?` 显式选择 version 2。v1 在 mutation 前检查参数、最终 query／`returning`／`explain` 结果类型和 introspection schema，无法表达新标量时返回 `E_PROTOCOL_TYPE`。幂等命中仍保持“不解析源码直接重放”的既有语义，同时验证存量回执能否由 v1 表达。v2 使用 RFC 0004 的 canonical wire envelope，响应回显版本，幂等 digest 仍包含版本。
 
-cursor 根据实际 boundary 选择词汇版本：只含旧标量时继续输出 `u1`，任一排序键含新标量时输出 `u2`。两个版本共享 HMAC、database/schema/query/sequence 绑定和大小限制；prefix、payload codec 与 typed vocabulary 不一致时 fail closed。全部六类生产标量的源码与查询均已接入；decimal 乘除、avg 与舍入仍明确 deferred。
+cursor 根据实际 boundary 选择词汇版本：只含旧标量时继续输出 `u1`，任一排序键含新标量时输出 `u2`。两个版本共享 HMAC、database/schema/query/sequence 绑定和大小限制；prefix、payload codec 与 typed vocabulary 不一致时 fail closed。全部六类生产标量的源码与查询均已接入；decimal 乘除、舍入和平均值使用显式目标 P/S 与 mode，不改变 durable codec。
 
 ## English Description
 
-`unionid::scalars` provides six native production scalars across source, typed Rust ADTs, protocol v2, value/index codecs, cursors, redb, backups, and exact migrations. Decimal precision and scale belong to the schema; addition, subtraction, negation, and sum are checked at every step. Multiplication, division, average, and rounding remain deliberately deferred.
+`unionid::scalars` provides six native production scalars across source, typed Rust ADTs, protocol v2, value/index codecs, cursors, redb, backups, and exact migrations. Decimal precision and scale belong to the schema; addition, subtraction, negation, and sum are checked at every step. Multiplication, division, average, and rounding require an explicit target precision, scale, and rounding mode.
 
 Requests default to protocol 1; `.with_version(2)?` opts in. Version 1 rejects new scalar parameters before mutation, responses echo the requested version, and idempotency digests distinguish versions. Legacy durable formats reject native schemas/receipts and persistent mutations with native parameters. Read-only protocol-v2 use can pass and return native parameters without upgrading storage.
 

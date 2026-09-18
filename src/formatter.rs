@@ -757,23 +757,41 @@ fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
         (depth + 2, depth + 1)
     };
     for assignment in &aggregate.assignments {
-        let function = match assignment.function {
-            AggregateFunction::Count => "count",
-            AggregateFunction::CountDistinct => "count_distinct",
-            AggregateFunction::Average => "avg",
-            AggregateFunction::Sum => "sum",
-            AggregateFunction::Min => "min",
-            AggregateFunction::Max => "max",
-        };
         let input = assignment
             .input
             .as_ref()
-            .map(|input| format!(" {}", scalar(input, 0, false)))
-            .unwrap_or_default();
+            .map(|input| scalar(input, 0, false));
+        let rendered = match assignment.function {
+            AggregateFunction::Count => "count".to_owned(),
+            AggregateFunction::CountDistinct => {
+                format!("count_distinct {}", input.as_deref().unwrap_or_default())
+            }
+            AggregateFunction::Average => {
+                format!("avg {}", input.as_deref().unwrap_or_default())
+            }
+            AggregateFunction::DecimalAverage {
+                precision,
+                scale,
+                rounding,
+            } => format!(
+                "decimal_avg {} {precision} {scale} \"{}\"",
+                input.as_deref().unwrap_or_default(),
+                rounding.as_str()
+            ),
+            AggregateFunction::Sum => {
+                format!("sum {}", input.as_deref().unwrap_or_default())
+            }
+            AggregateFunction::Min => {
+                format!("min {}", input.as_deref().unwrap_or_default())
+            }
+            AggregateFunction::Max => {
+                format!("max {}", input.as_deref().unwrap_or_default())
+            }
+        };
         line(
             output,
             assignment_depth,
-            &format!("{} = {function}{input}", assignment.name),
+            &format!("{} = {rendered}", assignment.name),
         );
     }
     line(output, closing_depth, "}");

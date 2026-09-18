@@ -61,6 +61,88 @@ select {id, amount, with_fee, reversed}"#,
         .expect("decimal avg must require explicit rounding");
     assert_eq!(error.code, "E_TYPE");
     assert!(error.message.contains("precision and rounding"));
+
+    let average =
+        engine.execute(r#"from invoices | aggregate {mean = decimal_avg amount 18 2 "half_even"}"#);
+    assert!(average.ok, "{}", average.message);
+    assert_eq!(
+        average.rows[0]["mean"].source_text(),
+        "Some(decimal \"8.30\")"
+    );
+}
+
+#[test]
+fn explicit_decimal_multiply_divide_and_rounding_cover_ties_and_errors() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                r#"type Number = {id int, value decimal 18 2}
+table numbers Number
+  key id
+insert many numbers [
+  {id = 1, value = decimal "2.50"},
+  {id = 2, value = decimal "-2.50"},
+]"#,
+            )
+            .ok
+    );
+    let result = engine.execute(
+        r#"from numbers
+sort id
+derive {
+  product_even = decimal_mul value decimal "1.25" 18 2 "half_even"
+  product_up = decimal_mul value decimal "1.25" 18 2 "half_up"
+  quotient = decimal_div value decimal "3.00" 18 3 "half_even"
+  rounded_even = decimal_round value 18 0 "half_even"
+  rounded_up = decimal_round value 18 0 "half_up"
+}"#,
+    );
+    assert!(result.ok, "{}", result.message);
+    let source = r#"from numbers | aggregate {mean = decimal_avg value 18 2 "half_even"}"#;
+    let formatted = format_source(source).unwrap();
+    assert_eq!(format_source(&formatted).unwrap(), formatted);
+    assert_eq!(
+        result.rows[0]["product_even"].source_text(),
+        "decimal \"3.12\""
+    );
+    assert_eq!(
+        result.rows[0]["product_up"].source_text(),
+        "decimal \"3.13\""
+    );
+    assert_eq!(
+        result.rows[0]["quotient"].source_text(),
+        "decimal \"0.833\""
+    );
+    assert_eq!(
+        result.rows[0]["rounded_even"].source_text(),
+        "decimal \"2\""
+    );
+    assert_eq!(result.rows[0]["rounded_up"].source_text(), "decimal \"3\"");
+    assert_eq!(
+        result.rows[1]["rounded_even"].source_text(),
+        "decimal \"-2\""
+    );
+    assert_eq!(result.rows[1]["rounded_up"].source_text(), "decimal \"-3\"");
+
+    let exact = engine
+        .execute(r#"from numbers | derive bad = decimal_div value decimal "3.00" 18 2 "exact""#);
+    assert_eq!(exact.error.unwrap().code, "E_ARITH");
+    let mutation = engine.execute(
+        r#"update numbers | filter id == 1 | set value = decimal_div value decimal "3.00" 18 2 "exact""#,
+    );
+    assert_eq!(mutation.error.unwrap().code, "E_ARITH");
+    assert_eq!(
+        engine.execute("from numbers | filter id == 1").rows[0]["value"].source_text(),
+        "decimal \"2.50\""
+    );
+    let zero = engine.execute(
+        r#"from numbers | derive bad = decimal_div value decimal "0.00" 18 2 "half_even""#,
+    );
+    assert_eq!(zero.error.unwrap().code, "E_ARITH");
+    let bad_mode =
+        engine.execute(r#"from numbers | derive bad = decimal_round value 18 2 "bankers""#);
+    assert_eq!(bad_mode.error.unwrap().code, "E_DECIMAL_ROUNDING");
 }
 
 #[test]
