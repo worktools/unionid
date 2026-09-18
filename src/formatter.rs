@@ -757,10 +757,7 @@ fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
         (depth + 2, depth + 1)
     };
     for assignment in &aggregate.assignments {
-        let input = assignment
-            .input
-            .as_ref()
-            .map(|input| scalar(input, 0, false));
+        let input = assignment.input.as_ref().map(scalar_argument);
         let rendered = match assignment.function {
             AggregateFunction::Count => "count".to_owned(),
             AggregateFunction::CountDistinct => {

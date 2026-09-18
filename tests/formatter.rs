@@ -1,6 +1,15 @@
 use unionid::{Engine, format_source};
 
 #[test]
+fn decimal_average_parenthesizes_computed_input() {
+    let source =
+        r#"from invoices | aggregate {mean = decimal_avg (amount + fee) 18 2 "half_even"}"#;
+    let formatted = format_source(source).unwrap();
+    assert!(formatted.contains("decimal_avg (amount + fee) 18 2 \"half_even\""));
+    assert_eq!(format_source(&formatted).unwrap(), formatted);
+}
+
+#[test]
 fn formatter_is_idempotent_for_current_examples() {
     for (name, source) in [
         ("tasks", include_str!("../examples/tasks.unid")),
