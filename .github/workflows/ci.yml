@@ -23,6 +23,7 @@ jobs:
   # the repository-owned consumer verification scripts.
   core:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -55,6 +56,7 @@ jobs:
   # as a matrix so they compile in parallel instead of serially.
   tools:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +87,7 @@ jobs:
 
   derive:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -105,6 +108,7 @@ jobs:
 
   query-macro:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
