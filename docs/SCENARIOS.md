@@ -333,7 +333,7 @@ filter email == "shared@example.com"
 
 - 缺少可证明的 predicate 时回退到其他正确索引或 full scan，`predicate_rejections` 用 value-free 的 shape identity 与 `predicate_not_implied` 说明原因。
 - 稳定分页只有在证明成立时才用部分唯一索引论证唯一排序；`fetch_by_key` 不把部分唯一索引当作全表唯一证明。
-- predicate 变化是显式 drop/add；被引用字段改名通过 stable field path 更新显示文本，不改 index ID。`check` 会重新绑定每个 predicate，验证 true 行恰有一个 posting、false 行没有 posting。
+- predicate 变化是显式 drop/add；被引用字段改名通过 stable field path 更新显示文本，不改 index ID，而 drop 或改变字段类型前必须先 drop 对应索引。`check` 会重新绑定每个 predicate，验证 true 行恰有一个 posting、false 行没有 posting。
 - [release_scenarios.rs](../tests/release_scenarios.rs) 的 `partial_email` 与 `active_external_id` 两个旅程覆盖 query/DML → restart → migration → check → backup/restore，并比较源库与还原库的 schema、ledger、typed rows 与 explain plan。
 
 ## 功能覆盖与优先级

@@ -76,7 +76,7 @@ create unique index sessions (tenant, token) if (
 )
 ```
 
-`if` 比 component 列表绑定得更松，谓词在行类型作用域内解析。首版谓词是可规范化的 conjunction，atom 只允许 `field.path == typed_literal`、`field.path == None` 与 `is_some field.path`；`== None` 规范化为 `is_none`。`||`、`!`、`!=`、range 比较、参数、字段引用、算术、局部函数、`any/all`、`contains` 与 map lookup 返回 `E_INDEX_PREDICATE`，同一 path 上的矛盾条件返回 `E_INDEX_PREDICATE_CONTRADICTION`。atom 按 stable field-ID path、operator 与 canonical typed value 排序，因此交换 `&&`、空白或 enum 前缀不改变 schema identity。查看、删除或修改谓词被引用的字段前必须先 drop 对应索引，drop 时必须重复规范谓词；谓词变化是显式 drop/add。
+`if` 比 component 列表绑定得更松，谓词在行类型作用域内解析。首版谓词是可规范化的 conjunction，atom 只允许 `field.path == typed_literal`、`field.path == None` 与 `is_some field.path`；`== None` 规范化为 `is_none`。`||`、`!`、`!=`、range 比较、参数、字段引用、算术、局部函数、`any/all`、`contains` 与 map lookup 返回 `E_INDEX_PREDICATE`，同一 path 上的矛盾条件返回 `E_INDEX_PREDICATE_CONTRADICTION`。atom 按 stable field-ID path、operator 与 canonical typed value 排序，因此交换 `&&`、空白或 enum 前缀不改变 schema identity。rename 只通过 stable field path 更新显示文本，不改变 index ID；drop 或改变被引用字段类型前必须先 drop 对应索引，drop 时必须重复规范谓词；谓词变化是显式 drop/add。
 
 planner 只在查询已绑定过滤条件机械蕴含 index predicate 时才使用 partial unique index：只读取 barrier 前的简单 filter 与纯 `&&`，逐 atom 匹配 stable path、operator、静态类型与 canonical value，`field == Some value` 可蕴含 `is_some field`。`explain` 输出 canonical `index_predicate`、`predicate_proven` 与 value-free 的 `predicate_rejections`。`fetch_by_key` 不把 partial unique index 当作全表唯一证明。
 

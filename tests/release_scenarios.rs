@@ -333,6 +333,48 @@ sort id
     });
 }
 
+#[test]
+fn active_external_id_rejects_a_second_active_row_and_preserves_rows() {
+    let dir = TempDir::new();
+    let path = dir.0.join("active-external-id-conflict.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(
+        engine
+            .execute(
+                "type JobState = Pending | Active\n\
+                 type Job = {id int, provider text, external_id text, state JobState}\n\
+                 table jobs Job\n  key id\n\
+                 create unique index jobs (provider, external_id) if state == Active\n\
+                 insert jobs {id = 1, provider = \"acme\", external_id = \"42\", state = Active}\n\
+                 insert jobs {id = 2, provider = \"acme\", external_id = \"42\", state = Pending}"
+            )
+            .ok
+    );
+    let before = row_snapshot(&engine.execute("from jobs | sort id"));
+
+    let conflict = engine.execute("update jobs | filter id == 2 | set state = Active");
+    assert_eq!(conflict.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert_eq!(
+        row_snapshot(&engine.execute("from jobs | sort id")),
+        before,
+        "a rejected transition must not change either row"
+    );
+    assert!(engine.check_integrity().unwrap().backend_clean);
+
+    // The permitted handoff still works after the rejected attempt.
+    assert!(
+        engine
+            .execute("update jobs | filter id == 1 | set state = Pending")
+            .ok
+    );
+    assert!(
+        engine
+            .execute("update jobs | filter id == 2 | set state = Active")
+            .ok
+    );
+    assert!(engine.check_integrity().unwrap().backend_clean);
+}
+
 fn verify(scenario: Scenario) {
     let dir = TempDir::new();
     let database = dir.0.join(format!("{}.redb", scenario.name));

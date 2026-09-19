@@ -494,4 +494,24 @@ fn portable_contract_v2_preserves_partial_unique_predicates() {
     let legacy: unionid::portable::SchemaDescription = serde_json::from_value(legacy).unwrap();
     legacy.validate().unwrap();
     assert_eq!(legacy.version, 1);
+
+    // A version-1 description must not carry a predicate.
+    let mut illegal = description.clone();
+    illegal.version = 1;
+    assert_eq!(illegal.validate().unwrap_err().code, "E_CONTRACT_SCHEMA");
+
+    // A predicate requires a unique index.
+    let mut non_unique = description.clone();
+    let users = non_unique
+        .tables
+        .iter_mut()
+        .find(|table| table.name == "users")
+        .unwrap();
+    users
+        .indexes
+        .iter_mut()
+        .find(|index| index.predicate.is_some())
+        .unwrap()
+        .unique = false;
+    assert_eq!(non_unique.validate().unwrap_err().code, "E_CONTRACT_SCHEMA");
 }

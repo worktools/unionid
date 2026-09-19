@@ -309,6 +309,35 @@ impl SchemaDescription {
                         format!("table {} index {} has no components", table.name, index.id),
                     ));
                 }
+                if let Some(predicate) = &index.predicate {
+                    if self.version < 2 {
+                        return Err(Error::new(
+                            "E_CONTRACT_SCHEMA",
+                            format!(
+                                "table {} index {} carries a predicate, which requires description version 2",
+                                table.name, index.id
+                            ),
+                        ));
+                    }
+                    if !index.unique {
+                        return Err(Error::new(
+                            "E_CONTRACT_SCHEMA",
+                            format!(
+                                "table {} index {} carries a predicate but is not unique",
+                                table.name, index.id
+                            ),
+                        ));
+                    }
+                    if predicate.is_empty() || predicate.trim() != predicate {
+                        return Err(Error::new(
+                            "E_CONTRACT_SCHEMA",
+                            format!(
+                                "table {} index {} predicate must be a non-empty canonical string",
+                                table.name, index.id
+                            ),
+                        ));
+                    }
+                }
                 for component in &index.components {
                     let field = validate_field_path(
                         &table.row,
