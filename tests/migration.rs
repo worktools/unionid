@@ -385,6 +385,41 @@ fn redb_partial_unique_index_migration_round_trips() {
 }
 
 #[test]
+fn redb_partial_unique_index_migration_conflict_rolls_back() {
+    let dir = TempDir::new();
+    let path = dir.0.join("partial-migration-conflict.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    ok(
+        &mut engine,
+        "type User = {id int, email text, deleted_at option text}\n\
+         table users User\n  key id\n\
+         insert users {id = 1, email = \"a@example.com\", deleted_at = None}\n\
+         insert users {id = 2, email = \"a@example.com\", deleted_at = None}",
+    );
+    let before = engine.schema_info();
+    let migration = MigrationFile::parse(
+        "migration m0001_partial_email\n  add unique index users (email) if deleted_at == None\n",
+    )
+    .unwrap();
+    let error = engine
+        .apply_migrations(std::slice::from_ref(&migration))
+        .unwrap_err();
+    assert_eq!(error.code, "E_CONSTRAINT");
+    assert_eq!(engine.schema_info(), before);
+    assert!(engine.migration_history().is_empty());
+    assert!(engine.introspection().maintenance.is_none());
+    assert!(!engine.schema().contains("deleted_at == None"));
+    assert!(engine.check_integrity().unwrap().backend_clean);
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.schema_info(), before);
+    assert!(reopened.migration_history().is_empty());
+    assert!(reopened.introspection().maintenance.is_none());
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
 fn migration_directory_order_and_parent_are_validated() {
     let dir = TempDir::new();
     std::fs::write(dir.0.join("0001_initial.uid"), initial_file().source).unwrap();

@@ -281,6 +281,61 @@ table payments Payment
 
 迁移场景必须验证已有 text/int 数据，而不是把 cast 隐藏在类型变化中。例如 text ID 通过 `uuid_parse old` 转换，旧 amount text 通过 `decimal_parse old 18 2` 转换；任一坏行会阻止 schema、数据、索引和 ledger 发布。wire、redb、backup、cursor 与旧版本兼容边界由 RFC 的 golden vectors 一起验收。
 
+## 9. 软删除与状态化唯一约束
+
+很多业务只在某个状态集合内要求唯一：账号邮箱只有在未删除时唯一，外部任务 ID 只有在 Active 时唯一。把已删除行物理移走、给 key 拼接状态，或在应用层先查后写都会泄漏存储策略，也无法在并发和批量 mutation 下原子保证。部分唯一索引（[RFC 0022](rfc/0022-partial-unique-indexes.md)）用行内 typed predicate 表达这个约束：
+
+```text
+type Account =
+  id text
+  email text
+  deleted_at Option<text>
+
+table accounts Account key id
+create unique index accounts (email) if deleted_at == None
+```
+
+未删除邮箱唯一：
+
+```text
+-- 同一邮箱可以存在于已删除行；未删除行最多一条。
+insert accounts {id = "alice", email = "shared@example.com", deleted_at = None}
+insert accounts {id = "bob", email = "shared@example.com", deleted_at = Some "2026-01-01"}
+
+-- 冲突在提交前发现，整批不发布部分行。
+insert accounts {id = "carol", email = "shared@example.com", deleted_at = None}   -- E_CONSTRAINT
+
+-- 软删除释放约束，重新激活或迁移按最终状态校验。
+update accounts | filter id == "alice" | set deleted_at = Some "2026-02-01"
+upsert accounts {id = "dave", email = "shared@example.com", deleted_at = None}
+```
+
+状态化外部 ID 唯一：
+
+```text
+type JobState = Pending | Active
+type Job = {id int, provider text, external_id text, state JobState}
+
+table jobs Job key id
+create unique index jobs (provider, external_id) if state == Active
+```
+
+- `insert`/`upsert`/`update`/`delete`、批量写入、prepared mutation 和 migration 都在候选最终状态上维护约束；同一请求内多行交换 key 时按最终状态验证，不因中间顺序产生伪冲突，冲突则不发布 rows、indexes、schema、ledger 或 receipt。
+- `explain` 只在查询的已绑定过滤条件机械蕴含 index predicate 时才使用该索引，并显示 canonical `index_predicate`、`predicate_proven` 与被拒绝的有界 `predicate_rejections`：
+
+```text
+explain from accounts
+filter deleted_at == None
+filter email == "shared@example.com"
+-- access | secondary_index_lookup via accounts.email
+-- predicate | deleted_at == None (proven)
+```
+
+- 缺少可证明的 predicate 时回退到其他正确索引或 full scan，`predicate_rejections` 用 value-free 的 shape identity 与 `predicate_not_implied` 说明原因。
+- 稳定分页只有在证明成立时才用部分唯一索引论证唯一排序；`fetch_by_key` 不把部分唯一索引当作全表唯一证明。
+- predicate 变化是显式 drop/add；被引用字段改名通过 stable field path 更新显示文本，不改 index ID。`check` 会重新绑定每个 predicate，验证 true 行恰有一个 posting、false 行没有 posting。
+- [release_scenarios.rs](../tests/release_scenarios.rs) 的 `partial_email` 与 `active_external_id` 两个旅程覆盖 query/DML → restart → migration → check → backup/restore，并比较源库与还原库的 schema、ledger、typed rows 与 explain plan。
+
 ## 功能覆盖与优先级
 
 | 应用需要 | 当前能力 | 缺口与任务 | v0.2 优先级 |
@@ -301,6 +356,7 @@ table payments Payment
 | 原子状态转换、upsert、delete | update/delete 已实现 filter/match/sort/take target、穷尽 ADT match assignment 与 typed simultaneous set；全部 DML 可 returning 完整行或投影；upsert 已实现按主键 insert/replace；它们维护约束、索引、affected rows、稳定 RowId 和 redb 增量键提交 | 多写者／skip-locked 不在当前单写模型内 | #15/#83/#85/#87 |
 | count/count_distinct/avg/sum/min/max、分组与基础排名窗口 | 已实现 typed 空输入、int→float avg、命名 float/duration avg、显式 P/S/mode 的 decimal_avg、完整 ADT 去重与 key、显式 partition/order 的 row_number/rank/dense_rank、后续 stage 与有界资源 | frame、lag/lead 和用户定义 aggregate/window 延后 | #60/#245/#247 |
 | schema evolution 与数据转换 | 已有显式 type/field/variant 演进、默认回填、typed conversion、全嵌套引用扫描及约束/索引维护 | 版本化 plan/apply/status、ledger 与 diff | #17–#19，P0/P1 |
+| 条件唯一约束（软删除、状态化 key） | `create unique index ... if <predicate>` 已接通源码、内存与 redb、catalog/backup codec、migration、check、stable ID/diff，以及保守的 planner implication、explain 证明与 page 唯一性 | 普通非 unique partial index 与 expression index 延后 | #248，v0.10 |
 | 持久提交、恢复和备份 | redb Engine、原子提交、完整性检查、进程退出恢复、备份还原与三条端到端升级恢复场景已实现 | 物理设备故障不在当前测试声明内 | #13/#14/#20/#74，P0 |
 
 ## 对查询语言的约束

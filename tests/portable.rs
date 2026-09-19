@@ -129,7 +129,7 @@ fn portable_description_is_versioned_lossless_and_database_local() {
 fn rust_reference_implementation_runs_common_portable_vectors() {
     let vectors: VectorFile =
         serde_json::from_str(include_str!("fixtures/portable/v1.json")).unwrap();
-    assert_eq!(vectors.version, DESCRIPTION_VERSION);
+    assert_eq!(vectors.version, 1, "portable wire-vector fixture version");
     let contract = unionid::PortableContract::from_source(&vectors.schema).unwrap();
     for vector in vectors.vectors {
         let result = contract.validate_type(&vector.type_name, vector.value);
@@ -445,4 +445,53 @@ fn evolution_reports_new_and_tightened_unique_constraints_for_old_writers() {
             .iter()
             .any(|finding| finding.code == "unique_index_added")
     );
+}
+
+#[test]
+fn portable_contract_v2_preserves_partial_unique_predicates() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "type User = {id int, email text, deleted_at Option<text>}\n\
+                 table users User\n  key id\n\
+                 create unique index users (email) if deleted_at == None"
+            )
+            .ok
+    );
+    let description = engine.portable_contract().unwrap().into_description();
+    assert_eq!(description.version, DESCRIPTION_VERSION);
+    let users = description
+        .tables
+        .iter()
+        .find(|table| table.name == "users")
+        .unwrap();
+    let index = users.indexes.iter().find(|index| index.unique).unwrap();
+    assert_eq!(index.predicate.as_deref(), Some("deleted_at == None"));
+
+    let json = serde_json::to_string(&description).unwrap();
+    assert!(
+        json.contains("\"predicate\":\"deleted_at == None\""),
+        "{json}"
+    );
+    let decoded: unionid::portable::SchemaDescription = serde_json::from_str(&json).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded, description);
+
+    // A version-1 description without predicates stays readable.
+    let mut legacy = serde_json::to_value(&description).unwrap();
+    legacy["version"] = serde_json::json!(1);
+    for table in legacy["tables"].as_array_mut().unwrap() {
+        if let Some(indexes) = table
+            .get_mut("indexes")
+            .and_then(|value| value.as_array_mut())
+        {
+            for index in indexes {
+                index.as_object_mut().unwrap().remove("predicate");
+            }
+        }
+    }
+    let legacy: unionid::portable::SchemaDescription = serde_json::from_value(legacy).unwrap();
+    legacy.validate().unwrap();
+    assert_eq!(legacy.version, 1);
 }

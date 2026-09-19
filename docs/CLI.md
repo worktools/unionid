@@ -142,7 +142,7 @@ unionid schema rust --db app.redb --output src/schema.rs
 
 `schema check --file <schema.unid>` validates a declarative schema and prints its normalized form, and `schema print --db <db.redb>` prints the schema stored in a database. `schema rust` generates Rust `struct`/`enum` bindings from a schema file or an existing database; type mapping and recursion boxing follow RFC 0012. The output depends only on `serde` and `unionid::scalars`, Rust keyword field names get a `_` suffix, and schema files still accept only type/table/index declarations (a full script returns `E_SCHEMA`).
 
-`schema describe` 输出 [RFC 0014](rfc/0014-portable-adt-contract.md) 的 version 1 JSON，供查询绑定生成器和未来宿主语言 adapter 使用。文件模式从声明建立独立 catalog；数据库模式描述 live catalog 的逐字节私有副本，使 redb 的恢复 bookkeeping 不会改变请求的原文件，同时保留 migration 后的稳定 ID。ID 是十进制字符串且只在一个数据库 lineage 内有意义：
+`schema describe` 输出 [RFC 0014](rfc/0014-portable-adt-contract.md) 的 portable JSON（[RFC 0022](rfc/0022-partial-unique-indexes.md) 起当前为 version 2，索引可携带 canonical partial predicate；不含 predicate 的 version 1 仍可读取），供查询绑定生成器和未来宿主语言 adapter 使用。文件模式从声明建立独立 catalog；数据库模式描述 live catalog 的逐字节私有副本，使 redb 的恢复 bookkeeping 不会改变请求的原文件，同时保留 migration 后的稳定 ID。ID 是十进制字符串且只在一个数据库 lineage 内有意义：
 
 ```bash
 unionid schema describe --file schema.unid
@@ -151,7 +151,7 @@ unionid schema describe --db app.redb --output schema.contract.json
 
 描述包含 schema identity、命名 ADT、递归 ref、精确标量约束、默认值/输入省略、表、主键和索引。它不会输出行、数据库 instance、cursor secret 或业务值。应用可通过 `PortableContract::validate_type` 使用与 prepared binding 相同的运行时校验；未知 variant 明确失败。
 
-`schema describe` emits the RFC 0014 version-1 JSON used by query-binding generators and future host-language adapters. File mode creates an independent catalog from declarations, while database mode describes a private byte-for-byte copy of the live catalog so redb recovery bookkeeping cannot change the requested file; migration-stable IDs are preserved. IDs are decimal strings scoped to one database lineage. The description includes schema identity, named ADTs, recursive references, exact scalar constraints, defaults/omission, tables, keys, and indexes; it excludes rows, database instance identity, cursor secrets, and business values. `PortableContract::validate_type` reuses prepared-binding validation and fails explicitly on unknown variants.
+`schema describe` emits the RFC 0014 portable JSON (version 2 since [RFC 0022](rfc/0022-partial-unique-indexes.md), so indexes may carry a canonical partial predicate; version 1 without predicates stays readable), used by query-binding generators and future host-language adapters. File mode creates an independent catalog from declarations, while database mode describes a private byte-for-byte copy of the live catalog so redb recovery bookkeeping cannot change the requested file; migration-stable IDs are preserved. IDs are decimal strings scoped to one database lineage. The description includes schema identity, named ADTs, recursive references, exact scalar constraints, defaults/omission, tables, keys, and indexes; it excludes rows, database instance identity, cursor secrets, and business values. `PortableContract::validate_type` reuses prepared-binding validation and fails explicitly on unknown variants.
 
 ### 静态查询描述 / Static query descriptions
 

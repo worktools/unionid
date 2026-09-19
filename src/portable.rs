@@ -13,7 +13,11 @@ use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, EnumType, ScalarType};
 use crate::protocol::WireValue;
 
-pub const DESCRIPTION_VERSION: u32 = 1;
+pub const DESCRIPTION_VERSION: u32 = 2;
+
+/// Version 1 descriptions predate partial unique index predicates and remain
+/// readable; version 2 adds an optional normalized predicate per index.
+const SUPPORTED_DESCRIPTION_VERSIONS: &[u32] = &[1, DESCRIPTION_VERSION];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaDescription {
@@ -163,6 +167,9 @@ pub struct IndexDescription {
     pub id: String,
     pub unique: bool,
     pub components: Vec<IndexComponentDescription>,
+    /// Canonical normalized partial predicate; omitted for whole-table indexes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,7 +213,7 @@ pub struct EvolutionReport {
 impl SchemaDescription {
     /// Validate a deserialized description before a generator relies on it.
     pub fn validate(&self) -> Result<()> {
-        if self.version != DESCRIPTION_VERSION {
+        if !SUPPORTED_DESCRIPTION_VERSIONS.contains(&self.version) {
             return Err(Error::new(
                 "E_CONTRACT_VERSION",
                 format!(
@@ -1084,6 +1091,7 @@ fn describe_database(database: &Database) -> Result<SchemaDescription> {
                         descending: component.descending,
                     })
                     .collect(),
+                predicate: definition.display_predicate(),
             });
     }
     for definitions in indexes.values_mut() {

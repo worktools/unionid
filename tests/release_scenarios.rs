@@ -250,6 +250,89 @@ filter metadata == map {
     });
 }
 
+#[test]
+fn soft_deleted_email_survives_transition_migration_and_restore() {
+    verify(Scenario {
+        name: "partial_email",
+        storage_target: None,
+        initial_migration: r#"migration m0001_partial_email
+  add type Account =
+    id text
+    email text
+    deleted_at Option<text>
+  add table accounts Account key id
+  add unique index accounts (email) if deleted_at == None
+"#,
+        initial_script: r#"insert accounts {id = "alice", email = "shared@example.com", deleted_at = None}
+insert accounts {id = "bob", email = "shared@example.com", deleted_at = Some "2026-01-01"}
+update accounts
+filter id == "bob"
+set email = "bob@example.com"
+update accounts
+filter id == "alice"
+set deleted_at = Some "2026-02-01"
+upsert accounts {id = "dave", email = "shared@example.com", deleted_at = None}
+from accounts
+sort id
+"#,
+        restart_query: "from accounts | sort id",
+        upgrade_migration: r#"migration m0002_partial_email_note
+  parent m0001_partial_email
+  add field Account.note text = ""
+  add index accounts (note)
+"#,
+        final_query: "from accounts | select {id, email, deleted_at, note} | sort id",
+        explain_query: "explain from accounts | filter deleted_at == None | filter email == \"shared@example.com\"",
+        expected_access: QueryAccessKind::SecondaryIndexLookup,
+        expected_index: "accounts.email",
+        assert_before: assert_partial_email_before,
+        assert_after: assert_partial_email_after,
+    });
+}
+
+#[test]
+fn active_external_id_survives_state_transitions_and_restore() {
+    verify(Scenario {
+        name: "active_external_id",
+        storage_target: None,
+        initial_migration: r#"migration m0001_active_external_id
+  add type JobState = Pending | Active
+  add type Job =
+    id int
+    provider text
+    external_id text
+    state JobState
+  add table jobs Job key id
+  add unique index jobs (provider, external_id) if state == Active
+"#,
+        initial_script: r#"insert jobs {id = 1, provider = "acme", external_id = "42", state = Active}
+insert jobs {id = 2, provider = "acme", external_id = "42", state = Pending}
+insert jobs {id = 3, provider = "other", external_id = "42", state = Active}
+update jobs
+filter id == 1
+set state = Pending
+update jobs
+filter id == 2
+set state = Active
+upsert jobs {id = 3, provider = "other", external_id = "43", state = Active}
+from jobs
+sort id
+"#,
+        restart_query: "from jobs | sort id",
+        upgrade_migration: r#"migration m0002_active_external_id_owner
+  parent m0001_active_external_id
+  add field Job.owner Option<text> = None
+  add index jobs.owner
+"#,
+        final_query: "from jobs | select {id, provider, external_id, state, owner} | sort id",
+        explain_query: "explain from jobs | filter state == Active | filter provider == \"acme\" | filter external_id == \"42\"",
+        expected_access: QueryAccessKind::CompositeLookup,
+        expected_index: "jobs (provider, external_id)",
+        assert_before: assert_active_job_before,
+        assert_after: assert_active_job_after,
+    });
+}
+
 fn verify(scenario: Scenario) {
     let dir = TempDir::new();
     let database = dir.0.join(format!("{}.redb", scenario.name));
@@ -697,4 +780,49 @@ fn assert_metadata_after(response: &QueryResponse) {
         bob["metadata_entries"].source_text(),
         r#"[("plan", Text("free"))]"#
     );
+}
+
+fn assert_partial_email_before(response: &QueryResponse) {
+    assert_eq!(response.rows.len(), 3);
+    assert_text(&response.rows[0], "id", "alice");
+    assert_text(&response.rows[0], "email", "shared@example.com");
+    assert_eq!(
+        response.rows[0]["deleted_at"].source_text(),
+        r#"Some("2026-02-01")"#
+    );
+    assert_text(&response.rows[1], "id", "bob");
+    assert_text(&response.rows[1], "email", "bob@example.com");
+    assert_text(&response.rows[2], "id", "dave");
+    assert_text(&response.rows[2], "email", "shared@example.com");
+    assert_eq!(response.rows[2]["deleted_at"].source_text(), "None");
+}
+
+fn assert_partial_email_after(response: &QueryResponse) {
+    assert_partial_email_before(response);
+    for row in &response.rows {
+        assert_text(row, "note", "");
+    }
+}
+
+fn assert_active_job_before(response: &QueryResponse) {
+    assert_eq!(response.rows.len(), 3);
+    assert_int(&response.rows[0], "id", 1);
+    assert_text(&response.rows[0], "provider", "acme");
+    assert_text(&response.rows[0], "external_id", "42");
+    assert_eq!(response.rows[0]["state"].source_text(), "Pending");
+    assert_int(&response.rows[1], "id", 2);
+    assert_text(&response.rows[1], "provider", "acme");
+    assert_text(&response.rows[1], "external_id", "42");
+    assert_eq!(response.rows[1]["state"].source_text(), "Active");
+    assert_int(&response.rows[2], "id", 3);
+    assert_text(&response.rows[2], "provider", "other");
+    assert_text(&response.rows[2], "external_id", "43");
+    assert_eq!(response.rows[2]["state"].source_text(), "Active");
+}
+
+fn assert_active_job_after(response: &QueryResponse) {
+    assert_active_job_before(response);
+    for row in &response.rows {
+        assert_eq!(row["owner"].source_text(), "None");
+    }
 }

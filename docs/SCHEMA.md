@@ -2,7 +2,7 @@
 
 状态：v0.2 契约，2026-09-10。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据、[版本化 ADT value codec](CODEC.md)、[显式 schema migration 与版本化 runner](MIGRATIONS.md)，以及[声明式 schema diff](SCHEMA-DIFF.md)。
 
-面向生成客户端的 version 1 机器描述、无损运行时校验和四方向演进报告见 [RFC 0014](rfc/0014-portable-adt-contract.md)。`schema describe` 中的 ID 使用字符串并明确限定为单个数据库 catalog lineage；它们不能作为跨数据库全局身份。
+面向生成客户端的 machine description、无损运行时校验和四方向演进报告见 [RFC 0014](rfc/0014-portable-adt-contract.md)；[RFC 0022](rfc/0022-partial-unique-indexes.md) 起 description 为 version 2，索引可携带 canonical partial predicate，不含 predicate 的 version 1 仍可读取。`schema describe` 中的 ID 使用字符串并明确限定为单个数据库 catalog lineage；它们不能作为跨数据库全局身份。
 
 存储格式版本、语言／协议版本与应用 schema revision 是三个独立概念：升级 unionid 二进制不自动修改应用 schema，读取目标 schema 文件也不会隐式迁移已有数据。
 
@@ -18,7 +18,7 @@ RowId 属于单张表的内部行身份，使用独立、从 0 开始的单调 `
 | 表 | 与命名类型共享数据库级名称空间 | table ID |
 | record 字段 | 所属 record | field ID 路径 |
 | sum 变体 | 所属 sum type | variant ID |
-| 索引 | 所属表 | index ID、table ID、field ID 路径与 ordinary/unique kind |
+| 索引 | 所属表 | index ID、table ID、field ID 路径、ordinary/unique kind 与可选 normalized partial predicate |
 
 命名类型采用名义类型：形状相同但 type ID 不同的两个类型不能互换。字段与变体的运行时含义同样以 ID 为准；名称用于源码、诊断和显示。表引用命名 record 的 type ID，多个表可以安全共享同一个 row type。索引绑定 table ID 和逐层 field ID，不把点分隔名称当作长期身份。
 
@@ -28,7 +28,7 @@ RowId 属于单张表的内部行身份，使用独立、从 0 开始的单调 `
 
 空数据库的 schema revision 是 0。一次成功的原子脚本只要包含 type、table 或 index 变更，就在提交时把 revision 增加 1；同一脚本包含多个 schema 语句仍只产生一个 revision。纯 insert 或查询不改变 revision，解析、类型检查、约束或持久化失败也不发布新 revision。
 
-`schema.hash` 是 `sha256:<hex>`。当前 hash manifest 的格式版本是 1，内容按稳定 ID 排序，包含类型及其完整结构、表定义和索引定义（包括 unique kind），不包含行、索引 posting、提交 sequence 或 schema revision。名称和对外可见的字段顺序属于 schema，因此会影响 hash；稳定 ID保证这种变化不会改变旧值的含义。
+`schema.hash` 是 `sha256:<hex>`。当前 hash manifest 的格式版本是 1，内容按稳定 ID 排序，包含类型及其完整结构、表定义和索引定义（包括 unique kind 与 partial predicate 的规范化 atom），不包含行、索引 posting、提交 sequence 或 schema revision。名称和对外可见的字段顺序属于 schema，因此会影响 hash；稳定 ID保证这种变化不会改变旧值的含义。partial predicate 引用 stable field path；drop/change 被引用字段前必须先 drop 索引，改变字段类型要求显式重建 predicate index。
 
 revision 用于同一数据库内的快速失效检查；hash 用于备份、导入、migration plan 和不同进程之间的精确 schema 对照。两者都不是 migration ID。客户端不得假设两个独立创建但文本相同的数据库具有可互换的 catalog ID。
 
