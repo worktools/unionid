@@ -4800,7 +4800,7 @@ impl Database {
                 "page sort must end in an unchanged primary key or cover a complete unique-index suffix after equality-fixed fields",
             )
             .with_hint(
-                "make the final sort key statically unique by ending `sort` with the primary key",
+                "make the final sort key statically unique by ending `sort` with the primary key, or cover a complete unique-index suffix after equality-fixed fields",
             ));
         }
 

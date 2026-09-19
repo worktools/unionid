@@ -55,6 +55,9 @@ pub struct ProjectCheckError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<Span>,
+    /// Optional, value-free next step carried over from the source error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +107,7 @@ impl ProjectCheckReport {
             code: error.code,
             message: error.message,
             span: error.span,
+            hint: error.hint,
         });
     }
 }

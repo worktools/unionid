@@ -262,7 +262,8 @@ Common codes:
 - `E_TABLE`: unknown table; an empty-database hint says to apply migrations first.
 - `E_CONSTRAINT`: a key or unique conflict; inspect `constraint` and prefer `upsert` for a primary key.
 - `E_INDEX_PREDICATE`, `E_INDEX_PREDICATE_CONTRADICTION`: the partial predicate is unsupported or self-contradictory.
-- `E_PAGE_ORDER`, `E_PAGE_SHAPE`: end the final sort in the primary key and keep `page` as the only statement.
+- `E_PAGE_ORDER`: end the final sort in the primary key, or cover a complete unique-index suffix after equality-fixed fields.
+- `E_PAGE_SHAPE`: keep `page` as the only read pipeline and the only statement, with a valid position and stage composition; this is structural and does not require changing the sort.
 - `E_STORAGE_UPGRADE_REQUIRED`: an older database needs an explicit `unionid upgrade`.
 - `E_READ_ONLY`: the target is read-only.
 - `E_ARITH`, `E_DECIMAL_RANGE`: checked arithmetic failed before any commit.
