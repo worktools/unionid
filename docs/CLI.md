@@ -11,6 +11,12 @@ unionid cli --db app.redb --read-only
 unionid cli --addr 127.0.0.1:7878
 ```
 
+## Agent 与工具接入 / Agent and tool integration
+
+`unionid agent --format json` 输出 version 1 机器可读能力清单：稳定的命令与用法、protocol/stream/storage 版本、错误契约字段（`code`/`message`/`span`/`constraint`/`hint`）、完整错误码词汇表、constraint 分类及其 hint、退出码分类，以及推荐的“读 schema → 生成 → 校验 → 执行”工作流。`unionid agent`（不带 `--format`）输出同一清单的 Markdown 版本。命令只读、离线，不打开数据库，适合 AI agent、编辑器插件或 CI 在调用前发现接口。
+
+`unionid agent --format json` prints a version 1 machine-readable capability manifest: stable commands and usage, protocol/stream/storage versions, the error-contract fields (`code`/`message`/`span`/`constraint`/`hint`), the full error-code vocabulary, constraint classes with their hints, exit-code categories, and the recommended read-schema → generate → validate → execute workflow. `unionid agent` (without `--format`) prints the same manifest as Markdown. The command is read-only, offline, and never opens a database, so agents, editor plugins, and CI can discover the surface before calling it.
+
 ## 项目初始化 / Project initialization
 
 `init` 与 `project check` 从 v0.6.0 起提供。通过 crates.io、原生 release archive 或源码构建取得二进制后，都可以在不存在或空目录中执行同一条最小 ADT 项目链路；前两种入口不需要 clone 源码仓库。完整安装命令、预期结果与备份还原见 [GETTING_STARTED.md](GETTING_STARTED.md)：
