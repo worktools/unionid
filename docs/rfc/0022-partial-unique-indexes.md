@@ -62,7 +62,7 @@ atom 只允许：
 - `field.path is None`
 - `field.path is Some`
 
-`typed_literal` 必须在 schema 建立时完整绑定，不能包含参数、字段引用、算术、局部函数、`any`/`all`、`contains`、map lookup 或运行时错误。unit enum constructor 可在字段类型明确时简写，例如 `state == Active`。允许必要括号，但拒绝 `||`、`!`、`!=`、range 比较和 bool 字段的裸引用。
+`typed_literal` 必须在 schema 建立时完整绑定，不能包含参数、字段引用、算术、局部函数、`any`/`all`、`contains`、map lookup 或运行时错误。unit enum constructor 可在字段类型明确时简写，例如 `state == Active`。Option 字段的 `field == None` 可以输入，但绑定后必须折叠为 `field is None`；formatter 只输出后者。允许必要括号，但拒绝 `||`、`!`、`!=`、range 比较和 bool 字段的裸引用。
 
 这组限制使谓词确定、row-local、无错误且可在 schema、mutation、migration、restore 和 check 中得到同一结果。超出范围返回稳定的 `E_INDEX_PREDICATE`，诊断指出第一个不支持的结构。类型错误继续返回 `E_TYPE` 并保留源码 span。
 
@@ -77,7 +77,7 @@ IndexPredicate
   ]
 ```
 
-atom 按 stable field-ID path、operator 和 canonical typed value 排序。因此交换 `&&` 两侧、改变空白或省略明确的 enum 类型前缀不会改变 schema identity。完全重复的 atom 被折叠；同一路径上的矛盾 equality、`is None`/`is Some` 冲突在 DDL 前返回 `E_INDEX_PREDICATE_CONTRADICTION`。首版不尝试完整 SAT 求解。
+atom 按 stable field-ID path、operator 和 canonical typed value 排序。因此交换 `&&` 两侧、改变空白、省略明确的 enum 类型前缀，或在输入中使用 `== None` 都不会改变 schema identity。`Equal(None)` 不进入 bound IR；它总是规范化为 `IsNone`。完全重复的 atom 被折叠；同一路径上的不同 equality、`IsNone`/`IsSome`、`IsNone`/非 None equality 冲突在 DDL 前返回 `E_INDEX_PREDICATE_CONTRADICTION`。首版不尝试完整 SAT 求解。
 
 ### 4. 索引身份与 schema
 
@@ -104,7 +104,7 @@ predicate 引用 stable field paths。rename 只更新显示名称；drop/change
 | true | false | 删除旧 key |
 | true | true | 按现有规则删除旧 key、插入新 key |
 
-insert、upsert、update、delete、批量 mutation、prepared mutation 和 migration 都在候选最终状态上维护索引。一个请求中多行交换 key 时按最终状态验证，不因中间顺序产生伪冲突。任一重复返回 `E_UNIQUE`，消息包含 table、canonical component shape 和 canonical predicate，但不泄漏冲突行内容；整个请求不发布 rows、indexes、schema、ledger 或 receipt。
+insert、upsert、update、delete、批量 mutation、prepared mutation 和 migration 都在候选最终状态上维护索引。一个请求中多行交换 key 时按最终状态验证，不因中间顺序产生伪冲突。重复继续沿用现有 unique index 契约返回 `E_CONSTRAINT`，包括 mutation 冲突和创建／migration 扫描已有数据时发现的冲突；消息包含 table、canonical component shape 和 canonical predicate，但不泄漏冲突行内容。整个请求不发布 rows、indexes、schema、ledger 或 receipt。
 
 index key codec 不编码 predicate，也不需要为未命中的行保存占位符。它继续编码 index stable ID、typed component tuple 和 RowId；predicate 由 catalog definition 决定一行是否应有 posting。memory 与 redb 必须共享同一个 predicate evaluator。
 
@@ -190,15 +190,15 @@ Migrations use the same suffix. Dropping a partial index repeats its canonical p
 
 ### 3. Predicate subset and normalization
 
-The accepted predicate is a conjunction of `field.path == typed_literal`, `field.path is None`, and `field.path is Some` atoms. Literals bind completely at schema time. Parameters, other field references, arithmetic, local functions, collection operations, maps, `||`, `!`, `!=`, ranges, and bare boolean fields are rejected with `E_INDEX_PREDICATE`; ordinary type errors remain `E_TYPE` with source spans.
+The accepted predicate is a conjunction of `field.path == typed_literal`, `field.path is None`, and `field.path is Some` atoms. Literals bind completely at schema time. For an Option field, input may use `field == None`, but binding always folds it to `field is None` and the formatter emits only that form. Parameters, other field references, arithmetic, local functions, collection operations, maps, `||`, `!`, `!=`, ranges, and bare boolean fields are rejected with `E_INDEX_PREDICATE`; ordinary type errors remain `E_TYPE` with source spans.
 
-The bound representation is a sorted list of equality/presence atoms keyed by stable field path, operator, and canonical typed value. Reordering conjunctions, changing whitespace, or shortening an unambiguous enum constructor does not change schema identity. Duplicate atoms collapse. Direct equality conflicts and None/Some conflicts return `E_INDEX_PREDICATE_CONTRADICTION`; the first release does not implement a general SAT solver.
+The bound representation is a sorted list of equality/presence atoms keyed by stable field path, operator, and canonical typed value. `Equal(None)` never enters this IR; it becomes `IsNone`. Reordering conjunctions, changing whitespace, shortening an unambiguous enum constructor, or spelling the input as `== None` does not change schema identity. Duplicate atoms collapse. Different equalities on one path, None/Some conflicts, and None/non-None equality conflicts return `E_INDEX_PREDICATE_CONTRADICTION`; the first release does not implement a general SAT solver.
 
 The index shape becomes `(table stable ID, ordered components, normalized predicate)`. A full index and a partial unique index may therefore share components. The same shape cannot exist with two kinds. Schema source/hash/diff, migrations, introspection, and portable schema version 2 preserve the predicate. Dropping or changing a referenced field requires dropping the index first.
 
 ### 4. Mutation semantics
 
-Only rows whose predicate evaluates to true produce an index key. Mutations apply the false-to-false, false-to-true, true-to-false, and true-to-true transitions against the candidate final state. Insert, upsert, update, delete, batches, prepared mutations, and migrations validate final keys before publishing any rows, indexes, schema, ledger, or receipt. A conflict returns `E_UNIQUE` with the table, component shape, and predicate but no conflicting row data.
+Only rows whose predicate evaluates to true produce an index key. Mutations apply the false-to-false, false-to-true, true-to-false, and true-to-true transitions against the candidate final state. Insert, upsert, update, delete, batches, prepared mutations, and migrations validate final keys before publishing any rows, indexes, schema, ledger, or receipt. Mutation conflicts and duplicate rows found while creating an index or applying a migration preserve the existing unique-index contract and return `E_CONSTRAINT`, with the table, component shape, and predicate but no conflicting row data.
 
 The ordered-key codec remains unchanged: it stores the index ID, typed component tuple, and RowId. The catalog predicate determines posting membership. Memory and redb use one predicate evaluator.
 
