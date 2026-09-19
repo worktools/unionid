@@ -291,13 +291,13 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 
 ### v0.10.0 · 日常使用闭环 / Daily-use closure
 
-[Milestone 20](https://github.com/worktools/unionid/milestone/20) 只保留四条日常业务会直接遇到的链路：bounded typed map、显式 decimal 乘除/舍入/平均值、partial unique index，以及基于真实试用反馈的 CLI/诊断改进。优先完成不改变持久格式的 decimal 能力；partial unique index 需要新的 catalog/storage 兼容边界，单独设计与验收。
+[Milestone 20](https://github.com/worktools/unionid/milestone/20) 只保留四条日常业务会直接遇到的链路：bounded typed map、显式 decimal 乘除/舍入/平均值、partial unique index，以及基于真实试用反馈的 CLI/诊断改进。typed map 与 decimal 已交付；剩余 partial unique index 按 [RFC 0022](rfc/0022-partial-unique-indexes.md) 分离 catalog/storage 兼容、mutation 语义和 planner 证明后逐步验收。
 
-[Milestone 20](https://github.com/worktools/unionid/milestone/20) contains four direct daily-use paths: bounded typed maps, explicit decimal multiplication/division/rounding/average, partial unique indexes, and CLI/diagnostic improvements driven by real trials. Decimal ships first without a durable-format change; partial unique indexes require a separately reviewed catalog/storage compatibility boundary.
+[Milestone 20](https://github.com/worktools/unionid/milestone/20) contains four direct daily-use paths: bounded typed maps, explicit decimal multiplication/division/rounding/average, partial unique indexes, and CLI/diagnostic improvements driven by real trials. Typed maps and decimal are delivered; the remaining partial unique index follows [RFC 0022](rfc/0022-partial-unique-indexes.md), with catalog/storage compatibility, mutation semantics, and planner proofs reviewed in separate stages.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
-| [#246](https://github.com/worktools/unionid/issues/246) | 有界 typed map / bounded typed map | P1，进行中 / in progress |
+| [#246](https://github.com/worktools/unionid/issues/246) | 有界 typed map / bounded typed map | 已交付 / Delivered |
 | [#247](https://github.com/worktools/unionid/issues/247) | Decimal 显式乘除、舍入与平均值 / explicit decimal multiply, divide, rounding, and average | 已交付 / Delivered |
 | [#248](https://github.com/worktools/unionid/issues/248) | Partial unique index | P1 |
 | [#363](https://github.com/worktools/unionid/issues/363) | 试用反馈驱动的 CLI、诊断和错误提示 / trial-driven CLI, diagnostics, and errors | 已交付 / Delivered |
