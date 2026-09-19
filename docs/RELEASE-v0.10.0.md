@@ -27,6 +27,10 @@ unionid-query = "=0.10.0"
 
 `unionid`、`unionid-derive` 与 `unionid-query` 应统一使用 0.10.0。
 
+### Rust 源码兼容
+
+`Error` 新增公开字段 `constraint: Option<ConstraintKind>` 与 `Error::constraint()` builder，用于稳定区分 `E_CONSTRAINT` 冲突类型（`unique` / `partial_unique` / `primary_key` / `primary_key_missing`）。直接构造 `Error { code, message, span }` 的代码需要补 `constraint: None`；使用 `Error::new` / `.at` 的代码不受影响。`constraint` 使用 `#[serde(default)]`，因此旧 JSON/TCP/HTTP 响应缺少该字段时按 `None` 读取。
+
 ## 验证
 
 - `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 与全部测试通过。
@@ -54,6 +58,10 @@ Fresh redb databases are created directly at **storage format 10** with catalog/
 - This release does not change the protocol (still 1/2), the stream protocol (1), or the query contract version.
 
 Keep `unionid`, `unionid-derive`, and `unionid-query` on version 0.10.0 together.
+
+### Rust source compatibility
+
+`Error` gains a public `constraint: Option<ConstraintKind>` field and an `Error::constraint()` builder to classify `E_CONSTRAINT` conflicts (`unique` / `partial_unique` / `primary_key` / `primary_key_missing`). Code that constructs `Error { code, message, span }` literally must add `constraint: None`; code using `Error::new` / `.at` is unaffected. The field is `#[serde(default)]`, so older JSON/TCP/HTTP responses without it decode as `None`.
 
 ## Validation
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::control::ExecutionControl;
-use crate::error::{Error, Result};
+use crate::error::{ConstraintKind, Error, Result};
 use crate::migration::MigrationEntry;
 use crate::model::{
     Catalog, Column, DbObject, Row, RowId, ScalarType, Table, TypeDefinition, Value,
@@ -2141,7 +2141,8 @@ impl Database {
             return Err(Error::new(
                 "E_CONSTRAINT",
                 format!("duplicate value for unique index '{name} {display}'"),
-            ));
+            )
+            .constraint(unique_constraint_kind(&definition)));
         }
         let definition = IndexDefinition {
             id: self.catalog.allocate()?,
@@ -2447,6 +2448,7 @@ impl Database {
                 "E_CONSTRAINT",
                 format!("upsert requires a primary key on table '{name}'"),
             )
+            .constraint(ConstraintKind::PrimaryKeyMissing)
         })?;
         let fields = self.coerce_row(name, &values, "upsert")?;
         let returned = self.returning_rows(returning.as_ref(), &[&fields])?;
@@ -2503,6 +2505,7 @@ impl Database {
                 "E_CONSTRAINT",
                 format!("upsert many requires a primary key on table '{name}'"),
             )
+            .constraint(ConstraintKind::PrimaryKeyMissing)
         })?;
         let Value::List(values) = values else {
             return Err(Error::new(
@@ -2531,7 +2534,8 @@ impl Database {
                 return Err(Error::new(
                     "E_CONSTRAINT",
                     format!("duplicate primary key in bulk upsert '{name}.{key}'"),
-                ));
+                )
+                .constraint(ConstraintKind::PrimaryKey));
             }
             fields.push(row);
         }
@@ -2673,6 +2677,7 @@ impl Database {
                     if bulk { "upsert many" } else { "upsert" }
                 ),
             )
+            .constraint(ConstraintKind::PrimaryKeyMissing)
         })?;
         let initial_next_row_id = table.next_row_id;
         let mut next_row_id = initial_next_row_id;
@@ -2702,7 +2707,8 @@ impl Database {
                 return Err(Error::new(
                     "E_CONSTRAINT",
                     format!("duplicate primary key in bulk upsert '{name}.{primary_key}'"),
-                ));
+                )
+                .constraint(ConstraintKind::PrimaryKey));
             }
             let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
             let mut cursor = source.scan_index(name, &primary_key, &bounds, false, Some(2))?;
@@ -2868,7 +2874,8 @@ impl Database {
             return Err(Error::new(
                 "E_CONSTRAINT",
                 format!("upsert requires a primary key on table '{table}'"),
-            ));
+            )
+            .constraint(ConstraintKind::PrimaryKeyMissing));
         }
         Ok(row_type)
     }
@@ -2908,7 +2915,8 @@ impl Database {
                 return Err(Error::new(
                     "E_CONSTRAINT",
                     format!("duplicate primary key '{name}.{key}'"),
-                ));
+                )
+                .constraint(ConstraintKind::PrimaryKey));
             }
         }
         for definition in definitions
@@ -2929,7 +2937,8 @@ impl Database {
                         "duplicate value for unique index '{name} {}'",
                         definition.display_constraint()
                     ),
-                ));
+                )
+                .constraint(unique_constraint_kind(definition)));
             }
         }
         let id = table.next_row_id;
@@ -3175,40 +3184,50 @@ impl Database {
                 }
                 let boundary = self.index_tuple_key(table_name, &components, &after.fields)?;
                 if changed_values.insert(boundary.clone(), after.id).is_some() {
-                    return Err(Error::new(
-                        "E_CONSTRAINT",
+                    let (message, kind) =
                         if definition.is_primary_index(table.primary_key.as_deref()) {
-                            format!(
-                                "duplicate primary key '{table_name}.{}'",
-                                table.primary_key.as_deref().unwrap_or_default()
+                            (
+                                format!(
+                                    "duplicate primary key '{table_name}.{}'",
+                                    table.primary_key.as_deref().unwrap_or_default()
+                                ),
+                                ConstraintKind::PrimaryKey,
                             )
                         } else {
-                            format!(
-                                "duplicate value for unique index '{table_name} {}'",
-                                definition.display_constraint()
+                            (
+                                format!(
+                                    "duplicate value for unique index '{table_name} {}'",
+                                    definition.display_constraint()
+                                ),
+                                unique_constraint_kind(definition),
                             )
-                        },
-                    ));
+                        };
+                    return Err(Error::new("E_CONSTRAINT", message).constraint(kind));
                 }
                 let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
                 let mut cursor =
                     source.scan_index(table_name, &definition.shape_key(), &bounds, false, None)?;
                 while let Some(hits) = cursor.next_batch(control)? {
                     if hits.iter().any(|hit| !targets.contains(&hit.row_id)) {
-                        return Err(Error::new(
-                            "E_CONSTRAINT",
+                        let (message, kind) =
                             if definition.is_primary_index(table.primary_key.as_deref()) {
-                                format!(
-                                    "duplicate primary key '{table_name}.{}'",
-                                    table.primary_key.as_deref().unwrap_or_default()
+                                (
+                                    format!(
+                                        "duplicate primary key '{table_name}.{}'",
+                                        table.primary_key.as_deref().unwrap_or_default()
+                                    ),
+                                    ConstraintKind::PrimaryKey,
                                 )
                             } else {
-                                format!(
-                                    "duplicate value for unique index '{table_name} {}'",
-                                    definition.display_constraint()
+                                (
+                                    format!(
+                                        "duplicate value for unique index '{table_name} {}'",
+                                        definition.display_constraint()
+                                    ),
+                                    unique_constraint_kind(definition),
                                 )
-                            },
-                        ));
+                            };
+                        return Err(Error::new("E_CONSTRAINT", message).constraint(kind));
                     }
                 }
             }
@@ -3736,7 +3755,8 @@ impl Database {
                 return Err(Error::new(
                     "E_CONSTRAINT",
                     format!("duplicate primary key '{name}.{key}'"),
-                ));
+                )
+                .constraint(ConstraintKind::PrimaryKey));
             }
         }
         Ok(())
@@ -3764,7 +3784,8 @@ impl Database {
                             "duplicate value for unique index '{name} {}'",
                             definition.display_constraint()
                         ),
-                    ));
+                    )
+                    .constraint(unique_constraint_kind(definition)));
                 }
             }
         }
@@ -3881,17 +3902,21 @@ impl Database {
                 }
                 let ids = posting.entry(key).or_default();
                 if unique && !ids.is_empty() {
-                    return Err(Error::new(
-                        "E_CONSTRAINT",
-                        if definition.is_primary_index(primary_key.as_deref()) {
+                    let (message, kind) = if definition.is_primary_index(primary_key.as_deref()) {
+                        (
                             format!(
                                 "duplicate primary key '{name}.{}'",
                                 primary_key.as_deref().unwrap_or_default()
-                            )
-                        } else {
-                            format!("duplicate value for unique index '{name} {display}'")
-                        },
-                    ));
+                            ),
+                            ConstraintKind::PrimaryKey,
+                        )
+                    } else {
+                        (
+                            format!("duplicate value for unique index '{name} {display}'"),
+                            unique_constraint_kind(definition),
+                        )
+                    };
+                    return Err(Error::new("E_CONSTRAINT", message).constraint(kind));
                 }
                 match ids.binary_search(&after.id) {
                     Ok(_) => {
@@ -6635,7 +6660,8 @@ impl Database {
                         "duplicate value for unique index '{table} {}'",
                         definition.display_constraint()
                     ),
-                ));
+                )
+                .constraint(unique_constraint_kind(definition)));
             }
             self.indexes
                 .entry(table)
@@ -8334,6 +8360,15 @@ fn index_range_bounds(
         (start, end)
     };
     Ok(start.zip(end))
+}
+
+/// Classify a duplicate under a unique index for stable, value-free diagnostics.
+fn unique_constraint_kind(definition: &IndexDefinition) -> ConstraintKind {
+    if definition.predicate.is_some() {
+        ConstraintKind::PartialUnique
+    } else {
+        ConstraintKind::Unique
+    }
 }
 
 fn index_shape_key(components: &[IndexComponentDefinition]) -> String {
