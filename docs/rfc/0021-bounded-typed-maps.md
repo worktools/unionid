@@ -1,6 +1,6 @@
 # RFC 0021：有界 typed map / Bounded typed maps
 
-- 状态 / Status: proposed
+- 状态 / Status: accepted, implementation and end-to-end acceptance complete
 - 日期 / Date: 2026-09-19
 - 跟踪 / Tracking: [#246](https://github.com/worktools/unionid/issues/246)
 
@@ -165,6 +165,12 @@ Migration 首版支持新增 map 字段与 typed default、rename/drop 含 map �
 
 #246 只有在上述五层全部完成后关闭。仅完成 parser、memory Engine 或 serde roundtrip 不视为 typed map 已交付。
 
+### 9. 实现结果
+
+五层已全部实现。`tests/typed_maps.rs` 覆盖源码、serde/wire/portable 边界、format 8/9、索引/cursor/backup、查询操作、稳定限制、原子批量失败，以及 format 6→8、7→9 中断后的 old-or-new 恢复。`tests/release_scenarios.rs` 的 typed metadata 旅程从 format 6 显式升级开始，使用 sum-typed map value 完成 insert/upsert/update、重启查询、migration plan/rehearsal/apply、完整 check 和 logical backup/restore，并比较源库与恢复库的 schema、ledger、typed rows 和索引计划。
+
+该旅程同时修复了 shadow migration batch 曾固定使用 value codec 2 的问题；含 map 的 format 8/9 数据现在按 codec 3 构造 migration batch。首版仍维持既定边界：无动态字段路径、map pattern、merge、单 key 原地 mutation 或 keyed secondary index。
+
 ## English Description
 
 ### 1. Problem and decision
@@ -198,3 +204,7 @@ Upgrades are explicit and preserve all durable identity and journal state. Until
 Map literals may be defaults. Migrations can add map fields, rename/drop surrounding schema, preserve maps through unrelated changes, and explicitly replace a whole map. There is no implicit conversion between different value types. Whole-map ordinary, unique, and composite indexes are supported; keyed indexes are deferred until a workload and write-amplification budget exist.
 
 Delivery proceeds through model/source semantics; protocol/serde/portable Rust boundaries; durable formats and upgrades; expressions and migration boundaries; and a metadata journey covering restart, migration, check, backup/restore, legacy upgrades, and interrupted recovery. #246 closes only after every layer is complete. Parser-only, memory-only, or serde-only support is not delivered typed map.
+
+All five layers are now implemented. `tests/typed_maps.rs` covers source, serde/wire/portable boundaries, formats 8/9, indexes/cursors/backups, query operations, stable limits, atomic batch failures, and old-or-new recovery after interrupted 6-to-8 and 7-to-9 upgrades. The typed metadata journey in `tests/release_scenarios.rs` starts with the explicit format upgrade, then exercises sum-typed map values through insert/upsert/update, restart queries, migration planning/rehearsal/application, full integrity checking, and logical backup/restore while comparing schema, ledger, typed rows, and index plans.
+
+That journey also fixed shadow migration batches that had still selected value codec 2 unconditionally; format 8/9 map rows now use codec 3 while building a migration generation. The original boundary remains: no dynamic field paths, map patterns, merge, per-key in-place mutation, or keyed secondary indexes.

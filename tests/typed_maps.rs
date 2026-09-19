@@ -1,15 +1,21 @@
 use std::collections::BTreeMap;
+use std::process::Command;
 
 mod common;
 use common::TempDir;
 use unionid::backup::incremental::{BackupJournalConfig, BackupJournalState};
+use unionid::codec::MAX_VALUE_BYTES;
 use unionid::codec::{decode_value, encode_value_v2, encode_value_v3};
-use unionid::model::ScalarType;
+use unionid::model::{EnumValue, MAX_DEPTH, MAX_MAP_ENTRIES, MAX_MAP_KEY_BYTES, ScalarType};
 use unionid::portable::TypeShape;
 use unionid::{Engine, PageSpec, Value, WireValue, backup, format_source};
 
 const TEST_BACKUP_CHECKSUM: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+const MAP_UPGRADE_PATH_ENV: &str = "UNIONID_TEST_MAP_UPGRADE_PATH";
+const MAP_UPGRADE_READY_ENV: &str = "UNIONID_TEST_MAP_UPGRADE_READY";
+const MAP_UPGRADE_COMMITTED_ENV: &str = "UNIONID_TEST_MAP_UPGRADE_COMMITTED";
+const MAP_UPGRADE_TARGET_ENV: &str = "UNIONID_TEST_MAP_UPGRADE_TARGET";
 
 #[test]
 fn map_source_round_trips_through_memory_queries() {
@@ -372,6 +378,152 @@ fn map_rejects_non_text_keys_duplicates_and_wrong_value_types() {
 }
 
 #[test]
+fn map_limits_fail_atomically_before_publishing_rows() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "struct Item { id: int, attributes: Map<text, int> }\n\
+                 table items: Item { key id }"
+            )
+            .ok
+    );
+    let insert = engine.prepare("insert many items $rows").unwrap();
+
+    let too_many = (0..=MAX_MAP_ENTRIES)
+        .map(|index| (format!("key-{index}"), Value::Int(index as i64)))
+        .collect();
+    let response = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![
+                Value::Record(BTreeMap::from([
+                    ("id".into(), Value::Int(1)),
+                    ("attributes".into(), Value::Map(BTreeMap::new())),
+                ])),
+                Value::Record(BTreeMap::from([
+                    ("id".into(), Value::Int(2)),
+                    ("attributes".into(), Value::Map(too_many)),
+                ])),
+            ]),
+        )]),
+    );
+    assert_eq!(response.error.unwrap().code, "E_MAP_LIMIT");
+    assert!(engine.execute("from items").rows.is_empty());
+
+    let response = engine.execute_prepared(
+        &insert,
+        BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![
+                Value::Record(BTreeMap::from([
+                    ("id".into(), Value::Int(1)),
+                    ("attributes".into(), Value::Map(BTreeMap::new())),
+                ])),
+                Value::Record(BTreeMap::from([
+                    ("id".into(), Value::Int(2)),
+                    (
+                        "attributes".into(),
+                        Value::Map(BTreeMap::from([(
+                            "x".repeat(MAX_MAP_KEY_BYTES + 1),
+                            Value::Int(1),
+                        )])),
+                    ),
+                ])),
+            ]),
+        )]),
+    );
+    assert_eq!(response.error.unwrap().code, "E_MAP_LIMIT");
+    assert!(engine.execute("from items").rows.is_empty());
+
+    let mut recursive = Engine::memory();
+    assert!(
+        recursive
+            .execute(
+                "enum Node { Next(Node), End }\n\
+                 struct Tree { id: int, metadata: Map<text, Node> }\n\
+                 table trees: Tree { key id }"
+            )
+            .ok
+    );
+    let insert = recursive.prepare("insert many trees $rows").unwrap();
+    let mut node = Value::Enum(EnumValue {
+        variant: "End".into(),
+        args: Vec::new(),
+        id: 0,
+    });
+    for _ in 0..MAX_DEPTH {
+        node = Value::Enum(EnumValue {
+            variant: "Next".into(),
+            args: vec![node],
+            id: 0,
+        });
+    }
+    let response = recursive.execute_prepared(
+        &insert,
+        BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![
+                Value::Record(BTreeMap::from([
+                    ("id".into(), Value::Int(1)),
+                    ("metadata".into(), Value::Map(BTreeMap::new())),
+                ])),
+                Value::Record(BTreeMap::from([
+                    ("id".into(), Value::Int(2)),
+                    (
+                        "metadata".into(),
+                        Value::Map(BTreeMap::from([("tree".into(), node)])),
+                    ),
+                ])),
+            ]),
+        )]),
+    );
+    assert_eq!(response.error.unwrap().code, "E_LIMIT");
+    assert!(recursive.execute("from trees").rows.is_empty());
+
+    let dir = TempDir::new();
+    let path = dir.0.join("oversized-map.redb");
+    let mut durable = Engine::open_redb(&path).unwrap();
+    durable.upgrade_storage(8).unwrap();
+    assert!(
+        durable
+            .execute(
+                "struct Blob { id: int, metadata: Map<text, text> }\n\
+                 table blobs: Blob { key id }"
+            )
+            .ok
+    );
+    let insert = durable.prepare("insert many blobs $rows").unwrap();
+    let response = durable.execute_prepared(
+        &insert,
+        BTreeMap::from([(
+            "rows".into(),
+            Value::List(vec![
+                Value::Record(BTreeMap::from([
+                    ("id".into(), Value::Int(1)),
+                    ("metadata".into(), Value::Map(BTreeMap::new())),
+                ])),
+                Value::Record(BTreeMap::from([
+                    ("id".into(), Value::Int(2)),
+                    (
+                        "metadata".into(),
+                        Value::Map(BTreeMap::from([(
+                            "payload".into(),
+                            Value::Text("x".repeat(MAX_VALUE_BYTES)),
+                        )])),
+                    ),
+                ])),
+            ]),
+        )]),
+    );
+    let error = response.error.unwrap();
+    assert_eq!(error.code, "E_STORAGE");
+    assert!(error.message.contains("encoded value exceeds"), "{error}");
+    assert!(durable.execute("from blobs").rows.is_empty());
+}
+
+#[test]
 fn redb_rejects_maps_before_publishing_any_schema_change() {
     let dir = TempDir::new();
     let path = dir.0.join("maps.redb");
@@ -458,6 +610,127 @@ insert items {id: 2, attributes: map {"b": 2}}"#,
     assert_eq!(restored.introspection().storage_versions.unwrap().format, 8);
     assert_eq!(restored.execute("from items").rows.len(), 2);
     assert!(restored.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn typed_map_storage_upgrade_child() {
+    let Ok(path) = std::env::var(MAP_UPGRADE_PATH_ENV) else {
+        return;
+    };
+    let ready = std::env::var(MAP_UPGRADE_READY_ENV).unwrap();
+    let committed = std::env::var(MAP_UPGRADE_COMMITTED_ENV).unwrap();
+    let target = std::env::var(MAP_UPGRADE_TARGET_ENV)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    let mut engine = Engine::open_redb(path).unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    engine.upgrade_storage(target).unwrap();
+    std::fs::write(committed, b"committed").unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+#[test]
+fn terminated_format_6_and_7_map_upgrades_reopen_committed_state() {
+    for journal in [false, true] {
+        let dir = TempDir::new();
+        let path = dir.0.join(if journal {
+            "interrupted-format-9.redb"
+        } else {
+            "interrupted-format-8.redb"
+        });
+        let ready = dir.0.join("upgrade-ready");
+        let committed = dir.0.join("upgrade-committed");
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let mut source = String::from(
+            "struct Entry { id: int, value: text }\n\
+             table entries: Entry { key id }\n\
+             create index entries (value)\n\
+             insert many entries [",
+        );
+        for id in 0..5_000 {
+            if id > 0 {
+                source.push_str(", ");
+            }
+            source.push_str(&format!("{{id: {id}, value: \"value-{id}\"}}"));
+        }
+        source.push(']');
+        let inserted = engine.execute(&source);
+        assert!(inserted.ok, "{}", inserted.message);
+        if journal {
+            let status = engine.backup_journal_status().unwrap();
+            let enabled = engine
+                .enable_backup_journal(BackupJournalConfig::new(
+                    "map-upgrade",
+                    status.head_sequence,
+                    TEST_BACKUP_CHECKSUM,
+                ))
+                .unwrap();
+            assert_eq!(enabled.storage_format, 7);
+        }
+        drop(engine);
+
+        let target = if journal { 9 } else { 8 };
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "typed_map_storage_upgrade_child", "--nocapture"])
+            .env(MAP_UPGRADE_PATH_ENV, &path)
+            .env(MAP_UPGRADE_READY_ENV, &ready)
+            .env(MAP_UPGRADE_COMMITTED_ENV, &committed)
+            .env(MAP_UPGRADE_TARGET_ENV, target.to_string())
+            .spawn()
+            .unwrap();
+        for _ in 0..1_000 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(ready.exists(), "map upgrade child did not start");
+        for _ in 0..30_000 {
+            if committed.exists() {
+                break;
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "map upgrade child exited before publishing its durable commit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            committed.exists(),
+            "map upgrade child did not reach its durable commit"
+        );
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
+
+        let mut reopened = Engine::open_redb(&path).unwrap();
+        let format = reopened.introspection().storage_versions.unwrap().format;
+        assert_eq!(format, target);
+        assert!(reopened.check_integrity().unwrap().backend_clean);
+        let row = reopened.execute("from entries | filter id == 4999");
+        assert!(row.ok, "{}", row.message);
+        assert_eq!(row.rows.len(), 1);
+        assert!(row.rows[0]["value"].cmp_eq(&Value::Text("value-4999".into())));
+        if journal {
+            assert_eq!(
+                reopened.backup_journal_status().unwrap().state,
+                BackupJournalState::Active
+            );
+        }
+        assert_eq!(
+            reopened.introspection().storage_versions.unwrap().format,
+            target
+        );
+        let map = reopened.execute(
+            "struct Metadata { id: int, attributes: Map<text, text> }\n\
+             table metadata: Metadata { key id }\n\
+             insert metadata {id: 1, attributes: map {\"status\": \"ready\"}}",
+        );
+        assert!(map.ok, "{}", map.message);
+        assert!(reopened.check_integrity().unwrap().backend_clean);
+    }
 }
 
 #[test]

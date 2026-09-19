@@ -22,13 +22,14 @@ impl Database {
         table_name: &str,
         rows: &[Arc<Row>],
     ) -> Result<Self> {
+        let value_codec = if self.requires_map_storage() {
+            crate::codec::MAP_VALUE_CODEC_VERSION
+        } else {
+            crate::codec::PRODUCTION_VALUE_CODEC_VERSION
+        };
         let mut encoded = Vec::with_capacity(rows.len());
         for row in rows {
-            let (table_id, value) = self.durable_row_with_codec(
-                table_name,
-                row,
-                crate::codec::PRODUCTION_VALUE_CODEC_VERSION,
-            )?;
+            let (table_id, value) = self.durable_row_with_codec(table_name, row, value_codec)?;
             encoded.push((table_id, row.id, value));
         }
         let mut batch = Self::from_durable(

@@ -13,6 +13,7 @@ use unionid::{
 
 struct Scenario {
     name: &'static str,
+    storage_target: Option<u32>,
     initial_migration: &'static str,
     initial_script: &'static str,
     restart_query: &'static str,
@@ -29,6 +30,7 @@ struct Scenario {
 fn task_queue_survives_state_transition_migration_and_restore() {
     verify(Scenario {
         name: "task_queue",
+        storage_target: None,
         initial_migration: r#"migration m0001_task_queue
   add type TaskState = Queued | Running {worker text, attempt int} | Done {result text}
   add type Task =
@@ -70,6 +72,7 @@ sort id
 fn nested_config_survives_deep_adt_migration_and_restore() {
     verify(Scenario {
         name: "nested_config",
+        storage_target: None,
         initial_migration: r#"migration m0001_nested_config
   add type Retry =
     attempts int
@@ -133,6 +136,7 @@ filter source == Http {
 fn session_key_lifecycle_survives_migration_and_restore() {
     verify(Scenario {
         name: "session_lifecycle",
+        storage_target: None,
         initial_migration: r#"migration m0001_sessions
   add type SessionState = Active | Expired {reason text}
   add type Session =
@@ -165,6 +169,87 @@ from sessions | filter id == "s1"
     });
 }
 
+#[test]
+fn typed_metadata_survives_mutation_migration_restart_check_and_restore() {
+    verify(Scenario {
+        name: "typed_metadata",
+        storage_target: Some(8),
+        initial_migration: r#"migration m0001_typed_metadata
+  add type Attribute = Text(text) | Number(int) | Enabled(bool)
+  add type Account =
+    id text
+    attributes Map<text, Attribute>
+    legacy_plan Map<text, Attribute>
+  add table accounts Account key id
+  add unique index accounts.attributes
+"#,
+        initial_script: r#"insert accounts {
+  id = "alice"
+  attributes = map {
+    "plan": Text("pro")
+    "region": Text("eu")
+    "seats": Number(5)
+  }
+  legacy_plan = map {"plan": Text("pro")}
+}
+upsert accounts {
+  id = "bob"
+  attributes = map {"plan": Text("free")}
+  legacy_plan = map {}
+}
+update accounts
+filter id == "alice"
+set attributes = map {
+  "enabled": Enabled(true)
+  "plan": Text("pro")
+  "region": Text("eu")
+  "seats": Number(6)
+}
+from accounts
+sort id
+derive {
+  plan = get attributes "plan"
+  attribute_keys = keys attributes
+  attribute_count = length attributes
+}"#,
+        restart_query: r#"from accounts
+filter contains_key attributes "plan"
+sort id
+derive {
+  plan = get attributes "plan"
+  attribute_keys = keys attributes
+  attribute_count = length attributes
+}"#,
+        upgrade_migration: r#"migration m0002_normalize_metadata
+  parent m0001_typed_metadata
+  rename field Account.attributes to metadata
+  change field Account.legacy_plan to Option<Attribute>
+    using old -> get old "plan"
+  add field Account.provider_metadata: Map<text, Attribute> = map {}
+"#,
+        final_query: r#"from accounts
+filter contains_key metadata "plan"
+sort id
+derive {
+  plan = get metadata "plan"
+  metadata_entries = entries metadata
+  metadata_count = length metadata
+}
+select {id, metadata, legacy_plan, provider_metadata, plan, metadata_entries, metadata_count}"#,
+        explain_query: r#"explain from accounts
+filter metadata == map {
+  "enabled": Enabled(true)
+  "plan": Text("pro")
+  "region": Text("eu")
+  "seats": Number(6)
+}"#,
+        expected_access: QueryAccessKind::SecondaryIndexLookup,
+        expected_index: "accounts.metadata",
+        assert_before: assert_metadata_before,
+        assert_after: assert_metadata_after,
+    });
+}
+
 fn verify(scenario: Scenario) {
     let dir = TempDir::new();
     let database = dir.0.join(format!("{}.redb", scenario.name));
@@ -172,7 +257,29 @@ fn verify(scenario: Scenario) {
     let archive = dir.0.join(format!("{}.backup.json", scenario.name));
     let migrations = dir.0.join("migrations");
     std::fs::create_dir(&migrations).unwrap();
-    write_migration(&migrations, "0001_initial.uid", scenario.initial_migration);
+    write_migration(&migrations, "0001_initial.unid", scenario.initial_migration);
+
+    if let Some(target) = scenario.storage_target {
+        let target = target.to_string();
+        let upgraded: serde_json::Value = run_json(
+            scenario.name,
+            &[
+                "upgrade",
+                "--db",
+                path(&database),
+                "--target",
+                &target,
+                "--format",
+                "json",
+            ],
+        );
+        assert_eq!(upgraded["format"], scenario.storage_target.unwrap());
+        assert_eq!(
+            upgraded["changed"], true,
+            "{} storage upgrade",
+            scenario.name
+        );
+    }
 
     let initial: MigrationApply = run_json(
         scenario.name,
@@ -199,7 +306,7 @@ fn verify(scenario: Scenario) {
     let restarted = run_query(scenario.name, &database, scenario.restart_query);
     (scenario.assert_before)(&restarted);
 
-    write_migration(&migrations, "0002_upgrade.uid", scenario.upgrade_migration);
+    write_migration(&migrations, "0002_upgrade.unid", scenario.upgrade_migration);
     let plan: MigrationPlan = run_json(
         scenario.name,
         &[
@@ -540,4 +647,54 @@ fn assert_session_after(response: &QueryResponse) {
     assert_int(row, "generation", 1);
     assert!(row["state"].source_text().starts_with("Ready"));
     assert!(row["tags"].source_text().contains("refreshed"));
+}
+
+fn assert_metadata_before(response: &QueryResponse) {
+    assert_eq!(response.rows.len(), 2);
+    let alice = &response.rows[0];
+    assert_text(alice, "id", "alice");
+    assert_int(alice, "attribute_count", 4);
+    assert_eq!(alice["plan"].source_text(), "Some(Text(\"pro\"))");
+    assert_eq!(
+        alice["attribute_keys"].source_text(),
+        r#"["enabled", "plan", "region", "seats"]"#
+    );
+    let attributes = alice["attributes"].source_text();
+    assert!(attributes.contains(r#""seats": Number(6)"#), "{attributes}");
+
+    let bob = &response.rows[1];
+    assert_text(bob, "id", "bob");
+    assert_int(bob, "attribute_count", 1);
+    assert_eq!(bob["plan"].source_text(), "Some(Text(\"free\"))");
+    assert_eq!(bob["attribute_keys"].source_text(), r#"["plan"]"#);
+    assert_eq!(bob["legacy_plan"].source_text(), "map {}");
+}
+
+fn assert_metadata_after(response: &QueryResponse) {
+    assert_eq!(response.rows.len(), 2);
+    let alice = &response.rows[0];
+    assert_text(alice, "id", "alice");
+    assert_int(alice, "metadata_count", 4);
+    assert_eq!(alice["plan"].source_text(), "Some(Text(\"pro\"))");
+    assert_eq!(alice["legacy_plan"].source_text(), "Some(Text(\"pro\"))");
+    assert_eq!(alice["provider_metadata"].source_text(), "map {}");
+    let metadata = alice["metadata"].source_text();
+    assert!(metadata.contains(r#""seats": Number(6)"#), "{metadata}");
+    let entries = alice["metadata_entries"].source_text();
+    assert!(
+        entries.starts_with(r#"[("enabled", Enabled(true))"#),
+        "{entries}"
+    );
+    assert!(entries.ends_with(r#"("seats", Number(6))]"#), "{entries}");
+
+    let bob = &response.rows[1];
+    assert_text(bob, "id", "bob");
+    assert_int(bob, "metadata_count", 1);
+    assert_eq!(bob["plan"].source_text(), "Some(Text(\"free\"))");
+    assert_eq!(bob["legacy_plan"].source_text(), "None");
+    assert_eq!(bob["provider_metadata"].source_text(), "map {}");
+    assert_eq!(
+        bob["metadata_entries"].source_text(),
+        r#"[("plan", Text("free"))]"#
+    );
 }
