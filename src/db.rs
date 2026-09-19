@@ -1120,6 +1120,19 @@ impl IndexDefinition {
         self.predicate.as_ref().map(IndexPredicate::source_text)
     }
 
+    pub(crate) fn display_constraint(&self) -> String {
+        match self.display_predicate() {
+            Some(predicate) => format!("({}) if {predicate}", self.display_shape()),
+            None => format!("({})", self.display_shape()),
+        }
+    }
+
+    fn includes(&self, fields: &BTreeMap<String, Value>) -> bool {
+        self.predicate
+            .as_ref()
+            .is_none_or(|predicate| predicate.matches(fields))
+    }
+
     pub(crate) fn is_primary_index(&self, primary_key: Option<&str>) -> bool {
         let components = self.effective_components();
         components.len() == 1
@@ -1731,11 +1744,13 @@ impl Database {
                 let before = change
                     .before
                     .as_ref()
+                    .filter(|row| definition.includes(&row.fields))
                     .map(|row| index_value(&row.fields, &components, table))
                     .transpose()?;
                 let after = change
                     .after
                     .as_ref()
+                    .filter(|row| definition.includes(&row.fields))
                     .map(|row| index_value(&row.fields, &components, table))
                     .transpose()?;
                 if before.as_ref().is_some_and(|before| {
@@ -2039,13 +2054,15 @@ impl Database {
         unique: bool,
         predicate: Option<&BoolExpression>,
     ) -> Result<QueryResponse> {
-        if let Some(predicate) = predicate {
-            let _ = self.bind_index_predicate(name, predicate)?;
+        if predicate.is_some() && !unique {
             return Err(Error::new(
                 "E_INDEX_PREDICATE",
-                "partial unique index execution is not available in this implementation stage",
+                "partial predicates require a unique index",
             ));
         }
+        let predicate = predicate
+            .map(|predicate| self.bind_index_predicate(name, predicate))
+            .transpose()?;
         if components.is_empty() || components.len() > crate::query::MAX_INDEX_COMPONENTS {
             return Err(Error::new(
                 "E_INDEX_SHAPE",
@@ -2077,27 +2094,8 @@ impl Database {
             }
             (table.id, definitions)
         };
-        let shape = index_shape_key(&definitions);
-        let display = display_index_shape(&definitions);
-        if self
-            .indexes
-            .get(name)
-            .is_some_and(|indexes| indexes.contains_key(&shape))
-        {
-            return Err(Error::new(
-                "E_INDEX_DUPLICATE",
-                format!("index on '{name} ({display})' already exists"),
-            ));
-        }
-        let posting = self.build_index(name, &definitions)?;
-        if unique && posting.values().any(|rows| rows.len() > 1) {
-            return Err(Error::new(
-                "E_CONSTRAINT",
-                format!("duplicate value for unique index '{name} ({display})'"),
-            ));
-        }
         let definition = IndexDefinition {
-            id: self.catalog.allocate()?,
+            id: 0,
             table_id,
             column: String::new(),
             field_path: Vec::new(),
@@ -2107,7 +2105,30 @@ impl Database {
             } else {
                 IndexKind::Ordinary
             },
-            predicate: None,
+            predicate,
+        };
+        let shape = definition.shape_key();
+        let display = definition.display_constraint();
+        if self
+            .indexes
+            .get(name)
+            .is_some_and(|indexes| indexes.contains_key(&shape))
+        {
+            return Err(Error::new(
+                "E_INDEX_DUPLICATE",
+                format!("index on '{name} {display}' already exists"),
+            ));
+        }
+        let posting = self.build_index(name, &definition)?;
+        if unique && posting.values().any(|rows| rows.len() > 1) {
+            return Err(Error::new(
+                "E_CONSTRAINT",
+                format!("duplicate value for unique index '{name} {display}'"),
+            ));
+        }
+        let definition = IndexDefinition {
+            id: self.catalog.allocate()?,
+            ..definition
         };
         self.index_definitions
             .entry(name.into())
@@ -2118,20 +2139,20 @@ impl Database {
             .or_default()
             .insert(shape, posting);
         Ok(QueryResponse::ok_message(format!(
-            "{}index created on '{name} ({display})'",
+            "{}index created on '{name} {display}'",
             if unique { "unique " } else { "" }
         )))
     }
 
-    fn build_index(
-        &self,
-        name: &str,
-        components: &[IndexComponentDefinition],
-    ) -> Result<IndexPosting> {
+    fn build_index(&self, name: &str, definition: &IndexDefinition) -> Result<IndexPosting> {
         let table = self.table(name)?;
         let mut posting = IndexPosting::new();
+        let components = definition.effective_components();
         for row in &table.rows {
-            let key = self.index_tuple_key(name, components, &row.fields)?;
+            if !definition.includes(&row.fields) {
+                continue;
+            }
+            let key = self.index_tuple_key(name, &components, &row.fields)?;
             posting.entry(key).or_default().push_back(row.id);
         }
         Ok(posting)
@@ -2180,6 +2201,18 @@ impl Database {
             ));
         }
         Ok(key)
+    }
+
+    fn included_index_tuple_key(
+        &self,
+        table_name: &str,
+        definition: &IndexDefinition,
+        fields: &BTreeMap<String, Value>,
+    ) -> Result<Option<Vec<u8>>> {
+        definition
+            .includes(fields)
+            .then(|| self.index_tuple_key(table_name, &definition.effective_components(), fields))
+            .transpose()
     }
 
     fn single_index_key(&self, table: &str, column: &str, value: &Value) -> Result<Vec<u8>> {
@@ -2841,7 +2874,9 @@ impl Database {
             .cloned()
             .unwrap_or_default();
         for definition in definitions.values() {
-            index_value(&fields, &definition.effective_components(), name)?;
+            if definition.includes(&fields) {
+                index_value(&fields, &definition.effective_components(), name)?;
+            }
         }
         if let Some(key) = &table.primary_key {
             let value = row_field(&fields, key)
@@ -2861,7 +2896,7 @@ impl Database {
         }
         for definition in definitions
             .values()
-            .filter(|definition| definition.kind.is_unique())
+            .filter(|definition| definition.kind.is_unique() && definition.includes(&fields))
         {
             let key = self.index_tuple_key(name, &definition.effective_components(), &fields)?;
             let shape = definition.shape_key();
@@ -2874,8 +2909,8 @@ impl Database {
                 return Err(Error::new(
                     "E_CONSTRAINT",
                     format!(
-                        "duplicate value for unique index '{name} ({})'",
-                        definition.display_shape()
+                        "duplicate value for unique index '{name} {}'",
+                        definition.display_constraint()
                     ),
                 ));
             }
@@ -2886,6 +2921,7 @@ impl Database {
             .ok_or_else(|| Error::new("E_LIMIT", "row ID space exhausted"))?;
         let index_entries = definitions
             .values()
+            .filter(|definition| definition.includes(&fields))
             .map(|definition| {
                 Ok((
                     definition.shape_key(),
@@ -3117,6 +3153,9 @@ impl Database {
                 let Some(after) = change.after.as_ref() else {
                     continue;
                 };
+                if !definition.includes(&after.fields) {
+                    continue;
+                }
                 let boundary = self.index_tuple_key(table_name, &components, &after.fields)?;
                 if changed_values.insert(boundary.clone(), after.id).is_some() {
                     return Err(Error::new(
@@ -3128,8 +3167,8 @@ impl Database {
                             )
                         } else {
                             format!(
-                                "duplicate value for unique index '{table_name} ({})'",
-                                definition.display_shape()
+                                "duplicate value for unique index '{table_name} {}'",
+                                definition.display_constraint()
                             )
                         },
                     ));
@@ -3148,8 +3187,8 @@ impl Database {
                                 )
                             } else {
                                 format!(
-                                    "duplicate value for unique index '{table_name} ({})'",
-                                    definition.display_shape()
+                                    "duplicate value for unique index '{table_name} {}'",
+                                    definition.display_constraint()
                                 )
                             },
                         ));
@@ -3697,13 +3736,16 @@ impl Database {
             let mut seen = BTreeSet::new();
             let components = definition.effective_components();
             for row in rows {
+                if !definition.includes(&row.fields) {
+                    continue;
+                }
                 let value = index_value(&row.fields, &components, name)?;
                 if !seen.insert(value.index_key()) {
                     return Err(Error::new(
                         "E_CONSTRAINT",
                         format!(
-                            "duplicate value for unique index '{name} ({})'",
-                            definition.display_shape()
+                            "duplicate value for unique index '{name} {}'",
+                            definition.display_constraint()
                         ),
                     ));
                 }
@@ -3737,7 +3779,7 @@ impl Database {
             }
             if let Some(after) = &change.after {
                 for definition in definitions.values() {
-                    index_value(&after.fields, &definition.effective_components(), name)?;
+                    self.included_index_tuple_key(name, definition, &after.fields)?;
                 }
             }
         }
@@ -3746,39 +3788,41 @@ impl Database {
         // validate against the final candidate rather than statement order.
         for definition in definitions.values() {
             let shape = definition.shape_key();
-            let display = definition.display_shape();
-            let components = definition.effective_components();
+            let display = definition.display_constraint();
             let posting = indexes.get_mut(&shape).ok_or_else(|| {
                 Error::new(
                     "E_INDEX",
-                    format!("missing in-memory index '{name} ({display})'"),
+                    format!("missing in-memory index '{name} {display}'"),
                 )
             })?;
             for change in changes {
                 let Some(before) = change.before.as_ref() else {
                     continue;
                 };
-                let key = self.index_tuple_key(name, &components, &before.fields)?;
-                if change
+                let Some(key) = self.included_index_tuple_key(name, definition, &before.fields)?
+                else {
+                    continue;
+                };
+                let after_key = change
                     .after
                     .as_ref()
-                    .map(|after| self.index_tuple_key(name, &components, &after.fields))
+                    .map(|after| self.included_index_tuple_key(name, definition, &after.fields))
                     .transpose()?
-                    .is_some_and(|after_key| after_key == key)
-                {
+                    .flatten();
+                if after_key.as_ref() == Some(&key) {
                     continue;
                 }
                 let remove_key = {
                     let ids = posting.get_mut(&key).ok_or_else(|| {
                         Error::new(
                             "E_INDEX",
-                            format!("index '{name} ({display})' is missing row ID {}", before.id),
+                            format!("index '{name} {display}' is missing row ID {}", before.id),
                         )
                     })?;
                     let position = ids.binary_search(&before.id).map_err(|_| {
                         Error::new(
                             "E_INDEX",
-                            format!("index '{name} ({display})' is missing row ID {}", before.id),
+                            format!("index '{name} {display}' is missing row ID {}", before.id),
                         )
                     })?;
                     ids.remove(position);
@@ -3794,26 +3838,28 @@ impl Database {
             let unique =
                 definition.kind.is_unique() || definition.is_primary_index(primary_key.as_deref());
             let shape = definition.shape_key();
-            let display = definition.display_shape();
-            let components = definition.effective_components();
+            let display = definition.display_constraint();
             let posting = indexes.get_mut(&shape).ok_or_else(|| {
                 Error::new(
                     "E_INDEX",
-                    format!("missing in-memory index '{name} ({display})'"),
+                    format!("missing in-memory index '{name} {display}'"),
                 )
             })?;
             for change in changes {
                 let Some(after) = change.after.as_ref() else {
                     continue;
                 };
-                let key = self.index_tuple_key(name, &components, &after.fields)?;
-                if change
+                let Some(key) = self.included_index_tuple_key(name, definition, &after.fields)?
+                else {
+                    continue;
+                };
+                let before_key = change
                     .before
                     .as_ref()
-                    .map(|before| self.index_tuple_key(name, &components, &before.fields))
+                    .map(|before| self.included_index_tuple_key(name, definition, &before.fields))
                     .transpose()?
-                    .is_some_and(|before_key| before_key == key)
-                {
+                    .flatten();
+                if before_key.as_ref() == Some(&key) {
                     continue;
                 }
                 let ids = posting.entry(key).or_default();
@@ -3826,7 +3872,7 @@ impl Database {
                                 primary_key.as_deref().unwrap_or_default()
                             )
                         } else {
-                            format!("duplicate value for unique index '{name} ({display})'")
+                            format!("duplicate value for unique index '{name} {display}'")
                         },
                     ));
                 }
@@ -3835,7 +3881,7 @@ impl Database {
                         return Err(Error::new(
                             "E_INDEX",
                             format!(
-                                "index '{name} ({display})' already contains row ID {}",
+                                "index '{name} {display}' already contains row ID {}",
                                 after.id
                             ),
                         ));
@@ -4020,10 +4066,11 @@ impl Database {
             .into_iter()
             .flat_map(|definitions| definitions.values())
             .filter(|definition| {
-                definition
-                    .effective_components()
-                    .first()
-                    .is_some_and(|component| component.column == lookup.target_key)
+                definition.predicate.is_none()
+                    && definition
+                        .effective_components()
+                        .first()
+                        .is_some_and(|component| component.column == lookup.target_key)
             })
             .min_by_key(|definition| (definition.effective_components().len(), definition.id))
             .ok_or_else(|| {
@@ -4099,6 +4146,9 @@ impl Database {
             .flat_map(|definitions| definitions.values());
         let selected = definitions
             .filter_map(|definition| {
+                if definition.predicate.is_some() {
+                    return None;
+                }
                 let components = definition.effective_components();
                 let correlation = correlations.iter().find(|correlation| {
                     components
@@ -4838,7 +4888,7 @@ impl Database {
             .get(&pipeline.from)
             .into_iter()
             .flat_map(|definitions| definitions.values())
-            .filter(|definition| definition.kind.is_unique())
+            .filter(|definition| definition.kind.is_unique() && definition.predicate.is_none())
             .any(|definition| {
                 let components = definition.effective_components();
                 let equality_components = components
@@ -5173,6 +5223,9 @@ impl Database {
         let mut best = None;
         if let Some(definitions) = self.index_definitions.get(&pipeline.from) {
             for definition in definitions.values() {
+                if definition.predicate.is_some() {
+                    continue;
+                }
                 let shape = definition.shape_key();
                 if !source.has_index(&pipeline.from, &shape) {
                     continue;
@@ -5250,6 +5303,12 @@ impl Database {
                     .find(|definition| definition.shape_key() == shape)
             })
             .ok_or_else(|| Error::new("E_QUERY", "bound query index is no longer available"))?;
+        if definition.predicate.is_some() {
+            return Err(Error::new(
+                "E_QUERY",
+                "partial indexes require predicate implication planning",
+            ));
+        }
         if !source.has_index(&pipeline.from, shape) {
             return Err(Error::new(
                 "E_QUERY",
@@ -6474,14 +6533,13 @@ impl Database {
                     .insert(shape.clone(), definition);
             }
             let definition = &self.index_definitions[&table][&shape];
-            let components = definition.effective_components();
-            let posting = self.build_index(&table, &components)?;
+            let posting = self.build_index(&table, definition)?;
             if definition.kind.is_unique() && posting.values().any(|rows| rows.len() > 1) {
                 return Err(Error::new(
                     "E_CONSTRAINT",
                     format!(
-                        "duplicate value for unique index '{table} ({})'",
-                        definition.display_shape()
+                        "duplicate value for unique index '{table} {}'",
+                        definition.display_constraint()
                     ),
                 ));
             }
@@ -6982,6 +7040,9 @@ impl Database {
                     })?;
                 let components = definition.effective_components();
                 for row in &self.table(table)?.rows {
+                    if !definition.includes(&row.fields) {
+                        continue;
+                    }
                     let value = index_value(&row.fields, &components, table)?;
                     let value_key = self.index_tuple_key(table, &components, &row.fields)?;
                     let row_ids = posting.get(&value_key).ok_or_else(|| {

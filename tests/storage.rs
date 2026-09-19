@@ -42,6 +42,37 @@ const TEST_BACKUP_CHECKSUM: &str =
     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 #[test]
+fn redb_rejects_partial_indexes_until_the_format_10_stage() {
+    let dir = TempDir::new();
+    let path = dir.0.join("partial-index.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(
+        engine
+            .execute(
+                "type User = {id int, email text, deleted_at option text}\ntable users User\n  key id"
+            )
+            .ok
+    );
+    let before = engine.schema_info();
+    let response = engine.execute("create unique index users (email) if deleted_at == None");
+    assert_eq!(
+        response.error.as_ref().map(|error| error.code.as_str()),
+        Some("E_STORAGE_UPGRADE_REQUIRED")
+    );
+    assert_eq!(engine.schema_info(), before);
+    assert!(!engine.schema().contains("deleted_at == None"));
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(path).unwrap();
+    assert_eq!(reopened.schema_info(), before);
+    assert!(
+        reopened
+            .execute("insert users {id = 1, email = \"a@example.com\", deleted_at = None}")
+            .ok
+    );
+}
+
+#[test]
 fn default_redb_writes_remain_format6_without_journal_metadata() {
     let dir = TempDir::new();
     let path = dir.0.join("default-format6.redb");

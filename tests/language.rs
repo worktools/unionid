@@ -3917,6 +3917,146 @@ fn composite_unique_indexes_are_atomic_across_mutation_paths() {
 }
 
 #[test]
+fn partial_unique_indexes_enforce_only_the_final_matching_rows() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type User = {id int, email text, deleted_at option text}
+table users User
+  key id
+create unique index users (email) if deleted_at == None
+insert users {id = 1, email = "same@example.com", deleted_at = None}
+insert users {id = 2, email = "same@example.com", deleted_at = Some "old"}
+insert users {id = 3, email = "same@example.com", deleted_at = Some "older"}"#,
+    );
+
+    let duplicate =
+        engine.execute("insert users {id = 4, email = \"same@example.com\", deleted_at = None}");
+    assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert!(duplicate.message.contains("deleted_at == None"));
+
+    let activate_conflict = engine.execute("update users | filter id == 2 | set deleted_at = None");
+    assert_eq!(
+        activate_conflict.error.as_ref().unwrap().code,
+        "E_CONSTRAINT"
+    );
+    assert!(
+        ok(&mut engine, "from users | filter id == 2").rows[0]["deleted_at"]
+            .cmp_eq(&Value::Option(Some(Box::new(Value::Text("old".into())))))
+    );
+
+    ok(
+        &mut engine,
+        "update users | filter id == 1 | set deleted_at = Some \"deleted\"",
+    );
+    ok(
+        &mut engine,
+        "update users | filter id == 2 | set deleted_at = None",
+    );
+    ok(&mut engine, "delete users | filter id == 2");
+    ok(
+        &mut engine,
+        "update users | filter id == 3 | set deleted_at = None",
+    );
+
+    let before = rows(&mut engine, "from users | sort id");
+    let batch = engine.execute(
+        r#"insert many users [
+  {id = 4, email = "batch@example.com", deleted_at = None},
+  {id = 5, email = "batch@example.com", deleted_at = None}
+]"#,
+    );
+    assert_eq!(batch.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert_eq!(rows(&mut engine, "from users | sort id"), before);
+
+    ok(
+        &mut engine,
+        "insert users {id = 4, email = \"same@example.com\", deleted_at = Some \"old\"}",
+    );
+    let upsert =
+        engine.execute("upsert users {id = 4, email = \"same@example.com\", deleted_at = None}");
+    assert_eq!(upsert.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert!(
+        ok(&mut engine, "from users | filter id == 4").rows[0]["deleted_at"]
+            .cmp_eq(&Value::Option(Some(Box::new(Value::Text("old".into())))))
+    );
+
+    let plan = ok(
+        &mut engine,
+        "explain from users | filter email == \"same@example.com\"",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::FullScan);
+    assert!(
+        engine
+            .schema()
+            .contains("create unique index users (email) if deleted_at == None")
+    );
+
+    ok(
+        &mut engine,
+        r#"type JobState = Pending | Active
+type Marker = A | B
+type Job = {id int, provider text, external_id text, state JobState, owner option text, marker Marker}
+table jobs Job
+  key id
+create unique index jobs (provider, external_id) if state == Active && is_some owner
+insert jobs {id = 1, provider = "acme", external_id = "42", state = Active, owner = Some "a", marker = A}
+insert jobs {id = 2, provider = "acme", external_id = "42", state = Pending, owner = Some "b", marker = A}
+insert jobs {id = 3, provider = "acme", external_id = "42", state = Active, owner = None, marker = A}
+insert jobs {id = 5, provider = "acme", external_id = "43", state = Active, owner = Some "c", marker = B}"#,
+    );
+    let state_conflict = engine.execute(
+        "insert jobs {id = 4, provider = \"acme\", external_id = \"42\", state = Active, owner = Some \"b\", marker = A}",
+    );
+    assert_eq!(state_conflict.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    ok(
+        &mut engine,
+        r#"update jobs
+filter id in [1, 5]
+set external_id =
+  match marker
+    A => "43"
+    B => "42""#,
+    );
+}
+
+#[test]
+fn partial_unique_index_migrations_validate_existing_rows_and_drop_exact_shape() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type User = {id int, email text, deleted_at option text}
+table users User
+  key id
+insert users {id = 1, email = "same@example.com", deleted_at = None}
+insert users {id = 2, email = "same@example.com", deleted_at = Some "old"}"#,
+    );
+    ok(
+        &mut engine,
+        "migration m0001_partial\n  add unique index users (email) if deleted_at == None",
+    );
+    let duplicate =
+        engine.execute("insert users {id = 3, email = \"same@example.com\", deleted_at = None}");
+    assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    ok(
+        &mut engine,
+        "migration m0002_drop\n  drop index users (email) if deleted_at == None",
+    );
+    ok(
+        &mut engine,
+        "insert users {id = 3, email = \"same@example.com\", deleted_at = None}",
+    );
+
+    let before = engine.schema_info();
+    let conflict = engine
+        .execute("migration m0003_restore\n  add unique index users (email) if deleted_at == None");
+    assert_eq!(conflict.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert_eq!(engine.schema_info(), before);
+}
+
+#[test]
 fn creating_or_migrating_a_unique_index_over_duplicates_is_atomic() {
     let mut engine = Engine::memory();
     ok(

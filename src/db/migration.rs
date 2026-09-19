@@ -135,16 +135,7 @@ impl Database {
                 table,
                 components,
                 predicate,
-            } => {
-                if let Some(predicate) = predicate {
-                    let _ = self.bind_index_predicate(&table, &predicate)?;
-                    return Err(Error::new(
-                        "E_INDEX_PREDICATE",
-                        "partial unique index execution is not available in this implementation stage",
-                    ));
-                }
-                self.drop_index(&table, &components)
-            }
+            } => self.drop_index(&table, &components, predicate.as_ref()),
             SchemaMigration::SetKey { table, column } => self.set_key(&table, &column),
             SchemaMigration::DropKey { table } => self.drop_key(&table),
         }
@@ -604,29 +595,51 @@ impl Database {
         self.rewrite_after_catalog_change(&old_catalog, Some(owner_id), Some(&rewrite))
     }
 
-    fn drop_index(&mut self, table: &str, components: &[IndexComponent]) -> Result<()> {
+    fn drop_index(
+        &mut self,
+        table: &str,
+        components: &[IndexComponent],
+        predicate: Option<&BoolExpression>,
+    ) -> Result<()> {
         let source = self.table(table)?;
-        let shape = query_index_shape_key(components);
-        let display = crate::formatter::index_shape(components);
-        if components.len() == 1
+        let predicate = predicate
+            .map(|predicate| self.bind_index_predicate(table, predicate))
+            .transpose()?;
+        let component_shape = query_index_shape_key(components);
+        let shape = predicate.as_ref().map_or_else(
+            || component_shape.clone(),
+            |predicate| format!("{component_shape} if {}", predicate.identity_key()),
+        );
+        let display = predicate.as_ref().map_or_else(
+            || format!("({})", crate::formatter::index_shape(components)),
+            |predicate| {
+                format!(
+                    "({}) if {}",
+                    crate::formatter::index_shape(components),
+                    predicate.source_text()
+                )
+            },
+        );
+        if predicate.is_none()
+            && components.len() == 1
             && !components[0].descending
             && source.primary_key.as_deref() == Some(components[0].column.as_str())
         {
             return Err(Error::new(
                 "E_MIGRATION",
-                format!("index '{table} ({display})' enforces the primary key; drop the key first"),
+                format!("index '{table} {display}' enforces the primary key; drop the key first"),
             ));
         }
         let definitions = self.index_definitions.get_mut(table).ok_or_else(|| {
             Error::new(
                 "E_INDEX",
-                format!("index '{table} ({display})' does not exist"),
+                format!("index '{table} {display}' does not exist"),
             )
         })?;
         if definitions.remove(&shape).is_none() {
             return Err(Error::new(
                 "E_INDEX",
-                format!("index '{table} ({display})' does not exist"),
+                format!("index '{table} {display}' does not exist"),
             ));
         }
         if let Some(columns) = self.indexes.get_mut(table) {

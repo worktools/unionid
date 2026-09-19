@@ -71,6 +71,25 @@ impl IndexPredicate {
             .collect::<Vec<_>>()
             .join(" && ")
     }
+
+    pub(crate) fn matches(&self, fields: &std::collections::BTreeMap<String, Value>) -> bool {
+        self.atoms.iter().all(|atom| {
+            let Some(value) = super::row_field(fields, atom.column()) else {
+                return false;
+            };
+            match atom {
+                IndexPredicateAtom::Equal {
+                    value: expected, ..
+                } => value.cmp_eq(expected),
+                IndexPredicateAtom::IsNone { .. } => {
+                    matches!(value.unwrapped(), Value::Option(None))
+                }
+                IndexPredicateAtom::IsSome { .. } => {
+                    matches!(value.unwrapped(), Value::Option(Some(_)))
+                }
+            }
+        })
+    }
 }
 
 impl IndexPredicateAtom {

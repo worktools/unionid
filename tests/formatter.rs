@@ -108,21 +108,17 @@ fn partial_index_predicates_require_unique_indexes() {
 }
 
 #[test]
-fn partial_unique_index_execution_fails_before_schema_mutation() {
+fn partial_unique_index_execution_accepts_bound_predicates_and_rejects_invalid_ones() {
     let mut engine = Engine::memory();
     assert!(
         engine
             .execute("type User = {id int, email text, deleted_at option text}\ntable users User")
             .ok
     );
-    let before = engine.schema();
     let response = engine.execute("create unique index users (email) if deleted_at == None");
-    assert!(!response.ok);
-    assert_eq!(
-        response.error.as_ref().map(|error| error.code.as_str()),
-        Some("E_INDEX_PREDICATE")
-    );
-    assert_eq!(engine.schema(), before);
+    assert!(response.ok, "{}", response.message);
+    let before = engine.schema();
+    assert!(before.contains("create unique index users (email) if deleted_at == None"));
 
     let unsupported = engine.execute("create unique index users (email) if deleted_at != None");
     assert_eq!(
