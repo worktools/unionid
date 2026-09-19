@@ -6277,6 +6277,12 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
     let mut json = serde_json::to_value(entry)
         .map_err(|error| Error::new("E_STORAGE", format!("encode catalog entry: {error}")))?;
     if let DurableCatalogEntry::Index { definition, .. } = entry {
+        if definition.predicate.is_some() {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "partial unique indexes require storage format 10; durable support is not available in this implementation stage",
+            ));
+        }
         let components = definition.effective_components();
         if version < PRODUCTION_CATALOG_CODEC_VERSION
             && (components.len() != 1 || components[0].descending)

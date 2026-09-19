@@ -456,6 +456,60 @@ fn prepared_dml_rejects_invalid_empty_table_operations_before_execution() {
 }
 
 #[test]
+fn prepared_mutations_share_partial_unique_index_constraints() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "type User = {id int, email text, deleted_at option text}\ntable users User\n  key id\ncreate unique index users (email) if deleted_at == None"
+            )
+            .ok
+    );
+    let row = |id, deleted_at| {
+        Value::Record(BTreeMap::from([
+            ("id".into(), Value::Int(id)),
+            ("email".into(), Value::Text("same@example.com".into())),
+            ("deleted_at".into(), Value::Option(deleted_at)),
+        ]))
+    };
+    let insert = engine.prepare("insert users $row").unwrap();
+    assert!(
+        engine
+            .execute_prepared(&insert, BTreeMap::from([("row".into(), row(1, None))]),)
+            .ok
+    );
+    assert!(
+        engine
+            .execute_prepared(
+                &insert,
+                BTreeMap::from([(
+                    "row".into(),
+                    row(2, Some(Box::new(Value::Text("old".into())))),
+                )]),
+            )
+            .ok
+    );
+
+    let activate = engine
+        .prepare("update users\nfilter id == $id\nset deleted_at = $deleted_at")
+        .unwrap();
+    let rejected = engine.execute_prepared(
+        &activate,
+        BTreeMap::from([
+            ("id".into(), Value::Int(2)),
+            ("deleted_at".into(), Value::Option(None)),
+        ]),
+    );
+    assert_eq!(rejected.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    let unchanged = engine.execute("from users | filter id == 2");
+    assert!(unchanged.ok, "{}", unchanged.message);
+    assert!(
+        unchanged.rows[0]["deleted_at"]
+            .cmp_eq(&Value::Option(Some(Box::new(Value::Text("old".into())))))
+    );
+}
+
+#[test]
 fn prepared_bulk_insert_rejects_the_transitional_wal() {
     let temp = TempDir::new();
     let wal = temp.0.join("prepared-bulk.wal");
