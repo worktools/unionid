@@ -4,6 +4,22 @@
 
 unionid 最适合一个进程或少量客户端持有的应用状态：数据规模有限，表之间很少 join，但单行内部有明确的状态、分支和嵌套结构。重点不是替代分析型 SQL，而是让应用从 schema、查询到返回值都保持同一套代数类型。
 
+每节都有对应的可运行 `examples/*.unid`，可直接执行或作为起点复制：
+
+| 场景 | 可运行示例 |
+| --- | --- |
+| 1. 后台任务与本地队列 | [job_queue.unid](../examples/job_queue.unid) · [task_mutations.unid](../examples/task_mutations.unid) |
+| 2. 嵌套配置与连接定义 | [config.unid](../examples/config.unid) |
+| 3. Webhook 与事件收件箱 | [events.unid](../examples/events.unid) |
+| 4. 离线同步与冲突状态 | [sync_conflicts.unid](../examples/sync_conflicts.unid) |
+| 5. Session、缓存与功能开关 | [session_events.unid](../examples/session_events.unid) |
+| 6. 订单与明细的有界关联读取 | [orders_and_lines.unid](../examples/orders_and_lines.unid) |
+| 7. 有限树、原因链与规则 AST | [recursive_tree.unid](../examples/recursive_tree.unid) |
+| 8. 生产标量：身份、时间、金额与 binary | [content_metadata.unid](../examples/content_metadata.unid) · [invoices.unid](../examples/invoices.unid) |
+| 9. 软删除与状态化唯一约束 | [partial_index.unid](../examples/partial_index.unid) |
+
+仓库测试 `tests/examples.rs` 会执行所有顶层 `examples/*.unid`，并校验它们保持规范格式。
+
 ## 1. 后台任务与本地队列
 
 任务系统需要把“当前状态”及各状态独有的数据放在一起。拆成多个可空列会产生 `finished_at` 出现在 Queued、`worker` 出现在 Failed 等非法组合；sum type 可以排除这些状态。
@@ -228,7 +244,7 @@ sort id
 take 100
 ```
 
-这同时覆盖完全没有明细和所有明细都通过校验的订单；执行仍使用相同索引、driver 上限与首行短路。
+这同时覆盖完全没有明细和所有明细都通过校验的订单；执行仍使用相同索引、driver 上限与首行短路。完整可运行脚本见 [orders_and_lines.unid](../examples/orders_and_lines.unid)。
 
 ## 7. 有限树、原因链与规则 AST
 
@@ -335,6 +351,7 @@ filter email == "shared@example.com"
 - 稳定分页只有在证明成立时才用部分唯一索引论证唯一排序；`fetch_by_key` 不把部分唯一索引当作全表唯一证明。
 - predicate 变化是显式 drop/add；被引用字段改名通过 stable field path 更新显示文本，不改 index ID，而 drop 或改变字段类型前必须先 drop 对应索引。`check` 会重新绑定每个 predicate，验证 true 行恰有一个 posting、false 行没有 posting。
 - [release_scenarios.rs](../tests/release_scenarios.rs) 的 `partial_email` 与 `active_external_id` 两个旅程覆盖 query/DML → restart → migration → check → backup/restore，并比较源库与还原库的 schema、ledger、typed rows 与 explain plan。
+- 最小可运行脚本见 [partial_index.unid](../examples/partial_index.unid)，同时演示软删除邮箱与 Active 外部 ID 两种条件唯一约束和 `explain` 证明。
 
 ## 功能覆盖与优先级
 
