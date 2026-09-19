@@ -45,7 +45,13 @@ const TEST_BACKUP_CHECKSUM: &str =
 fn redb_rejects_partial_indexes_until_the_format_10_stage() {
     let dir = TempDir::new();
     let path = dir.0.join("partial-index.redb");
+    create_empty_format3(&path);
     let mut engine = Engine::open_redb(&path).unwrap();
+    for target in [4, 5, 6, 8] {
+        let upgraded = engine.upgrade_storage(target).unwrap();
+        assert_eq!(upgraded.format, target);
+    }
+    assert_eq!(engine.introspection().storage_versions.unwrap().format, 8);
     assert!(
         engine
             .execute(
@@ -61,27 +67,94 @@ fn redb_rejects_partial_indexes_until_the_format_10_stage() {
     );
     assert_eq!(engine.schema_info(), before);
     assert!(!engine.schema().contains("deleted_at == None"));
+
+    let upgraded = engine.upgrade_storage(10).unwrap();
+    assert_eq!((upgraded.previous_format, upgraded.format), (8, 10));
+    let created = engine.execute(
+        "create unique index users (email) if deleted_at == None\n\
+         insert users {id = 1, email = \"a@example.com\", deleted_at = None}\n\
+         insert users {id = 2, email = \"a@example.com\", deleted_at = Some(\"2026-01-01\")}",
+    );
+    assert!(created.ok, "{}", created.message);
+    let duplicate =
+        engine.execute("insert users {id = 3, email = \"a@example.com\", deleted_at = None}");
+    assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert!(engine.check_integrity().unwrap().backend_clean);
     drop(engine);
 
     let mut reopened = Engine::open_redb(path).unwrap();
-    assert_eq!(reopened.schema_info(), before);
-    assert!(
-        reopened
-            .execute("insert users {id = 1, email = \"a@example.com\", deleted_at = None}")
-            .ok
+    assert_eq!(
+        reopened.introspection().storage_versions.unwrap().format,
+        10
     );
+    assert!(reopened.schema().contains("deleted_at == None"));
+    let rows = reopened.execute("from users");
+    assert_eq!(rows.rows.len(), 2);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
 }
 
 #[test]
-fn default_redb_writes_remain_format6_without_journal_metadata() {
+fn partial_unique_index_transitions_and_backup_survive_reopen() {
     let dir = TempDir::new();
-    let path = dir.0.join("default-format6.redb");
+    let path = dir.0.join("partial-transitions.redb");
+    let archive = dir.0.join("partial-transitions.backup.json");
+    let restored = dir.0.join("partial-transitions-restored.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let setup = engine.execute(
+        "type User = {id int, email text, deleted_at option text}\n\
+         table users User\n  key id\n\
+         create unique index users (email) if deleted_at == None\n\
+         insert users {id = 1, email = \"a@example.com\", deleted_at = None}\n\
+         insert users {id = 2, email = \"a@example.com\", deleted_at = Some(\"2026-01-01\")}",
+    );
+    assert!(setup.ok, "{}", setup.message);
+    let duplicate =
+        engine.execute("insert users {id = 3, email = \"a@example.com\", deleted_at = None}");
+    assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+
+    let soft_deleted =
+        engine.execute("update users | filter id == 1 | set deleted_at = Some(\"2026-02-01\")");
+    assert!(soft_deleted.ok, "{}", soft_deleted.message);
+    assert_eq!(soft_deleted.affected_rows, Some(1));
+    let reactivated =
+        engine.execute("insert users {id = 4, email = \"a@example.com\", deleted_at = None}");
+    assert!(reactivated.ok, "{}", reactivated.message);
+    let replacing = engine.execute("update users | filter id == 2 | set deleted_at = None");
+    assert_eq!(replacing.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert!(engine.check_integrity().unwrap().backend_clean);
+    drop(engine);
+
+    let created = unionid::backup::create(&path, &archive).unwrap();
+    assert_eq!(created.format_version, 6);
+    unionid::backup::restore(&archive, &restored).unwrap();
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert!(reopened.schema().contains("deleted_at == None"));
+    assert_eq!(reopened.execute("from users").rows.len(), 3);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+    drop(reopened);
+
+    let mut restored = Engine::open_redb(&restored).unwrap();
+    assert!(restored.schema().contains("deleted_at == None"));
+    assert_eq!(restored.execute("from users").rows.len(), 3);
+    let duplicate =
+        restored.execute("insert users {id = 5, email = \"a@example.com\", deleted_at = None}");
+    assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    assert!(restored.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn default_redb_writes_use_format10_without_journal_metadata() {
+    let dir = TempDir::new();
+    let path = dir.0.join("default-format10.redb");
     {
         let mut engine = Engine::open_redb(&path).unwrap();
         let written = engine.execute("create table entries (id int)\ninsert entries {id = 1}");
         assert!(written.ok, "{}", written.message);
         let versions = engine.introspection().storage_versions.unwrap();
-        assert_eq!(versions.format, 6);
+        assert_eq!(versions.format, 10);
+        assert_eq!(versions.catalog_codec, 6);
+        assert_eq!(versions.backup_codec, 6);
         assert_eq!(versions.journal_codec, 0);
         assert_eq!(
             engine.backup_journal_status().unwrap().state,
@@ -109,7 +182,7 @@ fn explicit_backup_journal_tracks_atomic_commits_and_survives_reopen() {
     let path = dir.0.join("backup-journal.redb");
     let mut engine = Engine::open_redb(&path).unwrap();
     let initial = engine.backup_journal_status().unwrap();
-    assert_eq!(initial.storage_format, 6);
+    assert_eq!(initial.storage_format, 10);
     assert_eq!(initial.state, BackupJournalState::Disabled);
 
     let enabled = engine
@@ -119,7 +192,7 @@ fn explicit_backup_journal_tracks_atomic_commits_and_survives_reopen() {
             TEST_BACKUP_CHECKSUM,
         ))
         .unwrap();
-    assert_eq!(enabled.storage_format, 7);
+    assert_eq!(enabled.storage_format, 11);
     assert_eq!(enabled.state, BackupJournalState::Active);
     assert_eq!(engine.introspection().backup_journal, Some(enabled.clone()));
     assert_eq!(
@@ -187,7 +260,7 @@ fn explicit_backup_journal_tracks_atomic_commits_and_survives_reopen() {
     assert_eq!(refused.code, "E_BACKUP_CHAIN");
     let disabled = reopened.disable_backup_journal(true).unwrap();
     assert_eq!(disabled.state, BackupJournalState::Disabled);
-    assert_eq!(disabled.storage_format, 7);
+    assert_eq!(disabled.storage_format, 11);
     drop(reopened);
 
     let reopened = Engine::open_redb(&path).unwrap();
@@ -534,27 +607,7 @@ fn commit_prepare_subphase_sum(profile: unionid::DurableCommitProfile) -> u64 {
 }
 
 fn create_empty_format3(path: &std::path::Path) {
-    drop(Engine::open_redb(path).unwrap());
-    let database = RedbDatabase::open(path).unwrap();
-    let mut transaction = database.begin_write().unwrap();
-    transaction.set_durability(Durability::Immediate).unwrap();
-    transaction.set_two_phase_commit(true);
-    transaction.open_table(REDB_CATALOG).unwrap();
-    transaction.open_table(REDB_ROWS).unwrap();
-    transaction.open_table(REDB_SECONDARY_INDEX).unwrap();
-    let mut meta = transaction.open_table(REDB_META).unwrap();
-    for (key, value) in [
-        ("storage_format_version", 3_u32.to_be_bytes().to_vec()),
-        ("catalog_codec_version", 2_u16.to_be_bytes().to_vec()),
-        ("value_codec_version", 1_u16.to_be_bytes().to_vec()),
-        ("index_key_version", 1_u16.to_be_bytes().to_vec()),
-        ("migration_codec_version", 1_u16.to_be_bytes().to_vec()),
-        ("receipt_codec_version", 1_u16.to_be_bytes().to_vec()),
-    ] {
-        meta.insert(key, value.as_slice()).unwrap();
-    }
-    drop(meta);
-    transaction.commit().unwrap();
+    common::create_empty_format3(path)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -702,7 +755,7 @@ fn idempotent_effect_and_receipt_commit_together_and_survive_reopen() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            6_u32.to_be_bytes()
+            10_u32.to_be_bytes()
         );
         let receipts = transaction.open_table(REDB_IDEMPOTENCY_RECEIPTS).unwrap();
         assert_eq!(receipts.len().unwrap(), 1);
@@ -861,7 +914,7 @@ fn composite_index_shapes_and_tuples_survive_redb_reopen() {
         let duplicate = engine.execute("insert tasks {id = 3, tenant = \"acme\", priority = 4}");
         assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
         assert!(engine.check_integrity().unwrap().backend_clean);
-        assert_eq!(engine.introspection().storage_versions.unwrap().format, 6);
+        assert_eq!(engine.introspection().storage_versions.unwrap().format, 10);
     }
 
     let mut reopened = Engine::open_redb(&path).unwrap();
@@ -1850,7 +1903,7 @@ fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
         let meta = transaction.open_table(REDB_META).unwrap();
         assert_eq!(
             meta.get("storage_format_version").unwrap().unwrap().value(),
-            6_u32.to_be_bytes()
+            10_u32.to_be_bytes()
         );
         assert_eq!(
             meta.get("maintenance_codec_version")

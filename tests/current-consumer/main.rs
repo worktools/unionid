@@ -117,7 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let expected = rows()?;
     let mut engine = Engine::open_redb(&database)?;
     engine.apply_migrations(std::slice::from_ref(&initial))?;
-    assert_eq!(engine.introspection().storage_versions.unwrap().format, 6);
+    assert_eq!(
+        engine.introspection().storage_versions.unwrap().format,
+        Engine::current_storage_versions().format
+    );
 
     let insert = request("insert-attempt-1", "insert many entries $rows\nreturning")?
         .with_serde_param("rows", &expected)?
@@ -176,7 +179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(upgraded.iter().all(|entry| entry.priority == 1));
     let integrity = engine.check_integrity()?;
     assert!(integrity.backend_clean);
-    assert_eq!(integrity.versions.format, 6);
+    assert_eq!(
+        integrity.versions.format,
+        Engine::current_storage_versions().format
+    );
     drop(engine);
 
     let created = backup::create(&database, &archive)?;
@@ -189,12 +195,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
     .typed_rows::<EntryV2>()?;
     assert_eq!(restored_rows, upgraded);
-    assert_eq!(restored_engine.check_integrity()?.versions.format, 6);
+    assert_eq!(
+        restored_engine.check_integrity()?.versions.format,
+        Engine::current_storage_versions().format
+    );
 
     sdk::verify().await?;
 
     println!(
         "current-consumer: packaged Engine, TCP, async TCP and HTTP typed SDK journeys passed"
+    );
+    println!(
+        "current-consumer-report:{{\"storage_format\":{}}}",
+        Engine::current_storage_versions().format
     );
     Ok(())
 }

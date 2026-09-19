@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 mod common;
-use common::TempDir;
+use common::{TempDir, create_empty_format};
 use unionid::backup::incremental::{BackupJournalConfig, BackupJournalState};
 use unionid::codec::MAX_VALUE_BYTES;
 use unionid::codec::{decode_value, encode_value_v2, encode_value_v3};
@@ -485,7 +485,6 @@ fn map_limits_fail_atomically_before_publishing_rows() {
     let dir = TempDir::new();
     let path = dir.0.join("oversized-map.redb");
     let mut durable = Engine::open_redb(&path).unwrap();
-    durable.upgrade_storage(8).unwrap();
     assert!(
         durable
             .execute(
@@ -527,6 +526,7 @@ fn map_limits_fail_atomically_before_publishing_rows() {
 fn redb_rejects_maps_before_publishing_any_schema_change() {
     let dir = TempDir::new();
     let path = dir.0.join("maps.redb");
+    create_empty_format(&path, 6);
     let mut engine = Engine::open_redb(&path).unwrap();
     let response = engine.execute(
         "struct Item { id: int, attributes: Map<text, int> }\ntable items: Item { key id }",
@@ -540,6 +540,7 @@ fn redb_rejects_maps_before_publishing_any_schema_change() {
     let reopened = Engine::open_redb(&path).unwrap();
     assert!(reopened.tables().is_empty());
     assert!(!reopened.schema().contains("Item"));
+    assert_eq!(reopened.introspection().storage_versions.unwrap().format, 6);
 }
 
 #[test]
@@ -548,6 +549,7 @@ fn map_storage_upgrade_round_trips_indexes_cursors_and_backups() {
     let path = dir.0.join("maps-v8.redb");
     let archive = dir.0.join("maps-v5.json");
     let restored = dir.0.join("maps-restored.redb");
+    create_empty_format(&path, 6);
     let mut engine = Engine::open_redb(&path).unwrap();
     let upgraded = engine.upgrade_storage(8).unwrap();
     assert_eq!((upgraded.previous_format, upgraded.format), (6, 8));
@@ -607,7 +609,10 @@ insert items {id: 2, attributes: map {"b": 2}}"#,
 
     backup::restore(&archive, &restored).unwrap();
     let mut restored = Engine::open_redb(&restored).unwrap();
-    assert_eq!(restored.introspection().storage_versions.unwrap().format, 8);
+    assert_eq!(
+        restored.introspection().storage_versions.unwrap().format,
+        10
+    );
     assert_eq!(restored.execute("from items").rows.len(), 2);
     assert!(restored.check_integrity().unwrap().backend_clean);
 }
@@ -643,6 +648,7 @@ fn terminated_format_6_and_7_map_upgrades_reopen_committed_state() {
         });
         let ready = dir.0.join("upgrade-ready");
         let committed = dir.0.join("upgrade-committed");
+        create_empty_format(&path, 6);
         let mut engine = Engine::open_redb(&path).unwrap();
         let mut source = String::from(
             "struct Entry { id: int, value: text }\n\
@@ -737,23 +743,17 @@ fn terminated_format_6_and_7_map_upgrades_reopen_committed_state() {
 fn active_backup_journal_upgrades_from_format_7_to_9() {
     let dir = TempDir::new();
     let path = dir.0.join("maps-v9.redb");
+    create_empty_format(&path, 7);
     let mut engine = Engine::open_redb(&path).unwrap();
     let initial = engine.backup_journal_status().unwrap();
-    let enabled = engine
-        .enable_backup_journal(BackupJournalConfig::new(
-            "maps",
-            initial.head_sequence,
-            TEST_BACKUP_CHECKSUM,
-        ))
-        .unwrap();
-    assert_eq!(enabled.storage_format, 7);
-    assert_eq!(enabled.state, BackupJournalState::Active);
+    assert_eq!(initial.storage_format, 7);
+    assert_eq!(initial.state, BackupJournalState::Active);
 
     let upgraded = engine.upgrade_storage(9).unwrap();
     assert_eq!((upgraded.previous_format, upgraded.format), (7, 9));
     let status = engine.backup_journal_status().unwrap();
     assert_eq!(status.state, BackupJournalState::Active);
-    assert_eq!(status.chain_id.as_deref(), Some("maps"));
+    assert_eq!(status.chain_id.as_deref(), Some("legacy"));
     assert_eq!(status.storage_format, 9);
     assert_eq!(status.commit_count, 1);
     assert_eq!(status.head_sequence, initial.head_sequence + 1);
@@ -770,5 +770,85 @@ fn active_backup_journal_upgrades_from_format_7_to_9() {
     let mut reopened = Engine::open_redb(&path).unwrap();
     assert_eq!(reopened.introspection().storage_versions.unwrap().format, 9);
     assert_eq!(reopened.execute("from items").rows.len(), 1);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn active_backup_journal_upgrades_from_format_9_to_11() {
+    let dir = TempDir::new();
+    let path = dir.0.join("maps-v11.redb");
+    create_empty_format(&path, 9);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let initial = engine.backup_journal_status().unwrap();
+    assert_eq!(initial.storage_format, 9);
+    assert_eq!(initial.state, BackupJournalState::Active);
+
+    let upgraded = engine.upgrade_storage(11).unwrap();
+    assert_eq!((upgraded.previous_format, upgraded.format), (9, 11));
+    let status = engine.backup_journal_status().unwrap();
+    assert_eq!(status.state, BackupJournalState::Active);
+    assert_eq!(status.chain_id.as_deref(), Some("legacy"));
+    assert_eq!(status.storage_format, 11);
+    assert_eq!(status.commit_count, 1);
+    assert_eq!(status.head_sequence, initial.head_sequence + 1);
+    let repeated = engine.upgrade_storage(11).unwrap();
+    assert!(!repeated.changed);
+    assert_eq!(engine.backup_journal_status().unwrap(), status);
+    assert_eq!(
+        engine
+            .introspection()
+            .storage_versions
+            .unwrap()
+            .catalog_codec,
+        6
+    );
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(
+        reopened.introspection().storage_versions.unwrap().format,
+        11
+    );
+    assert_eq!(
+        reopened.backup_journal_status().unwrap().state,
+        BackupJournalState::Active
+    );
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn format_8_upgrades_to_10_and_round_trips_partial_indexes() {
+    let dir = TempDir::new();
+    let path = dir.0.join("maps-v10.redb");
+    create_empty_format(&path, 8);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let upgraded = engine.upgrade_storage(10).unwrap();
+    assert_eq!((upgraded.previous_format, upgraded.format), (8, 10));
+    let versions = engine.introspection().storage_versions.unwrap();
+    assert_eq!(
+        (
+            versions.format,
+            versions.catalog_codec,
+            versions.backup_codec,
+        ),
+        (10, 6, 6)
+    );
+    let created = engine.execute(
+        "struct User { id: int, email: text, state: text }\n\
+         table users: User { key id }\n\
+         create unique index users (email) if state == \"Active\"\n\
+         insert users {id: 1, email: \"a@example.com\", state: \"Active\"}\n\
+         insert users {id: 2, email: \"a@example.com\", state: \"Disabled\"}",
+    );
+    assert!(created.ok, "{}", created.message);
+    assert!(engine.check_integrity().unwrap().backend_clean);
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(
+        reopened.introspection().storage_versions.unwrap().format,
+        10
+    );
+    assert_eq!(reopened.execute("from users").rows.len(), 2);
     assert!(reopened.check_integrity().unwrap().backend_clean);
 }

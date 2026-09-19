@@ -1,11 +1,15 @@
 mod common;
 
-use common::TempDir;
+use common::{TempDir, create_empty_format};
 use unionid::migration::{
     ApplyDecision, MigrationEntry, MigrationFile, checksum, load_directory, validate_history,
     validate_next,
 };
 use unionid::{Engine, Value};
+
+fn create_empty_format6(path: &std::path::Path) {
+    create_empty_format(path, 6);
+}
 
 fn ok(engine: &mut Engine, source: &str) -> unionid::QueryResponse {
     let response = engine.execute(source);
@@ -321,6 +325,7 @@ fn redb_rejects_map_migration_before_starting_shadow_maintenance() {
         "migration m0002_attributes\n  parent m0001_items\n  add field Item.attributes: Map<text, int> = map {}\n",
     )
     .unwrap();
+    create_empty_format6(&path);
     let mut engine = Engine::open_redb(&path).unwrap();
     engine
         .apply_migrations(std::slice::from_ref(&initial))
@@ -339,6 +344,44 @@ fn redb_rejects_map_migration_before_starting_shadow_maintenance() {
     assert!(reopened.introspection().maintenance.is_none());
     assert_eq!(reopened.migration_history().len(), 1);
     assert!(!reopened.schema().contains("attributes"));
+}
+#[test]
+fn redb_partial_unique_index_migration_round_trips() {
+    let dir = TempDir::new();
+    let path = dir.0.join("partial-migration.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    ok(
+        &mut engine,
+        "type User = {id int, email text, deleted_at option text}\n\
+         table users User\n  key id\n\
+         insert users {id = 1, email = \"a@example.com\", deleted_at = None}\n\
+         insert users {id = 2, email = \"a@example.com\", deleted_at = Some(\"gone\")}",
+    );
+    let migration = MigrationFile::parse(
+        "migration m0001_partial_email\n  add unique index users (email) if deleted_at == None\n",
+    )
+    .unwrap();
+    engine
+        .apply_migrations(std::slice::from_ref(&migration))
+        .unwrap();
+    assert!(engine.schema().contains("deleted_at == None"));
+    assert!(engine.check_integrity().unwrap().backend_clean);
+    let duplicate =
+        engine.execute("insert users {id = 3, email = \"a@example.com\", deleted_at = None}");
+    assert_eq!(duplicate.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert!(reopened.schema().contains("deleted_at == None"));
+    assert_eq!(
+        reopened
+            .migration_status(&[migration])
+            .unwrap()
+            .applied
+            .len(),
+        1
+    );
+    assert!(reopened.check_integrity().unwrap().backend_clean);
 }
 
 #[test]

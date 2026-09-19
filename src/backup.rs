@@ -21,6 +21,7 @@ const RECEIPT_BACKUP_FORMAT_VERSION: u32 = 2;
 const SCALAR_BACKUP_FORMAT_VERSION: u32 = 3;
 pub const PRODUCTION_BACKUP_FORMAT_VERSION: u32 = 4;
 pub const MAP_BACKUP_FORMAT_VERSION: u32 = 5;
+pub const PARTIAL_BACKUP_FORMAT_VERSION: u32 = 6;
 const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,11 +62,7 @@ pub fn create(db: impl Into<PathBuf>, output: impl AsRef<Path>) -> Result<Backup
     let mut engine = Engine::open_redb(db)?;
     engine.check_integrity()?;
     let (database, source, receipts) = engine.logical_backup_view();
-    let format = if engine.logical_backup_supports_maps() {
-        MAP_BACKUP_FORMAT_VERSION
-    } else {
-        PRODUCTION_BACKUP_FORMAT_VERSION
-    };
+    let format = engine.logical_backup_format();
     write_database_view(database, source, receipts, output.as_ref(), format)
 }
 
@@ -405,6 +402,7 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             | SCALAR_BACKUP_FORMAT_VERSION
             | PRODUCTION_BACKUP_FORMAT_VERSION
             | MAP_BACKUP_FORMAT_VERSION
+            | PARTIAL_BACKUP_FORMAT_VERSION
     ) {
         return Err(Error::new(
             "E_BACKUP",
@@ -444,6 +442,14 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
     let database = envelope.database.validate_logical_backup()?;
     if envelope.format_version < MAP_BACKUP_FORMAT_VERSION && database.requires_map_storage() {
         return Err(Error::new("E_BACKUP", "typed maps require backup format 5"));
+    }
+    if envelope.format_version < PARTIAL_BACKUP_FORMAT_VERSION
+        && database.requires_partial_index_storage()
+    {
+        return Err(Error::new(
+            "E_BACKUP",
+            "partial unique indexes require backup format 6",
+        ));
     }
     if envelope.format_version == LEGACY_BACKUP_FORMAT_VERSION && !envelope.receipts.is_empty() {
         return Err(Error::new(

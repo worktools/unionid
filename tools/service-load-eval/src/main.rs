@@ -384,8 +384,13 @@ fn measure(
     prepare(&database, rows)?;
     let mut engine = Engine::open_redb(&database)?;
     let integrity = engine.check_integrity()?;
-    if !integrity.backend_clean || integrity.versions.format != 6 {
-        return Err("prepared database did not pass format-6 integrity checking".into());
+    if !integrity.backend_clean
+        || integrity.versions.format != Engine::current_storage_versions().format
+    {
+        return Err(
+            "prepared database did not pass integrity checking at the current storage format"
+                .into(),
+        );
     }
     let schema = engine.schema_info();
     let warmup_runtime = AdapterRuntime::start(adapter, engine)?;
@@ -795,8 +800,13 @@ fn measure_stream(
     prepare_stream(&database, rows, payload_bytes)?;
     let mut engine = Engine::open_redb(&database)?;
     let integrity = engine.check_integrity()?;
-    if !integrity.backend_clean || integrity.versions.format != 6 {
-        return Err("prepared stream database did not pass format-6 integrity checking".into());
+    if !integrity.backend_clean
+        || integrity.versions.format != Engine::current_storage_versions().format
+    {
+        return Err(
+            "prepared stream database did not pass integrity checking at the current storage format"
+                .into(),
+        );
     }
     let schema = engine.schema_info();
     let runtime = AdapterRuntime::start(adapter, engine)?;

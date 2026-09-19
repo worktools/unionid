@@ -89,7 +89,7 @@ unionid = {{ path = {dependency}, features = ["http", "http-client"] }}
         # A fresh target directory duplicates several GiB of the HTTP stack and
         # makes this release check unnecessarily expensive on developer hosts.
         environment["CARGO_TARGET_DIR"] = str(ROOT / "target")
-        subprocess.run(
+        completed = subprocess.run(
             [
                 "cargo",
                 "run",
@@ -101,14 +101,21 @@ unionid = {{ path = {dependency}, features = ["http", "http-client"] }}
             ],
             cwd=consumer,
             env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
             check=True,
         )
+        print(completed.stdout, end="")
+        match = re.search(r"current-consumer-report:(\{[^}]*\})", completed.stdout)
+        if match is None:
+            raise RuntimeError("consumer did not report its storage format")
+        storage_format = int(json.loads(match.group(1))["storage_format"])
         report = {
             "ok": True,
             "package": package.name,
             "consumer": "independent",
             "sdk_paths": ["engine", "tcp", "async_tcp", "http"],
-            "storage_format": 6,
+            "storage_format": storage_format,
             "protocol": 2,
             "legacy_inputs": False,
             "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),

@@ -2,7 +2,7 @@
 
 本页描述当前可执行的 schema migration 语言和版本化 runner。每个 `.unid` 文件包含一个 migration block（兼容窗口内也接受 `.uid`）；文件按名称排序，`parent` 把它们连成不可分叉的单链。runner 计算规范化源码的 SHA-256 checksum，并把 ID、parent、checksum、应用时间和提交后的 schema revision/hash 持久化到 redb ledger。
 
-storage format 6 使用可恢复的 shadow generation 应用单个文件。runner 保持 active generation 可读，以最多 1,024 条／16 MiB 的源批次转换数据，再用不超过 32 MiB 的事务持久化目标 rows、indexes 和 checkpoint。目标完成并通过有界完整性检查后，一个同步 two-phase transaction 原子切换 active generation、schema identity、sequence 和 ledger；随后分批回收旧 generation。多个待执行文件仍逐个切换：后续文件失败时，之前成功的文件保持已应用状态。没有隐式 down migration；回退通过新的前向 migration 或备份还原完成。
+storage format 6–11 使用可恢复的 shadow generation 应用单个文件。runner 保持 active generation 可读，以最多 1,024 条／16 MiB 的源批次转换数据，再用不超过 32 MiB 的事务持久化目标 rows、indexes 和 checkpoint。目标完成并通过有界完整性检查后，一个同步 two-phase transaction 原子切换 active generation、schema identity、sequence 和 ledger；随后分批回收旧 generation。多个待执行文件仍逐个切换：后续文件失败时，之前成功的文件保持已应用状态。没有隐式 down migration；回退通过新的前向 migration 或备份还原完成。
 
 ## 语法
 
@@ -102,19 +102,19 @@ migration m0002_add_task_priority
   add field Task.priority int = 0
 ```
 
-`plan` 验证 migration 链、schema 操作和目标 schema，并输出每个文件的 checksum、前后 revision/hash、操作列表与破坏性标记；它不修改数据库，数据库文件不存在时只在内存中按空库规划。每个待执行文件还报告受影响的类型与表：对签名发生变化的类型列出引用它的表及当前行数、索引数（`impacts`），供估算维护范围。format 6 的 plan 不扫描 durable rows，因此依赖既有值的 conversion、unique constraint 和 index 键错误会在 `apply` 构建 shadow generation 时报告。
+`plan` 验证 migration 链、schema 操作和目标 schema，并输出每个文件的 checksum、前后 revision/hash、操作列表与破坏性标记；它不修改数据库，数据库文件不存在时只在内存中按空库规划。每个待执行文件还报告受影响的类型与表：对签名发生变化的类型列出引用它的表及当前行数、索引数（`impacts`），供估算维护范围。format 6–11 的 plan 不扫描 durable rows，因此依赖既有值的 conversion、unique constraint 和 index 键错误会在 `apply` 构建 shadow generation 时报告。
 
 `apply` 创建不存在的 redb 文件并逐文件推进。进程退出或确定的读错误会保留最后一个 durable checkpoint；使用同一文件再次运行 `apply` 会核对数据库身份、source/target schema、migration ID/parent/checksum 和 executor version，再从 checkpoint 后继续。任一身份不一致返回 `E_MAINTENANCE_CONFLICT`，不会覆盖 shadow 数据。转换、类型或约束错误会自动进入 abort cleanup；管理员也可以显式执行 `migration abort` 丢弃未切换的目标 generation。generation ID 单调分配，abort 后不会复用。
 
 需要把长 migration 放入运维循环时，使用 `migration advance --max-steps N`。一个 step 对应一个已经成功提交的 generation start、row batch checkpoint、validation、cutover 或 reclaim batch；命令绝不会提交超过 N 个 step。`--step-delay-ms M` 可在相邻提交之间暂停，控制持续 I/O/CPU 压力；上限为 60 秒，首个 step 不等待，最后一个 step 后也不等待。延迟会延长 maintenance 写阻塞窗口，不改变每个 checkpoint、cutover 或恢复边界，也不承诺吞吐率。
 
-JSON 输出仍是 `MigrationProgress`，包含本次 `committed_steps`、`complete`、本次切换的 migration，以及完整 `MigrationStatus`。进程可在任一已提交 step 后终止，并用完全相同的目录继续调用，直到 `complete = true`。因此调度、人工暂停、重启与故障注入可以依赖提交边界，不需要猜测事务进度。嵌入式调用方使用 `Engine::advance_migrations(files, max_steps)` 获得相同的无延迟语义；应用需要限速时可每次推进一个 step 并自行调度。零 step 返回 `E_LIMIT`，非 format-6 redb 返回 `E_CONFIG`。
+JSON 输出仍是 `MigrationProgress`，包含本次 `committed_steps`、`complete`、本次切换的 migration，以及完整 `MigrationStatus`。进程可在任一已提交 step 后终止，并用完全相同的目录继续调用，直到 `complete = true`。因此调度、人工暂停、重启与故障注入可以依赖提交边界，不需要猜测事务进度。嵌入式调用方使用 `Engine::advance_migrations(files, max_steps)` 获得相同的无延迟语义；应用需要限速时可每次推进一个 step 并自行调度。零 step 返回 `E_LIMIT`，非 format 6–11 redb 返回 `E_CONFIG`。
 
 `Engine::apply_migrations_until` 仍用于 deadline。cutover 前的 timeout 或内部 cancellation 在批次边界返回 `E_TIMEOUT`／`E_CANCELLED`，并保留 Building checkpoint，不会被当作确定的数据错误自动清理。cutover 已提交后，deadline 若在 cleanup 期间到达，调用会保留 Reclaimable manifest；再次 `apply` 或 `advance` 会先完成旧 generation 的 cleanup。普通 `apply` 仍一次推进到完成。
 
 `status` 展示完整已应用记录、待应用 ID，以及可选的 `maintenance`：phase、source/target generation、已读／已写 row 数、index entry 数、逻辑字节、更新时间和允许的下一步。`.storage` 与 version 1 introspection 返回同一维护信息。Building、Ready 或 Aborting 期间，旧 active generation 的查询和只读打开继续工作，普通 DDL/DML、receipt prune、storage upgrade 和另一条 migration 返回 `E_MAINTENANCE_REQUIRED`。Reclaimable 表示 cutover 已完成，只剩旧 generation 清理，不阻止普通写入。维护事务的 commit 若返回不确定结果，当前 Engine 禁止继续读写并要求重开，通过 `migration status` 判断是继续、清理还是已经切换。
 
-`plan`、`apply`、`advance`、`status`、`rehearse` 和 `abort` 都支持 `--format json`，可供脚本稳定解析。`abort` 是写操作，只适用于 redb format 6；只读实例返回 `E_READ_ONLY`。Building/Ready/Aborting 时它放弃并清理 target；Reclaimable 时只完成旧 source 的回收，已经切换的 migration 不会回滚。没有 maintenance 时执行 abort 是成功的幂等 no-op。
+`plan`、`apply`、`advance`、`status`、`rehearse` 和 `abort` 都支持 `--format json`，可供脚本稳定解析。`abort` 是写操作，只适用于带 generation 的 redb format 6–11；只读实例返回 `E_READ_ONLY`。Building/Ready/Aborting 时它放弃并清理 target；Reclaimable 时只完成旧 source 的回收，已经切换的 migration 不会回滚。没有 maintenance 时执行 abort 是成功的幂等 no-op。
 
 `migration rehearse --db app.redb --dir migrations [--copy path]` 先把源库复制到临时路径（或 `--copy` 指定的路径），在副本上执行 apply 与完整 check，并输出源／目标 revision、applied/skipped、总耗时、文件字节、最后一个 shadow migration 的分阶段耗时／行数／索引数／逻辑字节，以及完整检查的 bounded working-state 峰值；源库保持不变。JSON 报告 `schema_version = 2`，`migration_profile` 在没有实际执行 shadow migration 时为 `null`。
 

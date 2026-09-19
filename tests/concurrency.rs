@@ -52,7 +52,7 @@ fn redb_protocol_reads_share_complete_commits_and_storage_identity() {
     assert!(response.ok, "{}", response.message);
     let introspection = response.introspection.unwrap();
     assert_eq!(introspection.schema.revision, 1);
-    assert_eq!(introspection.storage_versions.unwrap().format, 6);
+    assert_eq!(introspection.storage_versions.unwrap().format, 10);
     assert!(!introspection.read_only);
 
     drop(shared);

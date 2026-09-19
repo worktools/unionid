@@ -7,7 +7,7 @@ use unionid::migration::load_directory;
 use unionid::{Engine, MigrationFile, Value};
 
 #[test]
-fn backup_v4_preserves_idempotency_receipts_and_replay_identity() {
+fn backup_v6_preserves_idempotency_receipts_and_replay_identity() {
     const DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     let dir = TempDir::new();
     let source = dir.0.join("idempotency-source.redb");
@@ -30,7 +30,7 @@ fn backup_v4_preserves_idempotency_receipts_and_replay_identity() {
     }
 
     let created = backup::create(&source, &archive).unwrap();
-    assert_eq!(created.format_version, 4);
+    assert_eq!(created.format_version, 6);
     assert_eq!(created.receipt_count, 1);
     let recovered = backup::restore(&archive, &restored).unwrap();
     assert_eq!(created, recovered);
@@ -102,7 +102,7 @@ fn backup_v3_single_column_indexes_restore_through_the_legacy_shape() {
 }
 
 #[test]
-fn backup_v4_round_trips_composite_index_shapes() {
+fn backup_v6_round_trips_composite_index_shapes() {
     let dir = TempDir::new();
     let source = dir.0.join("composite-source.redb");
     let archive = dir.0.join("composite.backup.json");
@@ -114,7 +114,7 @@ fn backup_v4_round_trips_composite_index_shapes() {
             .ok);
     }
     let created = backup::create(&source, &archive).unwrap();
-    assert_eq!(created.format_version, 4);
+    assert_eq!(created.format_version, 6);
     backup::restore(&archive, &restored).unwrap();
 
     let mut engine = Engine::open_redb(restored).unwrap();
@@ -220,7 +220,7 @@ fn corrupt_or_unknown_backups_do_not_create_or_replace_a_target() {
     let text = std::fs::read_to_string(&archive).unwrap();
     std::fs::write(
         &corrupt,
-        text.replacen("\"format_version\":4", "\"format_version\":99", 1),
+        text.replacen("\"format_version\":6", "\"format_version\":99", 1),
     )
     .unwrap();
     assert!(backup::restore(&corrupt, &target).is_err());
@@ -242,6 +242,44 @@ fn corrupt_or_unknown_backups_do_not_create_or_replace_a_target() {
     assert!(backup::restore(&archive, &target).is_err());
     let mut existing = Engine::open_redb(&target).unwrap();
     assert!(existing.execute("from keep").ok);
+}
+
+#[test]
+fn backup_before_format6_rejects_partial_index_predicates() {
+    let dir = TempDir::new();
+    let source = dir.0.join("partial-backup.redb");
+    let archive = dir.0.join("partial.backup.json");
+    let legacy = dir.0.join("partial-as-v5.json");
+    let target = dir.0.join("partial-restored.redb");
+    {
+        let mut engine = Engine::open_redb(&source).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "type User = {id int, email text, deleted_at option text}\n\
+                     table users User\n  key id\n\
+                     create unique index users (email) if deleted_at == None"
+                )
+                .ok
+        );
+    }
+    let created = backup::create(&source, &archive).unwrap();
+    assert_eq!(created.format_version, 6);
+    let text = std::fs::read_to_string(&archive).unwrap();
+    std::fs::write(
+        &legacy,
+        text.replacen("\"format_version\":6", "\"format_version\":5", 1),
+    )
+    .unwrap();
+    let error = backup::restore(&legacy, &target).unwrap_err();
+    assert_eq!(error.code, "E_BACKUP");
+    assert!(
+        error
+            .message
+            .contains("partial unique indexes require backup format 6"),
+        "{error}"
+    );
+    assert!(!target.exists());
 }
 
 #[test]
