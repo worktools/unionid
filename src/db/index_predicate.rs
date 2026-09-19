@@ -110,10 +110,10 @@ fn validate_shape(expression: &BoolExpression) -> Result<()> {
         BoolExpression::Compare {
             left: ScalarExpression::Reference(_),
             op: CmpOp::Eq,
-            right: ScalarExpression::Literal(_),
+            right,
             ..
-        }
-        | BoolExpression::IsNone(ScalarExpression::Reference(_))
+        } if is_literal(right) => Ok(()),
+        BoolExpression::IsNone(ScalarExpression::Reference(_))
         | BoolExpression::IsSome(ScalarExpression::Reference(_)) => Ok(()),
         BoolExpression::Compare { op, .. } if *op != CmpOp::Eq => Err(Error::new(
             "E_INDEX_PREDICATE",
@@ -148,10 +148,11 @@ fn collect_atoms(
         BoolExpression::Compare {
             left: ScalarExpression::Reference(column),
             op: CmpOp::Eq,
-            right: ScalarExpression::Literal(value),
+            right,
             operand_type: Some(value_type),
-        } => {
+        } if is_literal(right) => {
             let field_path = catalog.field_path_ids(fields, column)?;
+            let value = crate::expression::evaluate_value(catalog, right, |_| None)?;
             if matches!(value, Value::Option(None)) {
                 atoms.push(IndexPredicateAtom::IsNone {
                     column: column.clone(),
@@ -162,7 +163,7 @@ fn collect_atoms(
                     column: column.clone(),
                     field_path,
                     value_type: value_type.clone(),
-                    value: value.clone(),
+                    value: catalog.coerce(&value, value_type, "index predicate literal")?,
                 });
             }
             Ok(())
@@ -185,6 +186,14 @@ fn collect_atoms(
             "E_INDEX_PREDICATE",
             "partial unique index predicate did not normalize to a supported atom",
         )),
+    }
+}
+
+fn is_literal(expression: &ScalarExpression) -> bool {
+    match expression {
+        ScalarExpression::Literal(_) => true,
+        ScalarExpression::Negate { value, .. } => is_literal(value),
+        _ => false,
     }
 }
 
@@ -234,7 +243,7 @@ fn atom_payload_key(atom: &IndexPredicateAtom) -> Vec<u8> {
     struct Key<'a> {
         operator: u8,
         value_type: Option<&'a ScalarType>,
-        value: Option<&'a Value>,
+        value_key: Option<String>,
     }
 
     let key = match atom {
@@ -243,17 +252,17 @@ fn atom_payload_key(atom: &IndexPredicateAtom) -> Vec<u8> {
         } => Key {
             operator: 0,
             value_type: Some(value_type),
-            value: Some(value),
+            value_key: Some(value.index_key()),
         },
         IndexPredicateAtom::IsNone { .. } => Key {
             operator: 1,
             value_type: None,
-            value: None,
+            value_key: None,
         },
         IndexPredicateAtom::IsSome { .. } => Key {
             operator: 2,
             value_type: None,
-            value: None,
+            value_key: None,
         },
     };
     serde_json::to_vec(&key)

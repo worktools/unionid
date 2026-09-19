@@ -1042,13 +1042,7 @@ fn format_index_declaration_layout(
             if let Some(parsed) = parsed_predicate {
                 boolean_lines(output, depth + 1, &canonical_index_predicate(parsed));
             } else {
-                for (index, atom) in predicate.split(" && ").enumerate() {
-                    line(
-                        output,
-                        depth + 1,
-                        &format!("{}{atom}", if index == 0 { "" } else { "&& " }),
-                    );
-                }
+                line(output, depth + 1, predicate);
             }
             line(output, depth, ")");
         } else {

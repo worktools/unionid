@@ -8414,6 +8414,39 @@ mod tests {
     }
 
     #[test]
+    fn partial_index_predicates_canonicalize_negative_literals_and_preserve_text() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "type User = {id int, email text, score float, label text}\ntable users User",
+        );
+        let negative = parsed_index_predicate("create unique index users (email) if score == -0.0");
+        let zero = parsed_index_predicate("create unique index users (email) if score == 0.0");
+        let negative = database.bind_index_predicate("users", &negative).unwrap();
+        let zero = database.bind_index_predicate("users", &zero).unwrap();
+        assert_eq!(negative.identity_key(), zero.identity_key());
+        assert_eq!(negative.source_text(), "score == 0.0");
+        let mut negative_schema = database.clone();
+        install_test_predicate(&mut negative_schema, negative);
+        let mut zero_schema = database.clone();
+        install_test_predicate(&mut zero_schema, zero);
+        assert_eq!(
+            negative_schema.schema_info().hash,
+            zero_schema.schema_info().hash
+        );
+
+        let text = "a && b repeated to make this bound predicate exceed the inline formatter width";
+        let predicate = parsed_index_predicate(&format!(
+            "create unique index users (email) if label == {text:?}"
+        ));
+        let predicate = database.bind_index_predicate("users", &predicate).unwrap();
+        install_test_predicate(&mut database, predicate);
+        let schema = database.schema_text();
+        assert!(schema.contains(&format!("label == {text:?}")));
+        assert!(crate::syntax::parse(&schema).is_ok(), "{schema}");
+    }
+
+    #[test]
     fn partial_index_predicates_report_unsupported_types_and_contradictions() {
         let mut database = Database::default();
         execute(
