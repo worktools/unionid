@@ -1308,6 +1308,20 @@ impl StorageLayout {
         )
     }
 
+    /// Formats that carry the generation envelope. Both backup journaling and
+    /// recoverable migrations require one of these exact layouts.
+    const fn supports_generation_envelope(self) -> bool {
+        matches!(
+            self.format,
+            PRODUCTION_STORAGE_FORMAT_VERSION
+                | JOURNAL_STORAGE_FORMAT_VERSION
+                | MAP_STORAGE_FORMAT_VERSION
+                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+        )
+    }
+
     const fn backup_format(self) -> u32 {
         if self.supports_partial_indexes() {
             crate::backup::PARTIAL_BACKUP_FORMAT_VERSION
@@ -2106,15 +2120,7 @@ impl RedbStore {
                 "another backup journal chain is already active",
             )));
         }
-        if !matches!(
-            self.committed.layout.format,
-            PRODUCTION_STORAGE_FORMAT_VERSION
-                | JOURNAL_STORAGE_FORMAT_VERSION
-                | MAP_STORAGE_FORMAT_VERSION
-                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
-        ) {
+        if !self.committed.layout.supports_generation_envelope() {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
                 "backup journaling requires storage format 6",
@@ -2418,15 +2424,7 @@ impl RedbStore {
         target: &Database,
         file: &MigrationFile,
     ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
-        if !matches!(
-            self.committed.layout.format,
-            PRODUCTION_STORAGE_FORMAT_VERSION
-                | JOURNAL_STORAGE_FORMAT_VERSION
-                | MAP_STORAGE_FORMAT_VERSION
-                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
-        ) {
+        if !self.committed.layout.supports_generation_envelope() {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
                 "recoverable migrations require storage format 6, 7, 8, 9, 10, or 11",
