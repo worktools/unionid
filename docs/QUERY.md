@@ -435,15 +435,41 @@ select {id, state}
 - `>`、`>=`、`<`、`<=` 当前只支持 int、float 和 text。
 - Int 使用精确 i64 比较。Float 使用精确数值相等，`-0.0` 与 `0.0` 相等；拒绝 NaN、Infinity 和超出 i64 的整数。
 - Float 字段可接受能够精确表示的整数字面量；Int 字段不接受浮点字面量。数字不会自动转换成 text。
-- `contains collection item` 只接受 list，并按 list 元素的完整类型化相等语义判断；元素可以是命名 ADT。`length` 接受 list 或 text，分别返回元素数或 Unicode scalar 数。
+- `contains collection item` 只接受 list，并按 list 元素的完整类型化相等语义判断；元素可以是命名 ADT。`length` 接受 list、map、text 或 bytes，分别返回元素／条目数、Unicode scalar 数或 byte 数。
 - `any items (item -> condition)` 与 `all items (item -> condition)` 对 list 元素建立有类型的词法绑定。绑定可访问 record 字段，predicate 也可引用外层行字段或 match binding，并可继续嵌套 `any/all`。局部绑定遮蔽同名外层字段。
-- `in`、`not in` 和 `any/all` 从左到右执行并短路。空 list 上 `in`/`any` 为 false，`not in`/`all` 为 true。每条 pipeline 或 DML target 最多执行 100,000 次 list 元素比较／predicate，组合与嵌套调用共享预算，超限返回 `E_LIMIT`。
+- `in`、`not in` 和 `any/all` 从左到右执行并短路。空 list 上 `in`/`any` 为 false，`not in`/`all` 为 true。每条 pipeline 或 DML target 最多执行 100,000 次集合元素比较、predicate 或 map materialization；组合、嵌套调用及 `keys/values/entries` 共享预算，超限返回 `E_LIMIT`。
 - `is_some value` 与 `is_none value` 只接受静态类型为 `Option<T>` 的值。二者不提取 payload；需要读取 payload 时仍使用显式 match。孤立的 `None` 没有元素类型，必须从字段、binding 或 typed 参数获得类型。
 - bool 字段可以直接作为条件。其他类型不隐式转换为 bool；option 也不提供 truthiness，必须用 `is_some/is_none` 或显式 match。
 - 优先级从高到低为括号／比较／函数、`!`、`&&`、`||`。混用 `&&` 与 `||` 的规范源码使用括号明确分组。逻辑运算在运行时从左到右短路；两侧仍会在扫描前完成类型检查，短路不会隐藏未知字段或类型错误。
 - 普通字段路径只能穿过 record。variant 和 option 的内容必须用显式模式处理。
 
 如果查询的第一个有效数据 stage 是单纯的有索引等值条件，引擎会按上述类型化计划直接读取候选行；前置 let 不阻止 lookup。复合布尔表达式暂时扫描候选表。具体选择可用 `explain` 检查。
+
+### Typed map 查询
+
+`Map<text, T>` 提供五个纯函数，并允许 `length map`：
+
+| 表达式 | 结果类型 | 语义 |
+| --- | --- | --- |
+| `contains_key attributes "plan"` | `bool` | 判断 text key 是否存在 |
+| `get attributes "plan"` | `Option<T>` | 返回 value；缺少 key 时返回 `None` |
+| `keys attributes` | `List<text>` | 按规范 key 顺序返回 key |
+| `values attributes` | `List<T>` | 按规范 key 顺序返回对应 value |
+| `entries attributes` | `List<(text, T)>` | 按规范 key 顺序返回 tuple |
+| `length attributes` | `int` | 返回条目数，不遍历并物化 list |
+
+```text
+from accounts
+filter contains_key attributes "plan"
+derive {
+  plan = get attributes "plan"
+  attribute_keys = keys attributes
+  is_pro = any (values attributes) (value -> value == Text("pro"))
+}
+select {id, plan, attribute_keys, is_pro}
+```
+
+map 与 key 在扫描前绑定；key 必须是 `text`。`keys`、`values`、`entries` 的结果与 literal 的书写顺序无关，始终使用 UTF-8 key byte 的规范顺序，因此 memory、redb、重启和协议边界一致。它们返回普通 typed list，可继续交给 `contains`、`any/all`、derive、match branch、局部函数、typed set 或 migration conversion。首版没有动态字段路径、map pattern 解构、merge、按 key 原地更新或 keyed secondary index；需要修改时构造并替换完整 map。
 
 ## 模式过滤
 

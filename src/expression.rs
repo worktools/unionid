@@ -20,7 +20,7 @@ impl EvaluationBudget {
             return Err(Error::new(
                 "E_LIMIT",
                 format!(
-                    "list element predicate evaluation limit of {MAX_COLLECTION_PREDICATE_EVALUATIONS} exceeded"
+                    "collection element evaluation limit of {MAX_COLLECTION_PREDICATE_EVALUATIONS} exceeded"
                 ),
             ));
         }
@@ -341,6 +341,46 @@ pub(crate) fn bind_scalar(
         }
         ScalarExpression::Call {
             name, arguments, ..
+        } if is_map_scalar_function(name) => {
+            let expected_arity = builtin_scalar_arity(name).expect("known map builtin");
+            if arguments.len() != expected_arity {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!(
+                        "{name} expects {expected_arity} arguments, got {}",
+                        arguments.len()
+                    ),
+                ));
+            }
+            let map_ty = infer_scalar(catalog, scope, &arguments[0], reference_kind)?
+                .ok_or_else(|| Error::new("E_TYPE", format!("cannot infer {name} map type")))?;
+            let ScalarType::Map(value_ty) = catalog.underlying(&map_ty)? else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!("{name} expects a map, got {}", catalog.describe(&map_ty)),
+                ));
+            };
+            let value_ty = value_ty.as_ref().clone();
+            bind_scalar(
+                catalog,
+                scope,
+                &mut arguments[0],
+                Some(&map_ty),
+                reference_kind,
+            )?;
+            if expected_arity == 2 {
+                bind_scalar(
+                    catalog,
+                    scope,
+                    &mut arguments[1],
+                    Some(&ScalarType::Text),
+                    reference_kind,
+                )?;
+            }
+            map_scalar_result(name, value_ty)?
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
@@ -440,12 +480,12 @@ pub(crate) fn bind_scalar(
             let ty = bind_scalar(catalog, scope, value, None, reference_kind)?;
             if !matches!(
                 catalog.underlying(&ty)?,
-                ScalarType::List(_) | ScalarType::Text | ScalarType::Bytes
+                ScalarType::List(_) | ScalarType::Map(_) | ScalarType::Text | ScalarType::Bytes
             ) {
                 return Err(Error::new(
                     "E_TYPE",
                     format!(
-                        "length expects a list, text, or bytes, got {}",
+                        "length expects a list, map, text, or bytes, got {}",
                         catalog.describe(&ty)
                     ),
                 ));
@@ -529,6 +569,40 @@ pub(crate) fn infer_scalar(
         ScalarExpression::Ascribed { ty, .. } => Ok(Some(ty.clone())),
         ScalarExpression::Call {
             name, arguments, ..
+        } if is_map_scalar_function(name) => {
+            let expected_arity = builtin_scalar_arity(name).expect("known map builtin");
+            if arguments.len() != expected_arity {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!(
+                        "{name} expects {expected_arity} arguments, got {}",
+                        arguments.len()
+                    ),
+                ));
+            }
+            let Some(map_ty) = infer_scalar(catalog, scope, &arguments[0], reference_kind)? else {
+                return Ok(match name.as_str() {
+                    "contains_key" => Some(ScalarType::Bool),
+                    "keys" => Some(ScalarType::List(Box::new(ScalarType::Text))),
+                    _ => None,
+                });
+            };
+            let ScalarType::Map(value_ty) = catalog.underlying(&map_ty)? else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!("{name} expects a map, got {}", catalog.describe(&map_ty)),
+                ));
+            };
+            if expected_arity == 2
+                && let Some(key_ty) = infer_scalar(catalog, scope, &arguments[1], reference_kind)?
+                && !same_type(&key_ty, &ScalarType::Text)
+            {
+                return Err(Error::new("E_TYPE", format!("{name} expects a text key")));
+            }
+            Ok(Some(map_scalar_result(name, value_ty.as_ref().clone())?))
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
@@ -604,13 +678,13 @@ pub(crate) fn infer_scalar(
             if let Some(ty) = infer_scalar(catalog, scope, value, reference_kind)?
                 && !matches!(
                     catalog.underlying(&ty)?,
-                    ScalarType::List(_) | ScalarType::Text | ScalarType::Bytes
+                    ScalarType::List(_) | ScalarType::Map(_) | ScalarType::Text | ScalarType::Bytes
                 )
             {
                 return Err(Error::new(
                     "E_TYPE",
                     format!(
-                        "length expects a list, text, or bytes, got {}",
+                        "length expects a list, map, text, or bytes, got {}",
                         catalog.describe(&ty)
                     ),
                 ));
@@ -810,23 +884,32 @@ fn temporal_arithmetic_signature(
 }
 
 pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
-    matches!(
-        name,
-        "uuid_parse"
-            | "bytes_parse_hex"
-            | "date_parse"
-            | "timestamp_parse"
-            | "duration_parse"
-            | "decimal_parse"
-            | "decimal_rescale"
-            | "decimal_round"
-            | "decimal_mul"
-            | "decimal_div"
-    )
+    is_map_scalar_function(name)
+        || matches!(
+            name,
+            "uuid_parse"
+                | "bytes_parse_hex"
+                | "date_parse"
+                | "timestamp_parse"
+                | "duration_parse"
+                | "decimal_parse"
+                | "decimal_rescale"
+                | "decimal_round"
+                | "decimal_mul"
+                | "decimal_div"
+        )
+}
+
+fn is_map_scalar_function(name: &str) -> bool {
+    matches!(name, "contains_key" | "get" | "keys" | "values" | "entries")
 }
 
 pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
-    if matches!(name, "decimal_parse" | "decimal_rescale") {
+    if matches!(name, "contains_key" | "get") {
+        Some(2)
+    } else if matches!(name, "keys" | "values" | "entries") {
+        Some(1)
+    } else if matches!(name, "decimal_parse" | "decimal_rescale") {
         Some(3)
     } else if name == "decimal_round" {
         Some(4)
@@ -837,6 +920,25 @@ pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
     } else {
         None
     }
+}
+
+fn map_scalar_result(name: &str, value_ty: ScalarType) -> Result<ScalarType> {
+    Ok(match name {
+        "contains_key" => ScalarType::Bool,
+        "get" => ScalarType::Option(Box::new(value_ty)),
+        "keys" => ScalarType::List(Box::new(ScalarType::Text)),
+        "values" => ScalarType::List(Box::new(value_ty)),
+        "entries" => ScalarType::List(Box::new(ScalarType::Tuple(vec![
+            ScalarType::Text,
+            value_ty,
+        ]))),
+        _ => {
+            return Err(Error::new(
+                "E_QUERY",
+                format!("unknown map scalar function '{name}'"),
+            ));
+        }
+    })
 }
 
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
@@ -1040,7 +1142,7 @@ pub(crate) fn evaluate_derive<'values>(
     budget: &mut EvaluationBudget,
 ) -> Result<Value> {
     match expression {
-        BoolExpression::Value(value) => evaluate_value(catalog, value, values),
+        BoolExpression::Value(value) => evaluate_scalar_value(catalog, value, values, budget),
         _ => evaluate(catalog, expression, values, budget).map(Value::Bool),
     }
 }
@@ -1092,7 +1194,7 @@ fn evaluate_resolved(
 ) -> Result<bool> {
     match expression {
         BoolExpression::Value(value) => {
-            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+            let Some(value) = evaluate_scalar(catalog, value, values, budget)? else {
                 return Ok(false);
             };
             Ok(matches!(value.as_value().unwrapped(), Value::Bool(true)))
@@ -1103,10 +1205,10 @@ fn evaluate_resolved(
             right,
             operand_type,
         } => {
-            let Some(left) = evaluate_scalar(catalog, left, values)? else {
+            let Some(left) = evaluate_scalar(catalog, left, values, budget)? else {
                 return Ok(false);
             };
-            let Some(right) = evaluate_scalar(catalog, right, values)? else {
+            let Some(right) = evaluate_scalar(catalog, right, values, budget)? else {
                 return Ok(false);
             };
             compare(
@@ -1118,10 +1220,10 @@ fn evaluate_resolved(
             )
         }
         BoolExpression::Contains { collection, item } => {
-            let Some(collection) = evaluate_scalar(catalog, collection, values)? else {
+            let Some(collection) = evaluate_scalar(catalog, collection, values, budget)? else {
                 return Ok(false);
             };
-            let Some(item) = evaluate_scalar(catalog, item, values)? else {
+            let Some(item) = evaluate_scalar(catalog, item, values, budget)? else {
                 return Ok(false);
             };
             Ok(match collection.as_value().unwrapped() {
@@ -1137,10 +1239,10 @@ fn evaluate_resolved(
             collection,
             negated,
         } => {
-            let Some(item) = evaluate_scalar(catalog, item, values)? else {
+            let Some(item) = evaluate_scalar(catalog, item, values, budget)? else {
                 return Ok(false);
             };
-            let Some(collection) = evaluate_scalar(catalog, collection, values)? else {
+            let Some(collection) = evaluate_scalar(catalog, collection, values, budget)? else {
                 return Ok(false);
             };
             let Value::List(items) = collection.as_value().unwrapped() else {
@@ -1169,7 +1271,7 @@ fn evaluate_resolved(
             binding,
             predicate,
         } => {
-            let Some(collection) = evaluate_scalar(catalog, collection, values)? else {
+            let Some(collection) = evaluate_scalar(catalog, collection, values, budget)? else {
                 return Ok(false);
             };
             let Value::List(items) = collection.as_value().unwrapped() else {
@@ -1194,7 +1296,7 @@ fn evaluate_resolved(
             Ok(all)
         }
         BoolExpression::IsSome(value) | BoolExpression::IsNone(value) => {
-            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+            let Some(value) = evaluate_scalar(catalog, value, values, budget)? else {
                 return Ok(false);
             };
             let Value::Option(value) = value.as_value().unwrapped() else {
@@ -1230,6 +1332,7 @@ fn evaluate_scalar<'expression, 'values>(
     catalog: &Catalog,
     expression: &'expression ScalarExpression,
     values: &'values dyn ValueResolver,
+    budget: &mut EvaluationBudget,
 ) -> Result<Option<Evaluated<'expression, 'values>>> {
     match expression {
         ScalarExpression::Reference(path) => Ok(values.resolve(path).map(Evaluated::Runtime)),
@@ -1239,7 +1342,7 @@ fn evaluate_scalar<'expression, 'values>(
         )),
         ScalarExpression::Literal(value) => Ok(Some(Evaluated::Expression(value))),
         ScalarExpression::Ascribed { value, ty } => {
-            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+            let Some(value) = evaluate_scalar(catalog, value, values, budget)? else {
                 return Ok(None);
             };
             Ok(Some(Evaluated::Owned(catalog.coerce(
@@ -1247,6 +1350,59 @@ fn evaluate_scalar<'expression, 'values>(
                 ty,
                 "local function argument",
             )?)))
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
+        } if is_map_scalar_function(name) => {
+            let Some(map) = evaluate_scalar(catalog, &arguments[0], values, budget)? else {
+                return Ok(None);
+            };
+            let Value::Map(entries) = map.as_value().unwrapped() else {
+                return Err(Error::new("E_TYPE", format!("{name} expects a map")));
+            };
+            let key = if arguments.len() == 2 {
+                let Some(key) = evaluate_scalar(catalog, &arguments[1], values, budget)? else {
+                    return Ok(None);
+                };
+                let Value::Text(key) = key.as_value().unwrapped() else {
+                    return Err(Error::new("E_TYPE", format!("{name} expects a text key")));
+                };
+                Some(key.clone())
+            } else {
+                None
+            };
+            let result = match name.as_str() {
+                "contains_key" => Value::Bool(entries.contains_key(&key.expect("bound key"))),
+                "get" => {
+                    Value::Option(entries.get(&key.expect("bound key")).cloned().map(Box::new))
+                }
+                "keys" => {
+                    let mut values = Vec::with_capacity(entries.len());
+                    for key in entries.keys() {
+                        budget.consume_collection_predicate()?;
+                        values.push(Value::Text(key.clone()));
+                    }
+                    Value::List(values)
+                }
+                "values" => {
+                    let mut values = Vec::with_capacity(entries.len());
+                    for value in entries.values() {
+                        budget.consume_collection_predicate()?;
+                        values.push(value.clone());
+                    }
+                    Value::List(values)
+                }
+                "entries" => {
+                    let mut values = Vec::with_capacity(entries.len());
+                    for (key, value) in entries {
+                        budget.consume_collection_predicate()?;
+                        values.push(Value::Tuple(vec![Value::Text(key.clone()), value.clone()]));
+                    }
+                    Value::List(values)
+                }
+                _ => unreachable!("known map scalar function"),
+            };
+            Ok(Some(Evaluated::Owned(result)))
         }
         ScalarExpression::Call {
             name, arguments, ..
@@ -1266,12 +1422,14 @@ fn evaluate_scalar<'expression, 'values>(
                 let ScalarType::Decimal { precision, scale } = target else {
                     unreachable!()
                 };
-                let Some(argument) = evaluate_scalar(catalog, &arguments[0], values)? else {
+                let Some(argument) = evaluate_scalar(catalog, &arguments[0], values, budget)?
+                else {
                     return Ok(None);
                 };
                 let left = argument.as_value().unwrapped();
                 let right = if binary {
-                    let Some(argument) = evaluate_scalar(catalog, &arguments[1], values)? else {
+                    let Some(argument) = evaluate_scalar(catalog, &arguments[1], values, budget)?
+                    else {
                         return Ok(None);
                     };
                     Some(argument.as_value().unwrapped().clone())
@@ -1335,7 +1493,7 @@ fn evaluate_scalar<'expression, 'values>(
             let Some(argument) = arguments.first() else {
                 return Err(Error::new("E_TYPE", format!("{name} expects 1 argument")));
             };
-            let Some(argument) = evaluate_scalar(catalog, argument, values)? else {
+            let Some(argument) = evaluate_scalar(catalog, argument, values, budget)? else {
                 return Ok(None);
             };
             let Value::Text(source) = argument.as_value().unwrapped() else {
@@ -1356,11 +1514,12 @@ fn evaluate_scalar<'expression, 'values>(
             format!("local function '{name}' was not expanded before execution"),
         )),
         ScalarExpression::Length(value) => {
-            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+            let Some(value) = evaluate_scalar(catalog, value, values, budget)? else {
                 return Ok(None);
             };
             let length = match value.as_value().unwrapped() {
                 Value::List(values) => values.len(),
+                Value::Map(entries) => entries.len(),
                 Value::Text(value) => value.chars().count(),
                 Value::Bytes(value) => value.as_slice().len(),
                 _ => return Ok(None),
@@ -1370,7 +1529,7 @@ fn evaluate_scalar<'expression, 'values>(
             Ok(Some(Evaluated::Owned(Value::Int(length))))
         }
         ScalarExpression::Negate { value, ty } => {
-            let Some(value) = evaluate_scalar(catalog, value, values)? else {
+            let Some(value) = evaluate_scalar(catalog, value, values, budget)? else {
                 return Ok(None);
             };
             let raw = match value.as_value().unwrapped() {
@@ -1400,10 +1559,10 @@ fn evaluate_scalar<'expression, 'values>(
             right,
             ty,
         } => {
-            let Some(left) = evaluate_scalar(catalog, left, values)? else {
+            let Some(left) = evaluate_scalar(catalog, left, values, budget)? else {
                 return Ok(None);
             };
-            let Some(right) = evaluate_scalar(catalog, right, values)? else {
+            let Some(right) = evaluate_scalar(catalog, right, values, budget)? else {
                 return Ok(None);
             };
             let raw = evaluate_arithmetic(left.as_value(), *op, right.as_value())?;
@@ -1419,11 +1578,21 @@ pub(crate) fn evaluate_value<'values>(
     expression: &ScalarExpression,
     values: impl Fn(&str) -> Option<&'values Value> + Copy,
 ) -> Result<Value> {
+    let mut budget = EvaluationBudget::new();
+    evaluate_scalar_value(catalog, expression, values, &mut budget)
+}
+
+fn evaluate_scalar_value<'values>(
+    catalog: &Catalog,
+    expression: &ScalarExpression,
+    values: impl Fn(&str) -> Option<&'values Value> + Copy,
+    budget: &mut EvaluationBudget,
+) -> Result<Value> {
     let resolver = FunctionResolver {
         values,
         marker: std::marker::PhantomData,
     };
-    evaluate_scalar(catalog, expression, &resolver)?
+    evaluate_scalar(catalog, expression, &resolver, budget)?
         .map(|value| value.as_value().clone())
         .ok_or_else(|| Error::new("E_QUERY", "bound scalar expression has no runtime value"))
 }

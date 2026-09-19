@@ -144,7 +144,7 @@ take 20
 | 计划 | `explain from tasks \| filter id == 1` | 只绑定查询并返回 full scan／索引 lookup、候选数、stage 顺序和结果 schema |
 | 实际剖析 | `explain analyze from tasks \| filter id == 1` | 同快照执行查询并返回 value-free 耗时、行数、索引、缓存、批次与内存统计，不返回业务行 |
 
-支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及 Rust 风格的 `!`、`&&`、`||`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减。复杂条件可以放进跨行 `{}` 表达式块；改变优先级时使用 `()`。`contains tags value` 判断 list 成员，`length value` 接受 list 或 text；`any items (item -> condition)` 和 `all ...` 使用箭头闭包，不采用竖线闭包，避免与 pipeline 的 `|` 混淆。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。`take 10..20` 是一基位置的半开区间，`take 10..=20` 包含末端，与 Rust range 对应。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。分页完整规则见[有界 keyset page](QUERY.md#有界-keyset-page)。
+支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，以及 Rust 风格的 `!`、`&&`、`||`。数值表达式支持 `+`、`-`、`*`、`/` 与一元负号，乘除优先于加减。复杂条件可以放进跨行 `{}` 表达式块；改变优先级时使用 `()`。`contains tags value` 判断 list 成员，`length value` 接受 list、map、text 或 bytes；`any items (item -> condition)` 和 `all ...` 使用箭头闭包，不采用竖线闭包，避免与 pipeline 的 `|` 混淆。typed map 使用 `contains_key map key`、`get map key`、`keys map`、`values map` 和 `entries map`，遍历结果按规范 key 顺序返回，详见[查询参考](QUERY.md#typed-map-查询)。所有 stage 从左到右执行；`take` 和 `filter` 不可交换，未排序查询不承诺稳定行序。`take 10..20` 是一基位置的半开区间，`take 10..=20` 包含末端，与 Rust range 对应。字段和类型在扫描前校验，空表也会报错；`select` 之后不能访问已移除字段。分页完整规则见[有界 keyset page](QUERY.md#有界-keyset-page)。
 
 模式支持 sum 的 unit/record/位置负载和 option 的 `None`/`Some(value)`；record 可用 `{field: binding, ..}` 重命名绑定，也可递归写成 `{retry_at: Some(at), point: (x, y), ..}`。多个同名顶层 constructor 可以用互补的嵌套 pattern 覆盖完整值域；非穷尽与被前序分支完全覆盖的情况会在扫描前报错。`derive name = match source {...}` 的分支可返回 binding/literal/算术或完整 bool 表达式，也可构造 `Some(attempt + 1)`、`State::Done`、`Summary {label: message}`、tuple、record 和 list。
 

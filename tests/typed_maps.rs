@@ -20,6 +20,7 @@ fn map_source_round_trips_through_memory_queries() {
   attributes: Map<text, int> = map {}
 }
 
+
 table items: Item {
   key id
 }
@@ -84,6 +85,226 @@ select {id, copied}"#,
             .cmp_eq(&Value::Map(BTreeMap::from([("a".into(), Value::Int(1),)])))
     );
     assert!(derived.rows[1]["copied"].cmp_eq(&Value::Map(BTreeMap::new())));
+}
+
+#[test]
+fn map_queries_preserve_types_order_and_prepared_keys() {
+    let mut engine = Engine::memory();
+    let setup = engine.execute(
+        r#"enum Attribute {
+  Text(text)
+  Number(int)
+}
+struct Account {
+  id: int
+  attributes: Map<text, Attribute>
+}
+table accounts: Account { key id }
+insert accounts {
+  id: 1
+  attributes: map {
+    "quota": Number(3)
+    "plan": Text("pro")
+  }
+}
+insert accounts {id: 2, attributes: map {}}"#,
+    );
+    assert!(setup.ok, "{}", setup.message);
+
+    let response = engine.execute(
+        r#"from accounts
+derive {
+  has_plan = contains_key attributes "plan"
+  plan = get attributes "plan"
+  attribute_keys = keys attributes
+  attribute_values = values attributes
+  attribute_entries = entries attributes
+  attribute_count = length attributes
+  has_pro = any (values attributes) (value -> value == Text("pro"))
+  all_known = all (keys attributes) (key -> key == "plan" || key == "quota")
+}
+sort id"#,
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 2);
+    let populated = &response.rows[0];
+    assert!(populated["has_plan"].cmp_eq(&Value::Bool(true)));
+    assert!(populated["attribute_count"].cmp_eq(&Value::Int(2)));
+    assert!(populated["has_pro"].cmp_eq(&Value::Bool(true)));
+    assert!(populated["all_known"].cmp_eq(&Value::Bool(true)));
+    assert_eq!(
+        populated["attribute_keys"].source_text(),
+        r#"["plan", "quota"]"#
+    );
+    assert_eq!(
+        populated["attribute_values"].source_text(),
+        r#"[Text("pro"), Number(3)]"#
+    );
+    assert_eq!(
+        populated["attribute_entries"].source_text(),
+        r#"[("plan", Text("pro")), ("quota", Number(3))]"#
+    );
+    assert_eq!(populated["plan"].source_text(), r#"Some(Text("pro"))"#);
+
+    let empty = &response.rows[1];
+    assert!(empty["has_plan"].cmp_eq(&Value::Bool(false)));
+    assert!(empty["attribute_count"].cmp_eq(&Value::Int(0)));
+    assert!(empty["has_pro"].cmp_eq(&Value::Bool(false)));
+    assert!(empty["all_known"].cmp_eq(&Value::Bool(true)));
+    assert_eq!(empty["plan"].source_text(), "None");
+
+    let prepared = engine
+        .prepare(
+            r#"from accounts
+let lookup = (items, key: text) -> get items key
+derive selected = lookup attributes $key
+filter is_some selected
+select {id, selected}"#,
+        )
+        .unwrap();
+    assert_eq!(prepared.parameter_types()["key"], "text");
+    let selected = engine.execute_prepared(
+        &prepared,
+        BTreeMap::from([("key".into(), Value::Text("quota".into()))]),
+    );
+    assert!(selected.ok, "{}", selected.message);
+    assert_eq!(selected.rows.len(), 1);
+    assert_eq!(
+        selected.rows[0]["selected"].source_text(),
+        "Some(Number(3))"
+    );
+}
+
+#[test]
+fn map_materialization_shares_the_collection_evaluation_budget() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "struct Item { id: int, attributes: Map<text, int> }\n\
+                 table items: Item { key id }"
+            )
+            .ok
+    );
+    let insert = engine.prepare("insert items $row").unwrap();
+    let attributes: BTreeMap<String, Value> = (0..4_096)
+        .map(|index| (format!("key-{index:04}"), Value::Int(index)))
+        .collect();
+    for id in 0..25 {
+        let row = Value::Record(BTreeMap::from([
+            ("id".into(), Value::Int(id)),
+            ("attributes".into(), Value::Map(attributes.clone())),
+        ]));
+        let inserted = engine.execute_prepared(&insert, BTreeMap::from([("row".into(), row)]));
+        assert!(inserted.ok, "{}", inserted.message);
+    }
+
+    let response = engine.execute("from items\nderive copy = values attributes");
+    assert!(
+        !response.ok,
+        "query returned {} rows: {}",
+        response.rows.len(),
+        response.message
+    );
+    let error = response.error.unwrap();
+    assert_eq!(error.code, "E_LIMIT");
+    assert!(
+        error
+            .message
+            .contains("collection element evaluation limit")
+    );
+}
+
+#[test]
+fn map_query_type_errors_are_reported_before_scanning() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "struct Item { id: int, attributes: Map<text, int> }\n\
+                 table items: Item { key id }"
+            )
+            .ok
+    );
+    for (query, expected_message) in [
+        (
+            "from items | derive value = get id \"key\"",
+            "expects a map",
+        ),
+        (
+            "from items | derive value = contains_key attributes 1",
+            "expected text",
+        ),
+        (
+            "from items | derive value = keys attributes \"extra\"",
+            "expects 1 arguments",
+        ),
+        ("from items | derive value = length id", "length expects"),
+    ] {
+        let response = engine.execute(query);
+        assert!(!response.ok, "{query}");
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "E_TYPE", "{query}: {}", error.message);
+        assert!(
+            error.message.contains(expected_message),
+            "{query}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn map_queries_work_in_match_update_and_migration_expressions() {
+    let mut engine = Engine::memory();
+    let setup = engine.execute(
+        r#"enum Attributes {
+  Present(Map<text, int>)
+  Empty
+}
+struct Item {
+  id: int
+  attributes: Map<text, int>
+  wrapped: Attributes
+  configured: bool = false
+}
+table items: Item { key id }
+insert items {
+  id: 1
+  attributes: map {"plan": 2}
+  wrapped: Present(map {"plan": 3})
+}"#,
+    );
+    assert!(setup.ok, "{}", setup.message);
+
+    let matched = engine.execute(
+        r#"from items
+derive selected = match wrapped {
+  Present(attributes) => get attributes "plan"
+  Empty => None
+}
+select {id, selected}"#,
+    );
+    assert!(matched.ok, "{}", matched.message);
+    assert_eq!(matched.rows[0]["selected"].source_text(), "Some(3)");
+
+    let updated = engine.execute(
+        r#"update items
+filter id == 1
+set configured = contains_key attributes "plan"
+returning {configured}"#,
+    );
+    assert!(updated.ok, "{}", updated.message);
+    assert!(updated.rows[0]["configured"].cmp_eq(&Value::Bool(true)));
+
+    let migrated = engine.execute(
+        r#"migration select_plan
+  change field Item.attributes to Option<int>
+    using old -> get old "plan""#,
+    );
+    assert!(migrated.ok, "{}", migrated.message);
+    let row = engine.execute("from items | select {id, attributes}");
+    assert!(row.ok, "{}", row.message);
+    assert_eq!(row.rows[0]["attributes"].source_text(), "Some(2)");
 }
 
 #[test]

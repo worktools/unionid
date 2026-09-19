@@ -88,6 +88,7 @@ type ServiceConfig =
 - 按 environment、owner 和固定 record 路径筛选；普通 record 路径当前已支持，option 需要 #35 显式解构。
 - 只列出 HTTP 服务并投影 `base_url`；需要 #35 的 match expression，因为字段只存在于 `Http` 分支。
 - 判断某个完整 header 或 validation issue 是否存在可用 `contains`；按元素字段筛选可用 `any headers (header -> header.name == "authorization")`。若 `headers` 位于 sum payload 中，先用 `filter (match ... {...})` 建立 list binding，再在 condition 中使用 `any/all`。
+- provider metadata 或用户属性可声明为 `Map<text, Attribute>`，其中 `Attribute` 是统一的 sum type。`contains_key attributes "region"` 检查配置项，`get attributes "plan"` 返回 `Option<Attribute>`，`any (values attributes) (value -> value == Text("pro"))` 继续以 ADT 语义判断；`keys/values/entries` 总按规范 key 顺序返回，适合稳定展示和导出。当前不把 map key 当动态字段路径，也不提供 keyed index 或单 key 原地 mutation。
 - 整体 upsert 一份配置并校验嵌套类型；当前按主键插入或完整替换，示例见 [`config.unid`](../examples/config.unid)。
 - 把 `Bearer` 改名或给 `Http` 增加字段；身份保留、回填和转换属于 #17–#19。
 
