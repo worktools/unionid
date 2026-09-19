@@ -19,7 +19,7 @@ use redb::{
 use sha2::{Digest, Sha256};
 
 use crate::backup::incremental::{ArchiveFrame, ArchiveHeader, BaselineSource, JournalSource};
-use crate::codec::{PRODUCTION_VALUE_CODEC_VERSION, VALUE_CODEC_VERSION};
+use crate::codec::{MAP_VALUE_CODEC_VERSION, PRODUCTION_VALUE_CODEC_VERSION, VALUE_CODEC_VERSION};
 use crate::db::{
     Database, DurableCatalogEntry, DurableMeta, DurableTable, IndexDefinition, LogicalWriteSet,
 };
@@ -47,16 +47,21 @@ const SCALAR_STORAGE_FORMAT_VERSION: u32 = 4;
 const LEGACY_BOUNDED_STORAGE_FORMAT_VERSION: u32 = 5;
 pub(crate) const PRODUCTION_STORAGE_FORMAT_VERSION: u32 = 6;
 const JOURNAL_STORAGE_FORMAT_VERSION: u32 = 7;
+pub(crate) const MAP_STORAGE_FORMAT_VERSION: u32 = 8;
+pub(crate) const MAP_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 9;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
 const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
+const MAP_CATALOG_CODEC_VERSION: u16 = 5;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
 const SCALAR_INDEX_KEY_VERSION: u16 = 2;
 const PRODUCTION_INDEX_KEY_VERSION: u16 = crate::ordered_key::INDEX_KEY_CODEC_VERSION;
+const MAP_INDEX_KEY_VERSION: u16 = crate::ordered_key::MAP_INDEX_KEY_CODEC_VERSION;
 const MIGRATION_CODEC_VERSION: u16 = 1;
 const RECEIPT_CODEC_VERSION: u16 = 1;
 const PRODUCTION_RECEIPT_CODEC_VERSION: u16 = 2;
+const MAP_RECEIPT_CODEC_VERSION: u16 = 3;
 const MAINTENANCE_CODEC_VERSION: u16 = 1;
 const JOURNAL_CODEC_VERSION: u16 = 1;
 const GENERATION_KEY_CODEC_VERSION: u16 = 1;
@@ -219,6 +224,7 @@ pub(crate) struct RedbReadSource {
     transaction: redb::ReadTransaction,
     metadata: Arc<Database>,
     generation: GenerationRef,
+    index_version: u16,
     identity: SourceIdentity,
     cache: Mutex<SnapshotRowCache>,
 }
@@ -283,6 +289,7 @@ impl RedbReadSource {
         transaction: redb::ReadTransaction,
         metadata: Arc<Database>,
         generation: GenerationRef,
+        index_version: u16,
     ) -> Self {
         let identity = SourceIdentity {
             database_instance: metadata.durable_meta().cursor_instance_id,
@@ -294,6 +301,7 @@ impl RedbReadSource {
             transaction,
             metadata,
             generation,
+            index_version,
             identity,
             cache: Mutex::new(SnapshotRowCache::default()),
         }
@@ -463,7 +471,8 @@ impl TypedRowSource for RedbReadSource {
         read_limit: Option<usize>,
     ) -> Result<Box<dyn IndexHitCursor + 'a>> {
         let (index_id, component_count) = self.metadata.source_index_info(table, shape)?;
-        let (lower, upper) = durable_index_bounds(index_id, component_count, bounds)?;
+        let (lower, upper) =
+            durable_index_bounds(index_id, component_count, bounds, self.index_version)?;
         let lower = self.physical_bound(lower)?;
         let upper = self.physical_bound(upper)?;
         Ok(Box::new(RedbIndexCursor {
@@ -635,7 +644,12 @@ impl RedbIndexCursor<'_> {
                 break;
             }
             let key = self.source.logical_key(physical_key)?;
-            let hit = decode_durable_index_hit(key, self.index_id, self.component_count)?;
+            let hit = decode_durable_index_hit(
+                key,
+                self.index_id,
+                self.component_count,
+                self.source.index_version,
+            )?;
             encoded_bytes = encoded_bytes.saturating_add(physical_key.len());
             hits.push(hit);
             self.lower = Bound::Excluded(physical_key.to_vec());
@@ -677,8 +691,17 @@ impl RedbIndexCursor<'_> {
                     break;
                 };
                 let key = self.source.logical_key(&physical_key)?;
-                let hit = decode_durable_index_hit(key, self.index_id, self.component_count)?;
-                let mut before = durable_index_prefix(self.index_id, self.component_count);
+                let hit = decode_durable_index_hit(
+                    key,
+                    self.index_id,
+                    self.component_count,
+                    self.source.index_version,
+                )?;
+                let mut before = durable_index_prefix_version(
+                    self.index_id,
+                    self.component_count,
+                    self.source.index_version,
+                );
                 before.extend_from_slice(&hit.boundary);
                 let mut first = before.clone();
                 first.extend_from_slice(&0_u64.to_be_bytes());
@@ -714,7 +737,12 @@ impl RedbIndexCursor<'_> {
                 break;
             }
             let key = self.source.logical_key(&physical_key)?;
-            let hit = decode_durable_index_hit(key, self.index_id, self.component_count)?;
+            let hit = decode_durable_index_hit(
+                key,
+                self.index_id,
+                self.component_count,
+                self.source.index_version,
+            )?;
             encoded_bytes = encoded_bytes.saturating_add(physical_key.len());
             hits.push(hit);
             self.reverse_group
@@ -808,10 +836,10 @@ fn check_source_control(control: Option<&crate::control::ExecutionControl>) -> R
     control.map_or(Ok(()), crate::control::ExecutionControl::checkpoint)
 }
 
-fn durable_index_prefix(index_id: u64, component_count: u8) -> Vec<u8> {
+fn durable_index_prefix_version(index_id: u64, component_count: u8, version: u16) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(15);
     prefix.extend_from_slice(INDEX_MAGIC);
-    prefix.extend_from_slice(&PRODUCTION_INDEX_KEY_VERSION.to_be_bytes());
+    prefix.extend_from_slice(&version.to_be_bytes());
     prefix.extend_from_slice(&index_id.to_be_bytes());
     prefix.push(component_count);
     prefix
@@ -849,8 +877,9 @@ fn durable_index_bounds(
     index_id: u64,
     component_count: u8,
     bounds: &EncodedIndexBounds,
+    version: u16,
 ) -> Result<EncodedIndexBounds> {
-    let prefix = durable_index_prefix(index_id, component_count);
+    let prefix = durable_index_prefix_version(index_id, component_count, version);
     let lower = match &bounds.0 {
         Bound::Unbounded => Bound::Included(prefix.clone()),
         bound => durable_index_bound(&prefix, bound, true),
@@ -874,8 +903,13 @@ fn prefix_successor_bytes(prefix: &[u8]) -> Option<Vec<u8>> {
     Some(next)
 }
 
-fn decode_durable_index_hit(key: &[u8], index_id: u64, component_count: u8) -> Result<IndexHit> {
-    validate_index_key(key, PRODUCTION_INDEX_KEY_VERSION)?;
+fn decode_durable_index_hit(
+    key: &[u8],
+    index_id: u64,
+    component_count: u8,
+    version: u16,
+) -> Result<IndexHit> {
+    validate_index_key(key, version)?;
     if key.len() < 23
         || u64::from_be_bytes(key[6..14].try_into().unwrap()) != index_id
         || key[14] != component_count
@@ -1164,6 +1198,27 @@ impl StorageLayout {
         }
     }
 
+    const fn map() -> Self {
+        Self {
+            format: MAP_STORAGE_FORMAT_VERSION,
+            catalog: MAP_CATALOG_CODEC_VERSION,
+            value: MAP_VALUE_CODEC_VERSION,
+            index: MAP_INDEX_KEY_VERSION,
+            migration: MIGRATION_CODEC_VERSION,
+            receipt: MAP_RECEIPT_CODEC_VERSION,
+            maintenance: MAINTENANCE_CODEC_VERSION,
+            journal: 0,
+        }
+    }
+
+    const fn map_journal() -> Self {
+        Self {
+            format: MAP_JOURNAL_STORAGE_FORMAT_VERSION,
+            journal: JOURNAL_CODEC_VERSION,
+            ..Self::map()
+        }
+    }
+
     const fn scalar() -> Self {
         Self {
             format: SCALAR_STORAGE_FORMAT_VERSION,
@@ -1178,7 +1233,11 @@ impl StorageLayout {
     }
 
     const fn for_format(format: u32) -> Self {
-        if format == JOURNAL_STORAGE_FORMAT_VERSION {
+        if format == MAP_JOURNAL_STORAGE_FORMAT_VERSION {
+            Self::map_journal()
+        } else if format == MAP_STORAGE_FORMAT_VERSION {
+            Self::map()
+        } else if format == JOURNAL_STORAGE_FORMAT_VERSION {
             Self::journal()
         } else if format == PRODUCTION_STORAGE_FORMAT_VERSION {
             Self::production()
@@ -1202,6 +1261,17 @@ impl StorageLayout {
 
     const fn supports_production_scalars(self) -> bool {
         self.format >= SCALAR_STORAGE_FORMAT_VERSION
+    }
+
+    const fn supports_maps(self) -> bool {
+        matches!(
+            self.format,
+            MAP_STORAGE_FORMAT_VERSION | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+        )
+    }
+
+    const fn supports_journal(self) -> bool {
+        self.journal != 0
     }
 }
 
@@ -1562,6 +1632,7 @@ impl RedbStore {
             transaction,
             metadata.clone(),
             generation.active,
+            layout.index,
         ));
         Ok((metadata, source))
     }
@@ -1577,8 +1648,16 @@ impl RedbStore {
             receipt_codec: layout.receipt,
             maintenance_codec: layout.maintenance,
             journal_codec: layout.journal,
-            backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
+            backup_codec: if layout.supports_maps() {
+                crate::backup::MAP_BACKUP_FORMAT_VERSION
+            } else {
+                crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION
+            },
         }
+    }
+
+    pub(crate) fn supports_maps(&self) -> bool {
+        self.committed.layout.supports_maps()
     }
 
     pub(crate) fn backup_journal_status(&self) -> crate::backup::incremental::BackupJournalStatus {
@@ -1981,7 +2060,10 @@ impl RedbStore {
         }
         if !matches!(
             self.committed.layout.format,
-            PRODUCTION_STORAGE_FORMAT_VERSION | JOURNAL_STORAGE_FORMAT_VERSION
+            PRODUCTION_STORAGE_FORMAT_VERSION
+                | JOURNAL_STORAGE_FORMAT_VERSION
+                | MAP_STORAGE_FORMAT_VERSION
+                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
@@ -2001,7 +2083,11 @@ impl RedbStore {
         self.invalidate_compaction_proof()
             .map_err(CommitFailure::Definite)?;
         let previous_layout = self.committed.layout;
-        let layout = StorageLayout::journal();
+        let layout = if previous_layout.supports_maps() {
+            StorageLayout::map_journal()
+        } else {
+            StorageLayout::journal()
+        };
         let state = JournalState {
             version: JOURNAL_CODEC_VERSION,
             chain_id: config.chain_id.clone(),
@@ -2282,11 +2368,14 @@ impl RedbStore {
     ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
         if !matches!(
             self.committed.layout.format,
-            PRODUCTION_STORAGE_FORMAT_VERSION | JOURNAL_STORAGE_FORMAT_VERSION
+            PRODUCTION_STORAGE_FORMAT_VERSION
+                | JOURNAL_STORAGE_FORMAT_VERSION
+                | MAP_STORAGE_FORMAT_VERSION
+                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "recoverable migrations require storage format 6 or 7",
+                "recoverable migrations require storage format 6, 7, 8, or 9",
             )));
         }
         if source.durable_meta() != self.committed.meta {
@@ -3070,6 +3159,8 @@ impl RedbStore {
             SCALAR_STORAGE_FORMAT_VERSION
                 | LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
                 | PRODUCTION_STORAGE_FORMAT_VERSION
+                | MAP_STORAGE_FORMAT_VERSION
+                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
@@ -3088,6 +3179,22 @@ impl RedbStore {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
                 "storage downgrades are not supported",
+            )));
+        }
+        if target == MAP_STORAGE_FORMAT_VERSION
+            && previous.format != PRODUCTION_STORAGE_FORMAT_VERSION
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                "storage format 8 requires format 6",
+            )));
+        }
+        if target == MAP_JOURNAL_STORAGE_FORMAT_VERSION
+            && previous.format != JOURNAL_STORAGE_FORMAT_VERSION
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                "storage format 9 requires format 7",
             )));
         }
         if target == PRODUCTION_STORAGE_FORMAT_VERSION {
@@ -3358,7 +3465,7 @@ impl RedbStore {
             apply_bytes_delta(&mut table, &prepared.receipts, "idempotency receipt")
                 .map_err(CommitFailure::Definite)?;
         }
-        if prepared.layout.format >= JOURNAL_STORAGE_FORMAT_VERSION {
+        if prepared.layout.supports_journal() {
             let journal_apply_started = Instant::now();
             transaction
                 .open_table(BACKUP_JOURNAL)
@@ -3540,7 +3647,7 @@ impl RedbStore {
                         definition.id,
                         &indexed,
                         row_id,
-                        PRODUCTION_INDEX_KEY_VERSION,
+                        self.committed.layout.index,
                     )?;
                     row_working = row_working.saturating_add(expected.len());
                     profile.point_lookups = profile.point_lookups.saturating_add(1);
@@ -3578,7 +3685,7 @@ impl RedbStore {
                 entry.map_err(|error| storage_error("read index for integrity check", error))?;
             let physical_key = key.value();
             let key = logical_generation_key(generation, physical_key)?;
-            validate_index_key(key, PRODUCTION_INDEX_KEY_VERSION)?;
+            validate_index_key(key, self.committed.layout.index)?;
             let index_id = u64::from_be_bytes(key[6..14].try_into().unwrap());
             let component_count = key[14] as usize;
             let row_id = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
@@ -3610,7 +3717,7 @@ impl RedbStore {
                 definition.id,
                 &indexed,
                 row_id,
-                PRODUCTION_INDEX_KEY_VERSION,
+                self.committed.layout.index,
             )?;
             if key != expected.as_slice() {
                 return Err(Error::new(
@@ -3683,10 +3790,12 @@ impl RedbStore {
             LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
                 | PRODUCTION_STORAGE_FORMAT_VERSION
                 | JOURNAL_STORAGE_FORMAT_VERSION
+                | MAP_STORAGE_FORMAT_VERSION
+                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(Error::new(
                 "E_STORAGE",
-                "bounded reads require storage format 5, 6, or 7",
+                "bounded reads require storage format 5, 6, 7, 8, or 9",
             ));
         }
         validate_generation_state(&transaction, &meta, layout, generation)?;
@@ -3847,6 +3956,7 @@ impl RedbStore {
             transaction,
             metadata.clone(),
             generation.active,
+            layout.index,
         ));
         Ok((metadata, receipts, committed, source, profile))
     }
@@ -4956,7 +5066,7 @@ fn meta_entries(
             ),
         ]);
     }
-    if layout.format >= JOURNAL_STORAGE_FORMAT_VERSION {
+    if layout.supports_journal() {
         entries.push((JOURNAL_CODEC_KEY, layout.journal.to_be_bytes().to_vec()));
     }
     entries
@@ -4975,6 +5085,8 @@ fn read_meta(
             | LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
             | PRODUCTION_STORAGE_FORMAT_VERSION
             | JOURNAL_STORAGE_FORMAT_VERSION
+            | MAP_STORAGE_FORMAT_VERSION
+            | MAP_JOURNAL_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
     }
@@ -4986,6 +5098,7 @@ fn read_meta(
             | CATALOG_CODEC_VERSION
             | SCALAR_CATALOG_CODEC_VERSION
             | PRODUCTION_CATALOG_CODEC_VERSION
+            | MAP_CATALOG_CODEC_VERSION
     ) || (format_version >= SCALAR_STORAGE_FORMAT_VERSION && catalog_version != expected.catalog)
     {
         return Err(Error::new(
@@ -5015,7 +5128,7 @@ fn read_meta(
     } else {
         0
     };
-    let journal = if format_version >= JOURNAL_STORAGE_FORMAT_VERSION {
+    let journal = if expected.supports_journal() {
         u16::from_be_bytes(read_fixed::<2>(table, JOURNAL_CODEC_KEY)?)
     } else {
         0
@@ -5276,7 +5389,7 @@ fn read_journal_state_and_validate(
     meta: &DurableMeta,
     layout: StorageLayout,
 ) -> Result<Option<JournalState>> {
-    if layout.format < JOURNAL_STORAGE_FORMAT_VERSION {
+    if !layout.supports_journal() {
         return Ok(None);
     }
     let state_table = transaction
@@ -6152,6 +6265,7 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
             | CATALOG_CODEC_VERSION
             | SCALAR_CATALOG_CODEC_VERSION
             | PRODUCTION_CATALOG_CODEC_VERSION
+            | MAP_CATALOG_CODEC_VERSION
     ) {
         return Err(Error::new(
             "E_STORAGE",
@@ -6326,6 +6440,9 @@ fn encode_index_key(
     if version == PRODUCTION_INDEX_KEY_VERSION {
         return database.encode_secondary_index_key_v3(index_id, value, row_id);
     }
+    if version == MAP_INDEX_KEY_VERSION {
+        return database.encode_secondary_index_key_v4(index_id, value, row_id);
+    }
     let mut key = Vec::new();
     key.extend_from_slice(INDEX_MAGIC);
     key.extend_from_slice(&version.to_be_bytes());
@@ -6363,6 +6480,9 @@ fn validate_index_key(key: &[u8], expected_version: u16) -> Result<()> {
     }
     if version == PRODUCTION_INDEX_KEY_VERSION {
         return crate::ordered_key::validate_complete(key);
+    }
+    if version == MAP_INDEX_KEY_VERSION {
+        return crate::ordered_key::validate_complete_v4(key);
     }
     if version == INDEX_KEY_VERSION {
         if key.len() < 26 {

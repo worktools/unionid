@@ -287,6 +287,21 @@ pub struct WireMapEntry {
 }
 
 impl WireValue {
+    pub(crate) fn requires_map_codec(&self) -> bool {
+        match self {
+            Self::Map { .. } => true,
+            Self::Named { value, .. } | Self::Option { value: Some(value) } => {
+                value.requires_map_codec()
+            }
+            Self::Variant { args, .. } => args.iter().any(Self::requires_map_codec),
+            Self::Record { fields } => fields.values().any(Self::requires_map_codec),
+            Self::Tuple { items } | Self::List { items } => {
+                items.iter().any(Self::requires_map_codec)
+            }
+            _ => false,
+        }
+    }
+
     pub fn requires_v2(&self) -> bool {
         match self {
             Self::Uuid { .. }

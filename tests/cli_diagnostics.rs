@@ -35,11 +35,11 @@ fn version_and_doctor_have_stable_machine_readable_shapes() {
     assert_eq!(version["stream_protocol_versions"], serde_json::json!([1]));
     assert_eq!(
         version["readable_storage_formats"],
-        serde_json::json!([1, 2, 3, 4, 5, 6, 7])
+        serde_json::json!([1, 2, 3, 4, 5, 6, 7, 8, 9])
     );
     assert_eq!(
         version["readable_backup_formats"],
-        serde_json::json!([1, 2, 3, 4])
+        serde_json::json!([1, 2, 3, 4, 5])
     );
     assert_eq!(version["current_storage"]["format"], 6);
     assert_eq!(version["current_storage"]["maintenance_codec"], 1);

@@ -20,6 +20,7 @@ const LEGACY_BACKUP_FORMAT_VERSION: u32 = 1;
 const RECEIPT_BACKUP_FORMAT_VERSION: u32 = 2;
 const SCALAR_BACKUP_FORMAT_VERSION: u32 = 3;
 pub const PRODUCTION_BACKUP_FORMAT_VERSION: u32 = 4;
+pub const MAP_BACKUP_FORMAT_VERSION: u32 = 5;
 const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,7 +61,12 @@ pub fn create(db: impl Into<PathBuf>, output: impl AsRef<Path>) -> Result<Backup
     let mut engine = Engine::open_redb(db)?;
     engine.check_integrity()?;
     let (database, source, receipts) = engine.logical_backup_view();
-    write_database_view(database, source, receipts, output.as_ref())
+    let format = if engine.logical_backup_supports_maps() {
+        MAP_BACKUP_FORMAT_VERSION
+    } else {
+        PRODUCTION_BACKUP_FORMAT_VERSION
+    };
+    write_database_view(database, source, receipts, output.as_ref(), format)
 }
 
 pub fn restore(backup: impl AsRef<Path>, db: impl Into<PathBuf>) -> Result<BackupInfo> {
@@ -307,6 +313,7 @@ fn write_database_view(
     source: &dyn TypedRowSource,
     receipts: &ReceiptMap,
     output: &Path,
+    format_version: u32,
 ) -> Result<BackupInfo> {
     if std::fs::symlink_metadata(output).is_ok() {
         return Err(Error::new(
@@ -326,7 +333,7 @@ fn write_database_view(
     .map_err(|error| Error::new("E_BACKUP", format!("encode backup payload: {error}")))?;
     let checksum = format!("sha256:{:x}", payload_hash.hash.finalize());
     let info = BackupInfo {
-        format_version: PRODUCTION_BACKUP_FORMAT_VERSION,
+        format_version,
         checksum,
         schema: database.schema_info(),
         migration_count: database.migration_history().len(),
@@ -397,6 +404,7 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             | RECEIPT_BACKUP_FORMAT_VERSION
             | SCALAR_BACKUP_FORMAT_VERSION
             | PRODUCTION_BACKUP_FORMAT_VERSION
+            | MAP_BACKUP_FORMAT_VERSION
     ) {
         return Err(Error::new(
             "E_BACKUP",
@@ -434,6 +442,9 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
         ensure_legacy_receipts(&envelope.receipts)?;
     }
     let database = envelope.database.validate_logical_backup()?;
+    if envelope.format_version < MAP_BACKUP_FORMAT_VERSION && database.requires_map_storage() {
+        return Err(Error::new("E_BACKUP", "typed maps require backup format 5"));
+    }
     if envelope.format_version == LEGACY_BACKUP_FORMAT_VERSION && !envelope.receipts.is_empty() {
         return Err(Error::new(
             "E_BACKUP",
