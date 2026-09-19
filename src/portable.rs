@@ -1046,6 +1046,7 @@ fn compare_unique_constraints(
 pub struct PortableContract {
     description: SchemaDescription,
     catalog: Catalog,
+    tables: BTreeMap<String, Vec<Column>>,
 }
 
 impl PortableContract {
@@ -1059,6 +1060,57 @@ impl PortableContract {
 
     pub fn into_description(self) -> SchemaDescription {
         self.description
+    }
+
+    /// Validate an externally supplied description against this live catalog.
+    ///
+    /// In addition to the structural checks in [`SchemaDescription::validate`],
+    /// every partial predicate is parsed, bound to the table row type, and
+    /// required to reserialize to the canonical normalized form. This is the
+    /// catalog-backed counterpart for untrusted descriptions because
+    /// `SchemaDescription::validate` alone has no types to bind against.
+    pub fn validate_description(&self, description: &SchemaDescription) -> Result<()> {
+        description.validate()?;
+        for table in &description.tables {
+            let Some(schema) = self.tables.get(&table.name) else {
+                return Err(Error::new(
+                    "E_CONTRACT_SCHEMA",
+                    format!(
+                        "description table '{}' is unknown to the catalog",
+                        table.name
+                    ),
+                ));
+            };
+            for index in &table.indexes {
+                let Some(predicate) = &index.predicate else {
+                    continue;
+                };
+                let bound = bind_description_predicate(&self.catalog, schema, predicate).map_err(
+                    |error| {
+                        Error::new(
+                            "E_CONTRACT_SCHEMA",
+                            format!(
+                                "table {} index {} predicate is invalid: {}",
+                                table.name, index.id, error.message
+                            ),
+                        )
+                    },
+                )?;
+                if bound.source_text() != *predicate {
+                    return Err(Error::new(
+                        "E_CONTRACT_SCHEMA",
+                        format!(
+                            "table {} index {} predicate '{}' is not the canonical form '{}'",
+                            table.name,
+                            index.id,
+                            predicate,
+                            bound.source_text()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Validate and normalize a value with the same rules as prepared binding.
@@ -1082,8 +1134,42 @@ impl PortableContract {
         Ok(Self {
             description: describe_database(database)?,
             catalog: database.catalog.clone(),
+            tables: database
+                .schema_tables()
+                .into_iter()
+                .map(|table| (table.name.clone(), table.schema.clone()))
+                .collect(),
         })
     }
+}
+
+fn bind_description_predicate(
+    catalog: &Catalog,
+    schema: &[Column],
+    predicate: &str,
+) -> Result<crate::db::IndexPredicate> {
+    let source = format!("from __contract_validate\nfilter {predicate}\n");
+    let statements = crate::syntax::parse(&source)?;
+    let Some(located) = statements.into_iter().next() else {
+        return Err(Error::new(
+            "E_CONTRACT_SCHEMA",
+            "predicate did not parse to a statement",
+        ));
+    };
+    let crate::query::Statement::Pipeline(pipeline) = located.statement else {
+        return Err(Error::new(
+            "E_CONTRACT_SCHEMA",
+            "predicate did not parse to a pipeline",
+        ));
+    };
+    let mut stages = pipeline.stages.into_iter();
+    let Some(crate::query::Stage::Filter(expression)) = stages.next() else {
+        return Err(Error::new(
+            "E_CONTRACT_SCHEMA",
+            "predicate is not a filter expression",
+        ));
+    };
+    crate::db::IndexPredicate::bind(catalog, schema, &expression)
 }
 
 pub fn describe(source: &str) -> Result<SchemaDescription> {

@@ -549,3 +549,55 @@ fn schema_evolution_reports_partial_predicate_changes() {
             .any(|finding| finding.code == "unique_index_predicate_changed")
     );
 }
+
+#[test]
+fn catalog_backed_validation_rejects_noncanonical_or_unsupported_predicates() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute(
+                "type User = {id int, email text, deleted_at Option<text>}\n\
+                 table users User\n  key id\n\
+                 create unique index users (email) if deleted_at == None"
+            )
+            .ok
+    );
+    let contract = engine.portable_contract().unwrap();
+    let description = contract.description().clone();
+    contract.validate_description(&description).unwrap();
+
+    let rewrite_predicate = |description: &mut unionid::portable::SchemaDescription,
+                             value: &str| {
+        let users = description
+            .tables
+            .iter_mut()
+            .find(|table| table.name == "users")
+            .unwrap();
+        users
+            .indexes
+            .iter_mut()
+            .find(|index| index.predicate.is_some())
+            .unwrap()
+            .predicate = Some(value.into());
+    };
+
+    let mut non_canonical = description.clone();
+    rewrite_predicate(&mut non_canonical, "deleted_at==None");
+    assert_eq!(
+        contract
+            .validate_description(&non_canonical)
+            .unwrap_err()
+            .code,
+        "E_CONTRACT_SCHEMA"
+    );
+
+    let mut unsupported = description.clone();
+    rewrite_predicate(&mut unsupported, "deleted_at != None");
+    assert_eq!(
+        contract
+            .validate_description(&unsupported)
+            .unwrap_err()
+            .code,
+        "E_CONTRACT_SCHEMA"
+    );
+}
