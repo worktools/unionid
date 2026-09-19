@@ -16,9 +16,9 @@ use crate::model::{
 };
 use crate::profile::ExecutionObservation;
 use crate::query::{
-    Aggregate, AggregateAssignment, AggregateFunction, CmpOp, ExistsCorrelation, ExistsFilter,
-    IndexComponent, PageDirection, PageSpec, Pipeline, Returning, SetAssignment, SetOperator,
-    SetValue, SortKey, Stage, Statement, Window, WindowFunction,
+    Aggregate, AggregateAssignment, AggregateFunction, BoolExpression, CmpOp, ExistsCorrelation,
+    ExistsFilter, IndexComponent, PageDirection, PageSpec, Pipeline, Returning, SetAssignment,
+    SetOperator, SetValue, SortKey, Stage, Statement, Window, WindowFunction,
 };
 use crate::row_source::{
     CandidateRowSource, EncodedIndexBounds, GENERAL_WORKING_MAX_BYTES, IndexHit, IndexHitCursor,
@@ -1816,7 +1816,8 @@ impl Database {
                 table,
                 components,
                 unique,
-            } => self.create_index(&table, &components, unique),
+                predicate,
+            } => self.create_index(&table, &components, unique, predicate.as_ref()),
             Statement::Insert {
                 table,
                 values,
@@ -2012,6 +2013,7 @@ impl Database {
                     descending: false,
                 }],
                 false,
+                None,
             )?;
         }
         Ok(QueryResponse::ok_message(format!("table '{name}' created")))
@@ -2022,7 +2024,14 @@ impl Database {
         name: &str,
         components: &[IndexComponent],
         unique: bool,
+        predicate: Option<&BoolExpression>,
     ) -> Result<QueryResponse> {
+        if predicate.is_some() {
+            return Err(Error::new(
+                "E_INDEX_PREDICATE",
+                "partial unique index execution is not available in this implementation stage",
+            ));
+        }
         if components.is_empty() || components.len() > crate::query::MAX_INDEX_COMPONENTS {
             return Err(Error::new(
                 "E_INDEX_SHAPE",
@@ -7463,6 +7472,7 @@ impl Database {
                 table,
                 &components,
                 definition.kind.is_unique(),
+                None,
                 0,
             );
             lines.extend(source.lines().map(str::to_owned));

@@ -102,8 +102,17 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             table,
             components,
             unique,
+            predicate,
         } => {
-            format_index_declaration(output, "create", table, components, *unique, depth);
+            format_index_declaration(
+                output,
+                "create",
+                table,
+                components,
+                *unique,
+                predicate.as_ref(),
+                depth,
+            );
         }
         Statement::Insert {
             table,
@@ -906,10 +915,29 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
             table,
             components,
             unique,
-        } => migration_index(output, "add", table, components, *unique, depth),
-        SchemaMigration::DropIndex { table, components } => {
-            migration_index(output, "drop", table, components, false, depth)
-        }
+            predicate,
+        } => migration_index(
+            output,
+            "add",
+            table,
+            components,
+            *unique,
+            predicate.as_ref(),
+            depth,
+        ),
+        SchemaMigration::DropIndex {
+            table,
+            components,
+            predicate,
+        } => migration_index(
+            output,
+            "drop",
+            table,
+            components,
+            false,
+            predicate.as_ref(),
+            depth,
+        ),
         SchemaMigration::SetKey { table, column } => {
             line(output, depth, &format!("set key {table}.{column}"))
         }
@@ -937,6 +965,7 @@ pub(crate) fn format_index_declaration(
     table: &str,
     components: &[IndexComponent],
     unique: bool,
+    predicate: Option<&BoolExpression>,
     depth: usize,
 ) {
     let shape = index_shape(components);
@@ -944,8 +973,22 @@ pub(crate) fn format_index_declaration(
         "{verb} {}index {table}",
         if unique { "unique " } else { "" }
     );
-    if components.len() <= 4 && prefix.len() + shape.len() + 3 <= 88 {
-        line(output, depth, &format!("{prefix} ({shape})"));
+    let predicate_text = predicate.map(index_predicate_text);
+    if components.len() <= 4
+        && prefix.len() + shape.len() + predicate_text.as_ref().map_or(3, |value| value.len() + 7)
+            <= 88
+    {
+        line(
+            output,
+            depth,
+            &format!(
+                "{prefix} ({shape}){}",
+                predicate_text
+                    .as_ref()
+                    .map(|value| format!(" if {value}"))
+                    .unwrap_or_default()
+            ),
+        );
     } else {
         line(output, depth, &format!("{prefix} ("));
         for component in components {
@@ -959,8 +1002,59 @@ pub(crate) fn format_index_declaration(
                 ),
             );
         }
-        line(output, depth, ")");
+        if let Some(predicate) = predicate {
+            line(output, depth, ") if (");
+            boolean_lines(output, depth + 1, &canonical_index_predicate(predicate));
+            line(output, depth, ")");
+        } else {
+            line(output, depth, ")");
+        }
     }
+}
+
+fn canonical_index_predicate(value: &BoolExpression) -> BoolExpression {
+    match value {
+        BoolExpression::IsNone(value) => BoolExpression::Compare {
+            left: value.clone(),
+            op: crate::query::CmpOp::Eq,
+            right: crate::query::ScalarExpression::Literal(crate::model::Value::Option(None)),
+            operand_type: None,
+        },
+        BoolExpression::And(left, right) => BoolExpression::And(
+            Box::new(canonical_index_predicate(left)),
+            Box::new(canonical_index_predicate(right)),
+        ),
+        BoolExpression::Or(left, right) => BoolExpression::Or(
+            Box::new(canonical_index_predicate(left)),
+            Box::new(canonical_index_predicate(right)),
+        ),
+        BoolExpression::Not(value) => {
+            BoolExpression::Not(Box::new(canonical_index_predicate(value)))
+        }
+        BoolExpression::Any {
+            collection,
+            binding,
+            predicate,
+        } => BoolExpression::Any {
+            collection: collection.clone(),
+            binding: binding.clone(),
+            predicate: Box::new(canonical_index_predicate(predicate)),
+        },
+        BoolExpression::All {
+            collection,
+            binding,
+            predicate,
+        } => BoolExpression::All {
+            collection: collection.clone(),
+            binding: binding.clone(),
+            predicate: Box::new(canonical_index_predicate(predicate)),
+        },
+        other => other.clone(),
+    }
+}
+
+pub(crate) fn index_predicate_text(value: &BoolExpression) -> String {
+    boolean(&canonical_index_predicate(value), 0, false)
 }
 
 fn migration_index(
@@ -969,12 +1063,15 @@ fn migration_index(
     table: &str,
     components: &[IndexComponent],
     unique: bool,
+    predicate: Option<&BoolExpression>,
     depth: usize,
 ) {
-    if let Some(source) = migration_index_text(verb, table, components, unique) {
+    if predicate.is_none()
+        && let Some(source) = migration_index_text(verb, table, components, unique)
+    {
         line(output, depth, &source);
     } else {
-        format_index_declaration(output, verb, table, components, unique, depth);
+        format_index_declaration(output, verb, table, components, unique, predicate, depth);
     }
 }
 

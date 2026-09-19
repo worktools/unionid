@@ -17,7 +17,7 @@
 谓词使用 Rust match guard 风格的 `if`，继续遵守无分号语言约束：
 
 ```text
-create unique index users (email) if deleted_at is None
+create unique index users (email) if deleted_at == None
 create unique index jobs (provider, external_id) if state == Active
 ```
 
@@ -25,7 +25,7 @@ create unique index jobs (provider, external_id) if state == Active
 
 ```text
 create unique index sessions (tenant, token) if (
-  revoked_at is None
+  revoked_at == None
   && state == Active
 )
 ```
@@ -37,13 +37,13 @@ Migration 使用同一形状：
 ```text
 migration m0002_active_email
   parent m0001_users
-  add unique index users (email) if deleted_at is None
+  add unique index users (email) if deleted_at == None
 ```
 
 删除 partial index 必须重复其规范谓词：
 
 ```text
-drop index users (email) if deleted_at is None
+drop index users (email) if deleted_at == None
 ```
 
 谓词变化是显式 drop/add。字段改名通过 stable field path 更新显示文本，不改变 index ID。
@@ -59,10 +59,10 @@ atom && atom && ...
 atom 只允许：
 
 - `field.path == typed_literal`
-- `field.path is None`
-- `field.path is Some`
+- `field.path == None`
+- `is_some field.path`
 
-`typed_literal` 必须在 schema 建立时完整绑定，不能包含参数、字段引用、算术、局部函数、`any`/`all`、`contains`、map lookup 或运行时错误。unit enum constructor 可在字段类型明确时简写，例如 `state == Active`。Option 字段的 `field == None` 可以输入，但绑定后必须折叠为 `field is None`；formatter 只输出后者。允许必要括号，但拒绝 `||`、`!`、`!=`、range 比较和 bool 字段的裸引用。
+`typed_literal` 必须在 schema 建立时完整绑定，不能包含参数、字段引用、算术、局部函数、`any`/`all`、`contains`、map lookup 或运行时错误。unit enum constructor 可在字段类型明确时简写，例如 `state == Active`。Option 字段也接受查询语言已有的 `is_none field` 输入，但 formatter 统一输出更接近 Rust 的 `field == None`；`is_some field` 保持现有 helper 写法。允许必要括号，但拒绝 `||`、`!`、`!=`、range 比较和 bool 字段的裸引用。
 
 这组限制使谓词确定、row-local、无错误且可在 schema、mutation、migration、restore 和 check 中得到同一结果。超出范围返回稳定的 `E_INDEX_PREDICATE`，诊断指出第一个不支持的结构。类型错误继续返回 `E_TYPE` 并保留源码 span。
 
@@ -87,7 +87,7 @@ index shape 扩展为：
 (table stable ID, ordered components, normalized predicate)
 ```
 
-kind 继续是定义属性；同一 shape 不能同时存在 ordinary 与 unique 两种 kind。无谓词使用 `predicate = None`。由于 predicate 属于 shape，普通全表 index `(email)` 和 partial unique index `(email) if deleted_at is None` 可以共存。
+kind 继续是定义属性；同一 shape 不能同时存在 ordinary 与 unique 两种 kind。无谓词使用 `predicate = None`。由于 predicate 属于 shape，普通全表 index `(email)` 和 partial unique index `(email) if deleted_at == None` 可以共存。
 
 `IndexDefinition` 增加可选的 `predicate`。schema source、hash、diff、migration ledger、`.schema`、`schema print` 和 introspection 都输出 canonical predicate。portable schema 增加 version 2；version 1 仍可读取不含 predicate 的 schema，但不能无损描述 partial index。Rust ADT codegen 不因 index predicate 改变生成的行类型。
 
@@ -116,17 +116,17 @@ partial index 只能在查询的已绑定过滤条件可机械证明蕴含 index
 2. 将多个 filter 和 filter 内纯 `&&` 展平成已绑定 atom 集合；
 3. index predicate 的每个 atom 必须在 query atom 集合中有完全相同的 stable path、operator、静态类型和 canonical value；
 4. 额外 query atom 不影响证明；`||`、`!`、match、函数和计算表达式不产生证明；
-5. `field == Some(value)` 可以蕴含 `field is Some`，其他跨 operator 推理保持 deferred。
+5. `field == Some(value)` 可以蕴含 `is_some field`，其他跨 operator 推理保持 deferred。
 
 例如：
 
 ```text
 from users
-filter deleted_at is None
+filter deleted_at == None
 filter email == $email
 ```
 
-可使用 `(email) if deleted_at is None`。只过滤 `email`、使用 `deleted_at is Some`，或在 stage barrier 后才添加 `deleted_at is None` 时不能使用该索引。
+可使用 `(email) if deleted_at == None`。只过滤 `email`、使用 `is_some deleted_at`，或在 stage barrier 后才添加 `deleted_at == None` 时不能使用该索引。
 
 `explain.plan.access` 在选择 partial index 时增加 canonical `index_predicate` 和 `predicate_proven = true`。回退计划可列出被拒绝的 partial index 及有界 reason code，例如 `predicate_not_implied`，但不输出 literal、参数值或业务数据。现有 equality/range/order/page 规则在证明完成后照常应用。
 
@@ -173,7 +173,7 @@ This RFC adds a partial unique index that contains a row only when its predicate
 The predicate uses a Rust match-guard-shaped `if` and keeps the language semicolon-free:
 
 ```text
-create unique index users (email) if deleted_at is None
+create unique index users (email) if deleted_at == None
 create unique index jobs (provider, external_id) if state == Active
 ```
 
@@ -181,7 +181,7 @@ Necessary parentheses make multiline precedence explicit:
 
 ```text
 create unique index sessions (tenant, token) if (
-  revoked_at is None
+  revoked_at == None
   && state == Active
 )
 ```
@@ -190,7 +190,7 @@ Migrations use the same suffix. Dropping a partial index repeats its canonical p
 
 ### 3. Predicate subset and normalization
 
-The accepted predicate is a conjunction of `field.path == typed_literal`, `field.path is None`, and `field.path is Some` atoms. Literals bind completely at schema time. For an Option field, input may use `field == None`, but binding always folds it to `field is None` and the formatter emits only that form. Parameters, other field references, arithmetic, local functions, collection operations, maps, `||`, `!`, `!=`, ranges, and bare boolean fields are rejected with `E_INDEX_PREDICATE`; ordinary type errors remain `E_TYPE` with source spans.
+The accepted predicate is a conjunction of `field.path == typed_literal`, `field.path == None`, and `is_some field.path` atoms. Literals bind completely at schema time. The existing query helper `is_none field` is also accepted as input, but the formatter emits the more Rust-shaped `field == None`; `is_some field` retains the existing helper syntax. Parameters, other field references, arithmetic, local functions, collection operations, maps, `||`, `!`, `!=`, ranges, and bare boolean fields are rejected with `E_INDEX_PREDICATE`; ordinary type errors remain `E_TYPE` with source spans.
 
 The bound representation is a sorted list of equality/presence atoms keyed by stable field path, operator, and canonical typed value. `Equal(None)` never enters this IR; it becomes `IsNone`. Reordering conjunctions, changing whitespace, shortening an unambiguous enum constructor, or spelling the input as `== None` does not change schema identity. Duplicate atoms collapse. Different equalities on one path, None/Some conflicts, and None/non-None equality conflicts return `E_INDEX_PREDICATE_CONTRADICTION`; the first release does not implement a general SAT solver.
 
@@ -204,7 +204,7 @@ The ordered-key codec remains unchanged: it stores the index ID, typed component
 
 ### 5. Planner proof
 
-A partial index is eligible only when bound query filters mechanically imply its predicate. The initial proof flattens simple filters and pure conjunctions before the existing stage barrier, then requires every predicate atom to have an identical stable path, operator, static type, and canonical value in the query atom set. Extra query atoms are harmless. Disjunction, negation, match, calls, computed expressions, and conditions after a barrier do not contribute. Equality to `Some(value)` may imply `is Some`; other cross-operator reasoning is deferred.
+A partial index is eligible only when bound query filters mechanically imply its predicate. The initial proof flattens simple filters and pure conjunctions before the existing stage barrier, then requires every predicate atom to have an identical stable path, operator, static type, and canonical value in the query atom set. Extra query atoms are harmless. Disjunction, negation, match, calls, computed expressions, and conditions after a barrier do not contribute. Equality to `Some(value)` may imply `is_some field`; other cross-operator reasoning is deferred.
 
 Explain reports the canonical `index_predicate` and `predicate_proven = true` for a selected partial index. A fallback may expose a bounded `predicate_not_implied` reason without literals, parameter values, or business data. Existing equality, range, ordering, and page rules apply only after the proof. Partial uniqueness proves page order only inside an implied predicate domain and does not become a global `fetch_by_key` uniqueness proof.
 

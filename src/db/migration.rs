@@ -127,8 +127,21 @@ impl Database {
                 table,
                 components,
                 unique,
-            } => self.create_index(&table, &components, unique).map(|_| ()),
-            SchemaMigration::DropIndex { table, components } => {
+                predicate,
+            } => self
+                .create_index(&table, &components, unique, predicate.as_ref())
+                .map(|_| ()),
+            SchemaMigration::DropIndex {
+                table,
+                components,
+                predicate,
+            } => {
+                if predicate.is_some() {
+                    return Err(Error::new(
+                        "E_INDEX_PREDICATE",
+                        "partial unique index execution is not available in this implementation stage",
+                    ));
+                }
                 self.drop_index(&table, &components)
             }
             SchemaMigration::SetKey { table, column } => self.set_key(&table, &column),
@@ -627,6 +640,7 @@ impl Database {
                     descending: false,
                 }],
                 false,
+                None,
             )?;
         }
         let Some(DbObject::Table(source)) = self.objects.get_mut(table) else {

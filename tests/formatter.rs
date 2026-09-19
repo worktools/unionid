@@ -76,6 +76,56 @@ fn composite_index_layouts_share_one_canonical_shape() {
 }
 
 #[test]
+fn partial_unique_indexes_use_query_expressions_and_canonical_option_equality() {
+    let short = "create unique index users (email) if is_none deleted_at";
+    let expected = "create unique index users (email) if deleted_at == None\n";
+    assert_eq!(format_source(short).unwrap(), expected);
+    assert_eq!(format_source(expected).unwrap(), expected);
+
+    let migration = r#"migration m0002_active_email {
+  add unique index users (email) if is_none deleted_at
+  drop index users (email) if deleted_at == None
+}"#;
+    let formatted = format_source(migration).unwrap();
+    assert!(formatted.contains("add unique index users (email) if deleted_at == None"));
+    assert!(formatted.contains("drop index users (email) if deleted_at == None"));
+    assert_eq!(format_source(&formatted).unwrap(), formatted);
+
+    let long = "create unique index sessions (organization_identifier, external_session_identifier) if (is_none revoked_at && state == Active)";
+    let expected = "create unique index sessions (\n  organization_identifier\n  external_session_identifier\n) if (\n  revoked_at == None\n  && state == Active\n)\n";
+    assert_eq!(format_source(long).unwrap(), expected);
+    assert_eq!(format_source(expected).unwrap(), expected);
+}
+
+#[test]
+fn partial_index_predicates_require_unique_indexes() {
+    let error = format_source("create index users (email) if active == true").unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("partial predicates require a unique index")
+    );
+}
+
+#[test]
+fn partial_unique_index_execution_fails_before_schema_mutation() {
+    let mut engine = Engine::memory();
+    assert!(
+        engine
+            .execute("type User = {id int, email text, deleted_at option text}\ntable users User")
+            .ok
+    );
+    let before = engine.schema();
+    let response = engine.execute("create unique index users (email) if deleted_at == None");
+    assert!(!response.ok);
+    assert_eq!(
+        response.error.as_ref().map(|error| error.code.as_str()),
+        Some("E_INDEX_PREDICATE")
+    );
+    assert_eq!(engine.schema(), before);
+}
+
+#[test]
 fn membership_expressions_keep_infix_canonical_syntax() {
     let source = "from jobs | filter id not in $ignored and state in [Queued, Running {worker = \"local\"}] | derive selected = id in [1, 2]";
     let formatted = format_source(source).unwrap();

@@ -312,18 +312,37 @@ pub fn describe_step(step: &SchemaMigration) -> (String, bool) {
             table,
             components,
             unique,
+            predicate,
         } => (
             format!(
-                "add {}index {table} ({})",
+                "add {}index {table} ({}){}",
                 if *unique { "unique " } else { "" },
                 crate::formatter::index_shape(components),
+                predicate
+                    .as_ref()
+                    .map(|predicate| format!(
+                        " if {}",
+                        crate::formatter::index_predicate_text(predicate)
+                    ))
+                    .unwrap_or_default(),
             ),
             false,
         ),
-        SchemaMigration::DropIndex { table, components } => (
+        SchemaMigration::DropIndex {
+            table,
+            components,
+            predicate,
+        } => (
             format!(
-                "drop index {table} ({})",
-                crate::formatter::index_shape(components)
+                "drop index {table} ({}){}",
+                crate::formatter::index_shape(components),
+                predicate
+                    .as_ref()
+                    .map(|predicate| format!(
+                        " if {}",
+                        crate::formatter::index_predicate_text(predicate)
+                    ))
+                    .unwrap_or_default(),
             ),
             true,
         ),

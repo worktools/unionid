@@ -1027,10 +1027,20 @@ impl Parser {
             self.expect_word("index")?;
             let table = self.identifier()?;
             let components = self.index_components()?;
+            let predicate = if self.word("if") {
+                if !unique {
+                    return Err(self.error("partial predicates require a unique index"));
+                }
+                self.bump();
+                Some(self.bool_expression(0, false)?)
+            } else {
+                None
+            };
             Ok(Statement::CreateIndex {
                 table,
                 components,
                 unique,
+                predicate,
             })
         }
     }
@@ -1150,15 +1160,23 @@ impl Parser {
                     table,
                     components,
                     unique: false,
+                    predicate: None,
                 })
             } else if self.word("unique") {
                 self.bump();
                 self.expect_word("index")?;
                 let (table, components) = self.migration_index_shape()?;
+                let predicate = if self.word("if") {
+                    self.bump();
+                    Some(self.bool_expression(0, false)?)
+                } else {
+                    None
+                };
                 Ok(SchemaMigration::AddIndex {
                     table,
                     components,
                     unique: true,
+                    predicate,
                 })
             } else {
                 self.expect_word("variant")?;
@@ -1189,7 +1207,17 @@ impl Parser {
             } else if self.word("index") {
                 self.bump();
                 let (table, components) = self.migration_index_shape()?;
-                Ok(SchemaMigration::DropIndex { table, components })
+                let predicate = if self.word("if") {
+                    self.bump();
+                    Some(self.bool_expression(0, false)?)
+                } else {
+                    None
+                };
+                Ok(SchemaMigration::DropIndex {
+                    table,
+                    components,
+                    predicate,
+                })
             } else if self.word("key") {
                 self.bump();
                 Ok(SchemaMigration::DropKey {

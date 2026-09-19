@@ -32,6 +32,7 @@ pub enum Statement {
         table: String,
         components: Vec<IndexComponent>,
         unique: bool,
+        predicate: Option<BoolExpression>,
     },
     Insert {
         table: String,
@@ -174,10 +175,12 @@ pub enum SchemaMigration {
         table: String,
         components: Vec<IndexComponent>,
         unique: bool,
+        predicate: Option<BoolExpression>,
     },
     DropIndex {
         table: String,
         components: Vec<IndexComponent>,
+        predicate: Option<BoolExpression>,
     },
     SetKey {
         table: String,
