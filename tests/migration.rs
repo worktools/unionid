@@ -310,6 +310,38 @@ fn redb_shadow_generation_cleans_a_deterministic_constraint_failure() {
 }
 
 #[test]
+fn redb_rejects_map_migration_before_starting_shadow_maintenance() {
+    let dir = TempDir::new();
+    let path = dir.0.join("map-migration.redb");
+    let initial = MigrationFile::parse(
+        "migration m0001_items\n  add type Item =\n    id int\n  add table items Item key id\n",
+    )
+    .unwrap();
+    let add_map = MigrationFile::parse(
+        "migration m0002_attributes\n  parent m0001_items\n  add field Item.attributes: Map<text, int> = map {}\n",
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine
+        .apply_migrations(std::slice::from_ref(&initial))
+        .unwrap();
+
+    let error = engine
+        .apply_migrations(&[initial.clone(), add_map])
+        .unwrap_err();
+    assert_eq!(error.code, "E_STORAGE_UPGRADE_REQUIRED");
+    assert!(engine.introspection().maintenance.is_none());
+    assert_eq!(engine.migration_history().len(), 1);
+    assert!(!engine.schema().contains("attributes"));
+    drop(engine);
+
+    let reopened = Engine::open_redb(&path).unwrap();
+    assert!(reopened.introspection().maintenance.is_none());
+    assert_eq!(reopened.migration_history().len(), 1);
+    assert!(!reopened.schema().contains("attributes"));
+}
+
+#[test]
 fn migration_directory_order_and_parent_are_validated() {
     let dir = TempDir::new();
     std::fs::write(dir.0.join("0001_initial.uid"), initial_file().source).unwrap();

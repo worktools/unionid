@@ -984,7 +984,8 @@ pub(crate) fn same_type(left: &ScalarType, right: &ScalarType) -> bool {
         ) => a == c && b == d,
         (ScalarType::Ref(left), ScalarType::Ref(right)) => left == right,
         (ScalarType::Option(left), ScalarType::Option(right))
-        | (ScalarType::List(left), ScalarType::List(right)) => same_type(left, right),
+        | (ScalarType::List(left), ScalarType::List(right))
+        | (ScalarType::Map(left), ScalarType::Map(right)) => same_type(left, right),
         (ScalarType::Tuple(left), ScalarType::Tuple(right)) => {
             left.len() == right.len()
                 && left

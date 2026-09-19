@@ -46,6 +46,40 @@ sort id"#,
     let schema = engine.schema();
     assert!(schema.contains("Map<text, int>"));
     assert!(schema.contains("map {}"));
+
+    let queried = engine.execute(
+        r#"from items
+filter attributes == map {"z": 3, "a": 1}
+select {id, attributes}"#,
+    );
+    assert!(queried.ok, "{}", queried.message);
+    assert_eq!(queried.rows.len(), 1);
+    assert!(queried.rows[0]["attributes"].cmp_eq(&response.rows[0]["attributes"]));
+
+    let mut matches = Engine::memory();
+    let derived = matches.execute(
+        r#"enum Attributes {
+  Present(Map<text, int>)
+  Empty
+}
+struct Row { id: int, attributes: Attributes }
+table rows: Row { key id }
+insert rows {id: 1, attributes: Present(map {"a": 1})}
+insert rows {id: 2, attributes: Empty}
+from rows
+derive copied = match attributes {
+  Present(entries) => entries
+  Empty => map {},
+}
+sort id
+select {id, copied}"#,
+    );
+    assert!(derived.ok, "{}", derived.message);
+    assert!(
+        derived.rows[0]["copied"]
+            .cmp_eq(&Value::Map(BTreeMap::from([("a".into(), Value::Int(1),)])))
+    );
+    assert!(derived.rows[1]["copied"].cmp_eq(&Value::Map(BTreeMap::new())));
 }
 
 #[test]
@@ -124,4 +158,9 @@ fn redb_rejects_maps_before_publishing_any_schema_change() {
     assert_eq!(response.error.unwrap().code, "E_STORAGE_UPGRADE_REQUIRED");
     assert!(engine.tables().is_empty());
     assert!(!engine.schema().contains("Item"));
+    drop(engine);
+
+    let reopened = Engine::open_redb(&path).unwrap();
+    assert!(reopened.tables().is_empty());
+    assert!(!reopened.schema().contains("Item"));
 }

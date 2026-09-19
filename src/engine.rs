@@ -2323,6 +2323,12 @@ impl Engine {
         let mut target = source_database
             .migration_target(&file.id, &file.steps)
             .map_err(|error| migration_file_error(file, error))?;
+        if target.requires_map_storage() {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "typed maps are available in memory, but durable redb map storage requires format 8",
+            ));
+        }
         let schema = target.schema_info();
         let applied_at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)

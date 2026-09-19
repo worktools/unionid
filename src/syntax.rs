@@ -3026,7 +3026,7 @@ impl Parser {
         }
         match self.kind().clone() {
             Kind::Text(_) | Kind::Number(_) => Ok(MatchValue::Literal(self.value(depth)?)),
-            Kind::Ident(name) if matches!(name.as_str(), "true" | "false" | "null") => {
+            Kind::Ident(name) if matches!(name.as_str(), "true" | "false" | "null" | "map") => {
                 Ok(MatchValue::Literal(self.value(depth)?))
             }
             Kind::Ident(name) => {
@@ -3549,7 +3549,7 @@ impl Parser {
                 Ok(ScalarExpression::Parameter { name, ty: None })
             }
             Kind::Ident(name)
-                if matches!(name.as_str(), "true" | "false" | "null")
+                if matches!(name.as_str(), "true" | "false" | "null" | "map")
                     || matches!(name.as_str(), "uuid" | "bytes" | "decimal")
                         && matches!(
                             self.tokens.get(self.pos + 1).map(|token| &token.kind),
