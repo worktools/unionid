@@ -59,9 +59,10 @@ pub use client::{AsyncTcpClient, AsyncTcpStream};
 pub use client::{MAX_RESPONSE_BYTES, TcpClient, TypedStreamEvent};
 pub use db::{
     ExecutionPlanObservation, ExistsCorrelationPlan, ExistsPlan, IndexRangePlan, IndexTraversal,
-    LookupPlan, MAX_EXECUTION_PLAN_STAGES, MAX_EXISTS_DRIVERS, PageAccessKind, PageInfo, PageOrder,
-    PagePlan, QueryAccessKind, QueryAccessPlan, QueryAnalysis, QueryPlan, QueryPlanStage,
-    QueryResponse, QueryStageKind, SchemaInfo, SetOperationPlan, TypedPage, UpsertAction,
+    LookupPlan, MAX_EXECUTION_PLAN_STAGES, MAX_EXISTS_DRIVERS, MAX_PREDICATE_REJECTIONS,
+    PageAccessKind, PageInfo, PageOrder, PagePlan, PredicateRejection, QueryAccessKind,
+    QueryAccessPlan, QueryAnalysis, QueryPlan, QueryPlanStage, QueryResponse, QueryStageKind,
+    SchemaInfo, SetOperationPlan, TypedPage, UpsertAction,
 };
 pub use engine::{
     Engine, MutationProfile, PreparedQuery, StorageCompaction, StorageIntegrity, StorageUpgrade,

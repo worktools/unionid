@@ -1248,9 +1248,26 @@ pub struct QueryAccessPlan {
     pub sort_satisfied: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub page_seek: bool,
+    /// Canonical predicate of the selected partial unique index, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_predicate: Option<String>,
+    /// True when the query filters mechanically imply `index_predicate`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub predicate_proven: bool,
+    /// Bounded, value-free reasons a partial index was not selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub predicate_rejections: Vec<PredicateRejection>,
     pub estimated_rows: usize,
     pub table_rows: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PredicateRejection {
+    pub index: String,
+    pub reason: String,
+}
+
+pub const MAX_PREDICATE_REJECTIONS: usize = 8;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -4884,12 +4901,22 @@ impl Database {
         keys: &[SortKey],
     ) -> bool {
         let constraints = leading_index_constraints(pipeline);
+        let Ok(query_atoms) = self.leading_query_predicate_atoms(&pipeline.from, pipeline) else {
+            return false;
+        };
         self.index_definitions
             .get(&pipeline.from)
             .into_iter()
             .flat_map(|definitions| definitions.values())
-            .filter(|definition| definition.kind.is_unique() && definition.predicate.is_none())
+            .filter(|definition| definition.kind.is_unique())
             .any(|definition| {
+                if definition
+                    .predicate
+                    .as_ref()
+                    .is_some_and(|predicate| !predicate.implied_by(&query_atoms))
+                {
+                    return false;
+                }
                 let components = definition.effective_components();
                 let equality_components = components
                     .iter()
@@ -5220,17 +5247,40 @@ impl Database {
     ) -> Result<PlannedAccess> {
         let table_stats = source.table_stats(&pipeline.from)?;
         let constraints = leading_index_constraints(pipeline);
+        let query_atoms = self.leading_query_predicate_atoms(&pipeline.from, pipeline)?;
+        let mut rejections = Vec::new();
         let mut best = None;
         if let Some(definitions) = self.index_definitions.get(&pipeline.from) {
             for definition in definitions.values() {
-                if definition.predicate.is_some() {
+                let proven = definition
+                    .predicate
+                    .as_ref()
+                    .is_none_or(|predicate| predicate.implied_by(&query_atoms));
+                if !proven {
+                    if rejections.len() < MAX_PREDICATE_REJECTIONS
+                        && self
+                            .index_access_candidate(
+                                source,
+                                pipeline,
+                                page,
+                                definition,
+                                &constraints,
+                                false,
+                            )?
+                            .is_some()
+                    {
+                        rejections.push(PredicateRejection {
+                            index: definition.display_constraint(),
+                            reason: "predicate_not_implied".into(),
+                        });
+                    }
                     continue;
                 }
                 let shape = definition.shape_key();
                 if !source.has_index(&pipeline.from, &shape) {
                     continue;
                 }
-                let Some(candidate) = self.index_access_candidate(
+                let Some(mut candidate) = self.index_access_candidate(
                     source,
                     pipeline,
                     page,
@@ -5241,6 +5291,10 @@ impl Database {
                 else {
                     continue;
                 };
+                if definition.predicate.is_some() {
+                    candidate.plan.index_predicate = definition.display_predicate();
+                    candidate.plan.predicate_proven = true;
+                }
                 let replace = best.as_ref().is_none_or(|current: &IndexAccessCandidate| {
                     candidate.equality_components > current.equality_components
                         || candidate.equality_components == current.equality_components
@@ -5261,7 +5315,10 @@ impl Database {
                 }
             }
         }
-        if let Some(best) = best {
+        if let Some(mut best) = best {
+            if !rejections.is_empty() {
+                best.plan.predicate_rejections = rejections;
+            }
             return Ok(PlannedAccess {
                 plan: best.plan,
                 index_scan: Some(best.index_scan),
@@ -5278,12 +5335,39 @@ impl Database {
                 traversal: None,
                 sort_satisfied: false,
                 page_seek: false,
+                index_predicate: None,
+                predicate_proven: false,
+                predicate_rejections: rejections,
                 estimated_rows: table_stats.rows,
                 table_rows: table_stats.rows,
             },
             index_scan: None,
             ordered_sort: None,
         })
+    }
+
+    fn leading_query_predicate_atoms(
+        &self,
+        table: &str,
+        pipeline: &Pipeline,
+    ) -> Result<Vec<IndexPredicateAtom>> {
+        let schema = self.table(table)?.schema.clone();
+        let mut atoms = Vec::new();
+        for stage in &pipeline.stages {
+            match stage {
+                Stage::Let(_) => {}
+                Stage::Filter(expression) => {
+                    index_predicate::collect_query_atoms(
+                        &self.catalog,
+                        &schema,
+                        expression,
+                        &mut atoms,
+                    )?;
+                }
+                _ => break,
+            }
+        }
+        Ok(atoms)
     }
 
     fn plan_access_for_index(
@@ -5303,11 +5387,14 @@ impl Database {
                     .find(|definition| definition.shape_key() == shape)
             })
             .ok_or_else(|| Error::new("E_QUERY", "bound query index is no longer available"))?;
-        if definition.predicate.is_some() {
-            return Err(Error::new(
-                "E_QUERY",
-                "partial indexes require predicate implication planning",
-            ));
+        if let Some(predicate) = &definition.predicate {
+            let query_atoms = self.leading_query_predicate_atoms(&pipeline.from, pipeline)?;
+            if !predicate.implied_by(&query_atoms) {
+                return Err(Error::new(
+                    "E_QUERY",
+                    "bound partial index predicate is not implied by the query filters",
+                ));
+            }
         }
         if !source.has_index(&pipeline.from, shape) {
             return Err(Error::new(
@@ -5316,7 +5403,7 @@ impl Database {
             ));
         }
         let constraints = leading_index_constraints(pipeline);
-        let candidate = self
+        let mut candidate = self
             .index_access_candidate(
                 source,
                 pipeline,
@@ -5331,6 +5418,10 @@ impl Database {
                     "bound query index no longer matches the prepared access constraints",
                 )
             })?;
+        if definition.predicate.is_some() {
+            candidate.plan.index_predicate = definition.display_predicate();
+            candidate.plan.predicate_proven = true;
+        }
         Ok(PlannedAccess {
             plan: candidate.plan,
             index_scan: Some(candidate.index_scan),
@@ -5561,6 +5652,9 @@ impl Database {
                 traversal,
                 sort_satisfied: ordered_sort.is_some(),
                 page_seek,
+                index_predicate: None,
+                predicate_proven: false,
+                predicate_rejections: Vec::new(),
                 estimated_rows,
                 table_rows,
             },

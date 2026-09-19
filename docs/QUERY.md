@@ -360,9 +360,11 @@ explain analyze
 
 取消、deadline、行数和工作内存上限与普通查询完全相同；执行失败时直接返回对应错误，不返回不完整的分析对象。计数描述 unionid 执行器可观察到的逻辑工作量，不代表物理磁盘读取或分配器精确 RSS。重复测量可比较计划与工作量，wall-clock 时间仍会受机器负载和缓存状态影响。
 
-成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`、相关存在过滤 `exists`、集合运算 `set_operations`，以及最终结果 schema。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限；每个 exists 计划公开目标表、相关路径、实际索引和 driver 上限；每个 set-operation 计划公开 operator、右侧表与右侧访问计划。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
+成功响应的 `plan` 是结构化值，包含源表、访问方式、索引 shape、equality prefix、可选 range 字段与上下界 inclusivity、遍历方向、sort/page 覆盖状态、当前快照的候选行估计、源表行数、保持源码顺序的 stage 列表、关联读 `lookups`、相关存在过滤 `exists`、集合运算 `set_operations`，以及最终结果 schema。选择部分唯一索引时会额外给出 canonical `index_predicate` 与 `predicate_proven: true`；被拒绝的部分唯一索引在 `predicate_rejections` 中以有界 `{index, reason}` 列出（例如 `predicate_not_implied`），不含 literal、参数或业务数据。每个 lookup 计划公开 stage、输出字段、目标表/字段、driver 字段、实际目标索引和逐行上限；每个 exists 计划公开目标表、相关路径、实际索引和 driver 上限；每个 set-operation 计划公开 operator、右侧表与右侧访问计划。主访问方式为 `full_scan`、`primary_key_lookup`、`secondary_index_lookup`、`composite_lookup`、`range_scan`、`ordered_scan` 或 `page_seek`。CLI 会把这些字段打印成可读计划；JSON、Rust API 与 version 1 TCP 响应保留同一结构。prepared query 同样支持 explain，参数在选择索引前按静态类型绑定。计划只显示 `<bound>`／`<range>`，不暴露 literal、parameter、cursor boundary 或数据行。
 
 planner 跳过开头的 row-independent `let`，然后只从连续的简单 `field op bound` filter 提取边界；`op` 可以是 `==`、`>`、`>=`、`<` 或 `<=`。复合索引使用从首 component 开始的连续 equality prefix，并在紧邻的下一个 component 上合并至多一组 lower/upper range；range 后或 key gap 后的条件仍作为 residual filter。遇到 compound bool、`filter match`、derive、select、aggregate/group、sort、take 或其他语义边界后停止抽取，也不从 `&&`／`||` 内部拆条件。
+
+部分唯一索引额外要求证明：planner 只在 barrier 之前的简单 filter 与它们内部的纯 `&&` 展平后，逐 atom 匹配 stable field path、operator、静态类型和 canonical value，证明查询蕴含 index predicate 时才使用该索引；`field == Some value` 可蕴含 `is_some field`。`||`、`!`、`match`、函数、计算表达式、barrier 之后的过滤，以及参数未绑定的条件都不参与证明。`fetch_by_key` 不携带额外 predicate，因此不把部分唯一索引当作全表唯一证明；稳定分页只在证明成立时用部分唯一索引论证唯一排序。
 
 去掉 equality-fixed sort 字段后，剩余 sort 只有与索引 suffix 的连续前缀方向完全相同或全部相反时才消费 index order。多个候选依次按 equality component 数、是否有 range、是否满足 sort/page、key component 数和 stable index ID 选择。原 filter 始终按源码顺序再次执行；如果后续 stage 会改变行集或顺序，执行器不会提前按 `take` 截断。
 

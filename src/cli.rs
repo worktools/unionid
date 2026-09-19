@@ -1959,6 +1959,17 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                 "access | {access}{index}{condition} ({} of {} row(s))",
                 plan.access.estimated_rows, plan.access.table_rows
             );
+            if let Some(predicate) = &plan.access.index_predicate {
+                let proven = if plan.access.predicate_proven {
+                    "proven"
+                } else {
+                    "unproven"
+                };
+                println!("predicate | {predicate} ({proven})");
+            }
+            for rejection in &plan.access.predicate_rejections {
+                println!("rejected | {} ({})", rejection.index, rejection.reason);
+            }
             println!(
                 "stages | {}",
                 plan.stages
