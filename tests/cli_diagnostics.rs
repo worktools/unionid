@@ -209,6 +209,33 @@ fn run_on_an_empty_database_reports_an_actionable_hint() {
     assert_eq!(json(&json_output)["error"]["code"], "E_TABLE");
     // The hint is stderr-only, so stdout stays machine-readable.
     assert!(!String::from_utf8_lossy(&json_output.stdout).contains("hint:"));
+
+    // Piped local CLI input gets the same hint without changing its JSON stdout.
+    let piped = {
+        use std::io::Write;
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args(["cli", "--memory", "--format", "json"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"from tasks\n")
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    assert_eq!(piped.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&piped.stderr).contains("no tables yet"),
+        "{}",
+        String::from_utf8_lossy(&piped.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&piped.stdout).contains("hint:"));
+    assert_eq!(json(&piped)["error"]["code"], "E_TABLE");
 }
 
 #[test]
