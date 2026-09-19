@@ -1030,6 +1030,12 @@ fn compare_unique_constraints(
                 format!("{table_path}.index#{}", index.id),
                 "an ordinary index became unique and can reject writes accepted by the baseline",
             ),
+            Some(previous) if previous.predicate != index.predicate => report.client_write.add(
+                CompatibilityLevel::Incompatible,
+                "unique_index_predicate_changed",
+                format!("{table_path}.index#{}", index.id),
+                "the partial-unique predicate changed, so a different set of writes is accepted",
+            ),
             _ => {}
         }
     }

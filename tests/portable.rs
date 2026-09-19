@@ -515,3 +515,37 @@ fn portable_contract_v2_preserves_partial_unique_predicates() {
         .unique = false;
     assert_eq!(non_unique.validate().unwrap_err().code, "E_CONTRACT_SCHEMA");
 }
+
+#[test]
+fn schema_evolution_reports_partial_predicate_changes() {
+    let description = unionid::portable::describe(
+        "type User = {id int, email text, deleted_at Option<text>}\n\
+         table users User\n  key id\n\
+         create unique index users (email) if deleted_at == None",
+    )
+    .unwrap();
+    let unchanged = description.compare_same_catalog(&description).unwrap();
+    assert_eq!(unchanged.client_write.level, CompatibilityLevel::Compatible);
+
+    let mut candidate = description.clone();
+    let users = candidate
+        .tables
+        .iter_mut()
+        .find(|table| table.name == "users")
+        .unwrap();
+    users
+        .indexes
+        .iter_mut()
+        .find(|index| index.predicate.is_some())
+        .unwrap()
+        .predicate = None;
+    let report = description.compare_same_catalog(&candidate).unwrap();
+    assert_eq!(report.client_write.level, CompatibilityLevel::Incompatible);
+    assert!(
+        report
+            .client_write
+            .findings
+            .iter()
+            .any(|finding| finding.code == "unique_index_predicate_changed")
+    );
+}
