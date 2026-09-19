@@ -179,6 +179,39 @@ fn compact_cli_reports_success_and_stable_state_errors() {
 }
 
 #[test]
+fn run_on_an_empty_database_reports_an_actionable_hint() {
+    let dir = TempDir::new();
+    let database = dir.0.join("empty.redb");
+    drop(Engine::open_redb(&database).unwrap());
+
+    let output = run(&[
+        "run",
+        "--db",
+        database.to_str().unwrap(),
+        "--query",
+        "from tasks",
+    ]);
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no tables yet"), "{stderr}");
+    assert!(stderr.contains("migration apply"), "{stderr}");
+
+    let json_output = run(&[
+        "run",
+        "--db",
+        database.to_str().unwrap(),
+        "--query",
+        "from tasks",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(json_output.status.code(), Some(3));
+    assert_eq!(json(&json_output)["error"]["code"], "E_TABLE");
+    // The hint is stderr-only, so stdout stays machine-readable.
+    assert!(!String::from_utf8_lossy(&json_output.stdout).contains("hint:"));
+}
+
+#[test]
 fn doctor_reads_existing_state_without_changing_the_database() {
     let dir = TempDir::new();
     let database = dir.0.join("doctor.redb");

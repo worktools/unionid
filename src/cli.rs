@@ -1439,9 +1439,28 @@ fn run_local_engine(
         if one_shot_introspection && let Some(kind) = introspection_command(source.trim()) {
             return print_introspection(&engine.introspection(), kind, json);
         }
-        return print_response(&engine.execute(&source), json);
+        let response = engine.execute(&source);
+        print_first_run_hint(&engine, &response);
+        return print_response(&response, json);
     }
     repl(Some(&mut engine), "", json, history)
+}
+
+/// Add an actionable next step when a script fails on an empty local database.
+///
+/// This is additive stderr guidance for the first-use journey: it never changes
+/// the error code, message, exit class, or JSON output, and it stays silent once
+/// the database has any table.
+fn print_first_run_hint(engine: &Engine, response: &QueryResponse) {
+    let Some(error) = &response.error else {
+        return;
+    };
+    if error.code != "E_TABLE" || !engine.tables().is_empty() {
+        return;
+    }
+    eprintln!("hint: this database has no tables yet; apply migrations first, for example:");
+    eprintln!("  unionid migration apply --db <path> --dir migrations");
+    eprintln!("hint: run `unionid docs` for the bundled first-use guide");
 }
 
 pub fn run_cli(addr: &str, source: Option<String>, json: bool) -> Result<(), String> {

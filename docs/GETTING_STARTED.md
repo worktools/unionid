@@ -66,7 +66,7 @@ unionid run --db data/tasks.redb --file seed.unid
 unionid run --db data/tasks.redb --file queries/list_running.unid
 ```
 
-seed 写入两行，最后一条命令从新的 `unionid` 进程重新打开 redb，并返回 `id = 1`、标题为 `learn ADTs` 的 `Running` task。结果保留完整 sum variant 和 record payload；字段、constructor、pattern coverage 与 payload 类型会在扫描前检查。
+seed 写入两行，最后一条命令从新的 `unionid` 进程重新打开 redb，并返回 `id = 1`、标题为 `learn ADTs` 的 `Running` task。结果保留完整 sum variant 和 record payload；字段、constructor、pattern coverage 与 payload 类型会在扫描前检查。如果忘记先执行 `migration apply`，`run` 会返回 `E_TABLE`，并在 stderr 提示先应用 migration；`hint:` 行只写入 stderr，JSON 输出保持机器可读。
 
 ### 4. 诊断并检查原数据库
 
@@ -193,7 +193,7 @@ unionid run --db data/tasks.redb --file seed.unid
 unionid run --db data/tasks.redb --file queries/list_running.unid
 ```
 
-The seed writes two rows. The final command reopens redb in a new `unionid` process and returns the `Running` task with `id = 1` and title `learn ADTs`. The result preserves the complete sum variant and record payload. Fields, constructors, pattern coverage, and payload types are checked before scanning rows.
+The seed writes two rows. The final command reopens redb in a new `unionid` process and returns the `Running` task with `id = 1` and title `learn ADTs`. The result preserves the complete sum variant and record payload. Fields, constructors, pattern coverage, and payload types are checked before scanning rows. If `migration apply` is skipped, `run` returns `E_TABLE` and prints a stderr hint to apply migrations first; the `hint:` lines are stderr-only, so JSON output stays machine-readable.
 
 ### 4. Diagnose and check the original database
 

@@ -93,6 +93,12 @@ unionid check --db data/tasks.redb
 `schema.unid` is the declarative contract used by offline schema, query, and binding tools. `migrations/` is the ordered history applied to the database.
 
 `schema.unid` 是离线 schema、query 和绑定工具使用的声明式契约；`migrations/` 是按顺序应用到数据库的演进历史。
+
+Next steps / 继续探索：
+
+- `unionid docs` lists the bundled version-matched guide (language, queries, migrations, deployment).
+- Declare `Map<text, T>` for dynamic attributes with stable value types, or `create unique index t (c) if <predicate>` for conditional uniqueness, then run `unionid project check --dir .`.
+- Generate Rust bindings with `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs`.
 "#;
 
 const STARTER_GITIGNORE: &str = "data/\n";
@@ -120,6 +126,7 @@ pub fn init(directory: impl AsRef<Path>) -> Result<(), String> {
     println!("  unionid run --db data/tasks.redb --file queries/list_running.unid");
     println!("  unionid doctor --db data/tasks.redb");
     println!("  unionid check --db data/tasks.redb");
+    println!("hint: `unionid docs` lists the bundled version-matched guide");
     Ok(())
 }
 
