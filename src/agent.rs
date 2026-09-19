@@ -200,13 +200,13 @@ const COMMANDS: &[AgentCommand] = &[
     AgentCommand {
         name: "query",
         summary: "Bind and describe a saved query file without executing it.",
-        usage: "unionid query describe --db <path> --file <query.unid> --format json",
+        usage: "unionid query describe --db <path> --file <query.unid>",
         json: true,
     },
     AgentCommand {
         name: "migration",
         summary: "Create, plan, apply, resume, inspect, and abort migrations.",
-        usage: "unionid migration plan|apply|status --db <path> --dir <dir> --format json",
+        usage: "unionid migration plan --db <path> --dir <dir> --format json   # also apply, status, advance, abort",
         json: true,
     },
     AgentCommand {
@@ -357,13 +357,23 @@ pub fn manifest() -> AgentManifest {
 }
 
 pub fn render_markdown() -> String {
+    let storage = Engine::current_storage_versions();
     let mut output = format!(
-        "# unionid agent manifest\n\nschema_version: {}\nsoftware_version: {}\nprotocol_versions: {}, {}\nstream_protocol_versions: {}\n\n## Commands\n\n",
+        "# unionid agent manifest\n\nschema_version: {}\nsoftware_version: {}\nprotocol_versions: {}, {}\nstream_protocol_versions: {}\nstorage_format: {}\ncodecs (catalog/value/index/migration/receipt/maintenance/journal/backup): {}/{}/{}/{}/{}/{}/{}/{}\n\n## Commands\n\n",
         AGENT_MANIFEST_VERSION,
         env!("CARGO_PKG_VERSION"),
         crate::protocol::VERSION,
         crate::protocol::PRODUCTION_VERSION,
         crate::stream::VERSION,
+        storage.format,
+        storage.catalog_codec,
+        storage.value_codec,
+        storage.index_key_codec,
+        storage.migration_codec,
+        storage.receipt_codec,
+        storage.maintenance_codec,
+        storage.journal_codec,
+        storage.backup_codec,
     );
     for command in COMMANDS {
         output.push_str(&format!(
@@ -415,8 +425,9 @@ pub fn render_markdown() -> String {
         "unionid schema print --db <path> --format json",
     ));
     output.push_str(&format!(
-        "\nFull error-code vocabulary: {} codes (see `unionid agent --format json`).\n",
-        ERROR_CODES.len()
+        "\n## Error codes\n\n{} error codes: {}.\n",
+        ERROR_CODES.len(),
+        ERROR_CODES.join(", ")
     ));
     output
 }

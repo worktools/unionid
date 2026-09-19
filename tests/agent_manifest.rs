@@ -52,6 +52,9 @@ fn agent_manifest_markdown_lists_commands_and_hints() {
     assert!(markdown.starts_with("# unionid agent manifest"));
     assert!(markdown.contains("## Commands"));
     assert!(markdown.contains("## Error contract"));
+    assert!(markdown.contains("storage_format: 10"));
     assert!(markdown.contains("partial_unique"));
     assert!(markdown.contains("E_TABLE"));
+    assert!(markdown.contains("E_CONSTRAINT"));
+    assert!(markdown.contains("## Error codes"));
 }
