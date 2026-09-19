@@ -1,0 +1,92 @@
+# Bounded order/line lookup and correlated exists over an indexed child table.
+struct Order {
+  id: int
+  customer: text
+}
+
+struct Line {
+  id: int
+  order_id: int
+  sku: text
+  quantity: int
+}
+
+table orders: Order {
+  key id
+}
+
+table order_lines: Line {
+  key id
+}
+
+create index order_lines (order_id)
+
+insert orders {
+  customer: "ada"
+  id: 1
+}
+
+insert orders {
+  customer: "grace"
+  id: 2
+}
+
+insert orders {
+  customer: "linus"
+  id: 3
+}
+
+insert order_lines {
+  id: 10
+  order_id: 1
+  quantity: 2
+  sku: "bolt"
+}
+
+insert order_lines {
+  id: 11
+  order_id: 1
+  quantity: 1
+  sku: "nut"
+}
+
+insert order_lines {
+  id: 12
+  order_id: 2
+  quantity: 0
+  sku: "cable"
+}
+
+insert order_lines {
+  id: 13
+  order_id: 3
+  quantity: 1
+  sku: "cpu"
+}
+
+# Each order appears once; an order without lines gets an empty list.
+from orders
+sort id
+take 100
+lookup lines from order_lines on order_id == id take 100
+select {id, customer, lines}
+
+# Orders with at least one non-positive line, staying in the Order row shape.
+from orders
+filter exists {
+  from order_lines
+  filter order_id == outer.id
+  filter quantity <= 0
+}
+sort id
+select {id, customer}
+
+# Orders whose lines are all positive, including orders with no lines.
+from orders
+filter not exists {
+  from order_lines
+  filter order_id == outer.id
+  filter quantity <= 0
+}
+sort id
+select {id, customer}
