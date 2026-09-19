@@ -205,7 +205,7 @@ unionid query rust --db app.redb --dir queries --output generated/queries.rs
 
 JSON 成功结果和错误只写 stdout，面向人的诊断只写 stderr。`run --format json` 和 `cli --format json` 为保持协议兼容，继续输出现有 `QueryResponse`，不会套入 CLI envelope；失败时仍使用上表的进程退出码。`--version` 保留 clap 的单行人类输出，自动化应使用显式的 `version --format json`。
 
-查询失败时 CLI 可能向 stderr 追加一行 `hint:` 建议，例如空数据库先应用 migration、partial unique index 冲突时提示 predicate 只约束 true 行、`page` 排序需要唯一键。建议是附加诊断：只写 stderr，不改变错误 code、message、退出码或 JSON 输出，也不包含 literal、参数或业务数据。
+查询失败时 CLI 可能向 stderr 追加一行 `hint:` 建议，例如空数据库先应用 migration、partial unique index 冲突时提示 predicate 只约束 true 行、`page` 排序需要唯一键。引擎生成的建议也随响应以可选 `error.hint` 返回（`E_CONSTRAINT` 还带 `error.constraint` 分类），JSON/TCP/HTTP 客户端和 AI agent 可直接读取，无需解析 stderr；`E_PAGE_SHAPE` 的 stderr fallback 是 CLI-only，不进入序列化响应。建议是附加诊断：不改变错误 code、message、退出码或外层 `QueryResponse` envelope 与既有字段；失败响应可以新增可选 `error.hint`，且不包含 literal、参数或业务数据。
 
 `version --format json` 的 `stream_protocol_versions` 声明服务支持的独立 NDJSON 协议。当前 CLI query 命令仍等待完整 response，不把 partial stream 混入脚本输出；需要流式消费的应用使用 Rust `stream` API、TCP envelope 或 HTTP adapter。需要可靠续传时使用 bounded cursor page，不能把断开的 stream 行号当作 resume token。
 

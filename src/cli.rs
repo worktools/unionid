@@ -1440,80 +1440,30 @@ fn run_local_engine(
             return print_introspection(&engine.introspection(), kind, json);
         }
         let response = engine.execute(&source);
-        print_first_run_hint(&engine, &response);
         return print_response(&response, json);
     }
     repl(Some(&mut engine), "", json, history)
 }
 
-/// Add an actionable next step when a script fails on an empty local database.
+/// Print the value-free hint carried by a failed query response.
 ///
-/// This is additive stderr guidance for the first-use journey: it never changes
-/// the error code, message, exit class, or JSON output, and it stays silent once
-/// the database has any table.
-fn print_first_run_hint(engine: &Engine, response: &QueryResponse) -> bool {
-    if !first_run_hint_applies(engine, response) {
-        return false;
+/// The engine attaches actionable hints to `Error` (missing table, constraint
+/// classification, page ordering), so Rust/TCP/HTTP clients and the CLI share
+/// one source of truth. Printing is stderr-only and never changes the error
+/// code, message, exit class, or JSON output.
+fn print_query_error_hint(error: &Error) -> bool {
+    if let Some(hint) = &error.hint {
+        eprintln!("hint: {hint}");
+        return true;
     }
-    eprintln!("hint: this database has no tables yet; apply migrations first, for example:");
-    eprintln!("  unionid migration apply --db <path> --dir migrations");
-    eprintln!("hint: run `unionid docs` for the bundled first-use guide");
-    true
-}
-
-fn first_run_hint_applies(engine: &Engine, response: &QueryResponse) -> bool {
-    response
-        .error
-        .as_ref()
-        .is_some_and(|error| error.code == "E_TABLE")
-        && engine.tables().is_empty()
-}
-
-/// Add one actionable stderr hint for common query failures.
-///
-/// Like the first-run hint this is additive: it never changes the error code,
-/// message, exit class, or JSON output. Matching is by stable error code and
-/// value-free message shape, so no literals, parameters, or row data leak.
-fn print_query_error_hint(response: &QueryResponse) -> bool {
-    let Some(error) = &response.error else {
-        return false;
-    };
-    match error.code.as_str() {
-        "E_PAGE_ORDER" => {
-            eprintln!(
-                "hint: make the final sort key statically unique by ending `sort` with the primary key"
-            );
-            true
-        }
-        "E_PAGE_SHAPE" => {
-            eprintln!(
-                "hint: `page` must be the only read pipeline and the only statement in its script"
-            );
-            true
-        }
-        "E_CONSTRAINT" => match error.constraint {
-            Some(crate::ConstraintKind::PartialUnique) => {
-                eprintln!(
-                    "hint: this partial unique index only constrains rows whose `if` predicate is true; soft-delete or move the row out of the predicate to release the key"
-                );
-                true
-            }
-            Some(crate::ConstraintKind::Unique) => {
-                eprintln!(
-                    "hint: the value already exists under a unique index; update the existing row or choose a different key"
-                );
-                true
-            }
-            Some(crate::ConstraintKind::PrimaryKey) => {
-                eprintln!(
-                    "hint: use `upsert` to replace the row that already owns this primary key"
-                );
-                true
-            }
-            Some(crate::ConstraintKind::PrimaryKeyMissing) | None => false,
-        },
-        _ => false,
+    // `page` shape errors are structural and have no engine-side hint.
+    if error.code == "E_PAGE_SHAPE" {
+        eprintln!(
+            "hint: `page` must be the only read pipeline and the only statement in its script"
+        );
+        return true;
     }
+    false
 }
 
 pub fn run_cli(addr: &str, source: Option<String>, json: bool) -> Result<(), String> {
@@ -1559,9 +1509,6 @@ fn repl(
             Some(engine) => engine.execute(&source),
             None => send_one(addr, &source)?,
         };
-        if let Some(engine) = engine.as_deref() {
-            print_first_run_hint(engine, &response);
-        }
         return print_response(&response, json);
     }
     eprintln!("Enter a script. A blank line runs it when ready; .help lists commands.");
@@ -1637,9 +1584,6 @@ fn repl(
                 match response.and_then(|response| {
                     let changed = response.schema.as_ref()
                         != introspection.as_ref().map(|current| &current.schema);
-                    if let Some(engine) = engine.as_deref() {
-                        print_first_run_hint(engine, &response);
-                    }
                     let result = print_response(&response, json);
                     if changed && response.ok {
                         match load_introspection(
@@ -2004,7 +1948,9 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
         );
     }
     if !response.ok {
-        print_query_error_hint(response);
+        if let Some(error) = &response.error {
+            print_query_error_hint(error);
+        }
         return Err(response.message.clone());
     }
     for warning in &response.warnings {

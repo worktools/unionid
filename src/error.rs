@@ -30,6 +30,9 @@ pub struct Error {
     /// Stable, value-free classification for `E_CONSTRAINT` errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constraint: Option<ConstraintKind>,
+    /// Optional, value-free next step an agent or user can act on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 impl Error {
@@ -39,6 +42,7 @@ impl Error {
             message: message.into(),
             span: None,
             constraint: None,
+            hint: None,
         }
     }
 
@@ -47,9 +51,34 @@ impl Error {
         self
     }
 
+    /// Classify an `E_CONSTRAINT` error and attach the matching stable hint.
     pub fn constraint(mut self, constraint: ConstraintKind) -> Self {
         self.constraint = Some(constraint);
+        self.hint = constraint.default_hint().map(ToOwned::to_owned);
         self
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+impl ConstraintKind {
+    /// Value-free hint text shared by the CLI and machine-readable responses.
+    pub const fn default_hint(self) -> Option<&'static str> {
+        match self {
+            Self::Unique => Some(
+                "the value already exists under a unique index; update the existing row or choose a different key",
+            ),
+            Self::PartialUnique => Some(
+                "this partial unique index only constrains rows whose `if` predicate is true; soft-delete or move the row out of the predicate to release the key",
+            ),
+            Self::PrimaryKey => {
+                Some("use `upsert` to replace the row that already owns this primary key")
+            }
+            Self::PrimaryKeyMissing => None,
+        }
     }
 }
 

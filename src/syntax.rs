@@ -443,6 +443,7 @@ pub fn input_status(source: &str) -> InputStatus {
                     message: error.message,
                     span: error.span,
                     constraint: None,
+                    hint: error.hint,
                 }
             };
             InputStatus::Incomplete(error)

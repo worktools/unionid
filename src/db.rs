@@ -2001,7 +2001,16 @@ impl Database {
 
     fn table(&self, name: &str) -> Result<&Table> {
         let Some(DbObject::Table(table)) = self.objects.get(name) else {
-            return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
+            let error = Error::new("E_TABLE", format!("table '{name}' not found"));
+            return Err(if self.objects.is_empty() {
+                error.with_hint(
+                    "this database has no tables yet; apply migrations first, then run `unionid docs`",
+                )
+            } else {
+                error.with_hint(
+                    "check the table name against the schema; run `unionid schema print --db <path>` or `.tables`",
+                )
+            });
         };
         Ok(table)
     }
@@ -4789,6 +4798,9 @@ impl Database {
             return Err(Error::new(
                 "E_PAGE_ORDER",
                 "page sort must end in an unchanged primary key or cover a complete unique-index suffix after equality-fixed fields",
+            )
+            .with_hint(
+                "make the final sort key statically unique by ending `sort` with the primary key, or cover a complete unique-index suffix after equality-fixed fields",
             ));
         }
 

@@ -194,7 +194,7 @@ fn run_on_an_empty_database_reports_an_actionable_hint() {
     assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no tables yet"), "{stderr}");
-    assert!(stderr.contains("migration apply"), "{stderr}");
+    assert!(stderr.contains("apply migrations"), "{stderr}");
 
     let json_output = run(&[
         "run",
@@ -206,9 +206,18 @@ fn run_on_an_empty_database_reports_an_actionable_hint() {
         "json",
     ]);
     assert_eq!(json_output.status.code(), Some(3));
-    assert_eq!(json(&json_output)["error"]["code"], "E_TABLE");
-    // The hint is stderr-only, so stdout stays machine-readable.
-    assert!(!String::from_utf8_lossy(&json_output.stdout).contains("hint:"));
+    let report = json(&json_output);
+    assert_eq!(report["error"]["code"], "E_TABLE");
+    // The same hint is machine-readable in JSON.
+    assert!(
+        report["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("no tables yet"),
+        "{report}"
+    );
+    // The CLI adds the "hint:" prefix only on stderr, never in stdout.
+    assert!(!String::from_utf8_lossy(&json_output.stdout).contains("hint: "));
 
     // Piped local CLI input gets the same hint without changing its JSON stdout.
     let piped = {
@@ -234,7 +243,7 @@ fn run_on_an_empty_database_reports_an_actionable_hint() {
         "{}",
         String::from_utf8_lossy(&piped.stderr)
     );
-    assert!(!String::from_utf8_lossy(&piped.stdout).contains("hint:"));
+    assert!(!String::from_utf8_lossy(&piped.stdout).contains("hint: "));
     assert_eq!(json(&piped)["error"]["code"], "E_TABLE");
 }
 
@@ -252,11 +261,19 @@ fn query_failures_report_actionable_hints() {
          insert accounts {id: \"carol\", email: \"a@example.com\", deleted_at: None}",
     ]);
     assert_eq!(conflict.status.code(), Some(3));
-    assert_eq!(json(&conflict)["error"]["constraint"], "partial_unique");
+    let conflict_json = json(&conflict);
+    assert_eq!(conflict_json["error"]["constraint"], "partial_unique");
+    assert!(
+        conflict_json["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("partial unique index"),
+        "{conflict_json}"
+    );
     let stderr = String::from_utf8_lossy(&conflict.stderr);
     assert!(stderr.contains("partial unique index"), "{stderr}");
-    // The hint is stderr-only, so JSON stdout stays machine-readable.
-    assert!(!String::from_utf8_lossy(&conflict.stdout).contains("hint:"));
+    // The CLI adds the "hint:" prefix only on stderr.
+    assert!(!String::from_utf8_lossy(&conflict.stdout).contains("hint: "));
 
     // A missing primary key is also E_CONSTRAINT but must not get the upsert hint.
     let missing_key = run(&[
@@ -267,9 +284,11 @@ fn query_failures_report_actionable_hints() {
         "struct Item {\n  label: text\n}\n\ntable items: Item\n\nupsert items {label: \"a\"}",
     ]);
     assert_eq!(missing_key.status.code(), Some(3));
-    assert_eq!(
-        json(&missing_key)["error"]["constraint"],
-        "primary_key_missing"
+    let missing_json = json(&missing_key);
+    assert_eq!(missing_json["error"]["constraint"], "primary_key_missing");
+    assert!(
+        missing_json["error"].get("hint").is_none(),
+        "{missing_json}"
     );
     assert!(
         !String::from_utf8_lossy(&missing_key.stderr).contains("hint:"),
@@ -302,10 +321,16 @@ fn query_failures_report_actionable_hints() {
         "json",
     ]);
     assert_eq!(page.status.code(), Some(3));
-    assert_eq!(json(&page)["error"]["code"], "E_PAGE_ORDER");
-    let stderr = String::from_utf8_lossy(&page.stderr);
-    assert!(stderr.contains("statically unique"), "{stderr}");
-    assert!(!String::from_utf8_lossy(&page.stdout).contains("hint:"));
+    let page_json = json(&page);
+    assert_eq!(page_json["error"]["code"], "E_PAGE_ORDER");
+    assert!(
+        page_json["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("statically unique"),
+        "{page_json}"
+    );
+    assert!(!String::from_utf8_lossy(&page.stdout).contains("hint: "));
 }
 
 #[test]
