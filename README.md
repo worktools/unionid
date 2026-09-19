@@ -133,9 +133,9 @@ returning {id, state}
 
 `filter`, `select`, `sort`, `take`, `page`, `derive`, `group`, `aggregate`, and query-local `let` are composable stages. Stable cross-request traversal uses `sort {-priority, id} | page 100` and resumes with the opaque response cursor; the order must end in the primary key. `explain from tasks | filter id == 1` reports a plan without reading result rows; `explain analyze ...` executes on the same read snapshot and returns value-free timing, work, and memory observations. See [QUERY.md](docs/QUERY.md) for the complete executable surface.
 
-安装后的 CLI 内置按类别组织、与二进制版本匹配的用户文档；不需要源码 checkout 或网络即可查阅入门、语言、应用、生命周期、集成和运维主题。`unionid docs` 显示目录，`docs list --category language` 筛选类别，`docs show query` 输出完整查询参考。LLM 和代码生成工具可继续用专门的 `docs query` 取得紧凑规则与可运行示例。默认 Markdown 可直接放入 prompt，version 1 JSON 便于工具读取。生成查询前再用 `schema print` 提供实际数据库 schema；保存后的查询可用 `query describe` 在不执行的情况下绑定检查：
+安装后的 CLI 内置按类别组织、与二进制版本匹配的用户文档；不需要源码 checkout 或网络即可查阅入门、语言、应用、生命周期、集成和运维主题。`unionid docs` 显示目录，`docs list --category language` 筛选类别，`docs show query` 输出完整查询参考。LLM 和代码生成工具可继续用专门的 `docs query` 取得紧凑规则与可运行示例，并用 `unionid agent --format json` 获取稳定的命令面、错误码词汇表与 constraint/hint 契约。默认 Markdown 可直接放入 prompt，version 1 JSON 便于工具读取。生成查询前再用 `schema print` 提供实际数据库 schema；保存后的查询可用 `query describe` 在不执行的情况下绑定检查：
 
-The installed CLI bundles user documentation organized into learn, language, application, lifecycle, integration, and operations categories, all matched to the binary version and available without a source checkout or network access. `unionid docs` shows the catalog, `docs list --category language` filters it, and `docs show query` prints the complete query reference. LLMs and code generators can continue to use the dedicated `docs query` bundle for compact rules and runnable examples. Markdown is prompt-ready and version-1 JSON is tool-friendly. Pair generated queries with the database's actual schema, then bind a saved query without executing it:
+The installed CLI bundles user documentation organized into learn, language, application, lifecycle, integration, and operations categories, all matched to the binary version and available without a source checkout or network access. `unionid docs` shows the catalog, `docs list --category language` filters it, and `docs show query` prints the complete query reference. LLMs and code generators can continue to use the dedicated `docs query` bundle for compact rules and runnable examples, and `unionid agent --format json` for the stable command surface, error-code vocabulary, and constraint/hint contract. Markdown is prompt-ready and version-1 JSON is tool-friendly. Pair generated queries with the database's actual schema, then bind a saved query without executing it:
 
 ```bash
 unionid docs
@@ -143,6 +143,7 @@ unionid docs list --category language
 unionid docs show query
 unionid docs query
 unionid docs query --format json
+unionid agent --format json
 unionid schema print --db app.redb --format json
 unionid query describe --db app.redb --file query.unid
 ```

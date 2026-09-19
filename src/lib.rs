@@ -1,6 +1,7 @@
 //! A small typed database with a whitespace-oriented query language.
 //!
 //! The Engine is shared by embedded applications, the local CLI, and TCP.
+pub mod agent;
 #[cfg(feature = "asynchronous")]
 pub mod asynchronous;
 pub mod backup;

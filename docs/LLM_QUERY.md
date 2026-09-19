@@ -15,6 +15,9 @@ canonical source and is convenient for a human or an LLM context. Use `.tables`,
 `--format json`, these CLI introspection commands return a stable envelope containing `kind` and
 `introspection`; do not infer schema from raw redb bytes.
 
+For the stable command surface, error-code vocabulary, and constraint/hint contract in one
+machine-readable object, run `unionid agent --format json` before generating code.
+
 ## Source rules
 
 - Source is UTF-8 and semicolon-free. Newlines separate statements and multiline items.

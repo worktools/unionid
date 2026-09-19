@@ -193,12 +193,23 @@ enum ProjectCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AgentFormat {
+    Markdown,
+    Json,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Print software, protocol, storage, codec, and target versions.
     Version {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
+    },
+    /// Print a machine-readable capability manifest for agents and tools.
+    Agent {
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: AgentFormat,
     },
     /// Diagnose this binary and optionally inspect an existing database without repairing it.
     Doctor {
@@ -829,6 +840,18 @@ fn print_version(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn print_agent_manifest(json: bool) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&unionid::agent::manifest()).map_err(|e| e.to_string())?
+        );
+    } else {
+        print!("{}", unionid::agent::render_markdown());
+    }
+    Ok(())
+}
+
 fn print_query_docs(json: bool) -> Result<(), String> {
     if json {
         println!(
@@ -943,6 +966,7 @@ fn doctor(db: Option<PathBuf>, json: bool) -> Result<(), String> {
 fn run(args: Args) -> Result<(), String> {
     match args.command {
         Command::Version { format } => print_version(matches!(format, Format::Json)),
+        Command::Agent { format } => print_agent_manifest(matches!(format, AgentFormat::Json)),
         Command::Doctor { db, format } => doctor(db, matches!(format, Format::Json)),
         Command::Docs { command: None } => print_docs_catalog(None, false),
         Command::Docs {
