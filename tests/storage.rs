@@ -144,6 +144,37 @@ fn partial_unique_index_transitions_and_backup_survive_reopen() {
 }
 
 #[test]
+fn redb_partial_unique_index_batch_conflict_publishes_nothing() {
+    let dir = TempDir::new();
+    let path = dir.0.join("partial-batch.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let setup = engine.execute(
+        "type User = {id int, email text, deleted_at option text}\n\
+         table users User\n  key id\n\
+         create unique index users (email) if deleted_at == None\n\
+         insert users {id = 1, email = \"a@example.com\", deleted_at = None}",
+    );
+    assert!(setup.ok, "{}", setup.message);
+
+    let batch = engine.execute(
+        "insert many users [\n\
+           {id = 2, email = \"b@example.com\", deleted_at = None}\n\
+           {id = 3, email = \"a@example.com\", deleted_at = None}\n\
+         ]",
+    );
+    assert_eq!(batch.error.as_ref().unwrap().code, "E_CONSTRAINT");
+    let rows = engine.execute("from users | sort id").rows;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0]["id"].cmp_eq(&Value::Int(1)));
+    assert!(engine.check_integrity().unwrap().backend_clean);
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.execute("from users").rows.len(), 1);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
 fn redb_partial_unique_index_planner_uses_proven_predicate() {
     let dir = TempDir::new();
     let path = dir.0.join("partial-plan.redb");

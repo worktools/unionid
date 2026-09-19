@@ -65,6 +65,21 @@ create unique index sessions (tenant, token)
 
 unique index 支持 primitive、命名 sum/record、tuple、option 和 list；复合 unique 对完整 tuple 强制唯一。`None` 也是普通 typed value。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert/upsert、单行 upsert、update/delete、migration、restore 和 redb 完整性检查都维护同一 tuple 约束。
 
+unique index 可带 row-local predicate，只约束求值为 true 的行：
+
+```text
+create unique index users (email) if deleted_at == None
+create unique index jobs (provider, external_id) if state == Active
+create unique index sessions (tenant, token) if (
+  revoked_at == None
+  && state == Active
+)
+```
+
+`if` 比 component 列表绑定得更松，谓词在行类型作用域内解析。首版谓词是可规范化的 conjunction，atom 只允许 `field.path == typed_literal`、`field.path == None` 与 `is_some field.path`；`== None` 规范化为 `is_none`。`||`、`!`、`!=`、range 比较、参数、字段引用、算术、局部函数、`any/all`、`contains` 与 map lookup 返回 `E_INDEX_PREDICATE`，同一 path 上的矛盾条件返回 `E_INDEX_PREDICATE_CONTRADICTION`。atom 按 stable field-ID path、operator 与 canonical typed value 排序，因此交换 `&&`、空白或 enum 前缀不改变 schema identity。rename 只通过 stable field path 更新显示文本，不改变 index ID；drop 或改变被引用字段类型前必须先 drop 对应索引，drop 时必须重复规范谓词；谓词变化是显式 drop/add。
+
+planner 只在查询已绑定过滤条件机械蕴含 index predicate 时才使用 partial unique index：只读取 barrier 前的简单 filter 与纯 `&&`，逐 atom 匹配 stable path、operator、静态类型与 canonical value，`field == Some value` 可蕴含 `is_some field`。`explain` 输出 canonical `index_predicate`、`predicate_proven` 与 value-free 的 `predicate_rejections`。`fetch_by_key` 不把 partial unique index 当作全表唯一证明。
+
 planner 可以把连续的简单比较绑定为复合索引的 equality prefix，以及紧邻下一个 component 的一组上下 range boundary。匹配索引剩余连续前缀的 sort 可以直接使用声明方向或全局反向遍历；安全的 `take` 和 `page` 只读取足够的通过行。range 后、key gap 后或 stage 语义边界后的条件继续按源码顺序作为 residual filter 执行。分页顺序仍必须由主键收尾，或由 equality-fixed prefix 加完整 unique-index suffix 证明唯一。
 
 被任意普通、unique 或主键索引覆盖的 bytes leaf 最大为 8192 octets，完整持久索引 key 最大为 64 KiB；创建索引、写入、migration 或 restore 超限时返回 `E_INDEX_KEY_LIMIT` 并原子回滚。未索引 bytes 仍受 16 MiB value 上限。

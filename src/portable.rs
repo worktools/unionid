@@ -13,7 +13,11 @@ use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, EnumType, ScalarType};
 use crate::protocol::WireValue;
 
-pub const DESCRIPTION_VERSION: u32 = 1;
+pub const DESCRIPTION_VERSION: u32 = 2;
+
+/// Version 1 descriptions predate partial unique index predicates and remain
+/// readable; version 2 adds an optional normalized predicate per index.
+const SUPPORTED_DESCRIPTION_VERSIONS: &[u32] = &[1, DESCRIPTION_VERSION];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaDescription {
@@ -163,6 +167,9 @@ pub struct IndexDescription {
     pub id: String,
     pub unique: bool,
     pub components: Vec<IndexComponentDescription>,
+    /// Canonical normalized partial predicate; omitted for whole-table indexes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,7 +213,7 @@ pub struct EvolutionReport {
 impl SchemaDescription {
     /// Validate a deserialized description before a generator relies on it.
     pub fn validate(&self) -> Result<()> {
-        if self.version != DESCRIPTION_VERSION {
+        if !SUPPORTED_DESCRIPTION_VERSIONS.contains(&self.version) {
             return Err(Error::new(
                 "E_CONTRACT_VERSION",
                 format!(
@@ -301,6 +308,35 @@ impl SchemaDescription {
                         "E_CONTRACT_SCHEMA",
                         format!("table {} index {} has no components", table.name, index.id),
                     ));
+                }
+                if let Some(predicate) = &index.predicate {
+                    if self.version < 2 {
+                        return Err(Error::new(
+                            "E_CONTRACT_SCHEMA",
+                            format!(
+                                "table {} index {} carries a predicate, which requires description version 2",
+                                table.name, index.id
+                            ),
+                        ));
+                    }
+                    if !index.unique {
+                        return Err(Error::new(
+                            "E_CONTRACT_SCHEMA",
+                            format!(
+                                "table {} index {} carries a predicate but is not unique",
+                                table.name, index.id
+                            ),
+                        ));
+                    }
+                    if predicate.is_empty() || predicate.trim() != predicate {
+                        return Err(Error::new(
+                            "E_CONTRACT_SCHEMA",
+                            format!(
+                                "table {} index {} predicate must be a non-empty canonical string",
+                                table.name, index.id
+                            ),
+                        ));
+                    }
                 }
                 for component in &index.components {
                     let field = validate_field_path(
@@ -994,6 +1030,12 @@ fn compare_unique_constraints(
                 format!("{table_path}.index#{}", index.id),
                 "an ordinary index became unique and can reject writes accepted by the baseline",
             ),
+            Some(previous) if previous.predicate != index.predicate => report.client_write.add(
+                CompatibilityLevel::Incompatible,
+                "unique_index_predicate_changed",
+                format!("{table_path}.index#{}", index.id),
+                "the partial-unique predicate changed, so a different set of writes is accepted",
+            ),
             _ => {}
         }
     }
@@ -1084,6 +1126,7 @@ fn describe_database(database: &Database) -> Result<SchemaDescription> {
                         descending: component.descending,
                     })
                     .collect(),
+                predicate: definition.display_predicate(),
             });
     }
     for definitions in indexes.values_mut() {
