@@ -57,6 +57,33 @@ insert tasks {
 `returning field`, or `returning {field, nested.path}`. Update and delete targets may use
 `filter`, `filter match`, `sort`, and `take` before the first `set` or `returning` stage.
 
+## Indexes and conditional uniqueness
+
+Declare secondary indexes with 1–16 ordered field paths. `-` marks descending order:
+
+```text
+create index tasks (state)
+create unique index tasks (owner.email)
+create index tasks (state, -priority, id)
+```
+
+A `unique` index may carry a row-local `if` predicate, which constrains only rows whose
+predicate is true. Use it for conditional uniqueness such as non-deleted emails or active
+external IDs:
+
+```text
+create unique index users (email) if deleted_at == None
+create unique index jobs (provider, external_id) if state == Active
+```
+
+The first-release predicate is a conjunction of `field.path == literal`, `field.path == None`,
+and `is_some field.path`; `== None` normalizes to `is_none`. Do not emit `||`, `!`, `!=`,
+ranges, parameters, field references, arithmetic, calls, `any`/`all`, `contains`, or map lookups
+inside a predicate. A predicate change is an explicit `drop index` plus `create unique index`;
+renaming a referenced field keeps the index through its stable field path. `explain` uses the
+partial index only when the query filters mechanically imply its predicate and then reports
+`index_predicate` and `predicate_proven`.
+
 ## Query pipeline
 
 A query begins with `from table`. Stages execute in source order:
@@ -221,6 +248,25 @@ Assignments in one `set` block are simultaneous and read the pre-update row. A r
 an atomic script. Prefer an idempotency key through the client protocol when retrying a
 mutation after a lost response.
 
+## Diagnostics and errors
+
+Failures return a stable `code`, a readable `message`, an optional source `span`, and an optional
+value-free `hint` with the next step. `E_CONSTRAINT` errors also carry a `constraint` class:
+`unique`, `partial_unique`, `primary_key`, or `primary_key_missing`. Read these fields instead of
+parsing prose, and never place literal or parameter values into generated context.
+
+Common codes:
+
+- `E_SYNTAX`, `E_INCOMPLETE`: fix the source and re-run; `E_INCOMPLETE` means more input is needed.
+- `E_TYPE`, `E_FIELD`: a field, variant, or type does not match the bound schema.
+- `E_TABLE`: unknown table; an empty-database hint says to apply migrations first.
+- `E_CONSTRAINT`: a key or unique conflict; inspect `constraint` and prefer `upsert` for a primary key.
+- `E_INDEX_PREDICATE`, `E_INDEX_PREDICATE_CONTRADICTION`: the partial predicate is unsupported or self-contradictory.
+- `E_PAGE_ORDER`, `E_PAGE_SHAPE`: end the final sort in the primary key and keep `page` as the only statement.
+- `E_STORAGE_UPGRADE_REQUIRED`: an older database needs an explicit `unionid upgrade`.
+- `E_READ_ONLY`: the target is read-only.
+- `E_ARITH`, `E_DECIMAL_RANGE`: checked arithmetic failed before any commit.
+
 ## Generation checklist
 
 1. Read the exact current schema; never invent tables, fields, variants, or indexes.
@@ -230,3 +276,7 @@ mutation after a lost response.
 5. Use `unionid fmt` to canonicalize generated source.
 6. Use `unionid query describe --db app.redb --file query.unid` to bind a saved query
    without executing it, then run it only after diagnostics pass.
+7. After a failure, branch on the stable `code` and `constraint`, follow `hint`, and fix the
+   source instead of retrying blindly. After a lost response, retry a mutation only with the
+   client idempotency key.
+

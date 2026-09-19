@@ -97,12 +97,13 @@ impl ProjectCheckReport {
 
     fn fail(&mut self, failure: CheckFailure) {
         self.stages[failure.phase.index()].status = ProjectCheckStatus::Failed;
+        let error = *failure.error;
         self.error = Some(ProjectCheckError {
             phase: failure.phase,
             path: failure.path,
-            code: failure.error.code,
-            message: failure.error.message,
-            span: failure.error.span,
+            code: error.code,
+            message: error.message,
+            span: error.span,
         });
     }
 }
@@ -110,7 +111,7 @@ impl ProjectCheckReport {
 struct CheckFailure {
     phase: ProjectCheckPhase,
     path: String,
-    error: Error,
+    error: Box<Error>,
 }
 
 impl CheckFailure {
@@ -118,7 +119,7 @@ impl CheckFailure {
         Self {
             phase,
             path: path.into(),
-            error,
+            error: Box::new(error),
         }
     }
 }
