@@ -2,7 +2,7 @@
 
 规划日期：2026-09-12。GitHub 使用总览、分阶段具体任务和里程碑维护计划；实施记录见 [开发记录](DEVELOPMENT.md)。后续完成状态以 GitHub 为准，本文只提供导航和依赖，不维护第二套进度。
 
-当前验收：[v0.9 #357](https://github.com/worktools/unionid/issues/357) · [v0.8 #349](https://github.com/worktools/unionid/issues/349) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
+当前验收：[v0.10.0 milestone](https://github.com/worktools/unionid/milestone/20) · [v0.9 #357](https://github.com/worktools/unionid/issues/357) · [全部 Issues](https://github.com/worktools/unionid/issues) · [里程碑](https://github.com/worktools/unionid/milestones) · [历史 v0.1 总览 #1](https://github.com/worktools/unionid/issues/1)
 
 [2026-09-12 ADT 与语言互通评估](assessments/adt-adoption-2026-09-12.md)记录当前实现、独立消费探针、业界对照及采用建议；它是评估快照，不替代 issues 的实时范围与完成状态。 / The dated assessment records implementation evidence, consumer probes, industry comparisons, and adoption proposals; issues remain the source of current scope and status.
 
@@ -192,9 +192,9 @@ P0 表示所属阶段的正确性或契约门槛；P1 是重要可用性能力�
 
 ## 版本里程碑（v0.3.0 起） / Version milestones
 
-M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.8.0`，以下未发布版本仍是目标，不表示已经发布。issue 的完整验收决定完成状态；计划整理不创建 tag。软件版本与 storage/protocol 版本独立冻结。
+M0–M9 保留已完成阶段的证据；后续按发布版本维护。当前已发布为 `v0.9.1`，`v0.10.0` 处于发布候选。以下未发布版本仍是目标，不表示已经发布。issue 的完整验收决定完成状态；计划整理不创建 tag。软件版本与 storage/protocol 版本独立冻结。
 
-M0–M9 retain completed-stage evidence. The latest published release is `v0.8.0`; later unreleased versions below remain targets. Full issue acceptance determines completion. Planning does not create tags. Software, storage and protocol versions are frozen independently.
+M0–M9 retain completed-stage evidence. The latest published release is `v0.9.1`, and `v0.10.0` is a release candidate. Later unreleased versions below remain targets. Full issue acceptance determines completion. Planning does not create tags. Software, storage and protocol versions are frozen independently.
 
 ### v0.3.0 · 可靠 Rust 接入与应用闭环 / Reliable Rust integration and application workflows
 
@@ -291,20 +291,22 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 
 ### v0.10.0 · 日常使用闭环 / Daily-use closure
 
-[Milestone 20](https://github.com/worktools/unionid/milestone/20) 只保留四条日常业务会直接遇到的链路：bounded typed map、显式 decimal 乘除/舍入/平均值、partial unique index，以及基于真实试用反馈的 CLI/诊断改进。typed map 与 decimal 已交付；剩余 partial unique index 按 [RFC 0022](rfc/0022-partial-unique-indexes.md) 分离 catalog/storage 兼容、mutation 语义和 planner 证明后逐步验收。
+[Milestone 20](https://github.com/worktools/unionid/milestone/20) 只保留四条日常业务会直接遇到的链路：bounded typed map、显式 decimal 乘除/舍入/平均值、partial unique index，以及基于真实试用反馈的 CLI/诊断改进。四条链路均已交付，milestone issue 全部关闭；v0.10.0 发布候选整合升级契约与文档。
 
-[Milestone 20](https://github.com/worktools/unionid/milestone/20) contains four direct daily-use paths: bounded typed maps, explicit decimal multiplication/division/rounding/average, partial unique indexes, and CLI/diagnostic improvements driven by real trials. Typed maps and decimal are delivered; the remaining partial unique index follows [RFC 0022](rfc/0022-partial-unique-indexes.md), with catalog/storage compatibility, mutation semantics, and planner proofs reviewed in separate stages.
+[Milestone 20](https://github.com/worktools/unionid/milestone/20) contains four direct daily-use paths: bounded typed maps, explicit decimal multiplication/division/rounding/average, partial unique indexes, and CLI/diagnostic improvements driven by real trials. All four are delivered and every milestone issue is closed; the v0.10.0 release candidate consolidates the upgrade contract and docs.
 
 | Issue | 交付 / Deliverable | 优先级 / Priority |
 | --- | --- | --- |
 | [#246](https://github.com/worktools/unionid/issues/246) | 有界 typed map / bounded typed map | 已交付 / Delivered |
 | [#247](https://github.com/worktools/unionid/issues/247) | Decimal 显式乘除、舍入与平均值 / explicit decimal multiply, divide, rounding, and average | 已交付 / Delivered |
-| [#248](https://github.com/worktools/unionid/issues/248) | Partial unique index | P1 |
+| [#248](https://github.com/worktools/unionid/issues/248) | Partial unique index，按 [RFC 0022](rfc/0022-partial-unique-indexes.md) 分阶段交付 / delivered in stages | 已交付 / Delivered |
 | [#363](https://github.com/worktools/unionid/issues/363) | 试用反馈驱动的 CLI、诊断和错误提示 / trial-driven CLI, diagnostics, and errors | 已交付 / Delivered |
 
 #363 的验收记录见 [CLI trials for v0.10](assessments/cli-trials-v0.10.md)：任务项目与嵌套配置两条完整生命周期均通过，直接查看 redb 的单次 introspection 是唯一由试用证据纳入的修复。 / The #363 acceptance record is [CLI trials for v0.10](assessments/cli-trials-v0.10.md): the task-project and nested-configuration lifecycles both pass, and one-shot redb introspection is the only fix admitted by trial evidence.
 
 #246 的跨层兼容契约见 [RFC 0021](rfc/0021-bounded-typed-maps.md)。实现必须保持源码、Rust/wire、持久 codec、migration 与恢复链路闭合；只完成 parser 或 memory 支持不视为交付。 / The cross-layer compatibility contract for #246 is [RFC 0021](rfc/0021-bounded-typed-maps.md). Delivery must close the source, Rust/wire, durable-codec, migration, and recovery paths; parser-only or memory-only support does not count as completion.
+
+#248 的设计契约见 [RFC 0022](rfc/0022-partial-unique-indexes.md)：源码/绑定、内存约束、storage format 10/11 与 catalog/backup codec、planner implication/explain 与端到端业务场景按阶段独立验收，全部完成。 / The design contract for #248 is [RFC 0022](rfc/0022-partial-unique-indexes.md): source/binding, in-memory constraints, storage formats 10/11 with catalog/backup codecs, planner implication/explain, and end-to-end journeys were accepted in separate stages, all complete.
 
 ### 按需探索 · 版本待定 / Demand-driven exploration · version TBD
 
@@ -327,7 +329,9 @@ This candidate backlog replaces the former “v1.0 production scale exploration�
 
 ## 当前执行顺序
 
-M0–M9 与 v0.3.0–v0.8.0 已完成。当前只执行 [#354](https://github.com/worktools/unionid/issues/354) 与 [#357](https://github.com/worktools/unionid/issues/357)：冻结 v0.9 三个 crate、宏质量证据、文档和 release contract，验证 v0.8 数据／backup／客户端兼容，再运行一次 Ubuntu/macOS Release workflow。tag 与公开发布不能由普通候选 PR 代替。
+M0–M9 与 v0.3.0–v0.9.1 已完成。当前执行 v0.10.0 发布候选：冻结三个 crate、release contract 与升级文档，验证 v0.9.1 数据／backup／客户端兼容，再运行一次 Ubuntu/macOS Release workflow。tag 与公开发布不能由普通候选 PR 代替。
+
+M0–M9 and v0.3.0–v0.9.1 are complete. The current work is the v0.10.0 release candidate: freeze the three crates, the release contract, and the upgrade docs, verify v0.9.1 data/backup/client compatibility, then run one Ubuntu/macOS release workflow. A tag and public release cannot be replaced by an ordinary candidate PR.
 
 ## 维护约定
 

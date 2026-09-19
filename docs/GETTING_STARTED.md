@@ -98,6 +98,7 @@ restore 只写入不存在的新路径。还原后的 query rows、列类型和 
 
 ### 下一步
 
+- v0.10.0 起新库默认具备 typed map 与 partial unique index：用 `Map<text, T>` 保存键动态、值类型稳定的 metadata，用 `create unique index t (c) if <predicate>` 表达“未删除邮箱唯一”或“Active 外部 ID 唯一”；`explain` 会显示 `index_predicate` 与 `predicate_proven`。完整写法与业务示例见[场景](SCENARIOS.md)和[语言](LANGUAGE.md)。
 - 修改 schema 时新增 migration，再运行 `project check` 和 `migration plan/apply`；见[迁移说明](MIGRATIONS.md)。
 - 让 LLM 或代码生成器协助编写查询时，先运行 `unionid docs query` 取得版本匹配的规则和示例，再把 `schema print --format json` 的实际 schema 一并提供；生成结果用 `query describe` 检查后再执行。
 - 用 `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs` 生成共享 ADT、typed 参数、结果 row 和调用函数。
@@ -224,6 +225,7 @@ Restore writes only to a missing destination. Query rows, column types, and sche
 
 ### Next steps
 
+- Since v0.10.0, fresh databases support typed maps and partial unique indexes: use `Map<text, T>` for dynamic keys with stable value types, and `create unique index t (c) if <predicate>` for conditional uniqueness such as non-deleted emails or active external IDs. `explain` reports `index_predicate` and `predicate_proven`. See [Scenarios](SCENARIOS.md) and [Language](LANGUAGE.md) for the full syntax and business examples.
 - Add a migration when changing the schema, then run `project check` and `migration plan/apply`; see [Migrations](MIGRATIONS.md).
 - When an LLM or generator helps write a query, first run `unionid docs query` for version-matched rules and examples, provide the actual `schema print --format json` output, and validate the generated file with `query describe` before execution.
 - Generate shared ADTs, typed parameters, result rows, and call functions with `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs`.

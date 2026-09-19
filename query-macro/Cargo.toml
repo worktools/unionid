@@ -1,6 +1,6 @@
 [package]
 name = "unionid-query"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.94"
 description = "Compile-time checked inline Unionid queries for Rust applications"
@@ -18,7 +18,7 @@ proc-macro = true
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 syn = { version = "2", features = ["full"] }
-unionid = { version = "=0.9.1", path = ".." }
+unionid = { version = "=0.10.0", path = ".." }
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
