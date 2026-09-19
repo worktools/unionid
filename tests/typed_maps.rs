@@ -263,6 +263,9 @@ fn active_backup_journal_upgrades_from_format_7_to_9() {
     assert_eq!(status.storage_format, 9);
     assert_eq!(status.commit_count, 1);
     assert_eq!(status.head_sequence, initial.head_sequence + 1);
+    let repeated = engine.upgrade_storage(9).unwrap();
+    assert!(!repeated.changed);
+    assert_eq!(engine.backup_journal_status().unwrap(), status);
     let response = engine.execute(
         "struct Item { id: int, labels: Map<text, text> }\ntable items: Item { key id }\ninsert items {id: 1, labels: map {\"kind\": \"test\"}}",
     );

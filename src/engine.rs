@@ -3255,9 +3255,11 @@ impl Engine {
             return Err(Error::new("E_READ_ONLY", "storage upgrade is a mutation"));
         }
         if self.durable.as_ref().is_some_and(|durable| {
+            let format = durable.versions().format;
             durable.backup_journal_status().state
                 == crate::backup::incremental::BackupJournalState::Active
-                && !(durable.versions().format == 7
+                && format != target
+                && !(format == 7
                     && target == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION)
         }) {
             return Err(Error::new(
