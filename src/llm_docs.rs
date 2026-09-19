@@ -413,22 +413,7 @@ mod tests {
     fn bundled_topics_cover_the_user_facing_readme_docs() {
         // Every docs/*.md the README links for users must be reachable through
         // `unionid docs`, except release notes and contributor/planning pages.
-        const EXCLUDED: &[&str] = &[
-            "DEVELOPMENT",
-            "ROADMAP",
-            "RELEASE-VALIDATION",
-            "RELEASE-v0.1.0",
-            "RELEASE-v0.2.0",
-            "RELEASE-v0.3.0",
-            "RELEASE-v0.4.0",
-            "RELEASE-v0.5.0",
-            "RELEASE-v0.6.0",
-            "RELEASE-v0.7.0",
-            "RELEASE-v0.8.0",
-            "RELEASE-v0.9.0",
-            "RELEASE-v0.9.1",
-            "RELEASE-v0.10.0",
-        ];
+        const EXCLUDED: &[&str] = &["DEVELOPMENT", "ROADMAP", "RELEASE-VALIDATION"];
         let bundled = TOPICS
             .iter()
             .map(|topic| topic.source)
@@ -440,9 +425,10 @@ mod tests {
                 continue;
             };
             let stem = &segment[..end];
-            if stem.contains('/') || EXCLUDED.contains(&stem) {
+            if stem.contains('/') || stem.starts_with("RELEASE-") || EXCLUDED.contains(&stem) {
                 // Subdirectory links (rfc/, benchmarks/, assessments/) are not
-                // bundled topics; release notes and planning pages are excluded.
+                // bundled topics; versioned release notes and planning pages are
+                // excluded so future releases do not need to edit this list.
                 continue;
             }
             let path = format!("docs/{stem}.md");
