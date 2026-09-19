@@ -286,8 +286,8 @@ The #265 portable contract, #264 static query description/generation, and #287 s
 | --- | --- | --- |
 | [#352](https://github.com/worktools/unionid/issues/352) | 内联查询宏契约 / inline query macro contract | 已交付 / Delivered |
 | [#353](https://github.com/worktools/unionid/issues/353) | schema-aware `queries!` 与 consumer 验收 / macro and consumer acceptance | 已交付 / Delivered |
-| [#354](https://github.com/worktools/unionid/issues/354) | 编译成本、重建、诊断与 migration 边界 / compile cost, rebuild, diagnostics, and migration boundary | P1 |
-| [#357](https://github.com/worktools/unionid/issues/357) | v0.9 契约、三个 crate 与候选发布 / contract, three crates, and release candidate | P0 |
+| [#354](https://github.com/worktools/unionid/issues/354) | 编译成本、重建、诊断与 migration 边界 / compile cost, rebuild, diagnostics, and migration boundary | 已交付 / Delivered |
+| [#357](https://github.com/worktools/unionid/issues/357) | v0.9 契约、三个 crate 与候选发布 / contract, three crates, and release candidate | 已交付 / Delivered |
 
 ### v0.10.0 · 日常使用闭环 / Daily-use closure
 
