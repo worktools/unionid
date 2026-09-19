@@ -57,7 +57,7 @@ fn cli_lists_and_reads_categorized_bundled_docs() {
     assert!(language.status.success());
     let language: serde_json::Value = serde_json::from_slice(&language.stdout).unwrap();
     assert_eq!(language["schema_version"], 1);
-    assert_eq!(language["topics"].as_array().unwrap().len(), 5);
+    assert_eq!(language["topics"].as_array().unwrap().len(), 6);
     assert!(
         language["topics"]
             .as_array()
