@@ -67,7 +67,7 @@ pub use db::{
 pub use engine::{
     Engine, MutationProfile, PreparedQuery, StorageCompaction, StorageIntegrity, StorageUpgrade,
 };
-pub use error::{Error, Result, Span};
+pub use error::{ConstraintKind, Error, Result, Span};
 pub use formatter::format_source;
 pub use idempotency::{
     IdempotencyBoundary, IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult,

@@ -669,7 +669,8 @@ impl Database {
                 return Err(Error::new(
                     "E_CONSTRAINT",
                     format!("duplicate primary key '{table}.{column}'"),
-                ));
+                )
+                .constraint(ConstraintKind::PrimaryKey));
             }
         }
         if !self

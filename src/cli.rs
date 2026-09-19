@@ -1469,6 +1469,53 @@ fn first_run_hint_applies(engine: &Engine, response: &QueryResponse) -> bool {
         && engine.tables().is_empty()
 }
 
+/// Add one actionable stderr hint for common query failures.
+///
+/// Like the first-run hint this is additive: it never changes the error code,
+/// message, exit class, or JSON output. Matching is by stable error code and
+/// value-free message shape, so no literals, parameters, or row data leak.
+fn print_query_error_hint(response: &QueryResponse) -> bool {
+    let Some(error) = &response.error else {
+        return false;
+    };
+    match error.code.as_str() {
+        "E_PAGE_ORDER" => {
+            eprintln!(
+                "hint: make the final sort key statically unique by ending `sort` with the primary key"
+            );
+            true
+        }
+        "E_PAGE_SHAPE" => {
+            eprintln!(
+                "hint: `page` must be the only read pipeline and the only statement in its script"
+            );
+            true
+        }
+        "E_CONSTRAINT" => match error.constraint {
+            Some(crate::ConstraintKind::PartialUnique) => {
+                eprintln!(
+                    "hint: this partial unique index only constrains rows whose `if` predicate is true; soft-delete or move the row out of the predicate to release the key"
+                );
+                true
+            }
+            Some(crate::ConstraintKind::Unique) => {
+                eprintln!(
+                    "hint: the value already exists under a unique index; update the existing row or choose a different key"
+                );
+                true
+            }
+            Some(crate::ConstraintKind::PrimaryKey) => {
+                eprintln!(
+                    "hint: use `upsert` to replace the row that already owns this primary key"
+                );
+                true
+            }
+            Some(crate::ConstraintKind::PrimaryKeyMissing) | None => false,
+        },
+        _ => false,
+    }
+}
+
 pub fn run_cli(addr: &str, source: Option<String>, json: bool) -> Result<(), String> {
     run_cli_with_options(addr, source, json, HistoryOptions::default())
 }
@@ -1957,6 +2004,7 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
         );
     }
     if !response.ok {
+        print_query_error_hint(response);
         return Err(response.message.clone());
     }
     for warning in &response.warnings {

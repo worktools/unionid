@@ -239,6 +239,76 @@ fn run_on_an_empty_database_reports_an_actionable_hint() {
 }
 
 #[test]
+fn query_failures_report_actionable_hints() {
+    let conflict = run(&[
+        "run",
+        "--format",
+        "json",
+        "--query",
+        "struct Account {\n  id: text\n  email: text\n  deleted_at: Option<text>\n}\n\
+         table accounts: Account {\n  key id\n}\n\
+         create unique index accounts (email) if deleted_at == None\n\
+         insert accounts {id: \"alice\", email: \"a@example.com\", deleted_at: None}\n\
+         insert accounts {id: \"carol\", email: \"a@example.com\", deleted_at: None}",
+    ]);
+    assert_eq!(conflict.status.code(), Some(3));
+    assert_eq!(json(&conflict)["error"]["constraint"], "partial_unique");
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(stderr.contains("partial unique index"), "{stderr}");
+    // The hint is stderr-only, so JSON stdout stays machine-readable.
+    assert!(!String::from_utf8_lossy(&conflict.stdout).contains("hint:"));
+
+    // A missing primary key is also E_CONSTRAINT but must not get the upsert hint.
+    let missing_key = run(&[
+        "run",
+        "--format",
+        "json",
+        "--query",
+        "struct Item {\n  label: text\n}\n\ntable items: Item\n\nupsert items {label: \"a\"}",
+    ]);
+    assert_eq!(missing_key.status.code(), Some(3));
+    assert_eq!(
+        json(&missing_key)["error"]["constraint"],
+        "primary_key_missing"
+    );
+    assert!(
+        !String::from_utf8_lossy(&missing_key.stderr).contains("hint:"),
+        "{}",
+        String::from_utf8_lossy(&missing_key.stderr)
+    );
+
+    let dir = TempDir::new();
+    let database = dir.0.join("page-hint.redb");
+    {
+        let mut engine = Engine::open_redb(&database).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "struct Account { id: int, email: text }\n\
+                     table accounts: Account {\n  key id\n}\n\
+                     insert accounts {id: 1, email: \"a\"}\n\
+                     insert accounts {id: 2, email: \"b\"}"
+                )
+                .ok
+        );
+    }
+    let page = run(&[
+        "run",
+        "--db",
+        database.to_str().unwrap(),
+        "--query",
+        "from accounts | sort email | page 2",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(page.status.code(), Some(3));
+    assert_eq!(json(&page)["error"]["code"], "E_PAGE_ORDER");
+    let stderr = String::from_utf8_lossy(&page.stderr);
+    assert!(stderr.contains("statically unique"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&page.stdout).contains("hint:"));
+}
+
+#[test]
 fn doctor_reads_existing_state_without_changing_the_database() {
     let dir = TempDir::new();
     let database = dir.0.join("doctor.redb");
