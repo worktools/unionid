@@ -15,9 +15,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  rust:
+  # Root crate: formatting, lint (default and asynchronous features), tests, and
+  # the repository-owned consumer verification scripts.
+  core:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -27,44 +33,98 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
-      - name: Check core crate
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
         run: |
-          cargo fmt --check
-          cargo check --locked
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --features asynchronous -- -D warnings
+      - name: Test
+        run: |
           cargo test --locked
           cargo test --locked --features asynchronous --test asynchronous --test async_client
+      - name: Verify repository consumers and deployment scripts
+        run: |
           python3 scripts/verify-query-bindings.py
           python3 scripts/verify-typed-application.py
           python3 scripts/verify-envoy-deployment.py
           bash -n deploy/envoy/generate-dev-certs.sh
           bash -n deploy/envoy/verify.sh
-      - name: Check standalone evaluation tools
-        shell: bash
+
+  # Each standalone evaluation tool has its own workspace and lockfile; run them
+  # as a matrix so they compile in parallel instead of serially.
+  tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        tool:
+          - storage-eval
+          - recovery-eval
+          - workload-eval
+          - service-load-eval
+          - churn-eval
+          - compaction-eval
+          - incremental-backup-eval
+          - adt-interop-eval
+          - concurrency-eval
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tools-${{ matrix.tool }}
+          workspaces: |
+            tools/${{ matrix.tool }} -> target
+      - name: Check ${{ matrix.tool }}
         run: |
-          for manifest in \
-            tools/storage-eval/Cargo.toml \
-            tools/recovery-eval/Cargo.toml \
-            tools/workload-eval/Cargo.toml \
-            tools/service-load-eval/Cargo.toml \
-            tools/churn-eval/Cargo.toml \
-            tools/compaction-eval/Cargo.toml \
-            tools/incremental-backup-eval/Cargo.toml
-          do
-            cargo fmt --check --manifest-path "$manifest"
-            cargo check --locked --manifest-path "$manifest"
-            cargo clippy --locked --manifest-path "$manifest" --all-targets -- -D warnings
-          done
+          cargo fmt --check --manifest-path tools/${{ matrix.tool }}/Cargo.toml
+          cargo clippy --locked --manifest-path tools/${{ matrix.tool }}/Cargo.toml --all-targets -- -D warnings
+
+  derive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: derive
+          workspaces: |
+            derive -> target
       - name: Check derive crate
         run: |
           cargo fmt --check --manifest-path derive/Cargo.toml
-          cargo check --locked --manifest-path derive/Cargo.toml
           cargo clippy --locked --manifest-path derive/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path derive/Cargo.toml
+
+  query-macro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: query-macro
+          workspaces: |
+            query-macro -> target
       - name: Check inline query macro crate
         run: |
           cargo fmt --check --manifest-path query-macro/Cargo.toml
-          cargo check --locked --manifest-path query-macro/Cargo.toml
           cargo clippy --locked --manifest-path query-macro/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path query-macro/Cargo.toml
