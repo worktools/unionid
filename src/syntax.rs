@@ -442,6 +442,7 @@ pub fn input_status(source: &str) -> InputStatus {
                     code: "E_INCOMPLETE".into(),
                     message: error.message,
                     span: error.span,
+                    constraint: None,
                 }
             };
             InputStatus::Incomplete(error)

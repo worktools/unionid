@@ -242,6 +242,8 @@ fn run_on_an_empty_database_reports_an_actionable_hint() {
 fn query_failures_report_actionable_hints() {
     let conflict = run(&[
         "run",
+        "--format",
+        "json",
         "--query",
         "struct Account {\n  id: text\n  email: text\n  deleted_at: Option<text>\n}\n\
          table accounts: Account {\n  key id\n}\n\
@@ -250,8 +252,30 @@ fn query_failures_report_actionable_hints() {
          insert accounts {id: \"carol\", email: \"a@example.com\", deleted_at: None}",
     ]);
     assert_eq!(conflict.status.code(), Some(3));
+    assert_eq!(json(&conflict)["error"]["constraint"], "partial_unique");
     let stderr = String::from_utf8_lossy(&conflict.stderr);
     assert!(stderr.contains("partial unique index"), "{stderr}");
+    // The hint is stderr-only, so JSON stdout stays machine-readable.
+    assert!(!String::from_utf8_lossy(&conflict.stdout).contains("hint:"));
+
+    // A missing primary key is also E_CONSTRAINT but must not get the upsert hint.
+    let missing_key = run(&[
+        "run",
+        "--format",
+        "json",
+        "--query",
+        "struct Item {\n  label: text\n}\n\ntable items: Item\n\nupsert items {label: \"a\"}",
+    ]);
+    assert_eq!(missing_key.status.code(), Some(3));
+    assert_eq!(
+        json(&missing_key)["error"]["constraint"],
+        "primary_key_missing"
+    );
+    assert!(
+        !String::from_utf8_lossy(&missing_key.stderr).contains("hint:"),
+        "{}",
+        String::from_utf8_lossy(&missing_key.stderr)
+    );
 
     let dir = TempDir::new();
     let database = dir.0.join("page-hint.redb");
@@ -281,7 +305,6 @@ fn query_failures_report_actionable_hints() {
     assert_eq!(json(&page)["error"]["code"], "E_PAGE_ORDER");
     let stderr = String::from_utf8_lossy(&page.stderr);
     assert!(stderr.contains("statically unique"), "{stderr}");
-    // The hint is stderr-only, so JSON stdout stays machine-readable.
     assert!(!String::from_utf8_lossy(&page.stdout).contains("hint:"));
 }
 

@@ -1491,22 +1491,27 @@ fn print_query_error_hint(response: &QueryResponse) -> bool {
             );
             true
         }
-        "E_CONSTRAINT" if error.message.contains("unique index") => {
-            if error.message.contains(" if ") {
+        "E_CONSTRAINT" => match error.constraint {
+            Some(crate::ConstraintKind::PartialUnique) => {
                 eprintln!(
                     "hint: this partial unique index only constrains rows whose `if` predicate is true; soft-delete or move the row out of the predicate to release the key"
                 );
-            } else {
+                true
+            }
+            Some(crate::ConstraintKind::Unique) => {
                 eprintln!(
                     "hint: the value already exists under a unique index; update the existing row or choose a different key"
                 );
+                true
             }
-            true
-        }
-        "E_CONSTRAINT" if error.message.contains("primary key") => {
-            eprintln!("hint: use `upsert` to replace the row that already owns this primary key");
-            true
-        }
+            Some(crate::ConstraintKind::PrimaryKey) => {
+                eprintln!(
+                    "hint: use `upsert` to replace the row that already owns this primary key"
+                );
+                true
+            }
+            Some(crate::ConstraintKind::PrimaryKeyMissing) | None => false,
+        },
         _ => false,
     }
 }
