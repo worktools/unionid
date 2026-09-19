@@ -5270,7 +5270,7 @@ impl Database {
                             .is_some()
                     {
                         rejections.push(PredicateRejection {
-                            index: definition.display_constraint(),
+                            index: definition.shape_key(),
                             reason: "predicate_not_implied".into(),
                         });
                     }

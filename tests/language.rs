@@ -4077,7 +4077,13 @@ insert users {id = 2, email = "b@example.com", deleted_at = Some "old"}"#,
     assert!(
         plan.access.predicate_rejections[0]
             .index
-            .contains("deleted_at == None")
+            .contains("email if sha256:")
+    );
+    // Rejections must stay value-free: the predicate literal never leaks.
+    assert!(
+        !plan.access.predicate_rejections[0]
+            .index
+            .contains("deleted_at")
     );
 
     // `is_some` does not prove an equality-to-None predicate.
