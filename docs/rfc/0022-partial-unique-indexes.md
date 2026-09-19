@@ -66,6 +66,8 @@ atom 只允许：
 
 这组限制使谓词确定、row-local、无错误且可在 schema、mutation、migration、restore 和 check 中得到同一结果。超出范围返回稳定的 `E_INDEX_PREDICATE`，诊断指出第一个不支持的结构。类型错误继续返回 `E_TYPE` 并保留源码 span。
 
+一个谓词最多包含 64 个源码 atom。该边界在规范化前执行，避免重复或恶意输入放大绑定、排序和矛盾检查成本；超过边界返回 `E_INDEX_PREDICATE`。
+
 绑定后表示为有序 atom 列表，而不是保存通用 `BoolExpression`：
 
 ```text
@@ -191,6 +193,8 @@ Migrations use the same suffix. Dropping a partial index repeats its canonical p
 ### 3. Predicate subset and normalization
 
 The accepted predicate is a conjunction of `field.path == typed_literal`, `field.path == None`, and `is_some field.path` atoms. Literals bind completely at schema time. The existing query helper `is_none field` is also accepted as input, but the formatter emits the more Rust-shaped `field == None`; `is_some field` retains the existing helper syntax. Parameters, other field references, arithmetic, local functions, collection operations, maps, `||`, `!`, `!=`, ranges, and bare boolean fields are rejected with `E_INDEX_PREDICATE`; ordinary type errors remain `E_TYPE` with source spans.
+
+A predicate contains at most 64 source atoms. The limit applies before normalization so duplicate or hostile input cannot amplify binding, sorting, or contradiction checks; exceeding it returns `E_INDEX_PREDICATE`.
 
 The bound representation is a sorted list of equality/presence atoms keyed by stable field path, operator, and canonical typed value. `Equal(None)` never enters this IR; it becomes `IsNone`. Reordering conjunctions, changing whitespace, shortening an unambiguous enum constructor, or spelling the input as `== None` does not change schema identity. Duplicate atoms collapse. Different equalities on one path, None/Some conflicts, and None/non-None equality conflicts return `E_INDEX_PREDICATE_CONTRADICTION`; the first release does not implement a general SAT solver.
 

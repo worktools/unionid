@@ -26,7 +26,10 @@ use crate::row_source::{
     TableStats, TypedRowSource,
 };
 
+mod index_predicate;
 mod migration;
+
+pub use index_predicate::{IndexPredicate, IndexPredicateAtom};
 
 type PostingRows = imbl::Vector<RowId>;
 type IndexPosting = imbl::OrdMap<Vec<u8>, PostingRows>;
@@ -1084,6 +1087,8 @@ pub struct IndexDefinition {
     pub components: Vec<IndexComponentDefinition>,
     #[serde(default, skip_serializing_if = "IndexKind::is_ordinary")]
     pub kind: IndexKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<IndexPredicate>,
 }
 
 impl IndexDefinition {
@@ -1100,11 +1105,19 @@ impl IndexDefinition {
     }
 
     pub(crate) fn shape_key(&self) -> String {
-        index_shape_key(&self.effective_components())
+        let components = index_shape_key(&self.effective_components());
+        match &self.predicate {
+            Some(predicate) => format!("{components} if {}", predicate.identity_key()),
+            None => components,
+        }
     }
 
     pub(crate) fn display_shape(&self) -> String {
         display_index_shape(&self.effective_components())
+    }
+
+    pub(crate) fn display_predicate(&self) -> Option<String> {
+        self.predicate.as_ref().map(IndexPredicate::source_text)
     }
 
     pub(crate) fn is_primary_index(&self, primary_key: Option<&str>) -> bool {
@@ -2026,7 +2039,8 @@ impl Database {
         unique: bool,
         predicate: Option<&BoolExpression>,
     ) -> Result<QueryResponse> {
-        if predicate.is_some() {
+        if let Some(predicate) = predicate {
+            let _ = self.bind_index_predicate(name, predicate)?;
             return Err(Error::new(
                 "E_INDEX_PREDICATE",
                 "partial unique index execution is not available in this implementation stage",
@@ -2093,6 +2107,7 @@ impl Database {
             } else {
                 IndexKind::Ordinary
             },
+            predicate: None,
         };
         self.index_definitions
             .entry(name.into())
@@ -2120,6 +2135,15 @@ impl Database {
             posting.entry(key).or_default().push_back(row.id);
         }
         Ok(posting)
+    }
+
+    fn bind_index_predicate(
+        &self,
+        table_name: &str,
+        predicate: &BoolExpression,
+    ) -> Result<IndexPredicate> {
+        let table = self.table(table_name)?;
+        IndexPredicate::bind(&self.catalog, &table.schema, predicate)
     }
 
     fn index_tuple_key(
@@ -6442,6 +6466,7 @@ impl Database {
                         descending: false,
                     }],
                     kind: IndexKind::Ordinary,
+                    predicate: None,
                 };
                 self.index_definitions
                     .entry(table.clone())
@@ -6557,6 +6582,8 @@ impl Database {
                 field_path: Vec<u64>,
                 #[serde(skip_serializing_if = "IndexKind::is_ordinary")]
                 kind: IndexKind,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                predicate: Option<IndexPredicate>,
             },
             Composite {
                 id: u64,
@@ -6564,6 +6591,8 @@ impl Database {
                 components: Vec<IndexComponentDefinition>,
                 #[serde(skip_serializing_if = "IndexKind::is_ordinary")]
                 kind: IndexKind,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                predicate: Option<IndexPredicate>,
             },
         }
 
@@ -6593,7 +6622,7 @@ impl Database {
             .flat_map(|definitions| definitions.values())
             .collect::<Vec<_>>();
         index_definitions.sort_by_key(|definition| definition.id);
-        let indexes = index_definitions
+        let indexes: Vec<SchemaIndex> = index_definitions
             .into_iter()
             .map(|definition| {
                 let components = definition.effective_components();
@@ -6604,6 +6633,7 @@ impl Database {
                         column: components[0].column.clone(),
                         field_path: components[0].field_path.clone(),
                         kind: definition.kind,
+                        predicate: definition.predicate.clone(),
                     }
                 } else {
                     SchemaIndex::Composite {
@@ -6611,12 +6641,20 @@ impl Database {
                         table_id: definition.table_id,
                         components,
                         kind: definition.kind,
+                        predicate: definition.predicate.clone(),
                     }
                 }
             })
             .collect();
         let manifest = SchemaManifest {
-            format_version: 1,
+            format_version: if indexes.iter().any(|index| match index {
+                SchemaIndex::Legacy { predicate, .. }
+                | SchemaIndex::Composite { predicate, .. } => predicate.is_some(),
+            }) {
+                2
+            } else {
+                1
+            },
             types,
             tables,
             indexes,
@@ -7466,13 +7504,14 @@ impl Database {
                 })
                 .collect::<Vec<_>>();
             let mut source = String::new();
-            crate::formatter::format_index_declaration(
+            let predicate = definition.display_predicate();
+            crate::formatter::format_bound_index_declaration(
                 &mut source,
                 "create",
                 table,
                 &components,
                 definition.kind.is_unique(),
-                None,
+                predicate.as_deref(),
                 0,
             );
             lines.extend(source.lines().map(str::to_owned));
@@ -8299,6 +8338,170 @@ fn replace_or_append_column(schema: &mut Vec<Column>, column: Column) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parsed_index_predicate(source: &str) -> BoolExpression {
+        let Statement::CreateIndex {
+            predicate: Some(predicate),
+            ..
+        } = crate::query::parse_statement(source).unwrap()
+        else {
+            panic!("expected a partial index declaration")
+        };
+        predicate
+    }
+
+    fn install_test_predicate(database: &mut Database, predicate: IndexPredicate) {
+        let table = database.table("users").unwrap().clone();
+        let components = vec![IndexComponentDefinition {
+            column: "email".into(),
+            field_path: database
+                .catalog
+                .field_path_ids(&table.schema, "email")
+                .unwrap(),
+            descending: false,
+        }];
+        let definition = IndexDefinition {
+            id: database.catalog.allocate().unwrap(),
+            table_id: table.id,
+            column: String::new(),
+            field_path: Vec::new(),
+            components,
+            kind: IndexKind::Unique,
+            predicate: Some(predicate),
+        };
+        database
+            .index_definitions
+            .entry("users".into())
+            .or_default()
+            .insert(definition.shape_key(), definition);
+    }
+
+    #[test]
+    fn partial_index_predicates_bind_normalize_and_change_schema_identity() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "type State = Pending | Active\ntype User = {id int, email text, deleted_at option text, state State}\ntable users User",
+        );
+        let left = parsed_index_predicate(
+            "create unique index users (email) if state == Active && is_none deleted_at && state == Active",
+        );
+        let right = parsed_index_predicate(
+            "create unique index users (email) if deleted_at == None && state == State::Active",
+        );
+        let left = database.bind_index_predicate("users", &left).unwrap();
+        let right = database.bind_index_predicate("users", &right).unwrap();
+        assert_eq!(left.atoms.len(), 2);
+        assert_eq!(left.source_text(), "deleted_at == None && state == Active");
+        assert_eq!(left.identity_key(), right.identity_key());
+
+        let baseline = database.schema_info();
+        let mut active = database.clone();
+        install_test_predicate(&mut active, left);
+        let mut pending = database.clone();
+        let pending_predicate = parsed_index_predicate(
+            "create unique index users (email) if deleted_at == None && state == Pending",
+        );
+        let pending_predicate = pending
+            .bind_index_predicate("users", &pending_predicate)
+            .unwrap();
+        install_test_predicate(&mut pending, pending_predicate);
+        assert_ne!(active.schema_info().hash, baseline.hash);
+        assert_ne!(active.schema_info().hash, pending.schema_info().hash);
+        assert!(active.schema_text().contains(
+            "create unique index users (email) if deleted_at == None && state == Active"
+        ));
+    }
+
+    #[test]
+    fn partial_index_predicates_canonicalize_negative_literals_and_preserve_text() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "type User = {id int, email text, score float, label text}\ntable users User",
+        );
+        let negative = parsed_index_predicate("create unique index users (email) if score == -0.0");
+        let zero = parsed_index_predicate("create unique index users (email) if score == 0.0");
+        let negative = database.bind_index_predicate("users", &negative).unwrap();
+        let zero = database.bind_index_predicate("users", &zero).unwrap();
+        assert_eq!(negative.identity_key(), zero.identity_key());
+        assert_eq!(negative.source_text(), "score == 0.0");
+        let mut negative_schema = database.clone();
+        install_test_predicate(&mut negative_schema, negative);
+        let mut zero_schema = database.clone();
+        install_test_predicate(&mut zero_schema, zero);
+        assert_eq!(
+            negative_schema.schema_info().hash,
+            zero_schema.schema_info().hash
+        );
+
+        let text = "a && b repeated to make this bound predicate exceed the inline formatter width";
+        let predicate = parsed_index_predicate(&format!(
+            "create unique index users (email) if label == {text:?}"
+        ));
+        let predicate = database.bind_index_predicate("users", &predicate).unwrap();
+        install_test_predicate(&mut database, predicate);
+        let schema = database.schema_text();
+        assert!(schema.contains(&format!("label == {text:?}")));
+        assert!(crate::syntax::parse(&schema).is_ok(), "{schema}");
+    }
+
+    #[test]
+    fn partial_index_predicates_report_unsupported_types_and_contradictions() {
+        let mut database = Database::default();
+        execute(
+            &mut database,
+            "type State = Pending | Active\ntype User = {id int, email text, deleted_at option text, state State}\ntable users User",
+        );
+        for (source, code) in [
+            (
+                "create unique index users (email) if state != Active",
+                "E_INDEX_PREDICATE",
+            ),
+            (
+                "create unique index users (email) if state == $state",
+                "E_INDEX_PREDICATE",
+            ),
+            (
+                "create unique index users (email) if state == Active && state == Pending",
+                "E_INDEX_PREDICATE_CONTRADICTION",
+            ),
+            (
+                "create unique index users (email) if is_none deleted_at && is_some deleted_at",
+                "E_INDEX_PREDICATE_CONTRADICTION",
+            ),
+        ] {
+            let predicate = parsed_index_predicate(source);
+            assert_eq!(
+                database
+                    .bind_index_predicate("users", &predicate)
+                    .unwrap_err()
+                    .code,
+                code,
+                "{source}"
+            );
+        }
+        let wrong_type =
+            parsed_index_predicate("create unique index users (email) if state == \"Active\"");
+        assert_eq!(
+            database
+                .bind_index_predicate("users", &wrong_type)
+                .unwrap_err()
+                .code,
+            "E_TYPE"
+        );
+        let atom = parsed_index_predicate("create unique index users (email) if state == Active");
+        let oversized = std::iter::repeat_n(atom, index_predicate::MAX_INDEX_PREDICATE_ATOMS + 1)
+            .reduce(|left, right| BoolExpression::And(Box::new(left), Box::new(right)))
+            .unwrap();
+        assert_eq!(
+            database
+                .bind_index_predicate("users", &oversized)
+                .unwrap_err()
+                .code,
+            "E_INDEX_PREDICATE"
+        );
+    }
 
     #[derive(Default)]
     struct CountingSink {
