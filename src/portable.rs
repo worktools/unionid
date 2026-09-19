@@ -113,6 +113,12 @@ pub enum TypeShape {
         item: Box<TypeShape>,
         max_items: usize,
     },
+    Map {
+        key: Box<TypeShape>,
+        value: Box<TypeShape>,
+        max_entries: usize,
+        max_key_bytes: usize,
+    },
     Ref {
         type_id: String,
         name: String,
@@ -651,6 +657,20 @@ fn validate_shape(
         TypeShape::List { item, max_items } if *max_items == crate::codec::MAX_COLLECTION_ITEMS => {
             validate_shape(item, types, ids, &format!("{path}.item"), depth + 1)?;
         }
+        TypeShape::Map {
+            key,
+            value,
+            max_entries,
+            max_key_bytes,
+        } if **key
+            == TypeShape::Text {
+                encoding: "utf-8".into(),
+            }
+            && *max_entries == crate::model::MAX_MAP_ENTRIES
+            && *max_key_bytes == crate::model::MAX_MAP_KEY_BYTES =>
+        {
+            validate_shape(value, types, ids, &format!("{path}.value"), depth + 1)?;
+        }
         TypeShape::Ref { type_id, name } => {
             let id = parse_contract_id(type_id, path, false)?;
             if types.get(&id).map(|(name, _)| *name) != Some(name.as_str()) {
@@ -693,6 +713,9 @@ fn compare_shape(
         (TypeShape::Option { item: left }, TypeShape::Option { item: right })
         | (TypeShape::List { item: left, .. }, TypeShape::List { item: right, .. }) => {
             compare_shape(left, right, &format!("{path}.item"), report);
+        }
+        (TypeShape::Map { value: left, .. }, TypeShape::Map { value: right, .. }) => {
+            compare_shape(left, right, &format!("{path}.value"), report);
         }
         (TypeShape::Ref { type_id: left, .. }, TypeShape::Ref { type_id: right, .. })
             if left == right => {}
@@ -1173,6 +1196,14 @@ pub(crate) fn describe_type(catalog: &Catalog, ty: &ScalarType) -> Result<TypeSh
         ScalarType::List(item) => TypeShape::List {
             item: Box::new(describe_type(catalog, item)?),
             max_items: crate::codec::MAX_COLLECTION_ITEMS,
+        },
+        ScalarType::Map(value) => TypeShape::Map {
+            key: Box::new(TypeShape::Text {
+                encoding: "utf-8".into(),
+            }),
+            value: Box::new(describe_type(catalog, value)?),
+            max_entries: crate::model::MAX_MAP_ENTRIES,
+            max_key_bytes: crate::model::MAX_MAP_KEY_BYTES,
         },
         ScalarType::Ref(type_id) => {
             let definition = catalog.definition(*type_id)?;

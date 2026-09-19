@@ -267,6 +267,9 @@ pub enum WireValue {
     List {
         items: Vec<WireValue>,
     },
+    Map {
+        entries: Vec<WireMapEntry>,
+    },
     Option {
         value: Option<Box<WireValue>>,
     },
@@ -274,6 +277,13 @@ pub enum WireValue {
         type_id: String,
         value: Box<WireValue>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireMapEntry {
+    pub key: String,
+    pub value: WireValue,
 }
 
 impl WireValue {
@@ -284,7 +294,8 @@ impl WireValue {
             | Self::Timestamp { .. }
             | Self::Duration { .. }
             | Self::Decimal { .. }
-            | Self::Bytes { .. } => true,
+            | Self::Bytes { .. }
+            | Self::Map { .. } => true,
             Self::Named { value, .. } | Self::Option { value: Some(value) } => value.requires_v2(),
             Self::Variant { args, .. } => args.iter().any(Self::requires_v2),
             Self::Record { fields } => fields.values().any(Self::requires_v2),
@@ -343,6 +354,15 @@ impl From<&Value> for WireValue {
             },
             Value::List(items) => Self::List {
                 items: items.iter().map(Self::from).collect(),
+            },
+            Value::Map(entries) => Self::Map {
+                entries: entries
+                    .iter()
+                    .map(|(key, value)| WireMapEntry {
+                        key: key.clone(),
+                        value: Self::from(value),
+                    })
+                    .collect(),
             },
             Value::Option(value) => Self::Option {
                 value: value.as_deref().map(Self::from).map(Box::new),
@@ -406,6 +426,36 @@ impl TryFrom<WireValue> for Value {
             ),
             WireValue::Tuple { items } => Value::Tuple(decode_values(items)?),
             WireValue::List { items } => Value::List(decode_values(items)?),
+            WireValue::Map { entries } => {
+                if entries.len() > crate::model::MAX_MAP_ENTRIES {
+                    return Err(Error::new(
+                        "E_MAP_LIMIT",
+                        format!("map exceeds {} entry limit", crate::model::MAX_MAP_ENTRIES),
+                    ));
+                }
+                let mut decoded = BTreeMap::new();
+                let mut previous: Option<String> = None;
+                for entry in entries {
+                    if entry.key.len() > crate::model::MAX_MAP_KEY_BYTES {
+                        return Err(Error::new(
+                            "E_MAP_LIMIT",
+                            format!(
+                                "map key exceeds {} UTF-8 byte limit",
+                                crate::model::MAX_MAP_KEY_BYTES
+                            ),
+                        ));
+                    }
+                    if previous.as_ref().is_some_and(|key| key >= &entry.key) {
+                        return Err(Error::new(
+                            "E_DUPLICATE_KEY",
+                            "map entries must use unique keys in UTF-8 byte order",
+                        ));
+                    }
+                    previous = Some(entry.key.clone());
+                    decoded.insert(entry.key, Value::try_from(entry.value)?);
+                }
+                Value::Map(decoded)
+            }
             WireValue::Option { value } => Value::Option(
                 value
                     .map(|value| Value::try_from(*value))

@@ -13,7 +13,7 @@ use serde::ser::{
 use serde::{Serialize, Serializer};
 
 use crate::error::{Error, Result};
-use crate::model::{EnumValue, MAX_DEPTH, Value};
+use crate::model::{EnumValue, MAX_DEPTH, MAX_MAP_ENTRIES, MAX_MAP_KEY_BYTES, Value};
 
 impl serde::ser::Error for Error {
     fn custom<T: std::fmt::Display>(message: T) -> Self {
@@ -55,7 +55,7 @@ impl Serializer for ValueSerializer {
     type SerializeTuple = Tuple;
     type SerializeTupleStruct = Tuple;
     type SerializeTupleVariant = TupleVariant;
-    type SerializeMap = Record;
+    type SerializeMap = StringMap;
     type SerializeStruct = Record;
     type SerializeStructVariant = StructVariant;
 
@@ -200,8 +200,11 @@ impl Serializer for ValueSerializer {
         })
     }
 
-    fn serialize_map(self, len: Option<usize>) -> Result<Record> {
-        Ok(Record::new(len.unwrap_or(0)))
+    fn serialize_map(self, len: Option<usize>) -> Result<StringMap> {
+        if len.is_some_and(|len| len > MAX_MAP_ENTRIES) {
+            return Err(Error::new("E_MAP_LIMIT", "map exceeds entry limit"));
+        }
+        Ok(StringMap::new(len.unwrap_or(0)))
     }
 
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<Record> {
@@ -224,6 +227,69 @@ impl Serializer for ValueSerializer {
 }
 
 struct Sequence(Vec<Value>);
+
+struct StringMap {
+    entries: BTreeMap<String, Value>,
+    next_key: Option<String>,
+}
+
+impl StringMap {
+    fn new(_capacity: usize) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            next_key: None,
+        }
+    }
+}
+
+impl SerializeMap for StringMap {
+    type Ok = Value;
+    type Error = Error;
+
+    fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<()> {
+        if self.next_key.is_some() {
+            return Err(Error::new("E_SERDE", "map value is missing"));
+        }
+        let key = match serde_json::to_value(key) {
+            Ok(serde_json::Value::String(key)) => key,
+            Ok(_) => return Err(unsupported_key()),
+            Err(error) => return Err(Error::new("E_SERDE", format!("encode map key: {error}"))),
+        };
+        if key.len() > MAX_MAP_KEY_BYTES {
+            return Err(Error::new(
+                "E_MAP_LIMIT",
+                "map key exceeds UTF-8 byte limit",
+            ));
+        }
+        self.next_key = Some(key);
+        Ok(())
+    }
+
+    fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
+        let key = self
+            .next_key
+            .take()
+            .ok_or_else(|| Error::new("E_SERDE", "map key is missing"))?;
+        if self.entries.contains_key(&key) {
+            return Err(Error::new(
+                "E_DUPLICATE_KEY",
+                format!("duplicate map key {key:?}"),
+            ));
+        }
+        if self.entries.len() >= MAX_MAP_ENTRIES {
+            return Err(Error::new("E_MAP_LIMIT", "map exceeds entry limit"));
+        }
+        self.entries.insert(key, value.serialize(ValueSerializer)?);
+        Ok(())
+    }
+
+    fn end(self) -> Result<Value> {
+        if self.next_key.is_some() {
+            return Err(Error::new("E_SERDE", "map value is missing"));
+        }
+        Ok(Value::Map(self.entries))
+    }
+}
 
 impl SerializeSeq for Sequence {
     type Ok = Value;
@@ -452,7 +518,9 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
             Value::Named { value, .. } | Value::Option(Some(value)) => {
                 this.child(value).deserialize_any(visitor)
             }
-            Value::Record(fields) => visitor.visit_map(ValueMapAccess::new(fields, this.depth)),
+            Value::Record(fields) | Value::Map(fields) => {
+                visitor.visit_map(ValueMapAccess::new(fields, this.depth))
+            }
             Value::Tuple(items) | Value::List(items) => {
                 visitor.visit_seq(ValueSeqAccess::new(items, this.depth))
             }
@@ -514,8 +582,10 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
         let this = self.check()?;
         match this.value {
             Value::Named { value, .. } => this.child(value).deserialize_map(visitor),
-            Value::Record(fields) => visitor.visit_map(ValueMapAccess::new(fields, this.depth)),
-            _ => Err(Error::new("E_SERDE", "expected record")),
+            Value::Record(fields) | Value::Map(fields) => {
+                visitor.visit_map(ValueMapAccess::new(fields, this.depth))
+            }
+            _ => Err(Error::new("E_SERDE", "expected record or map")),
         }
     }
 

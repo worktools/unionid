@@ -942,7 +942,9 @@ fn type_contains_ref(ty: &ScalarType, target: u64) -> bool {
             .flat_map(|variant| &variant.args)
             .any(|ty| type_contains_ref(ty, target)),
         ScalarType::Tuple(items) => items.iter().any(|ty| type_contains_ref(ty, target)),
-        ScalarType::Option(item) | ScalarType::List(item) => type_contains_ref(item, target),
+        ScalarType::Option(item) | ScalarType::List(item) | ScalarType::Map(item) => {
+            type_contains_ref(item, target)
+        }
         ScalarType::Int
         | ScalarType::Float
         | ScalarType::Bool
@@ -990,7 +992,7 @@ fn type_reaches(
         ScalarType::Tuple(items) => items
             .iter()
             .any(|ty| type_reaches(catalog, ty, target, seen, depth + 1)),
-        ScalarType::Option(item) | ScalarType::List(item) => {
+        ScalarType::Option(item) | ScalarType::List(item) | ScalarType::Map(item) => {
             type_reaches(catalog, item, target, seen, depth + 1)
         }
         ScalarType::Int

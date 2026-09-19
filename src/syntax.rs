@@ -819,14 +819,22 @@ impl Parser {
             return Ok(first);
         }
         let name = self.identifier()?;
-        if matches!(name.as_str(), "Option" | "List") {
+        if matches!(name.as_str(), "Option" | "List" | "Map") {
             self.expect(Kind::Op("<".into()))?;
+            if name == "Map" {
+                let key = self.identifier()?;
+                if key != "text" {
+                    return Err(self.error("Map key type must be text"));
+                }
+                self.expect(Kind::Comma)?;
+            }
             let inner = self.ty(depth + 1)?;
             self.expect(Kind::Op(">".into()))?;
-            return Ok(if name == "Option" {
-                ScalarType::Option(Box::new(inner))
-            } else {
-                ScalarType::List(Box::new(inner))
+            return Ok(match name.as_str() {
+                "Option" => ScalarType::Option(Box::new(inner)),
+                "List" => ScalarType::List(Box::new(inner)),
+                "Map" => ScalarType::Map(Box::new(inner)),
+                _ => unreachable!(),
             });
         }
         if name == "Decimal" {
@@ -1832,6 +1840,54 @@ impl Parser {
         Ok(values)
     }
 
+    fn map(&mut self, depth: usize) -> Result<Value> {
+        self.depth(depth)?;
+        self.expect(Kind::Open('{'))?;
+        let mut entries = BTreeMap::new();
+        self.newlines();
+        while *self.kind() != Kind::Close('}') {
+            let token = self.bump();
+            let Kind::Text(key) = token.kind else {
+                return Err(syntax("map key must be quoted text", token.span));
+            };
+            if key.len() > crate::model::MAX_MAP_KEY_BYTES {
+                return Err(Error::new(
+                    "E_MAP_LIMIT",
+                    format!(
+                        "map key exceeds {} UTF-8 byte limit",
+                        crate::model::MAX_MAP_KEY_BYTES
+                    ),
+                )
+                .at(token.span));
+            }
+            self.expect(Kind::Colon)?;
+            let value = self.value(depth + 1)?;
+            if entries.insert(key.clone(), value).is_some() {
+                return Err(
+                    Error::new("E_DUPLICATE_KEY", format!("duplicate map key {key:?}"))
+                        .at(token.span),
+                );
+            }
+            if entries.len() > crate::model::MAX_MAP_ENTRIES {
+                return Err(Error::new(
+                    "E_MAP_LIMIT",
+                    format!("map exceeds {} entry limit", crate::model::MAX_MAP_ENTRIES),
+                )
+                .at(token.span));
+            }
+            let newline = self.separated_newlines();
+            if *self.kind() == Kind::Close('}') {
+                break;
+            }
+            if !self.eat(Kind::Comma) && !newline {
+                return Err(self.error("expected a newline or comma between map entries"));
+            }
+            self.newlines();
+        }
+        self.expect(Kind::Close('}'))?;
+        Ok(Value::Map(entries))
+    }
+
     fn value(&mut self, depth: usize) -> Result<Value> {
         self.depth(depth)?;
         let token = self.bump();
@@ -1871,6 +1927,7 @@ impl Parser {
             Kind::Ident(s) if s == "true" => Value::Bool(true),
             Kind::Ident(s) if s == "false" => Value::Bool(false),
             Kind::Ident(s) if s == "null" => Value::Null,
+            Kind::Ident(s) if s == "map" => self.map(depth + 1)?,
             Kind::Ident(s) if s == "uuid" => {
                 let token = self.bump();
                 let Kind::Text(source) = token.kind else {
@@ -2969,7 +3026,7 @@ impl Parser {
         }
         match self.kind().clone() {
             Kind::Text(_) | Kind::Number(_) => Ok(MatchValue::Literal(self.value(depth)?)),
-            Kind::Ident(name) if matches!(name.as_str(), "true" | "false" | "null") => {
+            Kind::Ident(name) if matches!(name.as_str(), "true" | "false" | "null" | "map") => {
                 Ok(MatchValue::Literal(self.value(depth)?))
             }
             Kind::Ident(name) => {
@@ -3492,7 +3549,7 @@ impl Parser {
                 Ok(ScalarExpression::Parameter { name, ty: None })
             }
             Kind::Ident(name)
-                if matches!(name.as_str(), "true" | "false" | "null")
+                if matches!(name.as_str(), "true" | "false" | "null" | "map")
                     || matches!(name.as_str(), "uuid" | "bytes" | "decimal")
                         && matches!(
                             self.tokens.get(self.pos + 1).map(|token| &token.kind),
