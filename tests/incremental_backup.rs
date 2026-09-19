@@ -68,8 +68,8 @@ fn init_export_list_verify_and_retry_form_a_contiguous_chain() {
         },
     )
     .unwrap();
-    assert_eq!(init.previous_storage_format, 6);
-    assert_eq!(init.current_storage_format, 7);
+    assert_eq!(init.previous_storage_format, 10);
+    assert_eq!(init.current_storage_format, 11);
     assert!(!init.resumed);
 
     let mut engine = Engine::open_redb(db.clone()).unwrap();

@@ -315,6 +315,9 @@ trait DurableBackend: Send {
     fn supports_maps(&self) -> bool {
         false
     }
+    fn supports_partial_indexes(&self) -> bool {
+        false
+    }
     fn supports_bounded_row_mutation(&self) -> bool {
         false
     }
@@ -500,6 +503,10 @@ impl DurableBackend for RedbStore {
         RedbStore::supports_maps(self)
     }
 
+    fn supports_partial_indexes(&self) -> bool {
+        RedbStore::supports_partial_indexes(self)
+    }
+
     fn supports_bounded_row_mutation(&self) -> bool {
         RedbStore::supports_bounded_row_mutation(self)
     }
@@ -630,7 +637,7 @@ impl Engine {
     pub const MAX_BATCH_KEYS: usize = 10_000;
 
     pub fn current_storage_versions() -> StorageVersions {
-        crate::redb_storage::production_versions()
+        crate::redb_storage::default_storage_versions()
     }
 
     pub fn memory() -> Self {
@@ -2037,7 +2044,7 @@ impl Engine {
         let mut candidate = if self
             .durable
             .as_ref()
-            .is_some_and(|durable| matches!(durable.versions().format, 6..=9))
+            .is_some_and(|durable| matches!(durable.versions().format, 6..=11))
         {
             self.committed.db.metadata_only()?
         } else {
@@ -2112,11 +2119,11 @@ impl Engine {
         if self
             .durable
             .as_ref()
-            .is_none_or(|durable| !matches!(durable.versions().format, 6..=9))
+            .is_none_or(|durable| !matches!(durable.versions().format, 6..=11))
         {
             return Err(Error::new(
                 "E_CONFIG",
-                "bounded migration progress requires a format-6, format-7, format-8, or format-9 redb database",
+                "bounded migration progress requires a format-6 through format-11 redb database",
             ));
         }
         let mut budget = MaintenanceStepBudget::bounded(max_steps);
@@ -2276,7 +2283,7 @@ impl Engine {
         if self
             .durable
             .as_ref()
-            .is_some_and(|durable| matches!(durable.versions().format, 6..=9))
+            .is_some_and(|durable| matches!(durable.versions().format, 6..=11))
         {
             return self.apply_migration_file_shadow(file, control, budget);
         }
@@ -2339,6 +2346,17 @@ impl Engine {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
                 "typed maps are available in memory, but durable redb map storage requires format 8",
+            ));
+        }
+        if target.requires_partial_index_storage()
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_partial_indexes())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "partial unique indexes require storage format 10; run storage upgrade --to 10",
             ));
         }
         let schema = target.schema_info();
@@ -2692,6 +2710,12 @@ impl Engine {
                 return Err(Error::new(
                     "E_STORAGE_UPGRADE_REQUIRED",
                     "typed maps are available in memory, but durable redb map storage requires format 8",
+                ));
+            }
+            if candidate.requires_partial_index_storage() && !durable.supports_partial_indexes() {
+                return Err(Error::new(
+                    "E_STORAGE_UPGRADE_REQUIRED",
+                    "partial unique indexes require storage format 10; run storage upgrade --to 10",
                 ));
             }
             let receipts = receipt_state
@@ -3261,6 +3285,8 @@ impl Engine {
                 && format != target
                 && !(format == 7
                     && target == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION)
+                && !(format == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION
+                    && target == crate::redb_storage::PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION)
         }) {
             return Err(Error::new(
                 "E_BACKUP_CHAIN_ACTIVE",
@@ -3280,8 +3306,11 @@ impl Engine {
                 .as_ref()
                 .is_some_and(|durable| durable.versions().format == 5);
         let journal_map_upgrade = self.durable.as_ref().is_some_and(|durable| {
-            durable.versions().format == 7
-                && target == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION
+            (durable.versions().format == 7
+                && target == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION)
+                || (durable.versions().format
+                    == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION
+                    && target == crate::redb_storage::PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION)
         });
         let mut database = if metadata_only_upgrade {
             self.committed.db.as_ref().clone()
@@ -3445,6 +3474,21 @@ impl Engine {
             || self.committed.db.requires_map_storage()
     }
 
+    pub(crate) fn logical_backup_format(&self) -> u32 {
+        if self
+            .durable
+            .as_ref()
+            .is_some_and(|durable| durable.supports_partial_indexes())
+            || self.committed.db.requires_partial_index_storage()
+        {
+            crate::backup::PARTIAL_BACKUP_FORMAT_VERSION
+        } else if self.logical_backup_supports_maps() {
+            crate::backup::MAP_BACKUP_FORMAT_VERSION
+        } else {
+            crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION
+        }
+    }
+
     pub(crate) fn restore_redb(
         path: PathBuf,
         database: Database,
@@ -3472,9 +3516,6 @@ impl Engine {
         drop(reservation);
         let result = (|| {
             let mut engine = Self::open_redb(path.clone())?;
-            if database.requires_map_storage() {
-                engine.upgrade_storage(crate::redb_storage::MAP_STORAGE_FORMAT_VERSION)?;
-            }
             let mut response = QueryResponse::ok_message("backup restored");
             engine.commit_candidate(database, None, &mut response, Some(receipts), None)?;
             Ok(engine)

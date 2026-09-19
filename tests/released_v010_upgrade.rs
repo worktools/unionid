@@ -208,7 +208,7 @@ fn published_v010_database_upgrades_to_format6_without_logical_drift() {
         "json",
     ]);
     assert_eq!(restored_check["schema"]["hash"], SCHEMA_HASH);
-    assert_eq!(restored_check["versions"]["format"], 6);
+    assert_eq!(restored_check["versions"]["format"], 10);
 
     let restored_old = dir.0.join("restored-old-backup.redb");
     successful_json(&[

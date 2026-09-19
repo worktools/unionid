@@ -16,9 +16,9 @@ v0.9 发布包同时携带 `RELEASE.json` 和独立的 `release/contract.json`�
 
 公开 v0.1.0 使用 storage/catalog/value/index/migration/backup/protocol version 1，并不包含 receipt、cursor identity、生产标量、复合索引或 generation envelope。v0.2.0 引入 format 6；v0.3.0 增加 Rust 接入、关联读取与 migration 使用体验；v0.4.0 增加可移植 ADT 契约与静态查询绑定；v0.5.0 增加显式 format-7 增量备份 journal；v0.6.0 增加安全项目骨架和项目级静态检查；v0.7.0 采用 Rust 形状的规范源码，并增加 typed membership、相关 exists 与集合运算；v0.8.0 增加 count_distinct、typed avg 和基础排名窗口；v0.9.0 增加 schema-aware 内联 Rust 查询宏；v0.9.1 修复宏生成代码与调用模块 serde imports 的名称冲突。v0.9 不改变持久化、backup 或协议数值。上表描述 v0.9.1 二进制的默认写入格式和全部可读范围，不追溯改写旧版本契约。
 
-当前二进制读取 storage format 1–7；新数据库直接创建为 format 6，使用 catalog/value/index-key/receipt/maintenance/journal codec 4/2/3/2/1/0。format 1/2 仍会补齐 cursor 身份并升级到 format 3；format 3 可显式升级到 4 以使用生产标量，format 4 可继续读写已有单列升序索引。创建复合或降序索引前必须先升级到 format 5。
+当前二进制读取 storage format 1–11；新数据库直接创建为 format 10，使用 catalog/value/index-key/receipt/maintenance/journal codec 6/3/4/3/1/0，并写入 logical backup 6。format 1/2 仍会补齐 cursor 身份并升级到 format 3；format 3 可显式升级到 4 以使用生产标量，format 4 可继续读写已有单列升序索引。创建复合或降序索引前必须先升级到 format 5，typed map 与 partial unique index 分别要求升级到 format 8 与 10。
 
-只有 `backup incremental init` / `Engine::enable_backup_journal` 会执行 6→7；创建数据库和普通写入仍保持 format 6。format 7 增加 journal codec 1，没有原地降级；需要回到不理解 format 7 的二进制时，应从启用前的 logical backup 恢复到新路径。
+只有 `backup incremental init` / `Engine::enable_backup_journal` 会进入 journal 格式：format 6 进入 7，format 8 进入 9，format 10 进入 11；创建数据库和普通写入仍保持 format 10。journal 格式增加 journal codec 1，没有原地降级；需要回到不理解 journal 格式的二进制时，应从启用前的 logical backup 恢复到新路径。
 
 升级或切换维护版本前，活跃增量链应先执行 `backup incremental export` 和 `backup incremental verify`。需要限制 archive 历史时，先 checkpoint，再 preview/confirm prune；不要直接删除 manifest 引用的文件。停止增量记录时使用 `backup incremental disable`。存在未导出提交时应先 export；只有明确接受这些 sequence 不可恢复时才使用 `--discard-unexported --confirm`。停用不会把 format 7 原地降回 format 6。
 
@@ -123,9 +123,9 @@ The v0.9 archive contains both `RELEASE.json` and an independent `release/contra
 
 The public v0.1.0 release used version 1 for storage, catalog, values, index keys, migration records, backup, and the JSON Lines protocol. It did not contain receipts, cursor identity, production scalars, composite indexes, or generation envelopes. v0.2.0 introduced format 6; v0.3.0 added Rust integration, relational reads, and migration UX; v0.4.0 added portable ADT contracts and static query bindings; v0.5.0 added the explicitly enabled format-7 incremental-backup journal; v0.6.0 added safe project scaffolding and project-level static checking; v0.7.0 adopted canonical Rust-shaped source and added typed membership, correlated exists, and set operations; v0.8.0 added count_distinct, typed averages, and basic ranking windows; v0.9.0 added schema-aware inline Rust query macros; v0.9.1 fixes generated-name conflicts with caller serde imports. v0.9 does not change persistence, backup, or protocol values. The v0.9 contract describes default current writes and the complete readable range without changing older release contracts.
 
-The current binary reads storage formats 1–7. New databases start at format 6 with catalog/value/index-key/receipt/maintenance/journal codecs 4/2/3/2/1/0. Formats 1 and 2 still gain cursor identity and move to format 3; format 3 can be explicitly upgraded to 4 for production scalars. Format 4 remains readable and writable for existing ascending single-column indexes, but composite or descending declarations first require format 5.
+The current binary reads storage formats 1–11. New databases start at format 10 with catalog/value/index-key/receipt/maintenance/journal codecs 6/3/4/3/1/0 and write logical backup 6. Formats 1 and 2 still gain cursor identity and move to format 3; format 3 can be explicitly upgraded to 4 for production scalars. Format 4 remains readable and writable for existing ascending single-column indexes, but composite or descending declarations first require format 5, typed maps require format 8, and partial unique indexes require format 10.
 
-Only `backup incremental init` / `Engine::enable_backup_journal` performs 6-to-7; database creation and ordinary writes remain on format 6. Format 7 adds journal codec 1 and has no in-place downgrade. To return to a binary that does not understand format 7, restore the logical backup made before enablement into a new path.
+Only `backup incremental init` / `Engine::enable_backup_journal` enters a journal format: 6 enters 7, 8 enters 9, and 10 enters 11; database creation and ordinary writes remain on format 10. A journal format adds journal codec 1 and has no in-place downgrade. To return to a binary that does not understand it, restore the logical backup made before enablement into a new path.
 
 ### Source file extension: `.uid` to `.unid`
 

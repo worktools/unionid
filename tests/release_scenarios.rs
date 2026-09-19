@@ -173,7 +173,7 @@ from sessions | filter id == "s1"
 fn typed_metadata_survives_mutation_migration_restart_check_and_restore() {
     verify(Scenario {
         name: "typed_metadata",
-        storage_target: Some(8),
+        storage_target: None,
         initial_migration: r#"migration m0001_typed_metadata
   add type Attribute = Text(text) | Number(int) | Enabled(bool)
   add type Account =

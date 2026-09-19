@@ -6931,6 +6931,13 @@ impl Database {
         })
     }
 
+    pub(crate) fn requires_partial_index_storage(&self) -> bool {
+        self.index_definitions
+            .values()
+            .flat_map(|definitions| definitions.values())
+            .any(|definition| definition.predicate.is_some())
+    }
+
     pub(crate) fn durable_row_with_codec(
         &self,
         table_name: &str,
@@ -7179,13 +7186,16 @@ impl Database {
         Ok((definition.id, component_count))
     }
 
-    pub(crate) fn source_index_value(
+    pub(crate) fn source_index_value_if_included(
         &self,
         table: &str,
         definition: &IndexDefinition,
         row: &Row,
-    ) -> Result<Value> {
-        index_value(&row.fields, &definition.effective_components(), table)
+    ) -> Result<Option<Value>> {
+        if !definition.includes(&row.fields) {
+            return Ok(None);
+        }
+        index_value(&row.fields, &definition.effective_components(), table).map(Some)
     }
 
     pub(crate) fn source_has_index(&self, table: &str, shape: &str) -> bool {

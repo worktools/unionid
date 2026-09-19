@@ -49,10 +49,13 @@ pub(crate) const PRODUCTION_STORAGE_FORMAT_VERSION: u32 = 6;
 const JOURNAL_STORAGE_FORMAT_VERSION: u32 = 7;
 pub(crate) const MAP_STORAGE_FORMAT_VERSION: u32 = 8;
 pub(crate) const MAP_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 9;
+pub(crate) const PARTIAL_STORAGE_FORMAT_VERSION: u32 = 10;
+pub(crate) const PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 11;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
 const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
 const MAP_CATALOG_CODEC_VERSION: u16 = 5;
+const PARTIAL_CATALOG_CODEC_VERSION: u16 = 6;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
 const SCALAR_INDEX_KEY_VERSION: u16 = 2;
@@ -78,8 +81,8 @@ const COMPACTION_PROOF_DOMAIN: &[u8] = b"unionid-compaction-proof-v1\0";
 const COMPACTION_FILE_LENGTH_SLACK: u64 = 64 * 1024;
 static COMPACTION_PROOF_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn production_versions() -> StorageVersions {
-    let layout = StorageLayout::production();
+pub(crate) fn default_storage_versions() -> StorageVersions {
+    let layout = StorageLayout::partial();
     StorageVersions {
         format: layout.format,
         catalog_codec: layout.catalog,
@@ -89,7 +92,7 @@ pub(crate) fn production_versions() -> StorageVersions {
         receipt_codec: layout.receipt,
         maintenance_codec: layout.maintenance,
         journal_codec: layout.journal,
-        backup_codec: crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION,
+        backup_codec: crate::backup::PARTIAL_BACKUP_FORMAT_VERSION,
     }
 }
 
@@ -1219,6 +1222,27 @@ impl StorageLayout {
         }
     }
 
+    const fn partial() -> Self {
+        Self {
+            format: PARTIAL_STORAGE_FORMAT_VERSION,
+            catalog: PARTIAL_CATALOG_CODEC_VERSION,
+            value: MAP_VALUE_CODEC_VERSION,
+            index: MAP_INDEX_KEY_VERSION,
+            migration: MIGRATION_CODEC_VERSION,
+            receipt: MAP_RECEIPT_CODEC_VERSION,
+            maintenance: MAINTENANCE_CODEC_VERSION,
+            journal: 0,
+        }
+    }
+
+    const fn partial_journal() -> Self {
+        Self {
+            format: PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION,
+            journal: JOURNAL_CODEC_VERSION,
+            ..Self::partial()
+        }
+    }
+
     const fn scalar() -> Self {
         Self {
             format: SCALAR_STORAGE_FORMAT_VERSION,
@@ -1233,7 +1257,11 @@ impl StorageLayout {
     }
 
     const fn for_format(format: u32) -> Self {
-        if format == MAP_JOURNAL_STORAGE_FORMAT_VERSION {
+        if format == PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION {
+            Self::partial_journal()
+        } else if format == PARTIAL_STORAGE_FORMAT_VERSION {
+            Self::partial()
+        } else if format == MAP_JOURNAL_STORAGE_FORMAT_VERSION {
             Self::map_journal()
         } else if format == MAP_STORAGE_FORMAT_VERSION {
             Self::map()
@@ -1266,8 +1294,28 @@ impl StorageLayout {
     const fn supports_maps(self) -> bool {
         matches!(
             self.format,
-            MAP_STORAGE_FORMAT_VERSION | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+            MAP_STORAGE_FORMAT_VERSION
+                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
         )
+    }
+
+    const fn supports_partial_indexes(self) -> bool {
+        matches!(
+            self.format,
+            PARTIAL_STORAGE_FORMAT_VERSION | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+        )
+    }
+
+    const fn backup_format(self) -> u32 {
+        if self.supports_partial_indexes() {
+            crate::backup::PARTIAL_BACKUP_FORMAT_VERSION
+        } else if self.supports_maps() {
+            crate::backup::MAP_BACKUP_FORMAT_VERSION
+        } else {
+            crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION
+        }
     }
 
     const fn supports_journal(self) -> bool {
@@ -1339,7 +1387,7 @@ impl RedbStore {
             .map_err(|error| Error::new("E_IO", format!("resolve opened database: {error}")))?;
         let redb_open_micros = elapsed_micros(redb_started);
         let empty = Database::default();
-        let initial = PreparedState::new(&empty, &ReceiptMap::new(), StorageLayout::production())?;
+        let initial = PreparedState::new(&empty, &ReceiptMap::new(), StorageLayout::partial())?;
         let mut store = Self {
             database,
             path,
@@ -1648,16 +1696,16 @@ impl RedbStore {
             receipt_codec: layout.receipt,
             maintenance_codec: layout.maintenance,
             journal_codec: layout.journal,
-            backup_codec: if layout.supports_maps() {
-                crate::backup::MAP_BACKUP_FORMAT_VERSION
-            } else {
-                crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION
-            },
+            backup_codec: layout.backup_format(),
         }
     }
 
     pub(crate) fn supports_maps(&self) -> bool {
         self.committed.layout.supports_maps()
+    }
+
+    pub(crate) fn supports_partial_indexes(&self) -> bool {
+        self.committed.layout.supports_partial_indexes()
     }
 
     pub(crate) fn backup_journal_status(&self) -> crate::backup::incremental::BackupJournalStatus {
@@ -2064,6 +2112,8 @@ impl RedbStore {
                 | JOURNAL_STORAGE_FORMAT_VERSION
                 | MAP_STORAGE_FORMAT_VERSION
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
@@ -2083,7 +2133,9 @@ impl RedbStore {
         self.invalidate_compaction_proof()
             .map_err(CommitFailure::Definite)?;
         let previous_layout = self.committed.layout;
-        let layout = if previous_layout.supports_maps() {
+        let layout = if previous_layout.supports_partial_indexes() {
+            StorageLayout::partial_journal()
+        } else if previous_layout.supports_maps() {
             StorageLayout::map_journal()
         } else {
             StorageLayout::journal()
@@ -2372,10 +2424,12 @@ impl RedbStore {
                 | JOURNAL_STORAGE_FORMAT_VERSION
                 | MAP_STORAGE_FORMAT_VERSION
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "recoverable migrations require storage format 6, 7, 8, or 9",
+                "recoverable migrations require storage format 6, 7, 8, 9, 10, or 11",
             )));
         }
         if source.durable_meta() != self.committed.meta {
@@ -3161,6 +3215,8 @@ impl RedbStore {
                 | PRODUCTION_STORAGE_FORMAT_VERSION
                 | MAP_STORAGE_FORMAT_VERSION
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
@@ -3195,6 +3251,21 @@ impl RedbStore {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
                 "storage format 9 requires format 7",
+            )));
+        }
+        if target == PARTIAL_STORAGE_FORMAT_VERSION && previous.format != MAP_STORAGE_FORMAT_VERSION
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                "storage format 10 requires format 8",
+            )));
+        }
+        if target == PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+            && previous.format != MAP_JOURNAL_STORAGE_FORMAT_VERSION
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                "storage format 11 requires format 9",
             )));
         }
         if target == PRODUCTION_STORAGE_FORMAT_VERSION {
@@ -3641,7 +3712,11 @@ impl RedbStore {
             let mut row_working = value.value().len();
             if let Some(table_indexes) = by_table.get(&table_id) {
                 for definition in table_indexes {
-                    let indexed = metadata.source_index_value(&table.name, definition, &row)?;
+                    let Some(indexed) =
+                        metadata.source_index_value_if_included(&table.name, definition, &row)?
+                    else {
+                        continue;
+                    };
                     let expected = encode_index_key(
                         metadata,
                         definition.id,
@@ -3711,7 +3786,18 @@ impl RedbStore {
                     Error::new("E_STORAGE", "secondary index references a missing row")
                 })?;
             let row = metadata.decode_source_row(&table.name, row_id, stored_row.value())?;
-            let indexed = metadata.source_index_value(&table.name, definition, &row)?;
+            let Some(indexed) =
+                metadata.source_index_value_if_included(&table.name, definition, &row)?
+            else {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    format!(
+                        "secondary index '{} ({})' contains a posting for row {row_id} that does not satisfy its predicate",
+                        table.name,
+                        definition.display_shape()
+                    ),
+                ));
+            };
             let expected = encode_index_key(
                 metadata,
                 definition.id,
@@ -3792,10 +3878,12 @@ impl RedbStore {
                 | JOURNAL_STORAGE_FORMAT_VERSION
                 | MAP_STORAGE_FORMAT_VERSION
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(Error::new(
                 "E_STORAGE",
-                "bounded reads require storage format 5, 6, 7, 8, or 9",
+                "bounded reads require storage format 5, 6, 7, 8, 9, 10, or 11",
             ));
         }
         validate_generation_state(&transaction, &meta, layout, generation)?;
@@ -5087,6 +5175,8 @@ fn read_meta(
             | JOURNAL_STORAGE_FORMAT_VERSION
             | MAP_STORAGE_FORMAT_VERSION
             | MAP_JOURNAL_STORAGE_FORMAT_VERSION
+            | PARTIAL_STORAGE_FORMAT_VERSION
+            | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
     }
@@ -5099,6 +5189,7 @@ fn read_meta(
             | SCALAR_CATALOG_CODEC_VERSION
             | PRODUCTION_CATALOG_CODEC_VERSION
             | MAP_CATALOG_CODEC_VERSION
+            | PARTIAL_CATALOG_CODEC_VERSION
     ) || (format_version >= SCALAR_STORAGE_FORMAT_VERSION && catalog_version != expected.catalog)
     {
         return Err(Error::new(
@@ -6266,6 +6357,7 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
             | SCALAR_CATALOG_CODEC_VERSION
             | PRODUCTION_CATALOG_CODEC_VERSION
             | MAP_CATALOG_CODEC_VERSION
+            | PARTIAL_CATALOG_CODEC_VERSION
     ) {
         return Err(Error::new(
             "E_STORAGE",
@@ -6277,10 +6369,10 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
     let mut json = serde_json::to_value(entry)
         .map_err(|error| Error::new("E_STORAGE", format!("encode catalog entry: {error}")))?;
     if let DurableCatalogEntry::Index { definition, .. } = entry {
-        if definition.predicate.is_some() {
+        if definition.predicate.is_some() && version < PARTIAL_CATALOG_CODEC_VERSION {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "partial unique indexes require storage format 10; durable support is not available in this implementation stage",
+                "partial unique indexes require storage format 10; run storage upgrade --to 10",
             ));
         }
         let components = definition.effective_components();
