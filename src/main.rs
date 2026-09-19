@@ -8,7 +8,8 @@ use unionid::{cli, project, server};
 #[command(
     name = "unionid",
     version,
-    about = "A lightweight database with algebraic types and pipeline queries"
+    about = "A lightweight database with algebraic types and pipeline queries",
+    after_help = "First run / 首次使用:\n  unionid init tasks && cd tasks\n  unionid project check --dir .\n  unionid migration apply --db data/tasks.redb --dir migrations\n  unionid run --db data/tasks.redb --file seed.unid\n  unionid docs                 # bundled version-matched guide / 内置版本匹配文档"
 )]
 struct Args {
     #[command(subcommand)]

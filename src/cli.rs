@@ -1439,9 +1439,34 @@ fn run_local_engine(
         if one_shot_introspection && let Some(kind) = introspection_command(source.trim()) {
             return print_introspection(&engine.introspection(), kind, json);
         }
-        return print_response(&engine.execute(&source), json);
+        let response = engine.execute(&source);
+        print_first_run_hint(&engine, &response);
+        return print_response(&response, json);
     }
     repl(Some(&mut engine), "", json, history)
+}
+
+/// Add an actionable next step when a script fails on an empty local database.
+///
+/// This is additive stderr guidance for the first-use journey: it never changes
+/// the error code, message, exit class, or JSON output, and it stays silent once
+/// the database has any table.
+fn print_first_run_hint(engine: &Engine, response: &QueryResponse) -> bool {
+    if !first_run_hint_applies(engine, response) {
+        return false;
+    }
+    eprintln!("hint: this database has no tables yet; apply migrations first, for example:");
+    eprintln!("  unionid migration apply --db <path> --dir migrations");
+    eprintln!("hint: run `unionid docs` for the bundled first-use guide");
+    true
+}
+
+fn first_run_hint_applies(engine: &Engine, response: &QueryResponse) -> bool {
+    response
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "E_TABLE")
+        && engine.tables().is_empty()
 }
 
 pub fn run_cli(addr: &str, source: Option<String>, json: bool) -> Result<(), String> {
@@ -1483,10 +1508,13 @@ fn repl(
                 json,
             );
         }
-        let response = match engine {
+        let response = match engine.as_deref_mut() {
             Some(engine) => engine.execute(&source),
             None => send_one(addr, &source)?,
         };
+        if let Some(engine) = engine.as_deref() {
+            print_first_run_hint(engine, &response);
+        }
         return print_response(&response, json);
     }
     eprintln!("Enter a script. A blank line runs it when ready; .help lists commands.");
@@ -1562,6 +1590,9 @@ fn repl(
                 match response.and_then(|response| {
                     let changed = response.schema.as_ref()
                         != introspection.as_ref().map(|current| &current.schema);
+                    if let Some(engine) = engine.as_deref() {
+                        print_first_run_hint(engine, &response);
+                    }
                     let result = print_response(&response, json);
                     if changed && response.ok {
                         match load_introspection(

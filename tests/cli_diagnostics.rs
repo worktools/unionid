@@ -179,6 +179,66 @@ fn compact_cli_reports_success_and_stable_state_errors() {
 }
 
 #[test]
+fn run_on_an_empty_database_reports_an_actionable_hint() {
+    let dir = TempDir::new();
+    let database = dir.0.join("empty.redb");
+    drop(Engine::open_redb(&database).unwrap());
+
+    let output = run(&[
+        "run",
+        "--db",
+        database.to_str().unwrap(),
+        "--query",
+        "from tasks",
+    ]);
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no tables yet"), "{stderr}");
+    assert!(stderr.contains("migration apply"), "{stderr}");
+
+    let json_output = run(&[
+        "run",
+        "--db",
+        database.to_str().unwrap(),
+        "--query",
+        "from tasks",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(json_output.status.code(), Some(3));
+    assert_eq!(json(&json_output)["error"]["code"], "E_TABLE");
+    // The hint is stderr-only, so stdout stays machine-readable.
+    assert!(!String::from_utf8_lossy(&json_output.stdout).contains("hint:"));
+
+    // Piped local CLI input gets the same hint without changing its JSON stdout.
+    let piped = {
+        use std::io::Write;
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args(["cli", "--memory", "--format", "json"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"from tasks\n")
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    assert_eq!(piped.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&piped.stderr).contains("no tables yet"),
+        "{}",
+        String::from_utf8_lossy(&piped.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&piped.stdout).contains("hint:"));
+    assert_eq!(json(&piped)["error"]["code"], "E_TABLE");
+}
+
+#[test]
 fn doctor_reads_existing_state_without_changing_the_database() {
     let dir = TempDir::new();
     let database = dir.0.join("doctor.redb");
