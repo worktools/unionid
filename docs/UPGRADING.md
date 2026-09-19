@@ -38,7 +38,7 @@ Before upgrading or switching maintenance binaries, export and verify any active
 
 ### 从 v0.9.1 升级
 
-v0.10.0 可直接打开 v0.9.1 的 format-6/7 数据库，不要求 storage upgrade、应用 schema migration 或查询源码重写。既有 format 6/7 数据库保持原能力；只有显式 `upgrade --target 8/10`（或 7→9→11）才会启用 typed map 与 partial unique index。新数据库默认创建为 format 10，因此新项目无需 upgrade 即可使用这些能力。`reindex` 不是必需的；但若希望在旧库上声明 map 列或 partial unique index，必须先升级到对应格式。本版本不改变 protocol（1/2）、stream protocol（1）或 query contract 版本。
+v0.10.0 可直接打开 v0.9.1 的 format-6/7 数据库，不要求 storage upgrade、应用 schema migration 或查询源码重写。既有 format 6/7 数据库保持原能力；只有显式 `upgrade --target 8/10`（或 7→9→11）才会启用 typed map 与 partial unique index。新数据库默认创建为 format 10，因此新项目无需 upgrade 即可使用这些能力。`reindex` 不是必需的；但若希望在旧库上声明 map 列或 partial unique index，必须先升级到对应格式。本版本不改变 protocol（1/2）、stream protocol（1）或 query contract 版本。Rust 源码层面，`Error` 新增公开字段 `constraint: Option<ConstraintKind>`；直接构造 `Error { code, message, span }` 的代码需补 `constraint: None`，使用 `Error::new` 的代码不受影响。
 
 ```bash
 unionid doctor --db app.redb --format json
@@ -144,7 +144,7 @@ Only `backup incremental init` / `Engine::enable_backup_journal` enters a journa
 
 ### Upgrading from v0.9.1
 
-v0.10.0 directly opens v0.9.1 format-6/7 databases without a storage upgrade, application schema migration, or query-source rewrite. Existing format 6/7 databases keep their current capabilities; only an explicit `upgrade --target 8/10` (or 7-to-9-to-11) enables typed maps and partial unique indexes. Fresh databases start at format 10, so new projects can use those capabilities without an upgrade. No reindex is required, but declaring a map column or a partial unique index on an older database requires upgrading to the corresponding format first. This release does not change the protocol (1/2), the stream protocol (1), or the query contract version.
+v0.10.0 directly opens v0.9.1 format-6/7 databases without a storage upgrade, application schema migration, or query-source rewrite. Existing format 6/7 databases keep their current capabilities; only an explicit `upgrade --target 8/10` (or 7-to-9-to-11) enables typed maps and partial unique indexes. Fresh databases start at format 10, so new projects can use those capabilities without an upgrade. No reindex is required, but declaring a map column or a partial unique index on an older database requires upgrading to the corresponding format first. This release does not change the protocol (1/2), the stream protocol (1), or the query contract version. At the Rust source level, `Error` gains a public `constraint: Option<ConstraintKind>` field; code constructing `Error { code, message, span }` literally must add `constraint: None`, while `Error::new` callers are unaffected.
 
 ### Upgrading from v0.8.0
 
