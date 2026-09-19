@@ -4023,6 +4023,133 @@ set external_id =
 }
 
 #[test]
+fn partial_unique_index_planner_requires_a_proven_predicate() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        r#"type User = {id int, email text, deleted_at option text}
+table users User
+  key id
+create unique index users (email) if deleted_at == None
+insert users {id = 1, email = "a@example.com", deleted_at = None}
+insert users {id = 2, email = "b@example.com", deleted_at = Some "old"}"#,
+    );
+
+    // Separate leading filters prove the predicate and use the partial index.
+    let plan = ok(
+        &mut engine,
+        "explain from users\nfilter deleted_at == None\nfilter email == \"a@example.com\"",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::SecondaryIndexLookup);
+    assert_eq!(plan.access.index.as_deref(), Some("users.email"));
+    assert_eq!(
+        plan.access.index_predicate.as_deref(),
+        Some("deleted_at == None")
+    );
+    assert!(plan.access.predicate_proven);
+    assert!(plan.access.predicate_rejections.is_empty());
+
+    // A conjunction in one filter still does not open an access path (the
+    // planner only reads simple leading comparisons), so this stays a scan.
+    let plan = ok(
+        &mut engine,
+        "explain from users\nfilter deleted_at == None && email == \"a@example.com\"",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::FullScan);
+
+    // Without the predicate filter the partial index is rejected explicitly.
+    let plan = ok(
+        &mut engine,
+        "explain from users\nfilter email == \"a@example.com\"",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::FullScan);
+    assert_eq!(plan.access.predicate_rejections.len(), 1);
+    assert_eq!(
+        plan.access.predicate_rejections[0].reason,
+        "predicate_not_implied"
+    );
+    assert!(
+        plan.access.predicate_rejections[0]
+            .index
+            .contains("email if sha256:")
+    );
+    // Rejections must stay value-free: the predicate literal never leaks.
+    assert!(
+        !plan.access.predicate_rejections[0]
+            .index
+            .contains("deleted_at")
+    );
+
+    // `is_some` does not prove an equality-to-None predicate.
+    let plan = ok(
+        &mut engine,
+        "explain from users\nfilter is_some deleted_at\nfilter email == \"a@example.com\"",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::FullScan);
+
+    // A stage barrier before the predicate filter prevents the proof.
+    let plan = ok(
+        &mut engine,
+        "explain from users\nfilter email == \"a@example.com\"\nderive tag = 1\nfilter deleted_at == None",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::FullScan);
+
+    // Predicate atoms flatten from a pure conjunction while component
+    // equality comes from separate leading filters.
+    ok(
+        &mut engine,
+        r#"type JobState = Pending | Active
+type Job = {id int, provider text, external_id text, state JobState, owner option text}
+table jobs Job
+  key id
+create unique index jobs (provider, external_id) if state == Active && is_some owner
+insert jobs {id = 1, provider = "acme", external_id = "42", state = Active, owner = Some "a"}"#,
+    );
+    let proven = ok(
+        &mut engine,
+        "explain from jobs\nfilter provider == \"acme\"\nfilter external_id == \"42\"\nfilter state == Active && is_some owner",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(proven.access.kind, QueryAccessKind::CompositeLookup);
+    assert_eq!(
+        proven.access.index_predicate.as_deref(),
+        Some("state == Active && is_some owner")
+    );
+    assert!(proven.access.predicate_proven);
+
+    // `field == Some(value)` independently implies `is_some field`.
+    let via_equality = ok(
+        &mut engine,
+        "explain from jobs\nfilter provider == \"acme\"\nfilter external_id == \"42\"\nfilter state == Active\nfilter owner == Some \"a\"",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(via_equality.access.kind, QueryAccessKind::CompositeLookup);
+    assert!(via_equality.access.predicate_proven);
+
+    // Dropping either predicate atom loses the proof.
+    let partial_proof = ok(
+        &mut engine,
+        "explain from jobs\nfilter provider == \"acme\"\nfilter external_id == \"42\"\nfilter state == Active",
+    )
+    .plan
+    .unwrap();
+    assert_eq!(partial_proof.access.kind, QueryAccessKind::FullScan);
+    assert_eq!(partial_proof.access.predicate_rejections.len(), 1);
+}
+
+#[test]
 fn partial_unique_index_migrations_validate_existing_rows_and_drop_exact_shape() {
     let mut engine = Engine::memory();
     ok(

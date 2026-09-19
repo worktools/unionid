@@ -90,6 +90,77 @@ impl IndexPredicate {
             }
         })
     }
+
+    /// Every predicate atom must appear identically in the bound query atom
+    /// set. Extra query atoms, disjunction, negation, or computed conditions do
+    /// not contribute, which keeps the proof intentionally conservative.
+    pub(crate) fn implied_by(&self, query: &[IndexPredicateAtom]) -> bool {
+        self.atoms
+            .iter()
+            .all(|atom| query.iter().any(|candidate| equivalent(atom, candidate)))
+    }
+}
+
+/// Flatten the leading bound query filters into predicate atoms without
+/// rejecting unsupported shapes: callers only need a conservative superset of
+/// the conditions the query guarantees. `field == Some(value)` contributes both
+/// the equality and `is_some`, and `field == None` normalizes to `is_none`.
+pub(crate) fn collect_query_atoms(
+    catalog: &Catalog,
+    fields: &[Column],
+    expression: &BoolExpression,
+    atoms: &mut Vec<IndexPredicateAtom>,
+) -> Result<()> {
+    match expression {
+        BoolExpression::And(left, right) => {
+            collect_query_atoms(catalog, fields, left, atoms)?;
+            collect_query_atoms(catalog, fields, right, atoms)
+        }
+        BoolExpression::Compare {
+            left: ScalarExpression::Reference(column),
+            op: CmpOp::Eq,
+            right,
+            operand_type: Some(value_type),
+        } if is_literal(right) => {
+            let field_path = catalog.field_path_ids(fields, column)?;
+            let value = crate::expression::evaluate_value(catalog, right, |_| None)?;
+            if matches!(value.unwrapped(), Value::Option(None)) {
+                atoms.push(IndexPredicateAtom::IsNone {
+                    column: column.clone(),
+                    field_path,
+                });
+            } else {
+                if matches!(value.unwrapped(), Value::Option(Some(_))) {
+                    atoms.push(IndexPredicateAtom::IsSome {
+                        column: column.clone(),
+                        field_path: field_path.clone(),
+                    });
+                }
+                atoms.push(IndexPredicateAtom::Equal {
+                    column: column.clone(),
+                    field_path,
+                    value_type: value_type.clone(),
+                    value: catalog.coerce(&value, value_type, "query predicate literal")?,
+                });
+            }
+            Ok(())
+        }
+        BoolExpression::IsNone(ScalarExpression::Reference(column)) => {
+            atoms.push(IndexPredicateAtom::IsNone {
+                column: column.clone(),
+                field_path: catalog.field_path_ids(fields, column)?,
+            });
+            Ok(())
+        }
+        BoolExpression::IsSome(ScalarExpression::Reference(column)) => {
+            atoms.push(IndexPredicateAtom::IsSome {
+                column: column.clone(),
+                field_path: catalog.field_path_ids(fields, column)?,
+            });
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 impl IndexPredicateAtom {

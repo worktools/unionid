@@ -143,6 +143,34 @@ sort slug"#;
 }
 
 #[test]
+fn partial_unique_index_proves_page_order_only_when_implied() {
+    let mut engine = Engine::memory();
+    let created = engine.execute(
+        r#"type User = {id int, email text, deleted_at option text}
+table users User
+  key id
+create unique index users (email) if deleted_at == None
+insert many users [
+  {id = 1, email = "a@example.com", deleted_at = None},
+  {id = 2, email = "b@example.com", deleted_at = None},
+  {id = 3, email = "a@example.com", deleted_at = Some "old"},
+]"#,
+    );
+    assert!(created.ok, "{}", created.message);
+
+    let proven = engine
+        .execute("explain\n  from users\n  filter deleted_at == None\n  sort email\n  page 2");
+    assert!(proven.ok, "{}", proven.message);
+    assert!(proven.plan.unwrap().access.predicate_proven);
+
+    // Without the predicate filter the partial unique index cannot prove a
+    // statically unique page order.
+    let rejected = engine.execute("from users | sort email | page 2");
+    assert!(!rejected.ok);
+    assert_eq!(rejected.error.unwrap().code, "E_PAGE_ORDER");
+}
+
+#[test]
 fn composite_index_page_seek_resumes_after_redb_reopen() {
     let dir = TempDir::new();
     let path = dir.0.join("composite-page.redb");

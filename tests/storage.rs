@@ -144,6 +144,44 @@ fn partial_unique_index_transitions_and_backup_survive_reopen() {
 }
 
 #[test]
+fn redb_partial_unique_index_planner_uses_proven_predicate() {
+    let dir = TempDir::new();
+    let path = dir.0.join("partial-plan.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let setup = engine.execute(
+        "type User = {id int, email text, deleted_at option text}\n\
+         table users User\n  key id\n\
+         create unique index users (email) if deleted_at == None\n\
+         insert users {id = 1, email = \"a@example.com\", deleted_at = None}",
+    );
+    assert!(setup.ok, "{}", setup.message);
+
+    let proven = engine.execute(
+        "explain from users\nfilter deleted_at == None\nfilter email == \"a@example.com\"",
+    );
+    let plan = proven.plan.unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::SecondaryIndexLookup);
+    assert_eq!(plan.access.index.as_deref(), Some("users.email"));
+    assert!(plan.access.predicate_proven);
+    let rejected = engine
+        .execute("explain from users\nfilter email == \"a@example.com\"")
+        .plan
+        .unwrap();
+    assert_eq!(rejected.access.kind, QueryAccessKind::FullScan);
+    assert_eq!(rejected.access.predicate_rejections.len(), 1);
+    drop(engine);
+
+    // The proven plan is reconstructed from the persisted catalog after reopen.
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    let plan = reopened
+        .execute("explain from users\nfilter deleted_at == None\nfilter email == \"a@example.com\"")
+        .plan
+        .unwrap();
+    assert_eq!(plan.access.kind, QueryAccessKind::SecondaryIndexLookup);
+    assert!(plan.access.predicate_proven);
+}
+
+#[test]
 fn default_redb_writes_use_format10_without_journal_metadata() {
     let dir = TempDir::new();
     let path = dir.0.join("default-format10.redb");
