@@ -68,6 +68,8 @@ jobs:
           - churn-eval
           - compaction-eval
           - incremental-backup-eval
+          - adt-interop-eval
+          - concurrency-eval
     steps:
       - uses: actions/checkout@v7
         with:
