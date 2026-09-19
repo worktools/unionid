@@ -35,6 +35,9 @@ pub struct BundledDocsTopic {
     pub category: DocsCategory,
     pub title: &'static str,
     pub summary: &'static str,
+    /// Repository path of the bundled document, used for coverage checks.
+    #[serde(skip)]
+    pub source: &'static str,
     #[serde(skip)]
     content: &'static str,
 }
@@ -71,6 +74,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "getting-started",
         category: DocsCategory::Learn,
         title: "Getting started / 入门",
+        source: "docs/GETTING_STARTED.md",
         summary: "Install Unionid and complete the first local ADT database workflow.",
         content: include_str!("../docs/GETTING_STARTED.md"),
     },
@@ -78,6 +82,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "cli",
         category: DocsCategory::Learn,
         title: "CLI and REPL / 命令行与交互环境",
+        source: "docs/CLI.md",
         summary: "Use local, remote, scripted, interactive, and diagnostic CLI flows.",
         content: include_str!("../docs/CLI.md"),
     },
@@ -85,6 +90,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "language",
         category: DocsCategory::Language,
         title: "Language overview / 语言概览",
+        source: "docs/LANGUAGE.md",
         summary: "Read the executable, Rust-shaped, semicolon-free language surface.",
         content: include_str!("../docs/LANGUAGE.md"),
     },
@@ -92,6 +98,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "query",
         category: DocsCategory::Language,
         title: "Query language / 查询语言",
+        source: "docs/QUERY.md",
         summary: "Use pipelines, expressions, ADT matching, aggregation, and bounded reads.",
         content: include_str!("../docs/QUERY.md"),
     },
@@ -100,12 +107,14 @@ const TOPICS: &[BundledDocsTopic] = &[
         category: DocsCategory::Language,
         title: "LLM query context / LLM 查询上下文",
         summary: "Provide compact query-generation rules; use `docs query` for examples.",
+        source: "docs/LLM_QUERY.md",
         content: QUERY_REFERENCE,
     },
     BundledDocsTopic {
         name: "schema",
         category: DocsCategory::Language,
         title: "Schema and evolution / Schema 与演进",
+        source: "docs/SCHEMA.md",
         summary: "Define ADTs, tables, stable identities, defaults, and evolution contracts.",
         content: include_str!("../docs/SCHEMA.md"),
     },
@@ -113,13 +122,23 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "scalars",
         category: DocsCategory::Language,
         title: "Production scalars / 生产标量",
+        source: "docs/SCALARS.md",
         summary: "Use decimal, temporal, UUID, bytes, and related typed values.",
         content: include_str!("../docs/SCALARS.md"),
+    },
+    BundledDocsTopic {
+        name: "scenarios",
+        category: DocsCategory::Language,
+        title: "Real scenarios / 实际场景",
+        source: "docs/SCENARIOS.md",
+        summary: "Apply ADTs and queries to task queues, configs, events, sync, and key/value data.",
+        content: include_str!("../docs/SCENARIOS.md"),
     },
     BundledDocsTopic {
         name: "application-data",
         category: DocsCategory::Application,
         title: "Application ADTs / 应用数据类型",
+        source: "docs/APPLICATION_DATA.md",
         summary: "Move structs, enums, options, tuples, and lists across application boundaries.",
         content: include_str!("../docs/APPLICATION_DATA.md"),
     },
@@ -127,6 +146,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "rust-query-macro",
         category: DocsCategory::Application,
         title: "Inline Rust queries / 内联 Rust 查询",
+        source: "docs/RUST_QUERY_MACRO.md",
         summary: "Compile inline pipelines into schema-checked typed Rust bindings.",
         content: include_str!("../docs/RUST_QUERY_MACRO.md"),
     },
@@ -134,6 +154,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "migrations",
         category: DocsCategory::Lifecycle,
         title: "Migrations / 数据迁移",
+        source: "docs/MIGRATIONS.md",
         summary: "Plan, apply, resume, inspect, and validate schema migrations.",
         content: include_str!("../docs/MIGRATIONS.md"),
     },
@@ -141,6 +162,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "upgrading",
         category: DocsCategory::Lifecycle,
         title: "Upgrading / 版本升级",
+        source: "docs/UPGRADING.md",
         summary: "Upgrade binaries, storage formats, codecs, and source compatibility safely.",
         content: include_str!("../docs/UPGRADING.md"),
     },
@@ -148,6 +170,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "service",
         category: DocsCategory::Integration,
         title: "Service integration / 服务集成",
+        source: "docs/SERVICE.md",
         summary: "Embed or serve Unionid with request, concurrency, and shutdown boundaries.",
         content: include_str!("../docs/SERVICE.md"),
     },
@@ -155,6 +178,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "protocol",
         category: DocsCategory::Integration,
         title: "Wire protocol / 传输协议",
+        source: "docs/PROTOCOL.md",
         summary: "Integrate through versioned typed request, response, and stream contracts.",
         content: include_str!("../docs/PROTOCOL.md"),
     },
@@ -162,6 +186,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "http",
         category: DocsCategory::Integration,
         title: "HTTP adapter / HTTP 适配器",
+        source: "docs/HTTP.md",
         summary: "Expose bounded query and stream operations through the HTTP adapter.",
         content: include_str!("../docs/HTTP.md"),
     },
@@ -169,6 +194,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "deployment",
         category: DocsCategory::Operations,
         title: "Deployment / 部署",
+        source: "docs/DEPLOYMENT.md",
         summary: "Run a durable service with explicit resource and maintenance boundaries.",
         content: include_str!("../docs/DEPLOYMENT.md"),
     },
@@ -176,6 +202,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "backup",
         category: DocsCategory::Operations,
         title: "Backup and restore / 备份与恢复",
+        source: "docs/BACKUP.md",
         summary: "Create, verify, restore, and retain logical and incremental backups.",
         content: include_str!("../docs/BACKUP.md"),
     },
@@ -183,6 +210,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "storage",
         category: DocsCategory::Operations,
         title: "Storage / 存储",
+        source: "docs/STORAGE.md",
         summary: "Understand redb durability, formats, checks, compaction, and limits.",
         content: include_str!("../docs/STORAGE.md"),
     },
@@ -190,6 +218,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "metrics",
         category: DocsCategory::Operations,
         title: "Metrics / 指标",
+        source: "docs/METRICS.md",
         summary: "Export bounded-cardinality process metrics without exposing data values.",
         content: include_str!("../docs/METRICS.md"),
     },
@@ -197,6 +226,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         name: "observability",
         category: DocsCategory::Operations,
         title: "Observability / 可观测性",
+        source: "docs/OBSERVABILITY.md",
         summary: "Configure value-free terminal and slow-query observation safely.",
         content: include_str!("../docs/OBSERVABILITY.md"),
     },
@@ -345,7 +375,7 @@ mod tests {
     fn bundled_docs_are_categorized_and_versioned() {
         let catalog = docs_catalog(None);
         assert_eq!(catalog.schema_version, 1);
-        assert_eq!(catalog.topics.len(), 19);
+        assert_eq!(catalog.topics.len(), 20);
         assert_eq!(catalog.topics[0].name, "getting-started");
         assert!(catalog.topics.iter().any(|topic| topic.name == "query"));
         assert!(
@@ -362,7 +392,7 @@ mod tests {
         );
 
         let language = docs_catalog(Some(DocsCategory::Language));
-        assert_eq!(language.topics.len(), 5);
+        assert_eq!(language.topics.len(), 6);
         assert!(
             language
                 .topics
@@ -377,5 +407,54 @@ mod tests {
         assert!(rendered.starts_with("---\ndocument_schema_version: 1\n"));
         assert!(rendered.contains("topic: query\ncategory: language"));
         assert!(bundled_document("missing").is_none());
+    }
+
+    #[test]
+    fn bundled_topics_cover_the_user_facing_readme_docs() {
+        // Every docs/*.md the README links for users must be reachable through
+        // `unionid docs`, except release notes and contributor/planning pages.
+        const EXCLUDED: &[&str] = &[
+            "DEVELOPMENT",
+            "ROADMAP",
+            "RELEASE-VALIDATION",
+            "RELEASE-v0.1.0",
+            "RELEASE-v0.2.0",
+            "RELEASE-v0.3.0",
+            "RELEASE-v0.4.0",
+            "RELEASE-v0.5.0",
+            "RELEASE-v0.6.0",
+            "RELEASE-v0.7.0",
+            "RELEASE-v0.8.0",
+            "RELEASE-v0.9.0",
+            "RELEASE-v0.9.1",
+            "RELEASE-v0.10.0",
+        ];
+        let bundled = TOPICS
+            .iter()
+            .map(|topic| topic.source)
+            .collect::<std::collections::BTreeSet<_>>();
+        let readme = include_str!("../README.md");
+        let mut missing = Vec::new();
+        for segment in readme.split("(docs/").skip(1) {
+            let Some(end) = segment.find(".md)") else {
+                continue;
+            };
+            let stem = &segment[..end];
+            if stem.contains('/') || EXCLUDED.contains(&stem) {
+                // Subdirectory links (rfc/, benchmarks/, assessments/) are not
+                // bundled topics; release notes and planning pages are excluded.
+                continue;
+            }
+            let path = format!("docs/{stem}.md");
+            if !bundled.contains(path.as_str()) {
+                missing.push(stem.to_string());
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "README links these docs but `unionid docs` does not bundle them: {missing:?}"
+        );
     }
 }
