@@ -245,6 +245,44 @@ fn corrupt_or_unknown_backups_do_not_create_or_replace_a_target() {
 }
 
 #[test]
+fn backup_before_format6_rejects_partial_index_predicates() {
+    let dir = TempDir::new();
+    let source = dir.0.join("partial-backup.redb");
+    let archive = dir.0.join("partial.backup.json");
+    let legacy = dir.0.join("partial-as-v5.json");
+    let target = dir.0.join("partial-restored.redb");
+    {
+        let mut engine = Engine::open_redb(&source).unwrap();
+        assert!(
+            engine
+                .execute(
+                    "type User = {id int, email text, deleted_at option text}\n\
+                     table users User\n  key id\n\
+                     create unique index users (email) if deleted_at == None"
+                )
+                .ok
+        );
+    }
+    let created = backup::create(&source, &archive).unwrap();
+    assert_eq!(created.format_version, 6);
+    let text = std::fs::read_to_string(&archive).unwrap();
+    std::fs::write(
+        &legacy,
+        text.replacen("\"format_version\":6", "\"format_version\":5", 1),
+    )
+    .unwrap();
+    let error = backup::restore(&legacy, &target).unwrap_err();
+    assert_eq!(error.code, "E_BACKUP");
+    assert!(
+        error
+            .message
+            .contains("partial unique indexes require backup format 6"),
+        "{error}"
+    );
+    assert!(!target.exists());
+}
+
+#[test]
 fn explicit_legacy_import_preserves_inputs_and_converts_supported_wal_snapshot() {
     let dir = TempDir::new();
     let snapshot = dir.0.join("legacy.snapshot");

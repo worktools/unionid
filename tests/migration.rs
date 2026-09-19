@@ -1,45 +1,14 @@
 mod common;
 
-use common::TempDir;
-use redb::{Database as RedbDatabase, Durability, TableDefinition};
+use common::{TempDir, create_empty_format};
 use unionid::migration::{
     ApplyDecision, MigrationEntry, MigrationFile, checksum, load_directory, validate_history,
     validate_next,
 };
 use unionid::{Engine, Value};
 
-const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
-const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
-const REDB_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
-const REDB_SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("secondary_index");
-
 fn create_empty_format6(path: &std::path::Path) {
-    drop(Engine::open_redb(path).unwrap());
-    let database = RedbDatabase::open(path).unwrap();
-    let mut transaction = database.begin_write().unwrap();
-    transaction.set_durability(Durability::Immediate).unwrap();
-    transaction.set_two_phase_commit(true);
-    transaction.open_table(REDB_CATALOG).unwrap();
-    transaction.open_table(REDB_ROWS).unwrap();
-    transaction.open_table(REDB_SECONDARY_INDEX).unwrap();
-    let mut meta = transaction.open_table(REDB_META).unwrap();
-    for (key, value) in [
-        ("storage_format_version", 3_u32.to_be_bytes().to_vec()),
-        ("catalog_codec_version", 2_u16.to_be_bytes().to_vec()),
-        ("value_codec_version", 1_u16.to_be_bytes().to_vec()),
-        ("index_key_version", 1_u16.to_be_bytes().to_vec()),
-        ("migration_codec_version", 1_u16.to_be_bytes().to_vec()),
-        ("receipt_codec_version", 1_u16.to_be_bytes().to_vec()),
-    ] {
-        meta.insert(key, value.as_slice()).unwrap();
-    }
-    drop(meta);
-    transaction.commit().unwrap();
-    drop(database);
-    let mut engine = Engine::open_redb(path).unwrap();
-    for target in [4, 5, 6] {
-        engine.upgrade_storage(target).unwrap();
-    }
+    create_empty_format(path, 6);
 }
 
 fn ok(engine: &mut Engine, source: &str) -> unionid::QueryResponse {

@@ -5,7 +5,69 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use redb::{Database as RedbDatabase, Durability, TableDefinition};
+use unionid::Engine;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+const REDB_META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+const REDB_CATALOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("catalog");
+const REDB_ROWS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rows");
+const REDB_SECONDARY_INDEX: TableDefinition<&[u8], u8> = TableDefinition::new("secondary_index");
+
+/// Rewrite a freshly created file as an empty storage-format-3 database so tests
+/// can exercise the explicit upgrade chain from the oldest bounded format.
+pub fn create_empty_format3(path: &std::path::Path) {
+    drop(Engine::open_redb(path).unwrap());
+    let database = RedbDatabase::open(path).unwrap();
+    let mut transaction = database.begin_write().unwrap();
+    transaction.set_durability(Durability::Immediate).unwrap();
+    transaction.set_two_phase_commit(true);
+    transaction.open_table(REDB_CATALOG).unwrap();
+    transaction.open_table(REDB_ROWS).unwrap();
+    transaction.open_table(REDB_SECONDARY_INDEX).unwrap();
+    let mut meta = transaction.open_table(REDB_META).unwrap();
+    for (key, value) in [
+        ("storage_format_version", 3_u32.to_be_bytes().to_vec()),
+        ("catalog_codec_version", 2_u16.to_be_bytes().to_vec()),
+        ("value_codec_version", 1_u16.to_be_bytes().to_vec()),
+        ("index_key_version", 1_u16.to_be_bytes().to_vec()),
+        ("migration_codec_version", 1_u16.to_be_bytes().to_vec()),
+        ("receipt_codec_version", 1_u16.to_be_bytes().to_vec()),
+    ] {
+        meta.insert(key, value.as_slice()).unwrap();
+    }
+    drop(meta);
+    transaction.commit().unwrap();
+    drop(database);
+}
+
+/// Build an empty database at a supported legacy format (6, 7, 8, or 9) via the
+/// public upgrade chain, leaving the file closed.
+pub fn create_empty_format(path: &std::path::Path, target: u32) {
+    create_empty_format3(path);
+    let mut engine = Engine::open_redb(path).unwrap();
+    for step in [4, 5, 6, 8] {
+        if step > target {
+            break;
+        }
+        engine.upgrade_storage(step).unwrap();
+    }
+    if target == 7 || target == 9 {
+        let status = engine.backup_journal_status().unwrap();
+        engine
+            .enable_backup_journal(unionid::BackupJournalConfig::new(
+                "legacy",
+                status.head_sequence,
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        engine.introspection().storage_versions.unwrap().format,
+        target
+    );
+}
 
 pub struct TempDir(pub PathBuf);
 impl TempDir {

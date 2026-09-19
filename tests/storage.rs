@@ -607,27 +607,7 @@ fn commit_prepare_subphase_sum(profile: unionid::DurableCommitProfile) -> u64 {
 }
 
 fn create_empty_format3(path: &std::path::Path) {
-    drop(Engine::open_redb(path).unwrap());
-    let database = RedbDatabase::open(path).unwrap();
-    let mut transaction = database.begin_write().unwrap();
-    transaction.set_durability(Durability::Immediate).unwrap();
-    transaction.set_two_phase_commit(true);
-    transaction.open_table(REDB_CATALOG).unwrap();
-    transaction.open_table(REDB_ROWS).unwrap();
-    transaction.open_table(REDB_SECONDARY_INDEX).unwrap();
-    let mut meta = transaction.open_table(REDB_META).unwrap();
-    for (key, value) in [
-        ("storage_format_version", 3_u32.to_be_bytes().to_vec()),
-        ("catalog_codec_version", 2_u16.to_be_bytes().to_vec()),
-        ("value_codec_version", 1_u16.to_be_bytes().to_vec()),
-        ("index_key_version", 1_u16.to_be_bytes().to_vec()),
-        ("migration_codec_version", 1_u16.to_be_bytes().to_vec()),
-        ("receipt_codec_version", 1_u16.to_be_bytes().to_vec()),
-    ] {
-        meta.insert(key, value.as_slice()).unwrap();
-    }
-    drop(meta);
-    transaction.commit().unwrap();
+    common::create_empty_format3(path)
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -217,7 +217,7 @@ unionid receipts prune --db app.redb --through-sequence 1200 --max-receipts 500 
 
 无 cutoff、`max-receipts` 不在 1–1000，或存储／只读边界不允许操作时返回稳定错误和对应的分类退出码。清理后的 key 可以再次执行；命令不会按墙钟自动淘汰 receipt。
 
-format-6 schema migration 可以在进程退出后从 durable checkpoint 继续，并提供显式状态与清理命令：
+带 generation 的 format 6–11 schema migration 可以在进程退出后从 durable checkpoint 继续，并提供显式状态与清理命令：
 
 ```bash
 unionid migration apply --db app.redb --dir migrations
