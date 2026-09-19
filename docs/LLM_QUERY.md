@@ -22,8 +22,8 @@ canonical source and is convenient for a human or an LLM context. Use `.tables`,
 - Use `struct Name { field: Type }` for product types and
   `enum Name { Unit Tuple(Type) Record {field: Type} }` for sum types.
 - Built-in types include `bool`, `int`, `float`, `text`, `uuid`, `bytes`, `date`,
-  `timestamp`, `duration`, `Decimal<P, S>`, `Option<T>`, `List<T>`, and tuples such as
-  `(int, text)`.
+  `timestamp`, `duration`, `Decimal<P, S>`, `Option<T>`, `List<T>`, `Map<text, T>`, and
+  tuples such as `(int, text)`. Map values use `map {"key": value}`; keys are text.
 - Record values use `{field: value}`. Enum values use `Pending`, `Ready(value)`, or
   `Running {worker: "w1"}` when the expected enum type is known. Use a qualified form such
   as `State::Pending` in standalone or ambiguous expressions.
@@ -108,8 +108,10 @@ lists. `_` is a catch-all. `{field, ..}` binds one record field and ignores the 
 
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,
-`is_some`, `is_none`, `any`, and `all`. Parameters start with `$` and are type-checked
-against the supplied schema before execution.
+`is_some`, `is_none`, `any`, and `all`. For `Map<text, T>`, use `contains_key map key`,
+`get map key`, `keys map`, `values map`, or `entries map`; `get` returns `Option<T>`, and
+traversal follows canonical key order. `length` also accepts maps. Parameters start with `$`
+and are type-checked against the supplied schema before execution.
 
 Decimal `*` and `/` are intentionally explicit: use `decimal_mul left right P S "mode"`,
 `decimal_div left right P S "mode"`, or `decimal_round value P S "mode"`. Modes are
