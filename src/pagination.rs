@@ -18,8 +18,10 @@ pub const MAX_CURSOR_SORT_KEYS: usize = 16;
 
 const LEGACY_CURSOR_PREFIX: &str = "u1";
 const PRODUCTION_CURSOR_PREFIX: &str = "u2";
+const MAP_CURSOR_PREFIX: &str = "u3";
 const LEGACY_CURSOR_CODEC_VERSION: u32 = 1;
 const PRODUCTION_CURSOR_CODEC_VERSION: u32 = 2;
+const MAP_CURSOR_CODEC_VERSION: u32 = 3;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -127,8 +129,11 @@ pub(crate) fn encode(
             format!("cursor sort key count exceeds {MAX_CURSOR_SORT_KEYS}"),
         ));
     }
+    let map = keys.iter().any(|key| key.value.requires_map_codec());
     let production = keys.iter().any(|key| key.value.requires_v2());
-    let (prefix, codec) = if production {
+    let (prefix, codec) = if map {
+        (MAP_CURSOR_PREFIX, MAP_CURSOR_CODEC_VERSION)
+    } else if production {
         (PRODUCTION_CURSOR_PREFIX, PRODUCTION_CURSOR_CODEC_VERSION)
     } else {
         (LEGACY_CURSOR_PREFIX, LEGACY_CURSOR_CODEC_VERSION)
@@ -185,6 +190,7 @@ pub(crate) fn decode(
     let expected_codec = match prefix {
         Some(LEGACY_CURSOR_PREFIX) => LEGACY_CURSOR_CODEC_VERSION,
         Some(PRODUCTION_CURSOR_PREFIX) => PRODUCTION_CURSOR_CODEC_VERSION,
+        Some(MAP_CURSOR_PREFIX) => MAP_CURSOR_CODEC_VERSION,
         _ => {
             return Err(Error::new("E_CURSOR_CODEC", "unsupported cursor prefix"));
         }
@@ -223,8 +229,19 @@ pub(crate) fn decode(
             format!("cursor sort key count exceeds {MAX_CURSOR_SORT_KEYS}"),
         ));
     }
+    let map = payload
+        .keys
+        .iter()
+        .any(|key| key.value.requires_map_codec());
     let production = payload.keys.iter().any(|key| key.value.requires_v2());
-    if production != (expected_codec == PRODUCTION_CURSOR_CODEC_VERSION) {
+    let actual_codec = if map {
+        MAP_CURSOR_CODEC_VERSION
+    } else if production {
+        PRODUCTION_CURSOR_CODEC_VERSION
+    } else {
+        LEGACY_CURSOR_CODEC_VERSION
+    };
+    if actual_codec != expected_codec {
         return Err(Error::new(
             "E_CURSOR_CODEC",
             "cursor prefix does not match its typed boundary vocabulary",

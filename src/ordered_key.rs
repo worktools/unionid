@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::model::{Catalog, MAX_DEPTH, ScalarType, Value};
 
 pub(crate) const INDEX_KEY_CODEC_VERSION: u16 = 3;
+pub(crate) const MAP_INDEX_KEY_CODEC_VERSION: u16 = 4;
 pub(crate) const MAX_COMPLETE_INDEX_KEY_BYTES: usize = 64 * 1024;
 const INDEX_MAGIC: &[u8; 4] = b"UIDI";
 
@@ -13,6 +14,16 @@ pub(crate) struct Component<'a> {
 }
 
 pub(crate) fn encode_tuple(catalog: &Catalog, components: &[Component<'_>]) -> Result<Vec<u8>> {
+    // Tuple ordering is also used by the in-memory planner. It always uses the
+    // newest vocabulary; durable complete keys select their codec explicitly.
+    encode_tuple_version(catalog, components, MAP_INDEX_KEY_CODEC_VERSION)
+}
+
+fn encode_tuple_version(
+    catalog: &Catalog,
+    components: &[Component<'_>],
+    version: u16,
+) -> Result<Vec<u8>> {
     if components.is_empty() || components.len() > crate::query::MAX_INDEX_COMPONENTS {
         return Err(Error::new(
             "E_INDEX_SHAPE",
@@ -25,7 +36,14 @@ pub(crate) fn encode_tuple(catalog: &Catalog, components: &[Component<'_>]) -> R
     let mut output = Vec::new();
     for component in components {
         let start = output.len();
-        encode_value(catalog, component.ty, component.value, &mut output, 0)?;
+        encode_value(
+            catalog,
+            component.ty,
+            component.value,
+            &mut output,
+            0,
+            version,
+        )?;
         if component.descending {
             for byte in &mut output[start..] {
                 *byte = !*byte;
@@ -41,12 +59,43 @@ pub(crate) fn encode_complete(
     components: &[Component<'_>],
     row_id: u64,
 ) -> Result<Vec<u8>> {
-    let tuple = encode_tuple(catalog, components)?;
+    encode_complete_version(
+        catalog,
+        index_id,
+        components,
+        row_id,
+        INDEX_KEY_CODEC_VERSION,
+    )
+}
+
+pub(crate) fn encode_complete_v4(
+    catalog: &Catalog,
+    index_id: u64,
+    components: &[Component<'_>],
+    row_id: u64,
+) -> Result<Vec<u8>> {
+    encode_complete_version(
+        catalog,
+        index_id,
+        components,
+        row_id,
+        MAP_INDEX_KEY_CODEC_VERSION,
+    )
+}
+
+fn encode_complete_version(
+    catalog: &Catalog,
+    index_id: u64,
+    components: &[Component<'_>],
+    row_id: u64,
+    version: u16,
+) -> Result<Vec<u8>> {
+    let tuple = encode_tuple_version(catalog, components, version)?;
     let component_count = u8::try_from(components.len())
         .map_err(|_| Error::new("E_INDEX_SHAPE", "too many index fields"))?;
     let mut output = Vec::with_capacity(15 + tuple.len() + 8);
     output.extend_from_slice(INDEX_MAGIC);
-    output.extend_from_slice(&INDEX_KEY_CODEC_VERSION.to_be_bytes());
+    output.extend_from_slice(&version.to_be_bytes());
     output.extend_from_slice(&index_id.to_be_bytes());
     output.push(component_count);
     output.extend_from_slice(&tuple);
@@ -64,11 +113,19 @@ pub(crate) fn encode_complete(
 }
 
 pub(crate) fn validate_complete(key: &[u8]) -> Result<()> {
+    validate_complete_version(key, INDEX_KEY_CODEC_VERSION)
+}
+
+pub(crate) fn validate_complete_v4(key: &[u8]) -> Result<()> {
+    validate_complete_version(key, MAP_INDEX_KEY_CODEC_VERSION)
+}
+
+fn validate_complete_version(key: &[u8], expected: u16) -> Result<()> {
     if key.len() < 23 || key.len() > MAX_COMPLETE_INDEX_KEY_BYTES || &key[..4] != INDEX_MAGIC {
         return Err(Error::new("E_STORAGE", "invalid secondary index key"));
     }
     let version = u16::from_be_bytes(key[4..6].try_into().unwrap());
-    if version != INDEX_KEY_CODEC_VERSION {
+    if version != expected {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported secondary index key version {version}"),
@@ -90,6 +147,7 @@ fn encode_value(
     value: &Value,
     output: &mut Vec<u8>,
     depth: usize,
+    version: u16,
 ) -> Result<()> {
     if depth >= MAX_DEPTH {
         return Err(Error::new(
@@ -180,6 +238,7 @@ fn encode_value(
                 value,
                 output,
                 depth + 1,
+                version,
             )?,
             _ => return Err(mismatch()),
         },
@@ -195,7 +254,7 @@ fn encode_value(
                 }
                 output.extend_from_slice(&value.id.to_be_bytes());
                 for (ty, value) in variant.args.iter().zip(&value.args) {
-                    encode_value(catalog, ty, value, output, depth + 1)?;
+                    encode_value(catalog, ty, value, output, depth + 1, version)?;
                 }
             }
             _ => return Err(mismatch()),
@@ -211,6 +270,7 @@ fn encode_value(
                         values.get(&column.name).ok_or_else(mismatch)?,
                         output,
                         depth + 1,
+                        version,
                     )?;
                 }
             }
@@ -219,7 +279,7 @@ fn encode_value(
         ScalarType::Tuple(types) => match value {
             Value::Tuple(values) if values.len() == types.len() => {
                 for (ty, value) in types.iter().zip(values) {
-                    encode_value(catalog, ty, value, output, depth + 1)?;
+                    encode_value(catalog, ty, value, output, depth + 1, version)?;
                 }
             }
             _ => return Err(mismatch()),
@@ -228,7 +288,7 @@ fn encode_value(
             Value::Option(None) => output.push(0),
             Value::Option(Some(value)) => {
                 output.push(1);
-                encode_value(catalog, inner, value, output, depth + 1)?;
+                encode_value(catalog, inner, value, output, depth + 1, version)?;
             }
             _ => return Err(mismatch()),
         },
@@ -236,18 +296,24 @@ fn encode_value(
             Value::List(values) => {
                 for value in values {
                     output.push(1);
-                    encode_value(catalog, inner, value, output, depth + 1)?;
+                    encode_value(catalog, inner, value, output, depth + 1, version)?;
                 }
                 output.push(0);
             }
             _ => return Err(mismatch()),
         },
         ScalarType::Map(inner) => match value {
+            _ if version < MAP_INDEX_KEY_CODEC_VERSION => {
+                return Err(Error::new(
+                    "E_STORAGE_UPGRADE_REQUIRED",
+                    "map index values require index key codec 4",
+                ));
+            }
             Value::Map(entries) => {
                 for (key, value) in entries {
                     output.push(1);
                     encode_escaped(key.as_bytes(), output);
-                    encode_value(catalog, inner, value, output, depth + 1)?;
+                    encode_value(catalog, inner, value, output, depth + 1, version)?;
                 }
                 output.push(0);
             }

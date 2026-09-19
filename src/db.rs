@@ -6852,6 +6852,9 @@ impl Database {
             crate::codec::PRODUCTION_VALUE_CODEC_VERSION => {
                 crate::codec::encode_value_v2(&self.catalog, &ty, &value)?
             }
+            crate::codec::MAP_VALUE_CODEC_VERSION => {
+                crate::codec::encode_value_v3(&self.catalog, &ty, &value)?
+            }
             _ => {
                 return Err(Error::new(
                     "E_STORAGE",
@@ -6896,6 +6899,9 @@ impl Database {
                         }
                         crate::codec::PRODUCTION_VALUE_CODEC_VERSION => {
                             crate::codec::encode_value_v2(&self.catalog, &ty, &value)?
+                        }
+                        crate::codec::MAP_VALUE_CODEC_VERSION => {
+                            crate::codec::encode_value_v3(&self.catalog, &ty, &value)?
                         }
                         _ => {
                             return Err(Error::new(
@@ -6968,6 +6974,25 @@ impl Database {
         value: &Value,
         row_id: RowId,
     ) -> Result<Vec<u8>> {
+        self.encode_secondary_index_key_version(index_id, value, row_id, false)
+    }
+
+    pub(crate) fn encode_secondary_index_key_v4(
+        &self,
+        index_id: u64,
+        value: &Value,
+        row_id: RowId,
+    ) -> Result<Vec<u8>> {
+        self.encode_secondary_index_key_version(index_id, value, row_id, true)
+    }
+
+    fn encode_secondary_index_key_version(
+        &self,
+        index_id: u64,
+        value: &Value,
+        row_id: RowId,
+        map_capable: bool,
+    ) -> Result<Vec<u8>> {
         let (table_name, definition) = self
             .index_definitions
             .iter()
@@ -7016,7 +7041,11 @@ impl Database {
                 descending: component.descending,
             })
             .collect::<Vec<_>>();
-        crate::ordered_key::encode_complete(&self.catalog, index_id, &bound, row_id)
+        if map_capable {
+            crate::ordered_key::encode_complete_v4(&self.catalog, index_id, &bound, row_id)
+        } else {
+            crate::ordered_key::encode_complete(&self.catalog, index_id, &bound, row_id)
+        }
     }
 
     pub(crate) fn source_table_info(&self, name: &str) -> Result<(u64, RowId, ScalarType)> {
@@ -7146,10 +7175,15 @@ impl Database {
 
     pub(crate) fn validate_logical_backup(mut self) -> Result<Self> {
         self.rebuild_indexes()?;
+        let codec = if self.requires_map_storage() {
+            crate::codec::MAP_VALUE_CODEC_VERSION
+        } else {
+            crate::codec::PRODUCTION_VALUE_CODEC_VERSION
+        };
         Self::from_durable(
             self.durable_meta(),
             self.durable_catalog_entries(),
-            self.durable_rows_with_codec(crate::codec::PRODUCTION_VALUE_CODEC_VERSION)?,
+            self.durable_rows_with_codec(codec)?,
             self.migration_history.clone(),
         )
     }

@@ -2,10 +2,14 @@ use std::collections::BTreeMap;
 
 mod common;
 use common::TempDir;
+use unionid::backup::incremental::{BackupJournalConfig, BackupJournalState};
 use unionid::codec::{decode_value, encode_value_v2, encode_value_v3};
 use unionid::model::ScalarType;
 use unionid::portable::TypeShape;
-use unionid::{Engine, Value, WireValue, format_source};
+use unionid::{Engine, PageSpec, Value, WireValue, backup, format_source};
+
+const TEST_BACKUP_CHECKSUM: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 #[test]
 fn map_source_round_trips_through_memory_queries() {
@@ -163,4 +167,111 @@ fn redb_rejects_maps_before_publishing_any_schema_change() {
     let reopened = Engine::open_redb(&path).unwrap();
     assert!(reopened.tables().is_empty());
     assert!(!reopened.schema().contains("Item"));
+}
+
+#[test]
+fn map_storage_upgrade_round_trips_indexes_cursors_and_backups() {
+    let dir = TempDir::new();
+    let path = dir.0.join("maps-v8.redb");
+    let archive = dir.0.join("maps-v5.json");
+    let restored = dir.0.join("maps-restored.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let upgraded = engine.upgrade_storage(8).unwrap();
+    assert_eq!((upgraded.previous_format, upgraded.format), (6, 8));
+    let versions = engine.introspection().storage_versions.unwrap();
+    assert_eq!(
+        (
+            versions.catalog_codec,
+            versions.value_codec,
+            versions.index_key_codec,
+            versions.receipt_codec,
+            versions.backup_codec,
+        ),
+        (5, 3, 4, 3, 5)
+    );
+
+    let response = engine.execute(
+        r#"struct Item {
+  id: int
+  attributes: Map<text, int>
+}
+table items: Item { key id }
+create unique index items (attributes)
+insert items {id: 1, attributes: map {"a": 1}}
+insert items {id: 2, attributes: map {"b": 2}}"#,
+    );
+    assert!(response.ok, "{}", response.message);
+    let first = engine.execute_page("from items\nsort {attributes, id}", PageSpec::forward(1));
+    assert!(first.ok, "{}", first.message);
+    assert!(first.page.unwrap().next_cursor.unwrap().starts_with("u3."));
+    assert!(engine.check_integrity().unwrap().backend_clean);
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.introspection().storage_versions.unwrap().format, 8);
+    let rows = reopened.execute("from items\nsort id");
+    assert!(rows.ok, "{}", rows.message);
+    assert_eq!(rows.rows.len(), 2);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
+    drop(reopened);
+
+    let created = backup::create(&path, &archive).unwrap();
+    assert_eq!(created.format_version, 5);
+    let mut journal_engine = Engine::open_redb(&path).unwrap();
+    let journal_head = journal_engine
+        .backup_journal_status()
+        .unwrap()
+        .head_sequence;
+    let enabled = journal_engine
+        .enable_backup_journal(BackupJournalConfig::new(
+            "maps-v8",
+            journal_head,
+            TEST_BACKUP_CHECKSUM,
+        ))
+        .unwrap();
+    assert_eq!(enabled.storage_format, 9);
+    drop(journal_engine);
+
+    backup::restore(&archive, &restored).unwrap();
+    let mut restored = Engine::open_redb(&restored).unwrap();
+    assert_eq!(restored.introspection().storage_versions.unwrap().format, 8);
+    assert_eq!(restored.execute("from items").rows.len(), 2);
+    assert!(restored.check_integrity().unwrap().backend_clean);
+}
+
+#[test]
+fn active_backup_journal_upgrades_from_format_7_to_9() {
+    let dir = TempDir::new();
+    let path = dir.0.join("maps-v9.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let initial = engine.backup_journal_status().unwrap();
+    let enabled = engine
+        .enable_backup_journal(BackupJournalConfig::new(
+            "maps",
+            initial.head_sequence,
+            TEST_BACKUP_CHECKSUM,
+        ))
+        .unwrap();
+    assert_eq!(enabled.storage_format, 7);
+    assert_eq!(enabled.state, BackupJournalState::Active);
+
+    let upgraded = engine.upgrade_storage(9).unwrap();
+    assert_eq!((upgraded.previous_format, upgraded.format), (7, 9));
+    let status = engine.backup_journal_status().unwrap();
+    assert_eq!(status.state, BackupJournalState::Active);
+    assert_eq!(status.chain_id.as_deref(), Some("maps"));
+    assert_eq!(status.storage_format, 9);
+    assert_eq!(status.commit_count, 1);
+    assert_eq!(status.head_sequence, initial.head_sequence + 1);
+    let response = engine.execute(
+        "struct Item { id: int, labels: Map<text, text> }\ntable items: Item { key id }\ninsert items {id: 1, labels: map {\"kind\": \"test\"}}",
+    );
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(engine.backup_journal_status().unwrap().commit_count, 2);
+    drop(engine);
+
+    let mut reopened = Engine::open_redb(&path).unwrap();
+    assert_eq!(reopened.introspection().storage_versions.unwrap().format, 9);
+    assert_eq!(reopened.execute("from items").rows.len(), 1);
+    assert!(reopened.check_integrity().unwrap().backend_clean);
 }
