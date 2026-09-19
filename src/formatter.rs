@@ -968,15 +968,51 @@ pub(crate) fn format_index_declaration(
     predicate: Option<&BoolExpression>,
     depth: usize,
 ) {
+    let predicate_text = predicate.map(index_predicate_text);
+    format_index_declaration_layout(
+        output,
+        verb,
+        table,
+        components,
+        unique,
+        predicate_text.as_deref(),
+        predicate,
+        depth,
+    );
+}
+
+pub(crate) fn format_bound_index_declaration(
+    output: &mut String,
+    verb: &str,
+    table: &str,
+    components: &[IndexComponent],
+    unique: bool,
+    predicate: Option<&str>,
+    depth: usize,
+) {
+    format_index_declaration_layout(
+        output, verb, table, components, unique, predicate, None, depth,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_index_declaration_layout(
+    output: &mut String,
+    verb: &str,
+    table: &str,
+    components: &[IndexComponent],
+    unique: bool,
+    predicate_text: Option<&str>,
+    parsed_predicate: Option<&BoolExpression>,
+    depth: usize,
+) {
     let shape = index_shape(components);
     let prefix = format!(
         "{verb} {}index {table}",
         if unique { "unique " } else { "" }
     );
-    let predicate_text = predicate.map(index_predicate_text);
     if components.len() <= 4
-        && prefix.len() + shape.len() + predicate_text.as_ref().map_or(3, |value| value.len() + 7)
-            <= 88
+        && prefix.len() + shape.len() + predicate_text.map_or(3, |value| value.len() + 7) <= 88
     {
         line(
             output,
@@ -984,7 +1020,6 @@ pub(crate) fn format_index_declaration(
             &format!(
                 "{prefix} ({shape}){}",
                 predicate_text
-                    .as_ref()
                     .map(|value| format!(" if {value}"))
                     .unwrap_or_default()
             ),
@@ -1002,9 +1037,19 @@ pub(crate) fn format_index_declaration(
                 ),
             );
         }
-        if let Some(predicate) = predicate {
+        if let Some(predicate) = predicate_text {
             line(output, depth, ") if (");
-            boolean_lines(output, depth + 1, &canonical_index_predicate(predicate));
+            if let Some(parsed) = parsed_predicate {
+                boolean_lines(output, depth + 1, &canonical_index_predicate(parsed));
+            } else {
+                for (index, atom) in predicate.split(" && ").enumerate() {
+                    line(
+                        output,
+                        depth + 1,
+                        &format!("{}{atom}", if index == 0 { "" } else { "&& " }),
+                    );
+                }
+            }
             line(output, depth, ")");
         } else {
             line(output, depth, ")");

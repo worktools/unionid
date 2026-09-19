@@ -136,7 +136,8 @@ impl Database {
                 components,
                 predicate,
             } => {
-                if predicate.is_some() {
+                if let Some(predicate) = predicate {
+                    let _ = self.bind_index_predicate(&table, &predicate)?;
                     return Err(Error::new(
                         "E_INDEX_PREDICATE",
                         "partial unique index execution is not available in this implementation stage",
@@ -266,6 +267,12 @@ impl Database {
                                 .effective_components()
                                 .iter()
                                 .any(|component| component.field_path.contains(&field_id))
+                                || definition.predicate.as_ref().is_some_and(|predicate| {
+                                    predicate
+                                        .atoms
+                                        .iter()
+                                        .any(|atom| atom.field_path().contains(&field_id))
+                                })
                         })
                         .map(|definition| (table, definition.display_shape()))
                 })
@@ -374,6 +381,30 @@ impl Database {
         let old_catalog = self.catalog.clone();
         let owner_id = self.named_type_id(owner)?;
         let old_column = direct_record_field(&old_catalog, owner, field)?.clone();
+        if let Some((table, shape)) =
+            self.index_definitions
+                .iter()
+                .find_map(|(table, definitions)| {
+                    definitions
+                        .values()
+                        .find(|definition| {
+                            definition.predicate.as_ref().is_some_and(|predicate| {
+                                predicate
+                                    .atoms
+                                    .iter()
+                                    .any(|atom| atom.field_path().contains(&old_column.id))
+                            })
+                        })
+                        .map(|definition| (table, definition.display_shape()))
+                })
+        {
+            return Err(Error::new(
+                "E_MIGRATION",
+                format!(
+                    "cannot change field '{owner}.{field}' while partial index '{table} ({shape})' references it; drop the index first"
+                ),
+            ));
+        }
         let mut new_ty = self.catalog.resolve(ty, 0)?;
         preserve_structural_ids(&old_column.ty, &mut new_ty);
         let definition = self.catalog.types.get_mut(owner).unwrap();
@@ -834,6 +865,31 @@ impl Database {
                 }
                 if components.is_empty() {
                     continue;
+                }
+                if let Some(predicate) = &mut definition.predicate {
+                    let mut valid = true;
+                    for atom in &mut predicate.atoms {
+                        let Some(column) =
+                            field_path_name(&self.catalog, &table.schema, atom.field_path())
+                        else {
+                            valid = false;
+                            break;
+                        };
+                        match atom {
+                            super::IndexPredicateAtom::Equal {
+                                column: current, ..
+                            }
+                            | super::IndexPredicateAtom::IsNone {
+                                column: current, ..
+                            }
+                            | super::IndexPredicateAtom::IsSome {
+                                column: current, ..
+                            } => *current = column,
+                        }
+                    }
+                    if !valid {
+                        continue;
+                    }
                 }
                 definition.column.clear();
                 definition.field_path.clear();

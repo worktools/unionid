@@ -123,6 +123,25 @@ fn partial_unique_index_execution_fails_before_schema_mutation() {
         Some("E_INDEX_PREDICATE")
     );
     assert_eq!(engine.schema(), before);
+
+    let unsupported = engine.execute("create unique index users (email) if deleted_at != None");
+    assert_eq!(
+        unsupported.error.as_ref().map(|error| error.code.as_str()),
+        Some("E_INDEX_PREDICATE")
+    );
+    assert!(
+        unsupported
+            .error
+            .unwrap()
+            .message
+            .contains("only support '=='")
+    );
+    let wrong_type = engine.execute("create unique index users (email) if deleted_at == 1");
+    assert_eq!(
+        wrong_type.error.as_ref().map(|error| error.code.as_str()),
+        Some("E_TYPE")
+    );
+    assert_eq!(engine.schema(), before);
 }
 
 #[test]

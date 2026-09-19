@@ -617,8 +617,13 @@ fn diff_tables(
                 })
                 .collect::<Vec<_>>();
             (
-                format!("{table}({})", crate::formatter::index_shape(&components)),
-                (table, components, definition.kind),
+                format!("{table}:{}", definition.shape_key()),
+                (
+                    table,
+                    components,
+                    definition.kind,
+                    definition.display_predicate(),
+                ),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -635,38 +640,41 @@ fn diff_tables(
                 })
                 .collect::<Vec<_>>();
             (
-                format!("{table}({})", crate::formatter::index_shape(&components)),
-                (table, components, definition.kind),
+                format!("{table}:{}", definition.shape_key()),
+                (
+                    table,
+                    components,
+                    definition.kind,
+                    definition.display_predicate(),
+                ),
             )
         })
         .collect::<BTreeMap<_, _>>();
-    for (identity, (table, components, kind)) in &target_indexes {
+    for (identity, (table, components, kind, predicate)) in &target_indexes {
         let primary = components.len() == 1
             && !components[0].descending
             && target_tables[*table].primary_key.as_deref() == Some(components[0].column.as_str());
         if !renamed_to.contains(table)
             && current_indexes
                 .get(identity)
-                .is_none_or(|(_, _, current_kind)| current_kind != kind)
+                .is_none_or(|(_, _, current_kind, _)| current_kind != kind)
             && !primary
         {
-            let description =
-                crate::formatter::migration_index_text("add", table, components, kind.is_unique())
-                    .unwrap_or_else(|| {
-                        format!(
-                            "add {}index {table} ({})",
-                            if kind.is_unique() { "unique " } else { "" },
-                            crate::formatter::index_shape(components)
-                        )
-                    });
+            let description = format_schema_index_operation(
+                "add",
+                table,
+                components,
+                kind.is_unique(),
+                predicate.as_deref(),
+            );
             generated.push(operation(description, false));
         }
     }
-    for (identity, (table, components, kind)) in &current_indexes {
+    for (identity, (table, components, kind, predicate)) in &current_indexes {
         if !renamed_from.contains(table)
             && target_indexes
                 .get(identity)
-                .is_none_or(|(_, _, target_kind)| target_kind != kind)
+                .is_none_or(|(_, _, target_kind, _)| target_kind != kind)
             && target_tables.contains_key(table)
         {
             let remains_primary = components.len() == 1
@@ -674,18 +682,43 @@ fn diff_tables(
                 && target_tables[*table].primary_key.as_deref()
                     == Some(components[0].column.as_str());
             if !remains_primary {
-                let description =
-                    crate::formatter::migration_index_text("drop", table, components, false)
-                        .unwrap_or_else(|| {
-                            format!(
-                                "drop index {table} ({})",
-                                crate::formatter::index_shape(components)
-                            )
-                        });
+                let description = format_schema_index_operation(
+                    "drop",
+                    table,
+                    components,
+                    false,
+                    predicate.as_deref(),
+                );
                 generated.push(operation(description, true));
             }
         }
     }
+}
+
+fn format_schema_index_operation(
+    verb: &str,
+    table: &str,
+    components: &[crate::query::IndexComponent],
+    unique: bool,
+    predicate: Option<&str>,
+) -> String {
+    if predicate.is_none()
+        && let Some(source) =
+            crate::formatter::migration_index_text(verb, table, components, unique)
+    {
+        return source;
+    }
+    let mut source = String::new();
+    crate::formatter::format_bound_index_declaration(
+        &mut source,
+        verb,
+        table,
+        components,
+        unique,
+        predicate,
+        0,
+    );
+    source.trim_end().to_owned()
 }
 
 fn table_type_name<'a>(database: &'a Database, table: &Table) -> Option<&'a str> {
