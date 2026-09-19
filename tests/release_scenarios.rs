@@ -206,14 +206,15 @@ set attributes = map {
   "seats": Number(6)
 }
 from accounts
-filter id == "alice"
+sort id
 derive {
   plan = get attributes "plan"
   attribute_keys = keys attributes
   attribute_count = length attributes
 }"#,
         restart_query: r#"from accounts
-filter contains_key attributes "plan" && id == "alice"
+filter contains_key attributes "plan"
+sort id
 derive {
   plan = get attributes "plan"
   attribute_keys = keys attributes
@@ -227,7 +228,8 @@ derive {
   add field Account.provider_metadata: Map<text, Attribute> = map {}
 "#,
         final_query: r#"from accounts
-filter contains_key metadata "plan" && id == "alice"
+filter contains_key metadata "plan"
+sort id
 derive {
   plan = get metadata "plan"
   metadata_entries = entries metadata
@@ -648,31 +650,51 @@ fn assert_session_after(response: &QueryResponse) {
 }
 
 fn assert_metadata_before(response: &QueryResponse) {
-    let row = only_row(response);
-    assert_text(row, "id", "alice");
-    assert_int(row, "attribute_count", 4);
-    assert_eq!(row["plan"].source_text(), "Some(Text(\"pro\"))");
+    assert_eq!(response.rows.len(), 2);
+    let alice = &response.rows[0];
+    assert_text(alice, "id", "alice");
+    assert_int(alice, "attribute_count", 4);
+    assert_eq!(alice["plan"].source_text(), "Some(Text(\"pro\"))");
     assert_eq!(
-        row["attribute_keys"].source_text(),
+        alice["attribute_keys"].source_text(),
         r#"["enabled", "plan", "region", "seats"]"#
     );
-    let attributes = row["attributes"].source_text();
+    let attributes = alice["attributes"].source_text();
     assert!(attributes.contains(r#""seats": Number(6)"#), "{attributes}");
+
+    let bob = &response.rows[1];
+    assert_text(bob, "id", "bob");
+    assert_int(bob, "attribute_count", 1);
+    assert_eq!(bob["plan"].source_text(), "Some(Text(\"free\"))");
+    assert_eq!(bob["attribute_keys"].source_text(), r#"["plan"]"#);
+    assert_eq!(bob["legacy_plan"].source_text(), "map {}");
 }
 
 fn assert_metadata_after(response: &QueryResponse) {
-    let row = only_row(response);
-    assert_text(row, "id", "alice");
-    assert_int(row, "metadata_count", 4);
-    assert_eq!(row["plan"].source_text(), "Some(Text(\"pro\"))");
-    assert_eq!(row["legacy_plan"].source_text(), "Some(Text(\"pro\"))");
-    assert_eq!(row["provider_metadata"].source_text(), "map {}");
-    let metadata = row["metadata"].source_text();
+    assert_eq!(response.rows.len(), 2);
+    let alice = &response.rows[0];
+    assert_text(alice, "id", "alice");
+    assert_int(alice, "metadata_count", 4);
+    assert_eq!(alice["plan"].source_text(), "Some(Text(\"pro\"))");
+    assert_eq!(alice["legacy_plan"].source_text(), "Some(Text(\"pro\"))");
+    assert_eq!(alice["provider_metadata"].source_text(), "map {}");
+    let metadata = alice["metadata"].source_text();
     assert!(metadata.contains(r#""seats": Number(6)"#), "{metadata}");
-    let entries = row["metadata_entries"].source_text();
+    let entries = alice["metadata_entries"].source_text();
     assert!(
         entries.starts_with(r#"[("enabled", Enabled(true))"#),
         "{entries}"
     );
     assert!(entries.ends_with(r#"("seats", Number(6))]"#), "{entries}");
+
+    let bob = &response.rows[1];
+    assert_text(bob, "id", "bob");
+    assert_int(bob, "metadata_count", 1);
+    assert_eq!(bob["plan"].source_text(), "Some(Text(\"free\"))");
+    assert_eq!(bob["legacy_plan"].source_text(), "None");
+    assert_eq!(bob["provider_metadata"].source_text(), "map {}");
+    assert_eq!(
+        bob["metadata_entries"].source_text(),
+        r#"[("plan", Text("free"))]"#
+    );
 }

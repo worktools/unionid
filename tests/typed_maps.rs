@@ -14,6 +14,7 @@ const TEST_BACKUP_CHECKSUM: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const MAP_UPGRADE_PATH_ENV: &str = "UNIONID_TEST_MAP_UPGRADE_PATH";
 const MAP_UPGRADE_READY_ENV: &str = "UNIONID_TEST_MAP_UPGRADE_READY";
+const MAP_UPGRADE_COMMITTED_ENV: &str = "UNIONID_TEST_MAP_UPGRADE_COMMITTED";
 const MAP_UPGRADE_TARGET_ENV: &str = "UNIONID_TEST_MAP_UPGRADE_TARGET";
 
 #[test]
@@ -617,6 +618,7 @@ fn typed_map_storage_upgrade_child() {
         return;
     };
     let ready = std::env::var(MAP_UPGRADE_READY_ENV).unwrap();
+    let committed = std::env::var(MAP_UPGRADE_COMMITTED_ENV).unwrap();
     let target = std::env::var(MAP_UPGRADE_TARGET_ENV)
         .unwrap()
         .parse::<u32>()
@@ -624,10 +626,14 @@ fn typed_map_storage_upgrade_child() {
     let mut engine = Engine::open_redb(path).unwrap();
     std::fs::write(ready, b"ready").unwrap();
     engine.upgrade_storage(target).unwrap();
+    std::fs::write(committed, b"committed").unwrap();
+    loop {
+        std::thread::park();
+    }
 }
 
 #[test]
-fn interrupted_format_6_and_7_map_upgrades_recover_old_or_new_state() {
+fn terminated_format_6_and_7_map_upgrades_reopen_committed_state() {
     for journal in [false, true] {
         let dir = TempDir::new();
         let path = dir.0.join(if journal {
@@ -636,6 +642,7 @@ fn interrupted_format_6_and_7_map_upgrades_recover_old_or_new_state() {
             "interrupted-format-8.redb"
         });
         let ready = dir.0.join("upgrade-ready");
+        let committed = dir.0.join("upgrade-committed");
         let mut engine = Engine::open_redb(&path).unwrap();
         let mut source = String::from(
             "struct Entry { id: int, value: text }\n\
@@ -670,6 +677,7 @@ fn interrupted_format_6_and_7_map_upgrades_recover_old_or_new_state() {
             .args(["--exact", "typed_map_storage_upgrade_child", "--nocapture"])
             .env(MAP_UPGRADE_PATH_ENV, &path)
             .env(MAP_UPGRADE_READY_ENV, &ready)
+            .env(MAP_UPGRADE_COMMITTED_ENV, &committed)
             .env(MAP_UPGRADE_TARGET_ENV, target.to_string())
             .spawn()
             .unwrap();
@@ -680,14 +688,26 @@ fn interrupted_format_6_and_7_map_upgrades_recover_old_or_new_state() {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(ready.exists(), "map upgrade child did not start");
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        let _ = child.kill();
-        child.wait().unwrap();
+        for _ in 0..30_000 {
+            if committed.exists() {
+                break;
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "map upgrade child exited before publishing its durable commit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            committed.exists(),
+            "map upgrade child did not reach its durable commit"
+        );
+        child.kill().unwrap();
+        assert!(!child.wait().unwrap().success());
 
         let mut reopened = Engine::open_redb(&path).unwrap();
-        let old = if journal { 7 } else { 6 };
         let format = reopened.introspection().storage_versions.unwrap().format;
-        assert!(matches!(format, value if value == old || value == target));
+        assert_eq!(format, target);
         assert!(reopened.check_integrity().unwrap().backend_clean);
         let row = reopened.execute("from entries | filter id == 4999");
         assert!(row.ok, "{}", row.message);
@@ -698,9 +718,6 @@ fn interrupted_format_6_and_7_map_upgrades_recover_old_or_new_state() {
                 reopened.backup_journal_status().unwrap().state,
                 BackupJournalState::Active
             );
-        }
-        if format == old {
-            assert!(reopened.upgrade_storage(target).unwrap().changed);
         }
         assert_eq!(
             reopened.introspection().storage_versions.unwrap().format,
