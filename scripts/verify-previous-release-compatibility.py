@@ -292,16 +292,27 @@ def main():
     previous = extract_previous_binary(archive, work, args.previous_version)
     previous_version = require_version(previous, args.previous_version)
     current_version = require_version(current, args.current_version)
+    # The transport and schema contract must stay identical, but a release may
+    # expand the readable range and choose a new default write format. The data
+    # cases below prove the previous release's databases, backups, and clients
+    # still work; here we only require that nothing previously readable was
+    # dropped.
     for key in [
         "schema_version",
         "protocol_versions",
         "stream_protocol_versions",
-        "readable_storage_formats",
-        "readable_backup_formats",
-        "current_storage",
     ]:
         if current_version.get(key) != previous_version.get(key):
             raise RuntimeError(f"{current_label} changed the frozen {key} capability")
+    for key in ["readable_storage_formats", "readable_backup_formats"]:
+        dropped = sorted(
+            set(previous_version.get(key, [])) - set(current_version.get(key, []))
+        )
+        if dropped:
+            raise RuntimeError(
+                f"{current_label} no longer reads the {key} {dropped} that "
+                f"{previous_label} read"
+            )
 
     cases = {
         case: verify_database_case(
