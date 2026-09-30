@@ -49,6 +49,12 @@ pub(crate) fn format_pipeline(pipeline: &Pipeline) -> String {
     output.trim_end().to_owned()
 }
 
+pub(crate) fn format_statement(value: &Statement) -> String {
+    let mut output = String::new();
+    statement(&mut output, value, 0);
+    output
+}
+
 fn comments(source: &str) -> (Vec<(usize, String)>, bool) {
     let mut comments = Vec::new();
     let mut has_code = false;

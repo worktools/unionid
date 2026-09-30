@@ -58,6 +58,8 @@ unionid project check --dir .
 
 `project check` 不创建数据库。它按 schema → migrations → queries 的固定顺序检查规范格式、migration 最终 schema 和 query binding；三个阶段都通过才返回 0。
 
+声明式 schema 与 migration 目标按名称、类型、默认值、主键和索引定义比较结构。增量 migration 保留稳定 ID，schema 文件重新分配 ID，因此两者的运行时 schema hash 可以不同；这不会让项目检查失败。客户端绑定和持久化完整性检查仍使用包含稳定 ID 的运行时 hash。
+
 ### 3. 建库、写入并从新进程重开
 
 ```bash
@@ -184,6 +186,8 @@ unionid project check --dir .
 - `data/`: a local data directory ignored by Git
 
 `project check` creates no database. In the fixed schema → migrations → queries order, it checks canonical formatting, the migration target schema, and query binding. It exits zero only when all three phases pass.
+
+The declarative schema and migration target are compared structurally by names, types, defaults, primary keys, and index definitions. Incremental migrations retain stable IDs while a schema file allocates them afresh, so their runtime schema hashes may differ without failing the project check. Client binding and durable integrity checks continue to use the runtime hash containing stable IDs.
 
 ### 3. Create, write, and reopen from a new process
 
