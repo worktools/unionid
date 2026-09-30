@@ -24,6 +24,12 @@ RowId 属于单张表的内部行身份，使用独立、从 0 开始的单调 `
 
 普通 DDL 负责创建对象；migration 的显式 `rename` 保留 ID，`drop` 后创建同名对象得到新 ID。不得通过修改名称或调整声明顺序重新解释已有值。命名类型可在定义体内直接引用自己的 type ID；catalog 只有在不动点检查证明该类型至少存在一个有限值时才接受定义。sum 的终止变体以及 `option`/`list` 的空值可结束递归，纯别名循环和全部必需成员都回到自身的积类型以 `E_SCHEMA` 拒绝。其他命名类型仍须先声明，当前不支持互递归声明批次。详细规则见 [RFC 0001](rfc/0001-finite-recursive-adts.md)。
 
+### 唯一值语义 / Unique-value semantics
+
+普通唯一索引比较完整 typed value；`None` 不作例外，单列索引中最多出现一次。要让未填写邮箱的账号不参与约束，应声明 `create unique index users (email) if is_some email`。文本唯一性使用精确内容，大小写、空白与 Unicode normalization 由应用在写入前统一处理。完整业务示例见[账号邮箱场景](SCENARIOS.md#可选账号邮箱)。
+
+Ordinary unique indexes compare complete typed values, including `None`; a single-column unique index admits at most one `None`. Declare `create unique index users (email) if is_some email` to exclude missing emails. Text uniqueness uses exact content. Apply a consistent policy for case, whitespace, and Unicode normalization at every application write boundary. See the [account email scenario](SCENARIOS.md#可选账号邮箱).
+
 ## 2. Revision 与 hash
 
 空数据库的 schema revision 是 0。一次成功的原子脚本只要包含 type、table 或 index 变更，就在提交时把 revision 增加 1；同一脚本包含多个 schema 语句仍只产生一个 revision。纯 insert 或查询不改变 revision，解析、类型检查、约束或持久化失败也不发布新 revision。

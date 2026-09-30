@@ -65,6 +65,10 @@ create unique index sessions (tenant, token)
 
 unique index 支持 primitive、命名 sum/record、tuple、option 和 list；复合 unique 对完整 tuple 强制唯一。`None` 也是普通 typed value。创建 unique index 会先扫描已有行，发现重复值时返回 `E_CONSTRAINT`，不会发布 index、schema revision 或 hash。insert、批量 insert/upsert、单行 upsert、update/delete、migration、restore 和 redb 完整性检查都维护同一 tuple 约束。
 
+**可选值与账号标识：** 普通单列 `unique` 索引最多允许一行 `None`。可选邮箱推荐 `create unique index users (email) if is_some email`，允许多个未填写邮箱的账号，同时限制每个 `Some(email)` 最多出现一次。`"A@x.com"`、`"a@x.com"` 与 `" a@x.com"` 是三个不同文本值；大小写、空白和 Unicode normalization 不会自动调整。应用必须在所有写入入口按同一业务规则规范化标识。参见[账号邮箱场景](SCENARIOS.md#可选账号邮箱)、[基础标量函数 #403](https://github.com/worktools/unionid/issues/403) 与[延后评估的 expression index #366](https://github.com/worktools/unionid/issues/366)。
+
+**Optional values and account identifiers:** An ordinary single-column unique index admits at most one `None`. Use `create unique index users (email) if is_some email` for optional emails. Text equality is exact: case, whitespace, and Unicode normalization are not changed automatically. Normalize identifiers consistently at every application write boundary. See the [account scenario](SCENARIOS.md#可选账号邮箱), [scalar functions #403](https://github.com/worktools/unionid/issues/403), and [deferred expression indexes #366](https://github.com/worktools/unionid/issues/366).
+
 unique index 可带 row-local predicate，只约束求值为 true 的行：
 
 ```text
