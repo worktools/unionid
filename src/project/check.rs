@@ -204,7 +204,7 @@ pub fn check(directory: impl AsRef<Path>) -> ProjectCheckReport {
 
 struct CheckedSchema {
     source: String,
-    hash: String,
+    normalized: String,
 }
 
 fn checked_project_root(directory: &Path) -> Result<PathBuf, CheckFailure> {
@@ -243,7 +243,7 @@ fn check_schema_source(
         .map_err(|error| CheckFailure::new(phase, &source.relative, error))?;
     Ok(CheckedSchema {
         source: source.source,
-        hash: checked.schema.hash,
+        normalized: checked.normalized,
     })
 }
 
@@ -271,7 +271,8 @@ fn check_migrations(
         files.push(file);
     }
     validate_project_migration_chain(&files)?;
-    let plan = Engine::memory().plan_migrations(&files).map_err(|error| {
+    let mut target = Engine::memory();
+    target.apply_migrations(&files).map_err(|error| {
         let path = files
             .iter()
             .filter_map(|file| file.path.as_ref())
@@ -282,16 +283,17 @@ fn check_migrations(
             );
         CheckFailure::new(phase, path, error)
     })?;
-    if plan.target_schema.hash != schema.hash {
+    // Runtime schema hashes include durable IDs. A declarative schema allocates
+    // those IDs afresh, while migrations retain identities and allocate new
+    // members later. Compare the same name-based schema representation used by
+    // schema diff, preserving types, defaults, keys and index predicates.
+    if target.schema() != schema.normalized {
         return Err(CheckFailure::new(
             phase,
             "schema.unid",
             Error::new(
                 "E_SCHEMA",
-                format!(
-                    "declarative schema hash {} does not match migration target {}",
-                    schema.hash, plan.target_schema.hash
-                ),
+                "declarative schema structure does not match the migration target",
             )
             .at(Span { line: 1, column: 1 }),
         ));
