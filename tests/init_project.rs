@@ -265,6 +265,38 @@ fn project_check_accepts_incremental_migrations_but_rejects_structural_drift() {
     }
 }
 
+#[test]
+fn project_check_ignores_top_level_declaration_order() {
+    let temp = TempDir::new();
+    let project = temp.0.join("ordered");
+    std::fs::create_dir_all(project.join("migrations")).unwrap();
+    std::fs::create_dir(project.join("queries")).unwrap();
+    let schema = "struct B {id: int, label: text}\nstruct A {id: int, label: text}\ntable b: B {key id}\ntable a: A {key id}\ncreate unique index b (label)\ncreate index a (label)";
+    let migration = "migration initial {\nadd struct A {id: int, label: text}\nadd struct B {id: int, label: text}\nadd table a: A {key id}\nadd table b: B {key id}\nadd index a (label)\nadd unique index b (label)\n}";
+    std::fs::write(
+        project.join("schema.unid"),
+        unionid::format_source(schema).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("migrations/0001_initial.unid"),
+        unionid::format_source(migration).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(project.join("queries/read.unid"), "from a\n").unwrap();
+    let report = unionid::project::check(&project);
+    assert!(report.ok, "{:?}", report.error);
+    // Member order is still part of the declared ADT contract.
+    let changed = schema.replace("id: int, label: text", "label: text, id: int");
+    std::fs::write(
+        project.join("schema.unid"),
+        unionid::format_source(&changed).unwrap(),
+    )
+    .unwrap();
+    let report = unionid::project::check(&project);
+    assert_eq!(report.error.unwrap().code, "E_SCHEMA");
+}
+
 #[cfg(unix)]
 #[test]
 fn project_check_rejects_symlinked_sources() {

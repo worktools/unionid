@@ -204,7 +204,7 @@ pub fn check(directory: impl AsRef<Path>) -> ProjectCheckReport {
 
 struct CheckedSchema {
     source: String,
-    normalized: String,
+    declarations: BTreeSet<String>,
 }
 
 fn checked_project_root(directory: &Path) -> Result<PathBuf, CheckFailure> {
@@ -243,7 +243,8 @@ fn check_schema_source(
         .map_err(|error| CheckFailure::new(phase, &source.relative, error))?;
     Ok(CheckedSchema {
         source: source.source,
-        normalized: checked.normalized,
+        declarations: schema_declarations(&checked.normalized)
+            .map_err(|error| CheckFailure::new(phase, &source.relative, error))?,
     })
 }
 
@@ -287,7 +288,9 @@ fn check_migrations(
     // those IDs afresh, while migrations retain identities and allocate new
     // members later. Compare the same name-based schema representation used by
     // schema diff, preserving types, defaults, keys and index predicates.
-    if target.schema() != schema.normalized {
+    let target_declarations = schema_declarations(&target.schema())
+        .map_err(|error| CheckFailure::new(phase, "migrations", error))?;
+    if target_declarations != schema.declarations {
         return Err(CheckFailure::new(
             phase,
             "schema.unid",
@@ -299,6 +302,13 @@ fn check_migrations(
         ));
     }
     Ok((files.len(), bytes))
+}
+
+fn schema_declarations(source: &str) -> Result<BTreeSet<String>, Error> {
+    Ok(crate::syntax::parse(source)?
+        .into_iter()
+        .map(|located| crate::formatter::format_statement(&located.statement))
+        .collect())
 }
 
 fn validate_project_migration_chain(files: &[MigrationFile]) -> Result<(), CheckFailure> {
