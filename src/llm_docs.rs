@@ -145,9 +145,9 @@ const TOPICS: &[BundledDocsTopic] = &[
     BundledDocsTopic {
         name: "parquet",
         category: DocsCategory::Application,
-        title: "Local Parquet inspection / 本地 Parquet 查看",
+        title: "Local Parquet inspection and queries / 本地 Parquet 查看与查询",
         source: "docs/PARQUET.md",
-        summary: "Inspect one local Parquet file as bounded structural UnionID data.",
+        summary: "Inspect or query one local Parquet file as bounded structural UnionID data.",
         content: include_str!("../docs/PARQUET.md"),
     },
     BundledDocsTopic {

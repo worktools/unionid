@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -52,6 +53,12 @@ pub(crate) trait IndexHitCursor {
 }
 
 pub(crate) trait TypedRowSource: Send + Sync {
+    /// Optional value-free scan label exposed by `explain` for external row
+    /// sources. Resident and durable UnionID tables keep the legacy plan shape.
+    fn external_scan_kind(&self) -> Option<&'static str> {
+        None
+    }
+
     fn snapshot_identity(&self) -> SourceIdentity;
 
     fn table_stats(&self, table: &str) -> Result<TableStats>;
@@ -74,6 +81,16 @@ pub(crate) trait TypedRowSource: Send + Sync {
     ) -> Result<Option<Arc<Row>>>;
 
     fn scan_rows<'a>(&'a self, table: &str) -> Result<Box<dyn RowBatchCursor + 'a>>;
+
+    /// Scan rows while allowing external columnar sources to avoid decoding
+    /// unused top-level fields. Row-oriented sources may ignore the hint.
+    fn scan_rows_projected<'a>(
+        &'a self,
+        table: &str,
+        _projection: &BTreeSet<String>,
+    ) -> Result<Box<dyn RowBatchCursor + 'a>> {
+        self.scan_rows(table)
+    }
 
     fn scan_index<'a>(
         &'a self,
@@ -101,6 +118,10 @@ impl<'a> CandidateRowSource<'a> {
 }
 
 impl TypedRowSource for CandidateRowSource<'_> {
+    fn external_scan_kind(&self) -> Option<&'static str> {
+        self.candidate.external_scan_kind()
+    }
+
     fn snapshot_identity(&self) -> SourceIdentity {
         self.candidate.snapshot_identity()
     }
@@ -134,6 +155,14 @@ impl TypedRowSource for CandidateRowSource<'_> {
 
     fn scan_rows<'a>(&'a self, table: &str) -> Result<Box<dyn RowBatchCursor + 'a>> {
         self.candidate.scan_rows(table)
+    }
+
+    fn scan_rows_projected<'a>(
+        &'a self,
+        table: &str,
+        projection: &BTreeSet<String>,
+    ) -> Result<Box<dyn RowBatchCursor + 'a>> {
+        self.candidate.scan_rows_projected(table, projection)
     }
 
     fn scan_index<'a>(

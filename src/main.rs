@@ -224,6 +224,12 @@ enum Command {
         /// Maximum number of rows to decode for the preview.
         #[arg(long, default_value_t = unionid::parquet::DEFAULT_PREVIEW_ROWS)]
         limit: usize,
+        /// Execute one read-only UnionID pipeline against the request-local table `data`.
+        #[arg(long, conflicts_with = "interactive")]
+        query: Option<String>,
+        /// Open a read-only UnionID REPL over the request-local table `data`.
+        #[arg(long)]
+        interactive: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -981,8 +987,16 @@ fn run(args: Args) -> Result<(), String> {
         Command::Parquet {
             path,
             limit,
+            query,
+            interactive,
             format,
-        } => cli::inspect_parquet(&path, limit, matches!(format, Format::Json)),
+        } => {
+            if query.is_some() || interactive {
+                cli::query_parquet(&path, query, matches!(format, Format::Json))
+            } else {
+                cli::inspect_parquet(&path, limit, matches!(format, Format::Json))
+            }
+        }
         Command::Docs { command: None } => print_docs_catalog(None, false),
         Command::Docs {
             command: Some(command),

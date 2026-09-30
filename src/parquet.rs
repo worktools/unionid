@@ -1,8 +1,9 @@
 //! Bounded, local-only inspection of one Parquet file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arrow_array::{
     Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
@@ -14,11 +15,21 @@ use arrow_array::{
     UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, TimeUnit};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use serde::Serialize;
 
+use crate::Engine;
+use crate::control::ExecutionControl;
+use crate::db::Database;
 use crate::error::{Error, Result};
-use crate::model::Value;
+use crate::model::{Column, Row, RowId, ScalarType, Value};
+use crate::profile::ExecutionObservation;
+use crate::query::Statement;
+use crate::row_source::{
+    EncodedIndexBounds, IndexHitCursor, RowBatch, RowBatchCursor, SOURCE_BATCH_MAX_BYTES,
+    SOURCE_BATCH_MAX_ROWS, SourceIdentity, TableStats, TypedRowSource,
+};
 use crate::scalars::{Bytes, Date, Decimal, Duration, Timestamp};
 
 pub const DEFAULT_PREVIEW_ROWS: usize = 20;
@@ -143,11 +154,383 @@ pub fn inspect(path: &Path, limit: usize) -> Result<ParquetInspection> {
     })
 }
 
+/// Open one Parquet file as the request-local, read-only table `data`.
+///
+/// The returned engine uses the normal parser, binder, planner and query
+/// executor. Rows remain in Parquet and are decoded in bounded Arrow batches;
+/// no redb file or in-memory table copy is created.
+pub fn query_engine(path: &Path) -> Result<Engine> {
+    let file = open_file(path)?;
+    let builder = reader_builder(path, file)?;
+    let row_count =
+        usize::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| {
+            Error::new(
+                "E_PARQUET_FORMAT",
+                "Parquet row count does not fit this platform",
+            )
+        })?;
+    let schema = builder.schema().clone();
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            validate_identifier(field.name(), field.name())?;
+            Ok(Column {
+                name: field.name().clone(),
+                ty: scalar_type(field, field.name())?,
+                default: None,
+                id: 0,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut database = Database::default();
+    database.execute(Statement::CreateTable {
+        table: "data".into(),
+        columns,
+    })?;
+    let identity = database.snapshot_identity();
+    let source = Arc::new(ParquetRowSource {
+        path: path.to_path_buf(),
+        schema,
+        row_count,
+        identity,
+    });
+    Engine::from_external_source(database, source)
+}
+
+fn open_file(path: &Path) -> Result<File> {
+    File::open(path).map_err(|error| {
+        Error::new(
+            "E_PARQUET_IO",
+            format!("open '{}': {error}", path.display()),
+        )
+        .with_hint("check that the local path exists and is readable")
+    })
+}
+
+fn reader_builder(path: &Path, file: File) -> Result<ParquetRecordBatchReaderBuilder<File>> {
+    ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| {
+        Error::new(
+            "E_PARQUET_FORMAT",
+            format!("read Parquet metadata from '{}': {error}", path.display()),
+        )
+        .with_hint("verify that the path is a complete local Parquet file")
+    })
+}
+
+struct ParquetRowSource {
+    path: PathBuf,
+    schema: arrow_schema::SchemaRef,
+    row_count: usize,
+    identity: SourceIdentity,
+}
+
+impl TypedRowSource for ParquetRowSource {
+    fn external_scan_kind(&self) -> Option<&'static str> {
+        Some("parquet_scan")
+    }
+
+    fn snapshot_identity(&self) -> SourceIdentity {
+        self.identity.clone()
+    }
+
+    fn table_stats(&self, table: &str) -> Result<TableStats> {
+        require_data_table(table)?;
+        Ok(TableStats {
+            rows: self.row_count,
+            rows_exact: true,
+            next_row_id: u64::try_from(self.row_count).unwrap_or(u64::MAX),
+        })
+    }
+
+    fn has_index(&self, _table: &str, _shape: &str) -> bool {
+        false
+    }
+
+    fn estimate_index_span(
+        &self,
+        _table: &str,
+        _shape: &str,
+        _bounds: &EncodedIndexBounds,
+    ) -> Result<usize> {
+        Err(Error::new(
+            "E_PARQUET_QUERY",
+            "Parquet request-local tables do not provide indexes",
+        ))
+    }
+
+    fn get_row(
+        &self,
+        _table: &str,
+        _row_id: RowId,
+        _control: Option<&ExecutionControl>,
+        _observation: &mut ExecutionObservation,
+    ) -> Result<Option<Arc<Row>>> {
+        Err(Error::new(
+            "E_PARQUET_QUERY",
+            "Parquet request-local tables do not provide point row access",
+        ))
+    }
+
+    fn scan_rows<'a>(&'a self, table: &str) -> Result<Box<dyn RowBatchCursor + 'a>> {
+        let projection = self
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        self.scan_rows_projected(table, &projection)
+    }
+
+    fn scan_rows_projected<'a>(
+        &'a self,
+        table: &str,
+        projection: &BTreeSet<String>,
+    ) -> Result<Box<dyn RowBatchCursor + 'a>> {
+        require_data_table(table)?;
+        let builder = reader_builder(&self.path, open_file(&self.path)?)?;
+        let current_rows =
+            usize::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| {
+                Error::new(
+                    "E_PARQUET_FORMAT",
+                    "Parquet row count does not fit this platform",
+                )
+            })?;
+        if builder.schema().as_ref() != self.schema.as_ref() || current_rows != self.row_count {
+            return Err(Error::new(
+                "E_PARQUET_FORMAT",
+                format!(
+                    "Parquet file '{}' changed after its query catalog was opened",
+                    self.path.display()
+                ),
+            )
+            .with_hint("restart the Parquet command to bind the current file schema"));
+        }
+        let selected = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| projection.contains(field.name()))
+            .collect::<Vec<_>>();
+        let mask = ProjectionMask::roots(
+            builder.parquet_schema(),
+            selected.iter().map(|(index, _)| *index),
+        );
+        let fields = selected
+            .into_iter()
+            .map(|(_, field)| field.clone())
+            .collect::<Vec<_>>();
+        let reader = builder
+            .with_projection(mask)
+            .with_batch_size(SOURCE_BATCH_MAX_ROWS)
+            .build()
+            .map_err(|error| parquet_error(&self.path, "build query reader", error))?;
+        Ok(Box::new(ParquetRowCursor {
+            reader,
+            fields,
+            next_row_id: 0,
+        }))
+    }
+
+    fn scan_index<'a>(
+        &'a self,
+        _table: &str,
+        _shape: &str,
+        _bounds: &EncodedIndexBounds,
+        _reverse: bool,
+        _read_limit: Option<usize>,
+    ) -> Result<Box<dyn IndexHitCursor + 'a>> {
+        Err(Error::new(
+            "E_PARQUET_QUERY",
+            "Parquet request-local tables do not provide indexes",
+        ))
+    }
+}
+
+struct ParquetRowCursor {
+    reader: ParquetRecordBatchReader,
+    fields: Vec<arrow_schema::FieldRef>,
+    next_row_id: RowId,
+}
+
+impl RowBatchCursor for ParquetRowCursor {
+    fn next_batch(
+        &mut self,
+        control: Option<&ExecutionControl>,
+        observation: &mut ExecutionObservation,
+    ) -> Result<Option<RowBatch>> {
+        if let Some(control) = control {
+            control.checkpoint()?;
+        }
+        let Some(batch) = self.reader.next() else {
+            return Ok(None);
+        };
+        let batch = batch.map_err(|error| Error::new("E_PARQUET_FORMAT", error.to_string()))?;
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        let mut encoded_bytes = 0_usize;
+        for row_index in 0..batch.num_rows() {
+            if row_index % 256 == 0
+                && let Some(control) = control
+            {
+                control.checkpoint()?;
+            }
+            let mut fields = BTreeMap::new();
+            for (column_index, field) in self.fields.iter().enumerate() {
+                fields.insert(
+                    field.name().clone(),
+                    value_at(
+                        batch.column(column_index).as_ref(),
+                        field,
+                        row_index,
+                        field.name(),
+                    )?,
+                );
+            }
+            let row_bytes = serde_json::to_vec(&fields)
+                .map_err(|error| Error::new("E_PARQUET_VALUE", error.to_string()))?
+                .len();
+            encoded_bytes = encoded_bytes
+                .checked_add(row_bytes)
+                .ok_or_else(|| Error::new("E_LIMIT", "Parquet query batch size overflow"))?;
+            if encoded_bytes > SOURCE_BATCH_MAX_BYTES {
+                return Err(Error::new(
+                    "E_LIMIT",
+                    "decoded Parquet query batch exceeds the 16 MiB working limit",
+                )
+                .with_hint(
+                    "reduce large cell values or rewrite the file with smaller row groups",
+                ));
+            }
+            rows.push(Arc::new(Row {
+                id: self.next_row_id,
+                fields,
+            }));
+            self.next_row_id = self
+                .next_row_id
+                .checked_add(1)
+                .ok_or_else(|| Error::new("E_LIMIT", "Parquet row identity overflow"))?;
+        }
+        observation.rows_decoded = observation.rows_decoded.saturating_add(rows.len());
+        Ok(Some(RowBatch {
+            rows,
+            encoded_bytes,
+        }))
+    }
+}
+
+fn require_data_table(table: &str) -> Result<()> {
+    if table == "data" {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "E_TABLE",
+            format!("Parquet queries expose only the request-local table 'data', not '{table}'"),
+        ))
+    }
+}
+
 fn parquet_error(path: &Path, action: &str, error: impl std::fmt::Display) -> Error {
     Error::new(
         "E_PARQUET_FORMAT",
         format!("{action} from '{}': {error}", path.display()),
     )
+}
+
+fn validate_identifier(name: &str, path: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let valid_start = chars
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic());
+    if valid_start && chars.all(|character| character == '_' || character.is_ascii_alphanumeric()) {
+        return Ok(());
+    }
+    Err(Error::new(
+        "E_PARQUET_TYPE",
+        format!("Parquet field '{path}' is not a valid UnionID identifier"),
+    )
+    .with_hint("rename the field to use ASCII letters, digits, and underscores"))
+}
+
+fn scalar_type(field: &Field, path: &str) -> Result<ScalarType> {
+    let inner = match field.data_type() {
+        DataType::Boolean => ScalarType::Bool,
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => ScalarType::Int,
+        DataType::Float32 | DataType::Float64 => ScalarType::Float,
+        DataType::Utf8 | DataType::LargeUtf8 => ScalarType::Text,
+        DataType::Binary | DataType::LargeBinary | DataType::FixedSizeBinary(_) => {
+            ScalarType::Bytes
+        }
+        DataType::Date32 | DataType::Date64 => ScalarType::Date,
+        DataType::Timestamp(_, timezone) if utc_timezone(timezone.as_deref()) => {
+            ScalarType::Timestamp
+        }
+        DataType::Duration(_) => ScalarType::Duration,
+        DataType::Decimal128(precision, scale) if *scale >= 0 && *scale <= *precision as i8 => {
+            ScalarType::Decimal {
+                precision: *precision,
+                scale: *scale as u8,
+            }
+        }
+        DataType::Struct(fields) => ScalarType::Record(
+            fields
+                .iter()
+                .map(|child| {
+                    let child_path = format!("{path}.{}", child.name());
+                    validate_identifier(child.name(), &child_path)?;
+                    Ok(Column {
+                        name: child.name().clone(),
+                        ty: scalar_type(child, &child_path)?,
+                        default: None,
+                        id: 0,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
+            ScalarType::List(Box::new(scalar_type(item, &format!("{path}[]"))?))
+        }
+        DataType::Map(entries, _) => {
+            let DataType::Struct(fields) = entries.data_type() else {
+                return Err(unsupported(
+                    path,
+                    entries.data_type(),
+                    "map entries must be a struct",
+                ));
+            };
+            if fields.len() != 2
+                || !matches!(fields[0].data_type(), DataType::Utf8 | DataType::LargeUtf8)
+            {
+                return Err(unsupported(
+                    path,
+                    entries.data_type(),
+                    "map keys must be text",
+                ));
+            }
+            ScalarType::Map(Box::new(scalar_type(&fields[1], &format!("{path}{{}}"))?))
+        }
+        DataType::Timestamp(_, _) => {
+            return Err(unsupported(
+                path,
+                field.data_type(),
+                "timestamp requires UTC timezone metadata",
+            ));
+        }
+        other => return Err(unsupported(path, other, "no lossless UnionID mapping")),
+    };
+    Ok(if field.is_nullable() {
+        ScalarType::Option(Box::new(inner))
+    } else {
+        inner
+    })
 }
 
 fn unionid_type(field: &Field, path: &str) -> Result<String> {

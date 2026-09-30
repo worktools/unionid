@@ -8,7 +8,7 @@ use arrow_array::builder::{Int64Builder, MapBuilder, StringBuilder};
 use arrow_array::types::Int64Type;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Date32Array, Decimal128Array, Int64Array, ListArray,
-    RecordBatch, StringArray, StructArray, TimestampMicrosecondArray,
+    RecordBatch, StringArray, StructArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
@@ -84,6 +84,24 @@ fn write_nested_fixture(path: &std::path::Path) {
         .collect::<Vec<_>>(),
     ));
     let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+fn write_projection_fixture(path: &std::path::Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("too_large", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![1])),
+            Arc::new(UInt64Array::from(vec![u64::MAX])),
+        ],
+    )
+    .unwrap();
     let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
     writer.write(&batch).unwrap();
     writer.close().unwrap();
@@ -175,6 +193,93 @@ fn cli_prints_human_and_machine_readable_inspection() {
     assert_eq!(value["version"], 1);
     assert_eq!(value["rows_total"], 3);
     assert_eq!(value["preview_rows"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn parquet_rows_use_the_normal_typed_query_pipeline() {
+    let temp = TempDir::new();
+    let path = temp.0.join("people.parquet");
+    write_fixture(&path);
+
+    let mut engine = unionid::parquet::query_engine(&path).unwrap();
+    let response =
+        engine.execute("from data | filter active | sort -id | select {id, name} | take 2");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 2);
+    assert!(matches!(response.rows[0]["id"], Value::Int(3)));
+    assert!(matches!(response.rows[1]["id"], Value::Int(1)));
+    assert_eq!(response.columns[0].name, "id");
+    assert_eq!(response.columns[1].name, "name");
+
+    let explained = engine.execute("explain from data | filter active | select id");
+    assert!(explained.ok, "{}", explained.message);
+    let plan = explained.plan.unwrap();
+    assert_eq!(plan.external_scan.as_deref(), Some("parquet_scan"));
+    assert_eq!(plan.projected_columns, ["active", "id"]);
+
+    let rejected = engine.execute("insert data {id = 4, name = None, active = true}");
+    assert!(!rejected.ok);
+    assert_eq!(rejected.error.unwrap().code, "E_READ_ONLY");
+}
+
+#[test]
+fn query_projection_skips_unused_column_values() {
+    let temp = TempDir::new();
+    let path = temp.0.join("projection.parquet");
+    write_projection_fixture(&path);
+
+    let mut engine = unionid::parquet::query_engine(&path).unwrap();
+    let selected = engine.execute("from data | select id");
+    assert!(selected.ok, "{}", selected.message);
+    assert!(matches!(selected.rows[0]["id"], Value::Int(1)));
+
+    let decoded = engine.execute("from data | select too_large");
+    assert!(!decoded.ok);
+    assert_eq!(decoded.error.unwrap().code, "E_PARQUET_VALUE");
+}
+
+#[test]
+fn cli_executes_one_shot_parquet_queries_as_table_or_json() {
+    let temp = TempDir::new();
+    let path = temp.0.join("people.parquet");
+    write_fixture(&path);
+
+    let json = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "parquet",
+            path.to_str().unwrap(),
+            "--query",
+            "from data | filter active | aggregate {people = count}",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["rows"][0]["people"]["value"], 2);
+
+    let table = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "parquet",
+            path.to_str().unwrap(),
+            "--query",
+            "from data | sort id | select {id, name} | take 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        table.status.success(),
+        "{}",
+        String::from_utf8_lossy(&table.stderr)
+    );
+    let stdout = String::from_utf8(table.stdout).unwrap();
+    assert!(stdout.contains("id | name"));
+    assert!(stdout.contains("1 | Some(\"Ada\")"));
 }
 
 #[test]
