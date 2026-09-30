@@ -105,6 +105,11 @@ pub fn inspect_parquet(path: &Path, limit: usize, json: bool) -> Result<(), Stri
     Ok(())
 }
 
+pub fn query_parquet(path: &Path, source: Option<String>, json: bool) -> Result<(), String> {
+    let engine = crate::parquet::query_engine(path).map_err(|error| error.to_string())?;
+    run_local_engine(engine, source, json, HistoryOptions::default(), false)
+}
+
 pub fn run_local_cli_with_options(
     source: Option<String>,
     json: bool,
@@ -2053,6 +2058,17 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
                 .map(|condition| format!(" using {condition}"))
                 .unwrap_or_default();
             println!("table | {}", plan.table);
+            if let Some(scan) = &plan.external_scan {
+                println!("scan | {scan}");
+                println!(
+                    "projection | {}",
+                    if plan.projected_columns.is_empty() {
+                        "(row count only)".into()
+                    } else {
+                        plan.projected_columns.join(", ")
+                    }
+                );
+            }
             println!(
                 "access | {access}{index}{condition} ({} of {} row(s))",
                 plan.access.estimated_rows, plan.access.table_rows

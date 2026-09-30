@@ -8,7 +8,7 @@ use arrow_array::builder::{Int64Builder, MapBuilder, StringBuilder};
 use arrow_array::types::Int64Type;
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Date32Array, Decimal128Array, Int64Array, ListArray,
-    RecordBatch, StringArray, StructArray, TimestampMicrosecondArray,
+    RecordBatch, StringArray, StructArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
@@ -84,6 +84,24 @@ fn write_nested_fixture(path: &std::path::Path) {
         .collect::<Vec<_>>(),
     ));
     let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+fn write_projection_fixture(path: &std::path::Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("too_large", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![1])),
+            Arc::new(UInt64Array::from(vec![u64::MAX])),
+        ],
+    )
+    .unwrap();
     let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
     writer.write(&batch).unwrap();
     writer.close().unwrap();
@@ -178,6 +196,93 @@ fn cli_prints_human_and_machine_readable_inspection() {
 }
 
 #[test]
+fn parquet_rows_use_the_normal_typed_query_pipeline() {
+    let temp = TempDir::new();
+    let path = temp.0.join("people.parquet");
+    write_fixture(&path);
+
+    let mut engine = unionid::parquet::query_engine(&path).unwrap();
+    let response =
+        engine.execute("from data | filter active | sort -id | select {id, name} | take 2");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 2);
+    assert!(matches!(response.rows[0]["id"], Value::Int(3)));
+    assert!(matches!(response.rows[1]["id"], Value::Int(1)));
+    assert_eq!(response.columns[0].name, "id");
+    assert_eq!(response.columns[1].name, "name");
+
+    let explained = engine.execute("explain from data | filter active | select id");
+    assert!(explained.ok, "{}", explained.message);
+    let plan = explained.plan.unwrap();
+    assert_eq!(plan.external_scan.as_deref(), Some("parquet_scan"));
+    assert_eq!(plan.projected_columns, ["active", "id"]);
+
+    let rejected = engine.execute("insert data {id = 4, name = None, active = true}");
+    assert!(!rejected.ok);
+    assert_eq!(rejected.error.unwrap().code, "E_READ_ONLY");
+}
+
+#[test]
+fn query_projection_skips_unused_column_values() {
+    let temp = TempDir::new();
+    let path = temp.0.join("projection.parquet");
+    write_projection_fixture(&path);
+
+    let mut engine = unionid::parquet::query_engine(&path).unwrap();
+    let selected = engine.execute("from data | select id");
+    assert!(selected.ok, "{}", selected.message);
+    assert!(matches!(selected.rows[0]["id"], Value::Int(1)));
+
+    let decoded = engine.execute("from data | select too_large");
+    assert!(!decoded.ok);
+    assert_eq!(decoded.error.unwrap().code, "E_PARQUET_VALUE");
+}
+
+#[test]
+fn cli_executes_one_shot_parquet_queries_as_table_or_json() {
+    let temp = TempDir::new();
+    let path = temp.0.join("people.parquet");
+    write_fixture(&path);
+
+    let json = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "parquet",
+            path.to_str().unwrap(),
+            "--query",
+            "from data | filter active | aggregate {people = count}",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["rows"][0]["people"]["value"], 2);
+
+    let table = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "parquet",
+            path.to_str().unwrap(),
+            "--query",
+            "from data | sort id | select {id, name} | take 1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        table.status.success(),
+        "{}",
+        String::from_utf8_lossy(&table.stderr)
+    );
+    let stdout = String::from_utf8(table.stdout).unwrap();
+    assert!(stdout.contains("id | name"));
+    assert!(stdout.contains("1 | Some(\"Ada\")"));
+}
+
+#[test]
 fn corrupt_files_and_excessive_limits_fail_with_stable_codes() {
     let temp = TempDir::new();
     let path = temp.0.join("broken.parquet");
@@ -213,4 +318,69 @@ fn corrupt_files_and_excessive_limits_fail_with_stable_codes() {
     assert!(!excessive.status.success());
     let error: serde_json::Value = serde_json::from_slice(&excessive.stdout).unwrap();
     assert_eq!(error["error"]["code"], "E_LIMIT");
+}
+
+fn write_large_rows(path: &std::path::Path, sizes: &[usize]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("payload", DataType::Utf8, false),
+    ]));
+    let values = sizes
+        .iter()
+        .map(|size| "x".repeat(*size))
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from_iter_values(0..sizes.len() as i64)),
+            Arc::new(StringArray::from_iter_values(values.iter())),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+#[test]
+fn query_splits_large_arrow_batches_without_losing_or_reordering_rows() {
+    let temp = TempDir::new();
+    let path = temp.0.join("large_rows.parquet");
+    write_large_rows(&path, &[6 * 1024 * 1024; 7]);
+    let mut engine = unionid::parquet::query_engine(&path).unwrap();
+    // The filter requires the large field, while the returned projection stays small.
+    let response = engine.execute("from data | filter (length payload) > 0 | select id");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 7);
+    for (index, row) in response.rows.iter().enumerate() {
+        assert!(matches!(row["id"], Value::Int(id) if id == index as i64));
+    }
+    let repeated = engine.execute("from data | filter (length payload) > 0 | select id");
+    assert!(repeated.ok, "{}", repeated.message);
+    assert_eq!(
+        serde_json::to_value(&repeated.rows).unwrap(),
+        serde_json::to_value(&response.rows).unwrap()
+    );
+}
+
+#[test]
+fn query_rejects_only_an_individually_oversized_pending_row() {
+    let temp = TempDir::new();
+    let path = temp.0.join("oversized_row.parquet");
+    write_large_rows(&path, &[6 * 1024 * 1024, 6 * 1024 * 1024, 17 * 1024 * 1024]);
+    let mut engine = unionid::parquet::query_engine(&path).unwrap();
+    // Finishing before the deferred oversized row remains valid.
+    let limited = engine.execute("from data | filter (length payload) > 0 | select id | take 2");
+    assert!(limited.ok, "{}", limited.message);
+    assert_eq!(limited.rows.len(), 2);
+    let response = engine.execute("from data | filter (length payload) > 0 | select id");
+    assert!(!response.ok);
+    let error = response.error.unwrap();
+    assert_eq!(error.code, "E_LIMIT");
+    assert!(error.message.contains("row exceeds"));
+    assert!(error.hint.unwrap().contains("project fewer columns"));
+    // A small projection does not decode the offending field.
+    let projected = engine.execute("from data | select id");
+    assert!(projected.ok, "{}", projected.message);
+    assert_eq!(projected.rows.len(), 3);
 }

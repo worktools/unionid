@@ -50,9 +50,9 @@ unionid check --db data/tasks.redb
 
 The current product targets one machine, one database owner, serialized writes, and a comfortable working set around 10,000 rows; 100,000 rows is a tested upper bound. General flattened joins, windows, and distributed execution remain outside the current scope.
 
-本地数据排查可以直接运行 `unionid parquet events.parquet`，查看推断后的结构类型、文件元数据和默认前 20 行，不需要先导入 redb。该入口只读取单个本地文件，并通过 `--limit` 和 `--format json` 提供有界、可自动化的输出；完整类型映射与限制见 [Parquet 文档](docs/PARQUET.md)。
+本地数据排查可以直接运行 `unionid parquet events.parquet`，查看推断后的结构类型、文件元数据和默认前 20 行，不需要先导入 redb；也可以用 `--query 'from data | ...'` 或 `--interactive` 直接运行只读 UnionID pipeline。该入口按有界 batch 扫描单个本地文件并下推列投影；完整类型映射与限制见 [Parquet 文档](docs/PARQUET.md)。
 
-For local data troubleshooting, `unionid parquet events.parquet` displays inferred structural types, file metadata, and the first 20 rows without importing the file into redb. This entry point reads one local file and provides bounded, automatable output through `--limit` and `--format json`; see the [Parquet guide](docs/PARQUET.md) for the complete mapping and limits.
+For local data troubleshooting, `unionid parquet events.parquet` displays inferred structural types, file metadata, and the first 20 rows without importing the file into redb. Add `--query 'from data | ...'` or `--interactive` to run read-only UnionID pipelines directly. The command scans one local file in bounded batches with column projection pushdown; see the [Parquet guide](docs/PARQUET.md) for the complete mapping and limits.
 
 当前还可直接声明 `uuid`、`bytes`、`date`、`timestamp`、`duration` 与 `decimal P S`：UUID 可作为主键，bytes 支持索引与二进制查询，temporal 值提供显式 offset，decimal 提供固定 scale 与 checked 精确算术。可运行示例见 [`content_metadata.unid`](examples/content_metadata.unid)、[`session_events.unid`](examples/session_events.unid) 与 [`invoices.unid`](examples/invoices.unid)。
 

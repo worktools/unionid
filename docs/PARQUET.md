@@ -31,7 +31,24 @@ unionid parquet events.parquet --limit 20 --format json
 
 JSON 输出是 version 1 inspection envelope，包含 `path`、`rows_total`、`row_groups`、`columns`、`preview_rows` 和 `preview_truncated`。预览值使用 UnionID 的 typed `Value` 表示，因此 `Option::None`、null、bytes、decimal 和 temporal 值不会退化成含糊字符串。
 
-当前命令只负责 schema 和有界预览。通过 `from data` 执行 UnionID pipeline、列投影下推和交互查询由后续 v0.11 工作补充。多文件/glob、Hive partition、schema union、远程对象存储、并行扫描、predicate pruning 和 Parquet 导出属于按真实需求推进的探索范围。
+## 直接查询
+
+`--query` 把当前文件暴露为请求级只读表 `data`，并复用数据库本身的 parser、类型绑定、表达式和 pipeline 执行器：
+
+```bash
+unionid parquet events.parquet \
+  --query 'from data | filter active | select {id, profile.city} | take 20'
+
+unionid parquet events.parquet \
+  --query 'from data | group category {aggregate {events = count, total = sum amount}} | sort -total' \
+  --format json
+
+unionid parquet events.parquet --interactive
+```
+
+查询是只读的；insert、upsert、update、delete、DDL 和 migration 会在读取 row batch 前返回 `E_READ_ONLY`。未被 filter、derive、aggregate、window、sort 或最终结果使用的顶层列会下推到 Parquet reader，不参与 Arrow 解码。`explain` 的 plan 会显示 `external_scan: "parquet_scan"` 和 `projected_columns`；表格输出显示同样的 scan 与 projection。
+
+扫描返回的 typed batch 最多包含 1,024 行、16 MiB 序列化数据；Arrow batch 若包含多个合法大行，会拆分返回且保持行顺序，单个 projected row 超过 16 MiB 才返回 `E_LIMIT`（可缩小单元格或投影更少列）。此上限不约束瞬时 Arrow decode memory。扫描仍沿用查询执行器的结果行数、工作内存、deadline 和 cancellation 检查。当前只接受可直接写进 UnionID query 的 ASCII 字段名；不符合标识符规则的字段返回 `E_PARQUET_TYPE`，提示先重命名。多文件/glob、Hive partition、schema union、远程对象存储、并行扫描、predicate pruning、稳定 page cursor 和 Parquet 导出仍属于按真实需求推进的探索范围。
 
 # Local Parquet inspection
 
@@ -51,4 +68,21 @@ UnionID does not guess nominal enums when a third-party Parquet schema only carr
 
 JSON output is a version 1 inspection envelope containing `path`, `rows_total`, `row_groups`, `columns`, `preview_rows`, and `preview_truncated`. Preview cells retain UnionID's typed `Value` representation, preserving `Option::None`, null, bytes, decimal, and temporal distinctions.
 
-This command currently covers schema and bounded preview only. Querying the file with `from data`, projection pushdown, and an interactive workflow are separate v0.11 work. Multiple files and globs, Hive partitions, schema union, remote object storage, parallel scans, predicate pruning, and Parquet export remain demand-driven exploration.
+## Direct queries
+
+`--query` exposes the current file as the request-local, read-only table `data`. It uses the database's normal parser, type binder, expressions, and pipeline executor:
+
+```bash
+unionid parquet events.parquet \
+  --query 'from data | filter active | select {id, profile.city} | take 20'
+
+unionid parquet events.parquet \
+  --query 'from data | group category {aggregate {events = count, total = sum amount}} | sort -total' \
+  --format json
+
+unionid parquet events.parquet --interactive
+```
+
+Queries are read-only. Insert, upsert, update, delete, DDL, and migration statements fail with `E_READ_ONLY` before a row batch is read. Top-level columns unused by filters, derives, aggregates, windows, sorting, or the final result are pushed into the Parquet reader and are not decoded by Arrow. An `explain` plan reports `external_scan: "parquet_scan"` and `projected_columns`; table output presents the same scan and projection.
+
+Returned typed source batches contain at most 1,024 rows and 16 MiB of serialized data. Arrow batches containing several valid large rows are split without changing row order; only a projected row that individually exceeds 16 MiB fails with `E_LIMIT` (reduce cell sizes or project fewer columns). This bound does not cap transient Arrow decode memory. Scanning also retains the existing result-row, working-memory, deadline, and cancellation checks. Field names must currently be ASCII identifiers that can be written directly in a UnionID query; incompatible names fail with `E_PARQUET_TYPE` and a rename hint. Multiple files and globs, Hive partitions, schema union, remote object storage, parallel scans, predicate pruning, stable page cursors, and Parquet export remain demand-driven exploration.

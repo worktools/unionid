@@ -91,6 +91,7 @@ pub const ERROR_CODES: &[&str] = &[
     "E_PARAM_TYPE",
     "E_PARQUET_FORMAT",
     "E_PARQUET_IO",
+    "E_PARQUET_QUERY",
     "E_PARQUET_TYPE",
     "E_PARQUET_VALUE",
     "E_PREPARE",
@@ -263,8 +264,8 @@ const COMMANDS: &[AgentCommand] = &[
     },
     AgentCommand {
         name: "parquet",
-        summary: "Inspect one local Parquet file with a bounded typed preview.",
-        usage: "unionid parquet <path> [--limit <rows>] --format json",
+        summary: "Inspect or query one local Parquet file as typed read-only data.",
+        usage: "unionid parquet <path> [--limit <rows> | --query <pipeline> | --interactive] [--format json]",
         json: true,
     },
     AgentCommand {

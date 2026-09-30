@@ -651,6 +651,26 @@ impl Engine {
         }
     }
 
+    /// Build a request-local, read-only engine over an external typed row
+    /// source. The source identity is checked against the catalog just like a
+    /// durable committed view, so external adapters cannot accidentally bind
+    /// rows against a different schema.
+    pub(crate) fn from_external_source(
+        database: Database,
+        source: Arc<dyn TypedRowSource>,
+    ) -> Result<Self> {
+        let database = Arc::new(database);
+        Ok(Self {
+            committed: Arc::new(CommittedView::new(
+                database,
+                source,
+                Arc::new(ReceiptMap::new()),
+            )?),
+            read_only: true,
+            ..Self::default()
+        })
+    }
+
     pub(crate) fn catalog(&self) -> &crate::model::Catalog {
         &self.committed.db.catalog
     }

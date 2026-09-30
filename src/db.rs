@@ -1348,6 +1348,10 @@ pub struct SetOperationPlan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryPlan {
     pub table: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_scan: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projected_columns: Vec<String>,
     pub access: QueryAccessPlan,
     pub stages: Vec<QueryPlanStage>,
     pub result_schema: Vec<ResponseColumn>,
@@ -5195,6 +5199,14 @@ impl Database {
                 }))
             })
             .collect::<Result<Vec<_>>>()?;
+        let external_scan = source.external_scan_kind().map(str::to_owned);
+        let projected_columns = if external_scan.is_some() {
+            self.required_source_columns(&pipeline, &schema)?
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut response = QueryResponse::ok_message("query plan");
         let page = prepared_page.as_ref().map(|page| PagePlan {
             limit: page.spec.limit,
@@ -5235,6 +5247,8 @@ impl Database {
         });
         response.plan = Some(QueryPlan {
             table: pipeline.from,
+            external_scan,
+            projected_columns,
             access,
             stages,
             result_schema,
@@ -5849,6 +5863,32 @@ impl Database {
         self.query_from(&source, pipeline, control)
     }
 
+    fn required_source_columns(
+        &self,
+        pipeline: &Pipeline,
+        result_schema: &[Column],
+    ) -> Result<BTreeSet<String>> {
+        let available = self
+            .table(&pipeline.from)?
+            .schema
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut referenced = BTreeSet::new();
+        collect_pipeline_references(pipeline, &mut referenced);
+        // Columns that survive into the result without being mentioned by a
+        // stage still have to be decoded. Derived and aggregate result names
+        // are filtered out against the original table schema below.
+        referenced.extend(result_schema.iter().map(|column| column.name.clone()));
+        Ok(referenced
+            .into_iter()
+            .filter_map(|path| {
+                let root = path.split('.').next().unwrap_or(&path);
+                available.contains(root).then(|| root.to_owned())
+            })
+            .collect())
+    }
+
     fn query_from(
         &self,
         source: &dyn TypedRowSource,
@@ -5956,6 +5996,7 @@ impl Database {
                 ty: self.catalog.describe(&column.ty),
             })
             .collect::<Vec<_>>();
+        let source_projection = self.required_source_columns(&pipeline, &schema)?;
         if let Some(output) = sink.as_deref_mut() {
             output.begin(&response_columns, &self.schema_info())?;
         }
@@ -6024,7 +6065,7 @@ impl Database {
                 }
             }
             None => {
-                let mut cursor = source.scan_rows(&pipeline.from)?;
+                let mut cursor = source.scan_rows_projected(&pipeline.from, &source_projection)?;
                 let mut position = 0_usize;
                 while !source_exhausted
                     && let Some(batch) = cursor.next_batch(control, &mut observation)?
@@ -7720,6 +7761,151 @@ impl Database {
             lines.extend(source.lines().map(str::to_owned));
         }
         lines.join("\n")
+    }
+}
+
+fn collect_pipeline_references(pipeline: &Pipeline, output: &mut BTreeSet<String>) {
+    for stage in &pipeline.stages {
+        match stage {
+            Stage::Let(binding) => collect_bool_references(&binding.expression, output),
+            Stage::Filter(expression) => collect_bool_references(expression, output),
+            Stage::FilterExists(exists) => {
+                for correlation in &exists.correlations {
+                    output.insert(correlation.outer.clone());
+                }
+                collect_pipeline_references(&exists.pipeline, output);
+            }
+            Stage::FilterMatch(matched) => {
+                output.insert(matched.column.clone());
+                for arm in &matched.arms {
+                    collect_bool_references(&arm.condition, output);
+                }
+            }
+            Stage::Derive(derive) => collect_bool_references(&derive.expression, output),
+            Stage::DeriveMatch(derive) => {
+                output.insert(derive.source.clone());
+                for arm in &derive.arms {
+                    collect_match_value_references(&arm.result, output);
+                }
+            }
+            Stage::Lookup(lookup) => {
+                output.insert(lookup.source_key.clone());
+            }
+            Stage::Aggregate(aggregate) => {
+                output.extend(aggregate.group_by.iter().cloned());
+                for assignment in &aggregate.assignments {
+                    if let Some(input) = &assignment.input {
+                        collect_scalar_references(input, output);
+                    }
+                }
+            }
+            Stage::Window(window) => {
+                output.extend(window.partition_by.iter().cloned());
+                output.extend(window.order_by.iter().map(|key| key.column.clone()));
+            }
+            Stage::SetOperation(operation) => {
+                collect_pipeline_references(&operation.pipeline, output);
+            }
+            Stage::Select(fields) => output.extend(fields.iter().cloned()),
+            Stage::Sort(keys) => output.extend(keys.iter().map(|key| key.column.clone())),
+            Stage::Take { .. } | Stage::Page(_) => {}
+        }
+    }
+}
+
+fn collect_bool_references(expression: &BoolExpression, output: &mut BTreeSet<String>) {
+    match expression {
+        BoolExpression::Value(value)
+        | BoolExpression::IsSome(value)
+        | BoolExpression::IsNone(value) => collect_scalar_references(value, output),
+        BoolExpression::Compare { left, right, .. } => {
+            collect_scalar_references(left, output);
+            collect_scalar_references(right, output);
+        }
+        BoolExpression::Contains { collection, item }
+        | BoolExpression::Membership {
+            item, collection, ..
+        } => {
+            collect_scalar_references(collection, output);
+            collect_scalar_references(item, output);
+        }
+        BoolExpression::Any {
+            collection,
+            predicate,
+            ..
+        }
+        | BoolExpression::All {
+            collection,
+            predicate,
+            ..
+        } => {
+            collect_scalar_references(collection, output);
+            collect_bool_references(predicate, output);
+        }
+        BoolExpression::Not(value) => collect_bool_references(value, output),
+        BoolExpression::And(left, right) | BoolExpression::Or(left, right) => {
+            collect_bool_references(left, output);
+            collect_bool_references(right, output);
+        }
+    }
+}
+
+fn collect_scalar_references(
+    expression: &crate::query::ScalarExpression,
+    output: &mut BTreeSet<String>,
+) {
+    use crate::query::ScalarExpression;
+    match expression {
+        ScalarExpression::Reference(path) => {
+            output.insert(path.clone());
+        }
+        ScalarExpression::Parameter { .. } | ScalarExpression::Literal(_) => {}
+        ScalarExpression::Ascribed { value, .. }
+        | ScalarExpression::Length(value)
+        | ScalarExpression::Negate { value, .. } => collect_scalar_references(value, output),
+        ScalarExpression::Call { arguments, .. } => {
+            for argument in arguments {
+                collect_scalar_references(argument, output);
+            }
+        }
+        ScalarExpression::Arithmetic { left, right, .. } => {
+            collect_scalar_references(left, output);
+            collect_scalar_references(right, output);
+        }
+    }
+}
+
+fn collect_match_value_references(value: &crate::query::MatchValue, output: &mut BTreeSet<String>) {
+    use crate::query::{MatchValue, MatchValuePayload};
+    match value {
+        MatchValue::Binding(name) => {
+            output.insert(name.clone());
+        }
+        MatchValue::Literal(_) => {}
+        MatchValue::Expression(expression) => collect_bool_references(expression, output),
+        MatchValue::Constructor { payload, .. } => match payload {
+            MatchValuePayload::Unit => {}
+            MatchValuePayload::Record(fields) => {
+                for field in fields {
+                    collect_match_value_references(&field.value, output);
+                }
+            }
+            MatchValuePayload::Positional(values) => {
+                for value in values {
+                    collect_match_value_references(value, output);
+                }
+            }
+        },
+        MatchValue::Record(fields) => {
+            for field in fields {
+                collect_match_value_references(&field.value, output);
+            }
+        }
+        MatchValue::Tuple(values) | MatchValue::List(values) => {
+            for value in values {
+                collect_match_value_references(value, output);
+            }
+        }
     }
 }
 
