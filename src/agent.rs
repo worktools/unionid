@@ -89,6 +89,10 @@ pub const ERROR_CODES: &[&str] = &[
     "E_PARAM_EXTRA",
     "E_PARAM_MISSING",
     "E_PARAM_TYPE",
+    "E_PARQUET_FORMAT",
+    "E_PARQUET_IO",
+    "E_PARQUET_TYPE",
+    "E_PARQUET_VALUE",
     "E_PREPARE",
     "E_PROTOCOL",
     "E_PROTOCOL_TYPE",
@@ -255,6 +259,12 @@ const COMMANDS: &[AgentCommand] = &[
         name: "doctor",
         summary: "Diagnose the binary and optionally inspect a database copy.",
         usage: "unionid doctor [--db <path>] --format json",
+        json: true,
+    },
+    AgentCommand {
+        name: "parquet",
+        summary: "Inspect one local Parquet file with a bounded typed preview.",
+        usage: "unionid parquet <path> [--limit <rows>] --format json",
         json: true,
     },
     AgentCommand {

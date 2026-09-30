@@ -218,6 +218,15 @@ enum Command {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Inspect one local Parquet file without importing it into redb.
+    Parquet {
+        path: PathBuf,
+        /// Maximum number of rows to decode for the preview.
+        #[arg(long, default_value_t = unionid::parquet::DEFAULT_PREVIEW_ROWS)]
+        limit: usize,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
     /// Read version-matched language documentation bundled with this binary. / 读取二进制内置且版本匹配的语言文档。
     Docs {
         #[command(subcommand)]
@@ -709,6 +718,7 @@ impl Args {
                 integrity: false,
             },
             Command::Version { format }
+            | Command::Parquet { format, .. }
             | Command::Doctor { format, .. }
             | Command::Project {
                 command: ProjectCommand::Check { format, .. },
@@ -968,6 +978,11 @@ fn run(args: Args) -> Result<(), String> {
         Command::Version { format } => print_version(matches!(format, Format::Json)),
         Command::Agent { format } => print_agent_manifest(matches!(format, AgentFormat::Json)),
         Command::Doctor { db, format } => doctor(db, matches!(format, Format::Json)),
+        Command::Parquet {
+            path,
+            limit,
+            format,
+        } => cli::inspect_parquet(&path, limit, matches!(format, Format::Json)),
         Command::Docs { command: None } => print_docs_catalog(None, false),
         Command::Docs {
             command: Some(command),
@@ -1431,7 +1446,25 @@ fn structured_error(message: &str) -> unionid::Error {
             .map(str::trim)
             .unwrap_or(message)
     };
-    unionid::Error::new(code, redact_quoted(detail))
+    // Parquet file and schema-field paths are part of this local inspection
+    // command's diagnostic contract. Other commands retain the conservative
+    // quoted-content redaction used by shared non-query JSON envelopes.
+    let detail = if code.starts_with("E_PARQUET_") {
+        detail.to_owned()
+    } else {
+        redact_quoted(detail)
+    };
+    let error = unionid::Error::new(code, detail);
+    match code {
+        "E_PARQUET_FORMAT" => {
+            error.with_hint("verify that the path is a complete local Parquet file")
+        }
+        "E_PARQUET_TYPE" | "E_PARQUET_VALUE" => {
+            error.with_hint("project or convert the field to a supported lossless Parquet type")
+        }
+        "E_PARQUET_IO" => error.with_hint("check that the local path exists and is readable"),
+        _ => error,
+    }
 }
 
 fn redact_quoted(message: &str) -> String {
@@ -1498,6 +1531,9 @@ fn classify_exit(code: &str, integrity: bool) -> i32 {
         | "E_PARAM_EXTRA"
         | "E_PARAM_MISSING"
         | "E_PARAM_TYPE"
+        | "E_PARQUET_FORMAT"
+        | "E_PARQUET_TYPE"
+        | "E_PARQUET_VALUE"
         | "E_PREPARE"
         | "E_PROTOCOL_TYPE"
         | "E_QUERY"
@@ -1523,6 +1559,7 @@ fn classify_exit(code: &str, integrity: bool) -> i32 {
         | "E_CODEC_VERSION"
         | "E_FORMAT_VERSION"
         | "E_IO"
+        | "E_PARQUET_IO"
         | "E_STORAGE"
         | "E_STORAGE_REOPEN_REQUIRED"
         | "E_STORAGE_UPGRADE"

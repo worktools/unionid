@@ -32,6 +32,79 @@ pub fn run_local_with_options(
     run_local_engine(Engine::memory(), source, json, history, false)
 }
 
+pub fn inspect_parquet(path: &Path, limit: usize, json: bool) -> Result<(), String> {
+    let inspection = match crate::parquet::inspect(path, limit) {
+        Ok(inspection) => inspection,
+        Err(error) => {
+            let fallback_hint = match error.code.as_str() {
+                "E_PARQUET_VALUE" => {
+                    Some("project or convert the field to a supported lossless Parquet type")
+                }
+                _ => None,
+            };
+            if !json && let Some(hint) = error.hint.as_deref().or(fallback_hint) {
+                eprintln!("hint: {hint}");
+            }
+            return Err(error.to_string());
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&inspection).map_err(|error| error.to_string())?
+        );
+        return Ok(());
+    }
+    println!("file | {}", inspection.path);
+    println!("rows | {}", inspection.rows_total);
+    println!("row groups | {}", inspection.row_groups);
+    println!("schema");
+    if inspection.columns.is_empty() {
+        println!("(no columns)");
+    } else {
+        println!("name | type");
+        for column in &inspection.columns {
+            println!("{} | {}", column.name, column.r#type);
+        }
+    }
+    println!("preview");
+    if inspection.preview_rows.is_empty() {
+        println!("(no rows)");
+    } else {
+        println!(
+            "{}",
+            inspection
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        for row in &inspection.preview_rows {
+            println!(
+                "{}",
+                inspection
+                    .columns
+                    .iter()
+                    .map(|column| row.get(&column.name).map(display_value).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
+        }
+    }
+    println!(
+        "previewed {} of {} row(s){}",
+        inspection.preview_rows.len(),
+        inspection.rows_total,
+        if inspection.preview_truncated {
+            " (truncated)"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 pub fn run_local_cli_with_options(
     source: Option<String>,
     json: bool,

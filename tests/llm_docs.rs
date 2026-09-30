@@ -48,6 +48,7 @@ fn cli_lists_and_reads_categorized_bundled_docs() {
     assert!(default_list.contains("operations\n"));
     assert!(default_list.contains("getting-started"));
     assert!(default_list.contains("observability"));
+    assert!(default_list.contains("parquet"));
     assert!(default_list.contains("unionid docs show <topic>"));
 
     let language = Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -74,6 +75,15 @@ fn cli_lists_and_reads_categorized_bundled_docs() {
     let query = String::from_utf8(query.stdout).unwrap();
     assert!(query.contains("topic: query\ncategory: language"));
     assert!(query.contains("# 查询语言参考"));
+
+    let parquet = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["docs", "show", "parquet"])
+        .output()
+        .unwrap();
+    assert!(parquet.status.success());
+    let parquet = String::from_utf8(parquet.stdout).unwrap();
+    assert!(parquet.contains("topic: parquet\ncategory: application"));
+    assert!(parquet.contains("unionid parquet events.parquet"));
 
     let unknown = Command::new(env!("CARGO_BIN_EXE_unionid"))
         .args(["docs", "show", "unknown"])
