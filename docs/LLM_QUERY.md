@@ -70,6 +70,19 @@ create unique index tasks (owner.email)
 create index tasks (state, -priority, id)
 ```
 
+**Do not assume SQL NULL semantics:** a single-column ordinary unique index allows
+at most one `None`. For optional email fields, generate
+`create unique index users (email) if is_some email` so absent emails are excluded.
+Text comparison is exact: `"A@x.com"`, `"a@x.com"`, and `" a@x.com"` are distinct.
+Applications must normalize account identifiers consistently before every write;
+do not generate implicit lower/trim calls or expression indexes. These are tracked
+in [#403](https://github.com/worktools/unionid/issues/403) and
+[#366](https://github.com/worktools/unionid/issues/366).
+
+**可选邮箱：** 普通单列唯一索引最多允许一个 `None`，推荐使用
+`create unique index users (email) if is_some email`。文本大小写、空白与 Unicode
+normalization 不会自动调整，应用需在所有写入入口统一规范化。
+
 A `unique` index may carry a row-local `if` predicate, which constrains only rows whose
 predicate is true. Use it for conditional uniqueness such as non-deleted emails or active
 external IDs:
@@ -283,4 +296,3 @@ Common codes:
 7. After a failure, branch on the stable `code` and `constraint`, follow `hint`, and fix the
    source instead of retrying blindly. After a lost response, retry a mutation only with the
    client idempotency key.
-

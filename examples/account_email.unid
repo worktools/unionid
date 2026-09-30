@@ -1,0 +1,22 @@
+# Missing emails are excluded; present emails must be unique.
+# Normalize identifiers consistently in the application before every write.
+struct User {
+  id: int
+  email: Option<text>
+}
+
+table users: User {
+  key id
+}
+
+create unique index users (email) if is_some email
+
+insert many users [
+  {email: None, id: 1}
+  {email: None, id: 2}
+  {email: Some("alice@example.com"), id: 3}
+]
+
+from users
+sort id
+select {id, email}

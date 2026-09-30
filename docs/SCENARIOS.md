@@ -297,6 +297,43 @@ table payments Payment
 
 迁移场景必须验证已有 text/int 数据，而不是把 cast 隐藏在类型变化中。例如 text ID 通过 `uuid_parse old` 转换，旧 amount text 通过 `decimal_parse old 18 2` 转换；任一坏行会阻止 schema、数据、索引和 ledger 发布。wire、redb、backup、cursor 与旧版本兼容边界由 RFC 的 golden vectors 一起验收。
 
+## 可选账号邮箱
+
+邮箱未填写时可以有多个账号，但填写后的规范邮箱必须唯一：
+
+```text
+struct User {
+  id: int
+  email: Option<text>
+}
+
+table users: User {
+  key id
+}
+
+create unique index users (email) if is_some email
+
+insert many users [
+  {id: 1, email: None}
+  {id: 2, email: None}
+  {id: 3, email: Some("alice@example.com")}
+]
+```
+
+再插入相同的 `Some("alice@example.com")` 返回 `E_CONSTRAINT` 并回滚。去掉 `if is_some email` 则第二个 `None` 也冲突；复合唯一索引比较完整 tuple，而不是单独限制某个成员。`"Alice@example.com"` 与 `" alice@example.com"` 仍是不同的原始文本。应用应选择符合业务规则的邮箱/用户名规范化策略，在创建、编辑、批量导入和同步等全部写入入口一致执行；数据库不替业务决定是否折叠大小写或空白。
+
+For optional account emails, `if is_some email` allows multiple absent values while
+rejecting duplicate present emails atomically. Without that predicate, a second
+`None` also conflicts in a single-column unique index. Composite uniqueness compares
+the entire tuple. Case, whitespace, and Unicode normalization are application policy;
+apply it consistently to creation, edits, imports, and sync writes. Unionid compares
+the resulting text exactly.
+
+可运行脚本见 [account_email.unid](../examples/account_email.unid)，账号约束回归见
+[account_email.rs](../tests/account_email.rs)。文本函数与表达式索引分别由
+[#403](https://github.com/worktools/unionid/issues/403) 和
+[#366](https://github.com/worktools/unionid/issues/366) 跟踪。
+
 ## 9. 软删除与状态化唯一约束
 
 很多业务只在某个状态集合内要求唯一：账号邮箱只有在未删除时唯一，外部任务 ID 只有在 Active 时唯一。把已删除行物理移走、给 key 拼接状态，或在应用层先查后写都会泄漏存储策略，也无法在并发和批量 mutation 下原子保证。部分唯一索引（[RFC 0022](rfc/0022-partial-unique-indexes.md)）用行内 typed predicate 表达这个约束：
