@@ -10,9 +10,9 @@ use arrow_array::{
     DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
     DurationSecondArray, FixedSizeBinaryArray, FixedSizeListArray, Float32Array, Float64Array,
     Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray, LargeListArray,
-    LargeStringArray, ListArray, MapArray, StringArray, StructArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    LargeStringArray, ListArray, MapArray, RecordBatch, StringArray, StructArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, TimeUnit};
 use parquet::arrow::ProjectionMask;
@@ -331,6 +331,7 @@ impl TypedRowSource for ParquetRowSource {
             reader,
             fields,
             next_row_id: 0,
+            pending: None,
         }))
     }
 
@@ -353,6 +354,8 @@ struct ParquetRowCursor {
     reader: ParquetRecordBatchReader,
     fields: Vec<arrow_schema::FieldRef>,
     next_row_id: RowId,
+    // The Arrow reader limits rows, while returned typed batches also limit bytes.
+    pending: Option<(RecordBatch, usize)>,
 }
 
 impl RowBatchCursor for ParquetRowCursor {
@@ -364,13 +367,20 @@ impl RowBatchCursor for ParquetRowCursor {
         if let Some(control) = control {
             control.checkpoint()?;
         }
-        let Some(batch) = self.reader.next() else {
-            return Ok(None);
+        let (batch, start_row) = match self.pending.take() {
+            Some(pending) => pending,
+            None => {
+                let Some(batch) = self.reader.next() else {
+                    return Ok(None);
+                };
+                let batch =
+                    batch.map_err(|error| Error::new("E_PARQUET_FORMAT", error.to_string()))?;
+                (batch, 0)
+            }
         };
-        let batch = batch.map_err(|error| Error::new("E_PARQUET_FORMAT", error.to_string()))?;
-        let mut rows = Vec::with_capacity(batch.num_rows());
+        let mut rows = Vec::with_capacity(batch.num_rows() - start_row);
         let mut encoded_bytes = 0_usize;
-        for row_index in 0..batch.num_rows() {
+        for row_index in start_row..batch.num_rows() {
             if row_index % 256 == 0
                 && let Some(control) = control
             {
@@ -391,18 +401,22 @@ impl RowBatchCursor for ParquetRowCursor {
             let row_bytes = serde_json::to_vec(&fields)
                 .map_err(|error| Error::new("E_PARQUET_VALUE", error.to_string()))?
                 .len();
-            encoded_bytes = encoded_bytes
+            let next_bytes = encoded_bytes
                 .checked_add(row_bytes)
                 .ok_or_else(|| Error::new("E_LIMIT", "Parquet query batch size overflow"))?;
-            if encoded_bytes > SOURCE_BATCH_MAX_BYTES {
-                return Err(Error::new(
-                    "E_LIMIT",
-                    "decoded Parquet query batch exceeds the 16 MiB working limit",
-                )
-                .with_hint(
-                    "reduce large cell values or rewrite the file with smaller row groups",
-                ));
+            if next_bytes > SOURCE_BATCH_MAX_BYTES {
+                if rows.is_empty() {
+                    return Err(Error::new(
+                        "E_LIMIT",
+                        "serialized Parquet query row exceeds the 16 MiB source batch limit",
+                    )
+                    .with_hint("reduce large cell values or project fewer columns"));
+                }
+                // Leave the row identity unchanged until this row is returned.
+                self.pending = Some((batch, row_index));
+                break;
             }
+            encoded_bytes = next_bytes;
             rows.push(Arc::new(Row {
                 id: self.next_row_id,
                 fields,
