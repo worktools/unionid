@@ -191,6 +191,12 @@ fn corrupt_files_and_excessive_limits_fail_with_stable_codes() {
     let error: serde_json::Value = serde_json::from_slice(&corrupt.stdout).unwrap();
     assert_eq!(error["error"]["code"], "E_PARQUET_FORMAT");
     assert!(error["error"]["hint"].as_str().is_some());
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(path.to_str().unwrap())
+    );
     assert_eq!(error["exit_code"], 3);
 
     let excessive = Command::new(env!("CARGO_BIN_EXE_unionid"))

@@ -23,7 +23,7 @@ use crate::scalars::{Bytes, Date, Decimal, Duration, Timestamp};
 
 pub const DEFAULT_PREVIEW_ROWS: usize = 20;
 pub const MAX_PREVIEW_ROWS: usize = 1_000;
-const MAX_PREVIEW_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RETAINED_PREVIEW_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ParquetColumn {
@@ -121,10 +121,10 @@ pub fn inspect(path: &Path, limit: usize) -> Result<ParquetInspection> {
                             .len(),
                     )
                     .ok_or_else(|| Error::new("E_LIMIT", "Parquet preview size overflow"))?;
-                if preview_bytes > MAX_PREVIEW_BYTES {
+                if preview_bytes > MAX_RETAINED_PREVIEW_BYTES {
                     return Err(Error::new(
                         "E_LIMIT",
-                        "Parquet preview exceeds the 64 MiB working-memory limit",
+                        "retained Parquet preview exceeds the 64 MiB serialized-size limit",
                     )
                     .with_hint("request fewer preview rows"));
                 }

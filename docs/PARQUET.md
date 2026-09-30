@@ -8,7 +8,7 @@ unionid parquet events.parquet --limit 50
 unionid parquet events.parquet --limit 20 --format json
 ```
 
-默认读取前 20 行；`--limit 0` 只检查 metadata 和 schema；硬上限为 1,000 行，预览工作内存上限为 64 MiB。读取按最多 1,024 行的 Arrow batch 进行，因此不会为了显示少量数据先把完整文件物化到内存。
+默认读取前 20 行；`--limit 0` 只检查 metadata 和 schema；硬上限为 1,000 行，转换后保留的 preview payload 上限为 64 MiB。读取按最多 1,024 行的 Arrow batch 进行，因此不会为了显示少量数据先把完整文件物化到内存；64 MiB 限制不表示 Arrow 解码过程的瞬时内存上限。
 
 当前映射保持无损：
 
@@ -43,7 +43,7 @@ unionid parquet events.parquet --limit 50
 unionid parquet events.parquet --limit 20 --format json
 ```
 
-The command previews 20 rows by default. `--limit 0` reads metadata and schema only. The hard limit is 1,000 rows and preview working memory is capped at 64 MiB. Input is decoded in Arrow batches of at most 1,024 rows, so a small preview does not materialize the complete file first.
+The command previews 20 rows by default. `--limit 0` reads metadata and schema only. The hard limit is 1,000 rows, and the retained serialized preview payload is capped at 64 MiB. Input is decoded in Arrow batches of at most 1,024 rows, so a small preview does not materialize the complete file first; the 64 MiB retained-payload bound is not a bound on transient Arrow decode memory.
 
 The current mapping is lossless: signed integers and unsigned integers that fit `i64` become `int`; float32/64 become `float`; UTF-8 becomes `text`; binary becomes `bytes`; compatible decimal128, date, UTC timestamp, and duration values retain their production scalar types. Struct, list, text-key map, and nullable fields become anonymous records, `List<T>`, `Map<text, T>`, and `Option<T>` respectively.
 

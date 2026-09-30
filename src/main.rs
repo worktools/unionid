@@ -1446,7 +1446,15 @@ fn structured_error(message: &str) -> unionid::Error {
             .map(str::trim)
             .unwrap_or(message)
     };
-    let error = unionid::Error::new(code, redact_quoted(detail));
+    // Parquet file and schema-field paths are part of this local inspection
+    // command's diagnostic contract. Other commands retain the conservative
+    // quoted-content redaction used by shared non-query JSON envelopes.
+    let detail = if code.starts_with("E_PARQUET_") {
+        detail.to_owned()
+    } else {
+        redact_quoted(detail)
+    };
+    let error = unionid::Error::new(code, detail);
     match code {
         "E_PARQUET_FORMAT" => {
             error.with_hint("verify that the path is a complete local Parquet file")
