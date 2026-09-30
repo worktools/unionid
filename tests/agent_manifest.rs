@@ -38,6 +38,11 @@ fn agent_manifest_is_machine_readable_and_covers_the_error_contract() {
     assert!(
         commands
             .iter()
+            .any(|command| { command["name"] == "parquet" && command["json"] == true })
+    );
+    assert!(
+        commands
+            .iter()
             .any(|command| command["name"] == "agent" && command["json"] == true)
     );
     assert_eq!(value["current_storage"]["format"], 10);

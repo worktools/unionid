@@ -143,6 +143,14 @@ const TOPICS: &[BundledDocsTopic] = &[
         content: include_str!("../docs/APPLICATION_DATA.md"),
     },
     BundledDocsTopic {
+        name: "parquet",
+        category: DocsCategory::Application,
+        title: "Local Parquet inspection / 本地 Parquet 查看",
+        source: "docs/PARQUET.md",
+        summary: "Inspect one local Parquet file as bounded structural UnionID data.",
+        content: include_str!("../docs/PARQUET.md"),
+    },
+    BundledDocsTopic {
         name: "rust-query-macro",
         category: DocsCategory::Application,
         title: "Inline Rust queries / 内联 Rust 查询",
@@ -375,9 +383,10 @@ mod tests {
     fn bundled_docs_are_categorized_and_versioned() {
         let catalog = docs_catalog(None);
         assert_eq!(catalog.schema_version, 1);
-        assert_eq!(catalog.topics.len(), 20);
+        assert_eq!(catalog.topics.len(), 21);
         assert_eq!(catalog.topics[0].name, "getting-started");
         assert!(catalog.topics.iter().any(|topic| topic.name == "query"));
+        assert!(catalog.topics.iter().any(|topic| topic.name == "parquet"));
         assert!(
             catalog
                 .topics
