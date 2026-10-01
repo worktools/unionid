@@ -303,7 +303,13 @@ const WORKFLOW: &[&str] = &[
     "On failure branch on `error.code` and `error.constraint`, then follow `error.hint`.",
 ];
 
-const HINT_CODES: &[&str] = &["E_TABLE", "E_CONSTRAINT", "E_PAGE_ORDER", "E_EXPECTATION"];
+const HINT_CODES: &[&str] = &[
+    "E_TABLE",
+    "E_CONSTRAINT",
+    "E_PAGE_ORDER",
+    "E_EXPECTATION",
+    "E_CONFIG",
+];
 
 const EXIT_CLASSES: &[AgentExitClass] = &[
     AgentExitClass {
@@ -349,7 +355,7 @@ pub fn manifest() -> AgentManifest {
         commands: COMMANDS.to_vec(),
         workflow: WORKFLOW.to_vec(),
         atomic_scripts: AgentAtomicScripts {
-            guard: "expect affected <operator> <nonnegative u64 literal>; immediately after DML",
+            guard: "expect affected <operator> <nonnegative u64 literal> (immediately after DML)",
             operators: ["==", "!=", "<", "<=", ">", ">="],
             max_statements: crate::script::MAX_SCRIPT_STATEMENTS,
             max_summary_bytes: crate::script::MAX_STATEMENT_SUMMARY_BYTES,

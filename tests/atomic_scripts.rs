@@ -564,3 +564,120 @@ fn a_trailing_guard_does_not_bypass_read_only_or_v1_returning_boundaries() {
         1
     );
 }
+
+#[test]
+fn legacy_wal_and_snapshot_reject_guards_without_persisting_unreplayable_scripts() {
+    let temp = TempDir::new();
+    for snapshot_enabled in [false, true] {
+        let wal = temp.0.join(format!("legacy-{snapshot_enabled}.wal"));
+        let snapshot = snapshot_enabled.then(|| temp.0.join("legacy.snapshot"));
+        let before_rows;
+        {
+            let mut engine = Engine::open(
+                Some(wal.clone()),
+                snapshot.clone(),
+                usize::from(snapshot_enabled),
+            )
+            .unwrap();
+            ok(&mut engine, SETUP);
+            before_rows = rows(&mut engine);
+            let before_wal = std::fs::read(&wal).unwrap();
+            let before_snapshot = snapshot.as_ref().map(|p| std::fs::read(p).unwrap());
+            let failed = engine.execute(
+                "update accounts | filter id == 1 | set balance = 0\nexpect affected == 1",
+            );
+            let error = failed.error.unwrap();
+            assert_eq!(error.code, "E_CONFIG");
+            assert_eq!(error.statement_index, Some(2));
+            assert!(error.hint.unwrap().contains("--db"));
+            assert_eq!(rows(&mut engine), before_rows);
+            assert_eq!(std::fs::read(&wal).unwrap(), before_wal);
+            assert_eq!(
+                snapshot.as_ref().map(|p| std::fs::read(p).unwrap()),
+                before_snapshot
+            );
+        }
+        let mut reopened =
+            Engine::open(Some(wal), snapshot, usize::from(snapshot_enabled)).unwrap();
+        assert_eq!(rows(&mut reopened), before_rows);
+    }
+}
+
+#[test]
+fn a_lost_tcp_response_can_retry_the_guarded_receipt_without_repeating_effects() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    use unionid::{ProtocolRequest, cli};
+    let temp = TempDir::new();
+    let db = temp.0.join("delivery.redb");
+    let server = common::Server::start(&["--db", db.to_str().unwrap()]);
+    assert!(cli::send_one(&server.addr, SETUP).unwrap().ok);
+    let request = ProtocolRequest::query("lost-response", "update accounts | filter id == 1 | set version = version + 1\nreturning {id, version}\nexpect affected == 1").with_idempotency_key("claim-delivery").unwrap();
+    let mut connection = TcpStream::connect(&server.addr).unwrap();
+    connection
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    connection.write_all(b"\n").unwrap();
+    connection.flush().unwrap();
+    // Wait for the committed effect on a separate connection, without reading
+    // any of the mutation response, then deliberately discard that response.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if cli::send_one(
+            &server.addr,
+            "from accounts | filter id == 1 && version == 1",
+        )
+        .unwrap()
+        .rows
+        .len()
+            == 1
+        {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    drop(connection);
+    let replay = cli::send_request(&server.addr, &request).unwrap();
+    assert!(replay.ok, "{}", replay.message);
+    assert!(replay.idempotency.unwrap().replayed);
+    assert_eq!(replay.statements.len(), 2);
+    assert_eq!(replay.statements[0].affected_rows, Some(1));
+    assert_eq!(
+        cli::send_one(
+            &server.addr,
+            "from accounts | filter id == 1 && version == 1"
+        )
+        .unwrap()
+        .rows
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn the_new_request_limit_does_not_prevent_replaying_older_large_wal_records() {
+    let temp = TempDir::new();
+    let path = temp.0.join("old-large.wal");
+    let legacy = unionid::wal::Wal::new(&path).unwrap();
+    legacy.append(1, SETUP).unwrap();
+    let old_source = "update accounts | filter id == 1 | set version = version + 1\n"
+        .repeat(MAX_SCRIPT_STATEMENTS + 1);
+    legacy.append(2, &old_source).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut engine = Engine::open(Some(path.clone()), None, 0).unwrap();
+    assert_eq!(
+        ok(
+            &mut engine,
+            &format!(
+                "from accounts | filter id == 1 && version == {}",
+                MAX_SCRIPT_STATEMENTS + 1
+            )
+        )
+        .rows
+        .len(),
+        1
+    );
+    assert_eq!(engine.execute(&old_source).error.unwrap().code, "E_LIMIT");
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}

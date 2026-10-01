@@ -1848,6 +1848,22 @@ impl Engine {
         idempotency: Option<PendingIdempotency<'_>>,
     ) -> Result<QueryResponse> {
         crate::script::preflight(&statements)?;
+        if matches!(
+            self.storage_mode,
+            StorageMode::LegacyWal | StorageMode::LegacyWalSnapshot
+        ) && let Some((offset, guard)) = statements
+            .iter()
+            .enumerate()
+            .find(|(_, located)| matches!(located.statement, Statement::Expect { .. }))
+        {
+            return Err(Error::new(
+                "E_CONFIG",
+                "affected-row guards require memory or redb; legacy WAL replay does not support them",
+            )
+            .with_hint("Use --db <path> for durable guarded writes.")
+            .at(guard.span)
+            .at_statement(offset + 1));
+        }
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
         let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
         if self.read_reopen_required {

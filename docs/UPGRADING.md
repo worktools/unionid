@@ -202,3 +202,11 @@ Generation reclamation after upgrades or repeated schema migrations does not gua
 新增 Error.statement_index 与 QueryResponse/ProtocolResponse.statements 公开字段，Rust struct literal 需补 None/Vec::new；构造器不受影响。Serde 读取旧响应使用默认空摘要，序列化空摘要时省略字段。每脚本新增 4,096 顶层语句上限；大批量写入改用 insert many。新摘要进入回执、逻辑备份和 journal 的既有 JSON payload，不更改 storage/codec 版本。继续使用同版本二进制执行、维护与恢复带守卫的请求；旧二进制无法执行 guard，不保证经旧程序重写保留新增摘要。
 
 New public fields require updating Rust struct literals: Error.statement_index defaults to None, response.statements to Vec::new. Constructors remain compatible. Legacy serde payloads default to empty summaries, which are omitted during encoding. Scripts now have a 4,096-statement bound; use batch inserts for bulk writes. Existing JSON receipt/backup/journal payloads retain the additive metadata without a codec bump. Use matching binaries for execution and recovery: old binaries cannot execute guards and may drop new metadata when rewriting.
+
+### 旧 WAL 边界 / Legacy WAL boundary
+
+守卫仅用于 memory/redb。旧 `--wal-path` 以及 WAL + snapshot 模式在构造候选状态和追加日志前以 `E_CONFIG` 拒绝包含 expect 的脚本，提示使用 `--db`；避免成功写入无法重放的日志。已有无守卫 WAL 仍可恢复。
+
+Guards require memory or redb. Legacy WAL and WAL + snapshot modes reject guarded scripts with E_CONFIG before candidate construction or logging, with a hint to use --db. This prevents committing an unreplayable log; existing unguarded WAL files remain recoverable.
+
+旧 WAL 记录的恢复不套用新请求的 4,096 语句上限，仍保留既有 source/record 字节限制；历史大记录可以恢复，新提交依然受限。Historical WAL replay retains its existing byte budgets instead of applying the new request statement limit; old large records remain recoverable while new submissions are bounded.

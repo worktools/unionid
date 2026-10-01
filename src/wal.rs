@@ -146,8 +146,8 @@ pub fn replay_from_path(path: &Path, db: &mut Database) -> Result<usize, String>
                 line.trim().to_string(),
             )
         };
-        let statements =
-            syntax::parse(&source).map_err(|e| format!("WAL line {line_number}: {e}"))?;
+        let statements = syntax::parse_legacy_wal(&source)
+            .map_err(|e| format!("WAL line {line_number}: {e}"))?;
         if !statements.iter().any(|s| s.statement.is_mutating()) {
             return Err(format!("WAL line {line_number}: no mutation"));
         }

@@ -894,3 +894,9 @@ A false guard returns `E_EXPECTATION` and rolls back the entire script, includin
 Successful responses include ordered, value-free `statements` entries with `index`, `kind`, and optional `affected_rows`. Guards have no count. A trailing guard preserves the preceding mutation's result and returning rows; a final read remains the top-level result. Scripts are bounded to 4,096 statements and 512 KiB of encoded summaries, checked before commit. Use batch inserts for large imports.
 
 Engine/prepare, CLI, TCP, and HTTP share execution. Durable receipts replay exact summaries through restart, logical backup, and journal recovery; old receipts default to an empty summary without inventing history. Changing a guard changes the digest. Static bindings and inline macros allow one DML plus a trailing guard; multi-mutation scripts use Engine/prepare. Transport delivery failure, including the post-commit TCP response limit, does not establish rollback; retry with an idempotency key. These APIs are under development for v0.12 and unavailable in released v0.11.
+
+### 旧 WAL 边界 / Legacy WAL boundary
+
+守卫仅用于 memory/redb。旧 `--wal-path` 以及 WAL + snapshot 模式在构造候选状态和追加日志前以 `E_CONFIG` 拒绝包含 expect 的脚本，提示使用 `--db`；避免成功写入无法重放的日志。已有无守卫 WAL 仍可恢复。
+
+Guards require memory or redb. Legacy WAL and WAL + snapshot modes reject guarded scripts with E_CONFIG before candidate construction or logging, with a hint to use --db. This prevents committing an unreplayable log; existing unguarded WAL files remain recoverable.

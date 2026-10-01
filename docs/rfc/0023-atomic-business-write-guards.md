@@ -129,3 +129,9 @@ Static descriptions, query rust, and inline macros initially accept one mutation
 Deliver syntax/budgets and compatibility vectors, then candidate/prepared atomic execution, then durable receipts/backup/journal, then guarded single-operation codegen/macros and complete user documentation. Keep #399 open until every stage passes.
 
 Exercise insufficient funds, missing recipients, successful transfers, stale versions, unguarded zero-row success, batch counts, trailing returning, final queries, invalid contexts, script/summary limits, receipt capacity, and later execution failures. For pre-commit failures compare complete typed rows, indexes, schema/sequence, allocation, and receipts before/after failures; reopen/check and verify backups in redb. Require matching Rust/CLI/TCP/HTTP diagnostics and exactly one successful concurrent guarded claim. Also inject post-commit encoding/delivery failures and require receipt retry to recover the committed summary instead of claiming rollback. Keep ordinary CI Ubuntu-only and run the full native-platform gate before release.
+
+### 旧 WAL 边界 / Legacy WAL boundary
+
+守卫仅用于 memory/redb。旧 `--wal-path` 以及 WAL + snapshot 模式在构造候选状态和追加日志前以 `E_CONFIG` 拒绝包含 expect 的脚本，提示使用 `--db`；避免成功写入无法重放的日志。已有无守卫 WAL 仍可恢复。
+
+Guards require memory or redb. Legacy WAL and WAL + snapshot modes reject guarded scripts with E_CONFIG before candidate construction or logging, with a hint to use --db. This prevents committing an unreplayable log; existing unguarded WAL files remain recoverable.

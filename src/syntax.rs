@@ -403,7 +403,18 @@ pub fn parse(source: &str) -> Result<Vec<LocatedStatement>> {
         pos: 0,
         needs_more: Cell::new(false),
     }
-    .script()
+    .script(crate::script::MAX_SCRIPT_STATEMENTS)
+}
+
+/// Historical WAL records predate the per-request statement limit. Preserve
+/// replay of these records while retaining the lexer source-byte bound.
+pub(crate) fn parse_legacy_wal(source: &str) -> Result<Vec<LocatedStatement>> {
+    Parser {
+        tokens: lex(source)?,
+        pos: 0,
+        needs_more: Cell::new(false),
+    }
+    .script(usize::MAX)
 }
 
 /// Classify whether `source` is complete, can be continued, or is already invalid.
@@ -432,7 +443,7 @@ pub fn input_status(source: &str) -> InputStatus {
         pos: 0,
         needs_more: Cell::new(false),
     };
-    match parser.script() {
+    match parser.script(crate::script::MAX_SCRIPT_STATEMENTS) {
         Ok(_) => InputStatus::Complete,
         Err(error) if parser.needs_more.get() => {
             let error = if let Some((open, span)) = unclosed {
@@ -558,7 +569,7 @@ impl Parser {
         Ok(p)
     }
 
-    fn script(&mut self) -> Result<Vec<LocatedStatement>> {
+    fn script(&mut self, max_statements: usize) -> Result<Vec<LocatedStatement>> {
         let mut out = Vec::new();
         self.newlines();
         while *self.kind() != Kind::End {
@@ -595,7 +606,7 @@ impl Parser {
                 ));
             };
             out.push(LocatedStatement { statement, span });
-            if out.len() > crate::script::MAX_SCRIPT_STATEMENTS {
+            if out.len() > max_statements {
                 return Err(
                     Error::new("E_LIMIT", "script exceeds the 4096 statement limit").at(span),
                 );
