@@ -324,3 +324,9 @@ cargo run -- cli --addr 127.0.0.1:7878 --file examples/tasks.unid
 TCP 的稳定客户端入口是 [JSON Lines version 1](PROTOCOL.md)：请求包含 `version/request_id/query/params` 和可选 schema 前置条件，响应回显 ID，并以独立 wire codec 无损编码 ADT 与 i64。JSON 中的换行不会被压平。服务暂时兼容 `{"query":"..."}` 和旧纯文本单行请求。
 
 响应包含 `ok/message/columns/rows/error/warnings/schema`，成功 DML 还包含 `affected_rows`；单行 upsert 额外包含 `upsert_action`，批量 upsert 包含按输入顺序排列的 `upsert_actions`。带 returning 的 DML 同时填充 typed `columns/rows`。`schema` 提供当前应用 schema 的 revision 与 SHA-256 hash；原子 schema 脚本只推进一次 revision，行写入与失败请求不推进，完整规则见 [Schema 身份与演进契约](SCHEMA.md)。`columns` 保留投影顺序和类型描述；version 1 的 `rows` 使用与内部 serde/存储 codec 分离的 typed wire value，i64 和稳定 ID 以十进制 string 传输。服务默认本机监听；连接、frame、working/result rows、response bytes、execution deadline、socket timeout、SIGINT/SIGTERM 关闭和重试语义见[服务运行边界](SERVICE.md)。
+
+## 原子写入守卫 / Atomic write guards
+
+v0.12 开发版增加独立 `expect affected == 1`，紧随 DML 检查命中行数；失败整体回滚。无参数、无分号，支持六种比较与非负整数常量。已发布 v0.11 不支持。
+
+The v0.12 development language adds an independent affected-row guard immediately after DML. Failure aborts the whole script. Six comparisons and nonnegative literals are supported. Released v0.11 does not support it. See [query reference](QUERY.md#原子业务写入v012-开发中--atomic-business-writes-v012-development).

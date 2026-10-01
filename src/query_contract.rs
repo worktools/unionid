@@ -98,10 +98,20 @@ impl Engine {
 }
 
 fn describe_prepared(engine: &Engine, prepared: &PreparedQuery) -> Result<QueryDescription> {
-    let [located] = prepared.statements() else {
+    let located = match prepared.statements() {
+        [located] => Some(located),
+        [located, guard]
+            if crate::script::is_dml(&located.statement)
+                && matches!(guard.statement, Statement::Expect { .. }) =>
+        {
+            Some(located)
+        }
+        _ => None,
+    };
+    let Some(located) = located else {
         let mut error = Error::new(
             "E_QUERY_FILE",
-            "a static query file must contain exactly one prepared operation",
+            "a static query file must contain one prepared operation with an optional trailing expect",
         );
         if let Some(second) = prepared.statements().get(1) {
             error = error.at(second.span);

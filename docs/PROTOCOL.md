@@ -173,3 +173,11 @@ HTTP/TCP Rust adapter 还可使用 `Request::query`、`Request::with_serde_param
 ```
 
 TCP 与 HTTP 复用 `stream::accept`、`AcceptedStream::start` 和同一有界 frame producer；typed row 继续使用 `WireValue`。producer 把 frame sink 直接交给 query pipeline：row-local full scan 可以逐行编码并等待有界 channel，不先构造完整 `QueryResponse.rows`；aggregate、group 或 blocking sort 仍先完成各自有界状态，再开始发送 rows。一个 stream 从 schema 到 terminal frame 始终持有同一个 request-scoped MVCC snapshot，背压、cancel、shutdown 和 deadline 都通过同一个 execution control 收敛。完整状态机、资源数值和竞态见 [RFC 0007](rfc/0007-cancellable-backpressured-streams.md)。stream 在 `complete` 前断开时是不可恢复的 partial result，不能从半帧或行号隐式续传；短查询和需要可靠重试/续传的遍历应使用完整 response 或 stable cursor page。
+
+## 逐语句摘要与写入守卫 / Statement summaries and write guards
+
+v0.12 开发版的 protocol v1/v2 成功响应增加可选 `statements: [{index, kind, affected_rows?}]`，尾随 expect 不替换 DML returning。错误新增可选 `statement_index`（从 1 开始）；`E_EXPECTATION` 与提交前摘要预算错误确定回滚；`E_EXPECTATION_CONTEXT` 在执行前拒绝。失败不提供未提交摘要。
+
+In v0.12 development, successful v1/v2 responses add optional ordered statement metadata. A trailing guard preserves the mutation output. Optional error `statement_index` counts top-level AST statements from one. Guard and pre-commit summary-budget failures roll back; context errors reject before execution. Receipt replay preserves summaries. Omitted fields in legacy receipts default to empty metadata. No protocol or storage version changes are required for these additive JSON fields.
+
+响应交付失败不保证回滚，TCP 16 MiB envelope 检查发生在提交之后；用幂等 key 重试。Transport delivery failures do not prove rollback: the TCP envelope budget runs after commit. Retry using an idempotency key. See [guard contract](rfc/0023-atomic-business-write-guards.md).

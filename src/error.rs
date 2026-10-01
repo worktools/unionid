@@ -33,6 +33,9 @@ pub struct Error {
     /// Optional, value-free next step an agent or user can act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// One-based top-level script position, when an AST statement is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_index: Option<usize>,
 }
 
 impl Error {
@@ -43,11 +46,17 @@ impl Error {
             span: None,
             constraint: None,
             hint: None,
+            statement_index: None,
         }
     }
 
     pub fn at(mut self, span: Span) -> Self {
         self.span.get_or_insert(span);
+        self
+    }
+
+    pub fn at_statement(mut self, index: usize) -> Self {
+        self.statement_index.get_or_insert(index);
         self
     }
 

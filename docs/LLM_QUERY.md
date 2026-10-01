@@ -296,3 +296,9 @@ Common codes:
 7. After a failure, branch on the stable `code` and `constraint`, follow `hint`, and fix the
    source instead of retrying blindly. After a lost response, retry a mutation only with the
    client idempotency key.
+
+## Atomic write guards (v0.12 development)
+
+Discover `atomic_scripts` in `unionid agent --format json` before emitting guards; released v0.11 does not support them. Append `expect affected == 1` immediately after each mutation that must match exactly one row. Read the schema and bind version/balance conditions in the mutation filter. Do not check affected_rows only after an atomic multi-write script has committed.
+
+Guard failure is `E_EXPECTATION`, with a one-based `error.statement_index`, and rolls back the entire request. Invalid placement is `E_EXPECTATION_CONTEXT` before execution. Success has ordered `statements` metadata; the final non-guard operation owns the top-level result. Accept only six comparison operators and nonnegative u64 literals; do not invent `expect $condition` or transaction blocks. Multi-mutation scripts use Engine/prepare, CLI, TCP, or HTTP; macros and static query files accept one DML plus one trailing guard. Transport errors can follow a commit: use receipt-backed idempotent retries. See [complete semantics](rfc/0023-atomic-business-write-guards.md) and [runnable version claim](../examples/atomic_claim.unid).

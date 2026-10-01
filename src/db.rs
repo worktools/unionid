@@ -1466,6 +1466,8 @@ pub struct QueryResponse {
     pub schema: Option<SchemaInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affected_rows: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statements: Vec<crate::script::StatementSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upsert_action: Option<UpsertAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1544,6 +1546,7 @@ impl QueryResponse {
             warnings: Vec::new(),
             schema: None,
             affected_rows: None,
+            statements: Vec::new(),
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
@@ -1566,6 +1569,7 @@ impl QueryResponse {
             warnings: Vec::new(),
             schema: None,
             affected_rows: None,
+            statements: Vec::new(),
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
@@ -1830,6 +1834,10 @@ impl Database {
         control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
         match stmt {
+            Statement::Expect { .. } => Err(Error::new(
+                "E_EXPECTATION_CONTEXT",
+                "expect requires a script mutation context",
+            )),
             Statement::DefineType { name, ty } => {
                 if self.objects.contains_key(&name) {
                     return Err(Error::new(
@@ -4288,7 +4296,8 @@ impl Database {
             | Statement::CreateTable { .. }
             | Statement::TypedTable { .. }
             | Statement::CreateIndex { .. }
-            | Statement::Migration { .. } => None,
+            | Statement::Migration { .. }
+            | Statement::Expect { .. } => None,
         };
         let Some(columns) = columns else {
             return Ok(Vec::new());
@@ -6362,6 +6371,7 @@ impl Database {
             warnings: Vec::new(),
             schema: None,
             affected_rows: None,
+            statements: Vec::new(),
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,

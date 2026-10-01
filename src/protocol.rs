@@ -518,6 +518,8 @@ pub struct Response {
     pub schema: Option<SchemaInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affected_rows: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statements: Vec<crate::script::StatementSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upsert_action: Option<UpsertAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -637,6 +639,7 @@ impl Response {
             warnings: response.warnings,
             schema: response.schema,
             affected_rows: response.affected_rows,
+            statements: response.statements,
             upsert_action: response.upsert_action,
             upsert_actions: response.upsert_actions,
             plan: response.plan,
@@ -683,6 +686,7 @@ impl Response {
             warnings: Vec::new(),
             schema: Some(introspection.schema.clone()),
             affected_rows: None,
+            statements: Vec::new(),
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,

@@ -444,6 +444,7 @@ pub fn input_status(source: &str) -> InputStatus {
                     span: error.span,
                     constraint: None,
                     hint: error.hint,
+                    statement_index: error.statement_index,
                 }
             };
             InputStatus::Incomplete(error)
@@ -580,6 +581,8 @@ impl Parser {
                 self.update()?
             } else if self.word("delete") {
                 self.delete()?
+            } else if self.word("expect") {
+                self.expect_affected()?
             } else if self.word("migration") {
                 self.migration()?
             } else if self.word("explain") {
@@ -588,10 +591,15 @@ impl Parser {
                 self.pipeline()?
             } else {
                 return Err(self.error(
-                    "expected struct / enum / type / table / insert / upsert / update / delete / migration / explain / from (or legacy create table/index)",
+                    "expected struct / enum / type / table / insert / upsert / update / delete / expect / migration / explain / from (or legacy create table/index)",
                 ));
             };
             out.push(LocatedStatement { statement, span });
+            if out.len() > crate::script::MAX_SCRIPT_STATEMENTS {
+                return Err(
+                    Error::new("E_LIMIT", "script exceeds the 4096 statement limit").at(span),
+                );
+            }
             // A consumed layout block already established a physical statement boundary.
             if !matches!(self.kind(), Kind::Newline | Kind::End)
                 && !matches!(
@@ -634,6 +642,23 @@ impl Parser {
         } else {
             Statement::Explain(pipeline)
         })
+    }
+
+    fn expect_affected(&mut self) -> Result<Statement> {
+        self.expect_word("expect")?;
+        self.expect_word("affected")?;
+        if matches!(self.kind(), Kind::Op(op) if op == "=") {
+            return Err(self.error("expect equality uses =="));
+        }
+        let op = self.comparison_operator()?;
+        let token = self.bump();
+        let Kind::Number(raw) = token.kind else {
+            return Err(self.error("expect requires a nonnegative integer constant"));
+        };
+        let affected = raw
+            .parse::<u64>()
+            .map_err(|_| syntax("expect requires a nonnegative u64 constant", token.span))?;
+        Ok(Statement::Expect { op, affected })
     }
 
     fn define_type(&mut self) -> Result<Statement> {

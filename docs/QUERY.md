@@ -861,3 +861,36 @@ filter match state {
 | Prepared DML | [parameters.rs](../examples/parameters.rs) 与测试内脚本 | 命名 row/list 参数、filter/set/match 推导、空表预检、主键/returning、schema 失效、deadline、WAL 拒绝和 redb 重开 | `prepared_dml_*`、`prepared_bulk_insert_*`、`parameterized_rows_*` |
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。
+
+## 原子业务写入（v0.12 开发中） / Atomic business writes (v0.12 development)
+
+### 中文说明
+
+`expect affected == 1` 是紧随 DML 的独立语句，检查上一条 insert、insert many、upsert、upsert many、update 或 delete 的实际命中行数。支持 `== != < <= > >=` 与非负 u64 整数常量，不接受参数或任意布尔表达式。空行与注释不打断相邻关系；查询、DDL 或第二个 expect 会打断。上下文错误在执行前返回 `E_EXPECTATION_CONTEXT`。
+
+```text
+update jobs
+filter id == $id && version == $version && state == Pending
+set {
+  state = Running {worker: $worker}
+  version = version + 1
+}
+returning {id, state, version}
+expect affected == 1
+```
+
+守卫失败返回 `E_EXPECTATION`，整个请求确定回滚，包括先前写入、索引、RowId 分配、schema、sequence 和新回执；零行 update/delete 在没有守卫时仍合法。`error.statement_index` 从 1 开始计数顶层语句，包含 expect，pipeline stage 不单独计数；失败不返回未提交的 rows 或摘要。成功响应增加 `statements`，按源码顺序提供 `{index, kind, affected_rows?}` 元数据；expect 不带 affected_rows。尾随 expect 保留上一条 DML 的 rows、columns、affected_rows 与 upsert metadata；最后若是查询，顶层结果仍是该查询的结果。
+
+一个脚本最多 4,096 条顶层语句，摘要编码预算 512 KiB，在提交前检查；大量导入使用 insert many。Engine/prepare、CLI、TCP 和 HTTP 共享语义。幂等重试、redb 重开、逻辑备份和增量 journal 恢复保存完整摘要。新增字段可选，旧回执未包含摘要时按空数组读取，不为它们重造历史摘要。guard 修改会改变 query/request digest。静态 `query describe`、生成 Rust bindings 与 `queries!` 支持一条 DML 加尾随 guard，多条 mutation 仍使用 Engine/prepare 请求级脚本。
+
+传输交付失败不能证明回滚：TCP 的 16 MiB 响应限制在提交后检查，断线也可能发生在提交后。使用幂等 key 重试确认效果。完整边界见 [RFC 0023](rfc/0023-atomic-business-write-guards.md)，可执行示例见 [atomic_claim.unid](../examples/atomic_claim.unid)。这些语法不在已发布的 v0.11 中。
+
+### English Description
+
+An independent `expect affected == 1` statement checks the affected-row count of the immediately preceding insert, batch insert, upsert, batch upsert, update, or delete. It accepts six comparison operators and a nonnegative u64 literal. Parameters and arbitrary Boolean expressions are unsupported. Blank lines and comments preserve adjacency; reads, DDL, or another guard break it. Invalid adjacency returns `E_EXPECTATION_CONTEXT` before execution.
+
+A false guard returns `E_EXPECTATION` and rolls back the entire script, including earlier writes, indexes, RowId allocation, schema, sequence, and new receipts. Unguarded zero-row mutations remain valid. Errors may carry a one-based top-level `statement_index`; guards count as statements, pipeline stages do not. Failure responses contain no uncommitted rows or summaries.
+
+Successful responses include ordered, value-free `statements` entries with `index`, `kind`, and optional `affected_rows`. Guards have no count. A trailing guard preserves the preceding mutation's result and returning rows; a final read remains the top-level result. Scripts are bounded to 4,096 statements and 512 KiB of encoded summaries, checked before commit. Use batch inserts for large imports.
+
+Engine/prepare, CLI, TCP, and HTTP share execution. Durable receipts replay exact summaries through restart, logical backup, and journal recovery; old receipts default to an empty summary without inventing history. Changing a guard changes the digest. Static bindings and inline macros allow one DML plus a trailing guard; multi-mutation scripts use Engine/prepare. Transport delivery failure, including the post-commit TCP response limit, does not establish rollback; retry with an idempotency key. These APIs are under development for v0.12 and unavailable in released v0.11.
