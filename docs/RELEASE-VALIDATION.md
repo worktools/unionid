@@ -78,9 +78,3 @@ The recorder rereads `RELEASE.json` and `release/contract.json` from the verifie
 发布包携带 validate-atomic-writes.py 与 atomic_claim.unid。验收从临时空目录验证转账失败不产生任何效果、statement_index、returning、agent/LLM 文档发现，以及 protocol v2 幂等转账的重开/逻辑 backup/增量 journal 完整摘要重放。两平台报告记录 packaged_atomic_write_journey；普通 PR 不启用 macOS。
 
 The native package contains an atomic-write validator and claim example. Fresh-directory acceptance proves transfer rollback, statement indexes, returning, bundled agent/LLM discovery, and exact protocol-v2 receipt replay after restart, logical backup, and incremental journal restore. Both platform reports record packaged_atomic_write_journey. Routine PRs stay Ubuntu-only.
-
-## 每版用户使用指南 / User guide for every release
-
-每个正式版本（含补丁）发布后，必须在 Discussions/Announcements 发布经验证的中英双语使用指南，并从 Release body 与发布验收 issue 链接。用户应能找到安装、完整示例与结果、失败/重试、应用接入、升级兼容和限制；完成后再关闭发布 issue/milestone。源文件、内容规范与清单见 [RELEASE-DISCUSSIONS.md](RELEASE-DISCUSSIONS.md)。
-
-Every official release, including patches, must publish a validated bilingual user guide in Discussions/Announcements, linked from the Release body and acceptance issue. Cover installation, complete examples/results, failure/retry behavior, integration, upgrade compatibility, and limits before closing release acceptance. See the linked requirements and checklist.
