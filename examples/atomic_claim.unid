@@ -1,0 +1,34 @@
+# v0.12 development: one request atomically claims a pending job.
+enum State {
+  Pending
+  Running {
+    worker: text
+  }
+  Done
+}
+
+struct Job {
+  id: int
+  state: State
+  version: int
+}
+
+table jobs: Job {
+  key id
+}
+
+insert jobs {
+  id: 1
+  state: Pending
+  version: 0
+}
+
+update jobs
+filter id == 1 && version == 0 && state == Pending
+set {
+  state = Running {worker: "worker-1"}
+  version = version + 1
+}
+returning {id, state, version}
+
+expect affected == 1

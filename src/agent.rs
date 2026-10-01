@@ -48,6 +48,8 @@ pub const ERROR_CODES: &[&str] = &[
     "E_DECIMAL_TYPE",
     "E_DUPLICATE_KEY",
     "E_EVALUATIONS",
+    "E_EXPECTATION",
+    "E_EXPECTATION_CONTEXT",
     "E_FIELD",
     "E_FORMAT_VERSION",
     "E_HTTP_STATUS",
@@ -145,6 +147,16 @@ pub struct AgentManifest {
     pub workflow: Vec<&'static str>,
     pub error_contract: AgentErrorContract,
     pub docs: AgentDocs,
+    pub atomic_scripts: AgentAtomicScripts,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentAtomicScripts {
+    pub guard: &'static str,
+    pub operators: [&'static str; 6],
+    pub max_statements: usize,
+    pub max_summary_bytes: usize,
+    pub static_operation: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -291,7 +303,13 @@ const WORKFLOW: &[&str] = &[
     "On failure branch on `error.code` and `error.constraint`, then follow `error.hint`.",
 ];
 
-const HINT_CODES: &[&str] = &["E_TABLE", "E_CONSTRAINT", "E_PAGE_ORDER"];
+const HINT_CODES: &[&str] = &[
+    "E_TABLE",
+    "E_CONSTRAINT",
+    "E_PAGE_ORDER",
+    "E_EXPECTATION",
+    "E_CONFIG",
+];
 
 const EXIT_CLASSES: &[AgentExitClass] = &[
     AgentExitClass {
@@ -336,8 +354,22 @@ pub fn manifest() -> AgentManifest {
         current_storage: Engine::current_storage_versions(),
         commands: COMMANDS.to_vec(),
         workflow: WORKFLOW.to_vec(),
+        atomic_scripts: AgentAtomicScripts {
+            guard: "expect affected <operator> <nonnegative u64 literal> (immediately after DML)",
+            operators: ["==", "!=", "<", "<=", ">", ">="],
+            max_statements: crate::script::MAX_SCRIPT_STATEMENTS,
+            max_summary_bytes: crate::script::MAX_STATEMENT_SUMMARY_BYTES,
+            static_operation: "one prepared operation with an optional trailing expect",
+        },
         error_contract: AgentErrorContract {
-            fields: vec!["code", "message", "span", "constraint", "hint"],
+            fields: vec![
+                "code",
+                "message",
+                "span",
+                "constraint",
+                "hint",
+                "statement_index",
+            ],
             codes: ERROR_CODES,
             constraint_kinds: [
                 ConstraintKind::Unique,
@@ -396,7 +428,7 @@ pub fn render_markdown() -> String {
         ));
     }
     output.push_str(
-        "\n## Error contract\n\nFields: `code`, `message`, `span`, `constraint`, `hint`.\n\n",
+        "\n## Error contract\n\nFields: `code`, `message`, `span`, `constraint`, `hint`, `statement_index`.\n\n",
     );
     for kind in [
         ConstraintKind::Unique,

@@ -21,6 +21,7 @@ unionid_query::queries! {
         filter id == $id
         set priority = $priority
         returning {id, priority, state}
+        expect affected == 1
     }
 
     query due_before {
@@ -78,6 +79,16 @@ fn inline_queries_generate_shared_typed_bindings() {
     assert_eq!(changed.rows.len(), 1);
     assert_eq!(changed.rows[0].state, State::Pending);
     assert_eq!(changed.rows[0].priority, 9);
+    let missed = reprioritize_task::reprioritize_task(
+        &mut engine,
+        reprioritize_task::ReprioritizeTaskParams {
+            id: 99,
+            priority: 0,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(missed.code, "E_EXPECTATION");
+    assert_eq!(missed.statement_index, Some(2));
     let due = due_before::due_before(&mut engine, due_before::DueBeforeParams).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].id, 1);

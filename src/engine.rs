@@ -1308,29 +1308,32 @@ impl Engine {
 
     pub fn prepare(&self, source: &str) -> Result<PreparedQuery> {
         let mut statements = syntax::parse(source)?;
+        crate::script::preflight(&statements)?;
         let mut mutating = false;
         let mut response_columns = Vec::new();
-        for located in &mut statements {
+        for (offset, located) in statements.iter_mut().enumerate() {
+            let index = offset + 1;
             match &mut located.statement {
+                Statement::Expect { .. } => {}
                 Statement::Pipeline(pipeline) => {
                     response_columns = self
                         .committed
                         .db
                         .prepare_pipeline(pipeline)
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                 }
                 Statement::Explain(pipeline) => {
                     self.committed
                         .db
                         .prepare_pipeline(pipeline)
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     response_columns.clear();
                 }
                 Statement::ExplainAnalyze(pipeline) => {
                     self.committed
                         .db
                         .prepare_pipeline(pipeline)
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     response_columns.clear();
                 }
                 Statement::InsertManyParameter {
@@ -1343,13 +1346,13 @@ impl Engine {
                         self.committed
                             .db
                             .prepare_bulk_insert_parameter(table, returning.as_ref())
-                            .map_err(|error| error.at(located.span))?,
+                            .map_err(|error| error.at(located.span).at_statement(index))?,
                     );
                     response_columns = self
                         .committed
                         .db
                         .prepare_returning_columns(table, returning.as_ref())
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     mutating = true;
                 }
                 Statement::InsertParameter {
@@ -1362,13 +1365,13 @@ impl Engine {
                         self.committed
                             .db
                             .prepare_insert_parameter(table, returning.as_ref())
-                            .map_err(|error| error.at(located.span))?,
+                            .map_err(|error| error.at(located.span).at_statement(index))?,
                     );
                     response_columns = self
                         .committed
                         .db
                         .prepare_returning_columns(table, returning.as_ref())
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     mutating = true;
                 }
                 Statement::UpsertParameter {
@@ -1381,13 +1384,13 @@ impl Engine {
                         self.committed
                             .db
                             .prepare_upsert_parameter(table, returning.as_ref())
-                            .map_err(|error| error.at(located.span))?,
+                            .map_err(|error| error.at(located.span).at_statement(index))?,
                     );
                     response_columns = self
                         .committed
                         .db
                         .prepare_returning_columns(table, returning.as_ref())
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     mutating = true;
                 }
                 Statement::UpsertManyParameter {
@@ -1400,13 +1403,13 @@ impl Engine {
                         self.committed
                             .db
                             .prepare_bulk_upsert_parameter(table, returning.as_ref())
-                            .map_err(|error| error.at(located.span))?,
+                            .map_err(|error| error.at(located.span).at_statement(index))?,
                     );
                     response_columns = self
                         .committed
                         .db
                         .prepare_returning_columns(table, returning.as_ref())
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     mutating = true;
                 }
                 Statement::Update {
@@ -1417,24 +1420,24 @@ impl Engine {
                     self.committed
                         .db
                         .prepare_update(target, assignments, returning.as_ref())
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     response_columns = self
                         .committed
                         .db
                         .prepare_returning_columns(&target.from, returning.as_ref())
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     mutating = true;
                 }
                 Statement::Delete { target, returning } => {
                     self.committed
                         .db
                         .prepare_delete(target, returning.as_ref())
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     response_columns = self
                         .committed
                         .db
                         .prepare_returning_columns(&target.from, returning.as_ref())
-                        .map_err(|error| error.at(located.span))?;
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
                     mutating = true;
                 }
                 _ => {
@@ -1442,7 +1445,7 @@ impl Engine {
                         "E_PREPARE",
                         "prepared operations support read pipelines, explain, parameterized insert/upsert, and update/delete",
                     )
-                    .at(located.span));
+                    .at(located.span).at_statement(index));
                 }
             }
         }
@@ -1485,7 +1488,11 @@ impl Engine {
             attach_structured_page(&mut statements, page)?;
         }
         crate::params::bind(&mut statements, parameters)?;
-        let Some(last) = statements.len().checked_sub(1) else {
+        crate::script::preflight(&statements)?;
+        let Some(last) = statements
+            .iter()
+            .rposition(|located| !matches!(located.statement, Statement::Expect { .. }))
+        else {
             return Ok(());
         };
         let needs_schema_preview = statements[..last]
@@ -1498,6 +1505,9 @@ impl Engine {
         };
         if needs_schema_preview {
             for located in &statements[..last] {
+                if matches!(located.statement, Statement::Expect { .. }) {
+                    continue;
+                }
                 preview
                     .execute(located.statement.clone())
                     .map_err(|error| error.at(located.span))?;
@@ -1837,6 +1847,23 @@ impl Engine {
         deadline: Option<&ExecutionControl>,
         idempotency: Option<PendingIdempotency<'_>>,
     ) -> Result<QueryResponse> {
+        crate::script::preflight(&statements)?;
+        if matches!(
+            self.storage_mode,
+            StorageMode::LegacyWal | StorageMode::LegacyWalSnapshot
+        ) && let Some((offset, guard)) = statements
+            .iter()
+            .enumerate()
+            .find(|(_, located)| matches!(located.statement, Statement::Expect { .. }))
+        {
+            return Err(Error::new(
+                "E_CONFIG",
+                "affected-row guards require memory or redb; legacy WAL replay does not support them",
+            )
+            .with_hint("Use --db <path> for durable guarded writes.")
+            .at(guard.span)
+            .at_statement(offset + 1));
+        }
         let mutating = statements.iter().any(|s| s.statement.is_mutating());
         let schema_changing = statements.iter().any(|s| s.statement.changes_schema());
         if self.read_reopen_required {
@@ -1880,7 +1907,9 @@ impl Engine {
                 .durable
                 .as_ref()
                 .is_some_and(|durable| durable.supports_bounded_row_mutation())
-            && statements.len() == 1
+            && (statements.len() == 1
+                || (statements.len() == 2
+                    && matches!(statements[1].statement, Statement::Expect { .. })))
             && !schema_changing
             && matches!(
                 statements[0].statement,
@@ -1903,8 +1932,39 @@ impl Engine {
             None
         };
         let mut response = QueryResponse::ok_message("ok");
-        for located in statements {
-            ensure_deadline(deadline)?;
+        let mut summaries = Vec::with_capacity(statements.len());
+        for (offset, located) in statements.into_iter().enumerate() {
+            let index = offset + 1;
+            ensure_deadline(deadline)
+                .map_err(|error| error.at(located.span).at_statement(index))?;
+            let kind = crate::script::kind(&located.statement);
+            if let Statement::Expect { op, affected } = located.statement {
+                let actual = response.affected_rows.ok_or_else(|| {
+                    Error::new(
+                        "E_EXPECTATION_CONTEXT",
+                        "preceding mutation omitted affected_rows",
+                    )
+                    .at(located.span)
+                    .at_statement(index)
+                })?;
+                if !crate::script::satisfies(actual, op, affected) {
+                    return Err(Error::new(
+                        "E_EXPECTATION",
+                        "mutation affected-row expectation was not satisfied",
+                    )
+                    .with_hint(
+                        "Refresh the business state or version before retrying the whole script.",
+                    )
+                    .at(located.span)
+                    .at_statement(index));
+                }
+                summaries.push(crate::script::StatementSummary {
+                    index,
+                    kind,
+                    affected_rows: None,
+                });
+                continue;
+            }
             response = match candidate.as_mut() {
                 Some(target) => match bounded_mutation_source.as_deref() {
                     Some(source) => {
@@ -1918,8 +1978,15 @@ impl Engine {
                     deadline,
                 ),
             }
-            .map_err(|e| e.at(located.span))?;
+            .map_err(|e| e.at(located.span).at_statement(index))?;
+            summaries.push(crate::script::StatementSummary {
+                index,
+                kind,
+                affected_rows: response.affected_rows,
+            });
         }
+        crate::script::validate_summaries(&summaries)?;
+        response.statements = summaries;
         ensure_deadline(deadline)?;
         if let Some(mut candidate) = candidate {
             if schema_changing {

@@ -15,6 +15,10 @@ pub struct IndexComponent {
 
 #[derive(Debug, Clone)]
 pub enum Statement {
+    Expect {
+        op: CmpOp,
+        affected: u64,
+    },
     DefineType {
         name: String,
         ty: ScalarType,
@@ -219,7 +223,7 @@ impl Statement {
     pub fn is_mutating(&self) -> bool {
         !matches!(
             self,
-            Self::Explain(_) | Self::ExplainAnalyze(_) | Self::Pipeline(_)
+            Self::Expect { .. } | Self::Explain(_) | Self::ExplainAnalyze(_) | Self::Pipeline(_)
         )
     }
 

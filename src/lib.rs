@@ -41,6 +41,7 @@ mod repl;
 mod row_source;
 pub mod scalars;
 pub mod schema;
+pub mod script;
 mod serde_value;
 pub mod server;
 pub mod snapshot;

@@ -211,3 +211,36 @@ async fn official_http_adapter_preserves_deadline_errors() {
     assert_eq!(response.error.unwrap().code, "E_TIMEOUT");
     assert!(response.page.is_none());
 }
+
+#[tokio::test]
+async fn http_guard_failure_rolls_back_and_success_replays_summaries() {
+    let app = http::router(ConcurrentEngine::new(Engine::memory()), Config::default());
+    assert!(query(&app, ProtocolRequest::query("setup",
+        "struct Account {id: int, balance: int}\ntable accounts: Account {key id}\ninsert many accounts [{id: 1, balance: 100}, {id: 2, balance: 0}]")).await.ok);
+    let failed = query(&app, ProtocolRequest::query("failed",
+        "update accounts | filter id == 1 | set balance = 50\nexpect affected == 1\nupdate accounts | filter id == 99 | set balance = 50\nexpect affected == 1")).await;
+    assert_eq!(failed.error.unwrap().statement_index, Some(4));
+    assert!(failed.statements.is_empty());
+    assert_eq!(
+        query(
+            &app,
+            ProtocolRequest::query("unchanged", "from accounts | filter balance == 100")
+        )
+        .await
+        .rows
+        .len(),
+        1
+    );
+    let request = ProtocolRequest::query("guarded", "update accounts | filter id == 1 | set balance = balance - 10\nreturning {id, balance}\nexpect affected == 1")
+        .with_idempotency_key("http-guard").unwrap();
+    let first = query(&app, request.clone()).await;
+    assert!(first.ok, "{}", first.message);
+    assert_eq!(first.statements.len(), 2);
+    assert_eq!(first.affected_rows, Some(1));
+    let replay = query(&app, request).await;
+    assert_eq!(replay.statements, first.statements);
+    assert_eq!(
+        serde_json::to_value(replay.rows).unwrap(),
+        serde_json::to_value(first.rows).unwrap()
+    );
+}

@@ -46,6 +46,15 @@ fn agent_manifest_is_machine_readable_and_covers_the_error_contract() {
             .any(|command| command["name"] == "agent" && command["json"] == true)
     );
     assert_eq!(value["current_storage"]["format"], 10);
+    assert_eq!(value["atomic_scripts"]["max_statements"], 4096);
+    assert!(codes.iter().any(|code| code == "E_EXPECTATION"));
+    assert!(
+        value["error_contract"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "statement_index")
+    );
 }
 
 #[test]

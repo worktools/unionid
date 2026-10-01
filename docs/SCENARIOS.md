@@ -425,3 +425,17 @@ filter email == "shared@example.com"
 实现顺序按用户可完成的工作流安排：#34–#36 与 #59–#61 已补齐列表读取、ADT 表达式、普通派生、基础汇总和查询局部纯函数；#11 已收口查询核心，#16 已补齐共享索引访问计划与 explain。#74 用任务队列、嵌套配置和 session/cache 走通持久重启、migration 与 backup/restore，#75、#70 和 #76 已收敛工作负载、日常体验与安装发布；#81 从 #25 中切出有限自递归 ADT，先补树形核心模型，再依据真实反馈决定互递归与泛型。
 
 查询结果整理可使用 `derive {score = priority + bonus, urgent = score >= 10}` 顺序计算，或用 `select {id, label = match state {...}}` 同时派生与投影。事件、任务队列和递归树示例使用此形式；计算式 select 必须放在分页最终 sort 之前，覆盖主键后不能继续 page。
+
+## v0.12 原子业务条件 / Atomic business preconditions
+
+### 中文说明
+
+业务试用新增三条关键链路：转账分别守卫扣款和入账，余额不足或收款人缺失时整体回滚；任务领取以 `filter id == $id && version == $version` 加 `expect affected == 1` 保证同一版本只有一个成功；库存扣减把可用数量条件放在 update filter 并立即检查命中数。先读后写不提供这一保证，提交后看 affected_rows 也不能撤销先前效果。
+
+可运行领取示例：[atomic_claim.unid](../examples/atomic_claim.unid)。回归覆盖 memory/redb、prepare、CLI、TCP v1/v2、HTTP、并发版本竞争、returning、失败后同 key 重试以及重开/backup/journal 的回执重放。守卫只检查行数；正金额、发送人与收款人的业务规则仍需应用定义。已发布 v0.11 不支持此语法。
+
+### English Description
+
+The v0.12 development acceptance adds guarded debit/credit transfers, optimistic version claims, and conditional inventory decrements. Guard each required mutation immediately; insufficient funds, a missing recipient, or a stale version must abort the entire request. Reads before a write and counts inspected after commit do not provide that guarantee.
+
+The runnable claim example and atomic-script tests cover memory/redb, prepared operations, CLI, TCP v1/v2, HTTP, competing claims, returning, failed-key reuse, and exact receipt replay after restart and backup/journal recovery. Guards prove row counts, not complete domain rules; applications still validate positive amounts and eligible transfer parties. Released v0.11 does not support guards.

@@ -114,6 +114,8 @@ pub(crate) fn validate_receipts(receipts: &ReceiptMap, sequence: u64) -> Result<
     for (key, receipt) in receipts {
         validate_key(key).map_err(as_storage_error)?;
         validate_digest(&receipt.digest).map_err(as_storage_error)?;
+        crate::script::validate_summaries(&receipt.response.statements)
+            .map_err(as_storage_error)?;
         if !receipt.response.ok || receipt.response.error.is_some() {
             return Err(Error::new(
                 "E_STORAGE",

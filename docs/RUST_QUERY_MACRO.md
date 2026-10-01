@@ -78,3 +78,19 @@ The first version never opens redb during compilation. Applications that require
 See [RFC 0020](rfc/0020-inline-rust-query-macros.md) for the complete contract and follow-up boundaries.
 
 See the [v0.9 compile record](benchmarks/query-macro-2026-09-18.md) for compile cost, schema/query re-expansion acceptance, diagnostic precision, and the migrated-catalog decision. The macro compiles the current Unionid compiler path for the host, so it is intended for short crate-owned queries that benefit from typed bindings; large or cross-language query sets should remain in `.unid` files.
+
+## 写入守卫 / Mutation guards (v0.12 development)
+
+宏中的单个 mutation 可在 returning 后追加独立 `expect affected == 1`；仍沿用原 Params/Row/Output 类型，失败返回 `E_EXPECTATION` 与顶层语句序号。guard 进入 canonical source 和 digest。多条 mutation 的静态查询仍不支持。
+
+A single inline mutation may append a trailing guard after returning. Existing typed parameters, rows, and output metadata remain unchanged; a miss returns `E_EXPECTATION` and `statement_index`. The canonical source and digest include the guard. Multi-mutation static operations remain unsupported; use Engine/prepare for them. Released v0.11 does not support guards.
+
+```text
+query claim_task {
+    update tasks
+    filter id == $id && state == Pending
+    set state = Running {worker: $worker}
+    returning {id, state}
+    expect affected == 1
+}
+```

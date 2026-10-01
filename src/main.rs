@@ -1532,6 +1532,8 @@ fn classify_exit(code: &str, integrity: bool) -> i32 {
         | "E_DECIMAL_RANGE"
         | "E_DECIMAL_TYPE"
         | "E_EVALUATIONS"
+        | "E_EXPECTATION"
+        | "E_EXPECTATION_CONTEXT"
         | "E_FIELD"
         | "E_IDEMPOTENCY_CAPACITY"
         | "E_IDEMPOTENCY_CONFLICT"

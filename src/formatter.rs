@@ -87,6 +87,17 @@ fn comments(source: &str) -> (Vec<(usize, String)>, bool) {
 
 fn statement(output: &mut String, value: &Statement, depth: usize) {
     match value {
+        Statement::Expect { op, affected } => {
+            let op = match op {
+                crate::query::CmpOp::Eq => "==",
+                crate::query::CmpOp::Ne => "!=",
+                crate::query::CmpOp::Gt => ">",
+                crate::query::CmpOp::Gte => ">=",
+                crate::query::CmpOp::Lt => "<",
+                crate::query::CmpOp::Lte => "<=",
+            };
+            line(output, depth, &format!("expect affected {op} {affected}"));
+        }
         Statement::DefineType { name, ty } => type_definition(output, "type", name, ty, depth),
         Statement::CreateTable { table, columns } => line(
             output,

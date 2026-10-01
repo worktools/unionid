@@ -403,7 +403,18 @@ pub fn parse(source: &str) -> Result<Vec<LocatedStatement>> {
         pos: 0,
         needs_more: Cell::new(false),
     }
-    .script()
+    .script(crate::script::MAX_SCRIPT_STATEMENTS)
+}
+
+/// Historical WAL records predate the per-request statement limit. Preserve
+/// replay of these records while retaining the lexer source-byte bound.
+pub(crate) fn parse_legacy_wal(source: &str) -> Result<Vec<LocatedStatement>> {
+    Parser {
+        tokens: lex(source)?,
+        pos: 0,
+        needs_more: Cell::new(false),
+    }
+    .script(usize::MAX)
 }
 
 /// Classify whether `source` is complete, can be continued, or is already invalid.
@@ -432,7 +443,7 @@ pub fn input_status(source: &str) -> InputStatus {
         pos: 0,
         needs_more: Cell::new(false),
     };
-    match parser.script() {
+    match parser.script(crate::script::MAX_SCRIPT_STATEMENTS) {
         Ok(_) => InputStatus::Complete,
         Err(error) if parser.needs_more.get() => {
             let error = if let Some((open, span)) = unclosed {
@@ -444,6 +455,7 @@ pub fn input_status(source: &str) -> InputStatus {
                     span: error.span,
                     constraint: None,
                     hint: error.hint,
+                    statement_index: error.statement_index,
                 }
             };
             InputStatus::Incomplete(error)
@@ -557,7 +569,7 @@ impl Parser {
         Ok(p)
     }
 
-    fn script(&mut self) -> Result<Vec<LocatedStatement>> {
+    fn script(&mut self, max_statements: usize) -> Result<Vec<LocatedStatement>> {
         let mut out = Vec::new();
         self.newlines();
         while *self.kind() != Kind::End {
@@ -580,6 +592,8 @@ impl Parser {
                 self.update()?
             } else if self.word("delete") {
                 self.delete()?
+            } else if self.word("expect") {
+                self.expect_affected()?
             } else if self.word("migration") {
                 self.migration()?
             } else if self.word("explain") {
@@ -588,10 +602,15 @@ impl Parser {
                 self.pipeline()?
             } else {
                 return Err(self.error(
-                    "expected struct / enum / type / table / insert / upsert / update / delete / migration / explain / from (or legacy create table/index)",
+                    "expected struct / enum / type / table / insert / upsert / update / delete / expect / migration / explain / from (or legacy create table/index)",
                 ));
             };
             out.push(LocatedStatement { statement, span });
+            if out.len() > max_statements {
+                return Err(
+                    Error::new("E_LIMIT", "script exceeds the 4096 statement limit").at(span),
+                );
+            }
             // A consumed layout block already established a physical statement boundary.
             if !matches!(self.kind(), Kind::Newline | Kind::End)
                 && !matches!(
@@ -634,6 +653,23 @@ impl Parser {
         } else {
             Statement::Explain(pipeline)
         })
+    }
+
+    fn expect_affected(&mut self) -> Result<Statement> {
+        self.expect_word("expect")?;
+        self.expect_word("affected")?;
+        if matches!(self.kind(), Kind::Op(op) if op == "=") {
+            return Err(self.error("expect equality uses =="));
+        }
+        let op = self.comparison_operator()?;
+        let token = self.bump();
+        let Kind::Number(raw) = token.kind else {
+            return Err(self.error("expect requires a nonnegative integer constant"));
+        };
+        let affected = raw
+            .parse::<u64>()
+            .map_err(|_| syntax("expect requires a nonnegative u64 constant", token.span))?;
+        Ok(Statement::Expect { op, affected })
     }
 
     fn define_type(&mut self) -> Result<Statement> {

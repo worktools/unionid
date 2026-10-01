@@ -18,6 +18,7 @@ const MAX_HISTORY_ENTRIES: usize = 10_000;
 
 pub(crate) const KEYWORDS: &[&str] = &[
     "add",
+    "affected",
     "aggregate",
     "all",
     "and",
@@ -33,6 +34,7 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "derive",
     "drop",
     "else",
+    "expect",
     "explain",
     "false",
     "filter",

@@ -1,6 +1,6 @@
 # RFC 0023：原子业务写入断言 / Atomic business-write guards
 
-- 状态 / Status: proposed for v0.12; not implemented in v0.11
+- 状态 / Status: implemented in v0.12 development; unavailable in released v0.11
 - 日期 / Date: 2026-10-01
 - 跟踪 / Tracking: [#399](https://github.com/worktools/unionid/issues/399), [v0.12 milestone](https://github.com/worktools/unionid/milestone/22)
 - 相关 / Related: [RFC 0002](0002-idempotent-write-receipts.md), [RFC 0015](0015-static-query-contract.md), [RFC 0020](0020-inline-rust-query-macros.md)
@@ -11,7 +11,7 @@
 
 请求级原子性只保证脚本里的写入一起提交或一起回滚，不保证每条条件 update 都命中。余额不足的扣款命中零行后，后续入账仍可能成功。客户端在脚本提交后检查最后一条 affected_rows，无法撤销这个错误业务效果；先读余额再写也存在竞态。
 
-v0.12 聚焦两项：在同一候选状态中检查 mutation 的 affected_rows，失败中止整个请求；成功响应提供有界、按源码顺序排列的逐语句摘要。零行 update/delete 本身仍合法，不隐式改变现有 DML 语义。本文是待实现设计，不应将示例提供给 v0.11 执行。
+v0.12 聚焦两项：在同一候选状态中检查 mutation 的 affected_rows，失败中止整个请求；成功响应提供有界、按源码顺序排列的逐语句摘要。零行 update/delete 本身仍合法，不隐式改变现有 DML 语义。实现与验证见 `tests/atomic_scripts.rs`、HTTP adapter 与宏 consumer 测试；不应将示例提供给已发布的 v0.11 执行。
 
 ### 2. 最小语法与作用域
 
@@ -74,7 +74,7 @@ expect affected == 1
 }
 ```
 
-首版建议每个脚本最多 4,096 个顶层语句，包含 expect，解析/prepare 后、扫描和候选构造前以 `E_LIMIT` 拒绝超限，不截断摘要。此上限也约束本地 API/CLI，不能只依赖 TCP frame 限制；实施前明确记录这个新增兼容边界，并验证大批量导入用 insert many 的替代路径。新增 Engine 侧摘要编码预算 512 KiB；用有界 writer 在 commit 前检查完整摘要，不在各 adapter 分别估算。摘要同时计入现有幂等 receipt 容量检查；现有 Engine returning 8 MiB 限制保留。上述 Engine/receipt 的提交前预算失败完整回滚。
+首版每个脚本最多 4,096 个顶层语句，包含 expect，解析/prepare 后、扫描和候选构造前以 `E_LIMIT` 拒绝超限，不截断摘要。此上限也约束本地 API/CLI，不能只依赖 TCP frame 限制；升级文档明确记录这个新增兼容边界，并验证大批量导入用 insert many 的替代路径。新增 Engine 侧摘要编码预算 512 KiB；用有界 writer 在 commit 前检查完整摘要，不在各 adapter 分别估算。摘要同时计入现有幂等 receipt 容量检查；现有 Engine returning 8 MiB 限制保留。上述 Engine/receipt 的提交前预算失败完整回滚。
 
 现有 TCP 的 MAX_RESPONSE_BYTES（16 MiB）在提交后编码阶段检查，本文不把它追溯改为提交前保障。完整响应还可能因传输 envelope、最终 query 结果或断线而无法交付；这种传输失败不能被理解为 mutation 未提交。CLI、TCP 和 HTTP 文档需区分：E_EXPECTATION 与 Engine 提交前预算失败是确定回滚，响应交付失败需使用幂等 key/回执重试来判断效果。首版不承诺所有 transport E_LIMIT 都回滚，也不引入依赖 transport envelope 的 Engine 预检查。
 
@@ -112,7 +112,7 @@ Evaluate the guard against the same candidate as its preceding mutation. False p
 
 Add an optional, one-based `statement_index` to execution errors, counting top-level AST statements including expect, with the existing span. Parse errors lacking a complete AST keep only their span. Failed scripts return no rows or uncommitted success summaries, and diagnostics do not expose row or parameter values.
 
-Successful responses gain bounded `statements` entries with index, kind, and optional affected_rows, without intermediate business rows or returning payloads. Top-level output remains the last non-expect statement's output; a trailing guard is transparent. A final query remains the final query, and top-level counts are not summed across mutations. Proposed limit: 4,096 top-level statements including guards, rejected with `E_LIMIT` before candidate construction or scanning, never silently truncated. Document this new compatibility boundary and verify bulk-import alternatives before implementation. Add a transport-neutral Engine budget of 512 KiB for the complete encoded summary, checked with a bounded writer before commit. Include summaries in existing pre-commit receipt-capacity checks and retain the Engine's 8 MiB returning limit. These pre-commit failures roll back the candidate.
+Successful responses gain bounded `statements` entries with index, kind, and optional affected_rows, without intermediate business rows or returning payloads. Top-level output remains the last non-expect statement's output; a trailing guard is transparent. A final query remains the final query, and top-level counts are not summed across mutations. Limit: 4,096 top-level statements including guards, rejected with `E_LIMIT` before candidate construction or scanning, never silently truncated. The upgrading guide documents this compatibility boundary and batch-import alternatives. Add a transport-neutral Engine budget of 512 KiB for the complete encoded summary, checked with a bounded writer before commit. Include summaries in existing pre-commit receipt-capacity checks and retain the Engine's 8 MiB returning limit. These pre-commit failures roll back the candidate.
 
 The current TCP 16 MiB MAX_RESPONSE_BYTES check occurs during post-commit encoding; this RFC does not redefine it as a pre-commit check. Full responses may still fail delivery because of transport envelopes, final query output, or disconnection. Distinguish deterministic E_EXPECTATION/Engine-budget rollback from post-commit delivery failures, whose effects must be resolved through idempotency-key/receipt retries. Do not promise rollback for every transport E_LIMIT or introduce transport-envelope-dependent Engine preflight.
 
@@ -129,3 +129,9 @@ Static descriptions, query rust, and inline macros initially accept one mutation
 Deliver syntax/budgets and compatibility vectors, then candidate/prepared atomic execution, then durable receipts/backup/journal, then guarded single-operation codegen/macros and complete user documentation. Keep #399 open until every stage passes.
 
 Exercise insufficient funds, missing recipients, successful transfers, stale versions, unguarded zero-row success, batch counts, trailing returning, final queries, invalid contexts, script/summary limits, receipt capacity, and later execution failures. For pre-commit failures compare complete typed rows, indexes, schema/sequence, allocation, and receipts before/after failures; reopen/check and verify backups in redb. Require matching Rust/CLI/TCP/HTTP diagnostics and exactly one successful concurrent guarded claim. Also inject post-commit encoding/delivery failures and require receipt retry to recover the committed summary instead of claiming rollback. Keep ordinary CI Ubuntu-only and run the full native-platform gate before release.
+
+### 旧 WAL 边界 / Legacy WAL boundary
+
+守卫仅用于 memory/redb。旧 `--wal-path` 以及 WAL + snapshot 模式在构造候选状态和追加日志前以 `E_CONFIG` 拒绝包含 expect 的脚本，提示使用 `--db`；避免成功写入无法重放的日志。已有无守卫 WAL 仍可恢复。
+
+Guards require memory or redb. Legacy WAL and WAL + snapshot modes reject guarded scripts with E_CONFIG before candidate construction or logging, with a hint to use --db. This prevents committing an unreplayable log; existing unguarded WAL files remain recoverable.

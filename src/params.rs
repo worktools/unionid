@@ -155,7 +155,8 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
                 ty: parameter_type.clone(),
             });
         }
-        Statement::DefineType { .. }
+        Statement::Expect { .. }
+        | Statement::DefineType { .. }
         | Statement::CreateTable { .. }
         | Statement::TypedTable { .. }
         | Statement::CreateIndex { .. }
@@ -254,7 +255,8 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
                 returning,
             };
         }
-        Statement::DefineType { .. }
+        Statement::Expect { .. }
+        | Statement::DefineType { .. }
         | Statement::CreateTable { .. }
         | Statement::TypedTable { .. }
         | Statement::CreateIndex { .. }
