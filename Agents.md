@@ -97,6 +97,11 @@
 - 默认 UTF-8 文本协议。
 - GitHub PR 与 issue 使用中英双语标题；正文分别设置 `## 中文说明` 与 `## English Description`，两部分独立描述问题、范围、验收条件和验证结果。
 
+## 发布文档
+
+- 每个正式版本（包括补丁）都必须发布中英双语 Announcements Discussion，以用户场景、可运行示例、结果、失败/重试与升级说明展示用法；不能只转贴 changelog。
+- 源文件保存于 `docs/releases/v<version>-user-guide.md`，执行新示例并验证后再发布。公开包可用后发布/更新该版本 Discussion，从 Release body 与验收 issue 链接并核验；完成后才关闭发布 issue/milestone。详细规范见 `docs/RELEASE-DISCUSSIONS.md`。
+
 ## 测试与验证
 
 - 至少保证 `cargo check` 通过。
