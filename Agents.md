@@ -99,8 +99,7 @@
 
 ## 发布文档
 
-- 每个正式版本（包括补丁）都必须发布中英双语 Announcements Discussion，以用户场景、可运行示例、结果、失败/重试与升级说明展示用法；不能只转贴 changelog。
-- 源文件保存于 `docs/releases/v<version>-user-guide.md`，执行新示例并验证后再发布。公开包可用后发布/更新该版本 Discussion，从 Release body 与验收 issue 链接并核验；完成后才关闭发布 issue/milestone。详细规范见 `docs/RELEASE-DISCUSSIONS.md`。
+- 每个正式版本（包括补丁）的中英双语用户使用指南只发布在 Discussions/Announcements，不在仓库重复保存；验证示例后发布，并从 Release 和验收 issue 链接。
 
 ## 测试与验证
 
