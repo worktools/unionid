@@ -106,7 +106,10 @@ pub fn inspect_parquet(path: &Path, limit: usize, json: bool) -> Result<(), Stri
 }
 
 pub fn query_parquet(path: &Path, source: Option<String>, json: bool) -> Result<(), String> {
-    let engine = crate::parquet::query_engine(path).map_err(|error| error.to_string())?;
+    let engine = match crate::parquet::query_engine(path) {
+        Ok(engine) => engine,
+        Err(error) => return print_response(&QueryResponse::failure(error), json),
+    };
     run_local_engine(engine, source, json, HistoryOptions::default(), false)
 }
 

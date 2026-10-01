@@ -12,24 +12,21 @@ import tempfile
 import time
 
 
-SOURCE = """type State =
+SOURCE = """enum State {
   Pending
-  | Running {
-    worker text,
-    attempt int,
-  }
-
-type Task = {
-  id int,
-  title text,
-  state State,
+  Running {worker: text, attempt: int}
 }
 
-table tasks Task
-  key id
+struct Task {
+  id: int
+  title: text
+  state: State
+}
 
-insert tasks {id = 1, title = "from previous release", state = Running {worker = "worker-a", attempt = 2}}
-insert tasks {id = 2, title = "pending", state = Pending}
+table tasks: Task {key id}
+
+insert tasks {id: 1, title: "from previous release", state: Running {worker: "worker-a", attempt: 2}}
+insert tasks {id: 2, title: "pending", state: Pending}
 
 from tasks
 sort id
@@ -129,7 +126,7 @@ def require_query(response, label):
     return {key: response[key] for key in ["columns", "rows", "schema"]}
 
 
-def verify_database_case(previous, current, work, previous_label, current_label, case):
+def verify_database_case(previous, current, work, previous_label, current_label, case, expected_format, journal):
     database = work / f"previous-{case}.redb"
     source = work / f"setup-{case}.unid"
     source.write_text(SOURCE)
@@ -137,7 +134,7 @@ def verify_database_case(previous, current, work, previous_label, current_label,
         run([previous, "run", "--db", database, "--file", source, "--format", "json"]),
         f"{previous_label} {case} setup",
     )
-    if case == "format7":
+    if journal:
         run(
             [
                 previous,
@@ -147,7 +144,7 @@ def verify_database_case(previous, current, work, previous_label, current_label,
                 "--db",
                 database,
                 "--repo",
-                work / "incremental-format7",
+                work / f"incremental-{case}",
                 "--format",
                 "json",
             ]
@@ -171,7 +168,7 @@ def verify_database_case(previous, current, work, previous_label, current_label,
     storage_format = (
         diagnosis.get("database", {}).get("storage_versions", {}).get("format")
     )
-    if storage_format != int(case[-1]):
+    if storage_format != expected_format:
         raise RuntimeError(f"{current_label} did not diagnose {case} as expected")
     integrity = run([current, "check", "--db", database, "--format", "json"])
     first_backend_clean = integrity.get("backend_clean")
@@ -250,7 +247,7 @@ def verify_database_case(previous, current, work, previous_label, current_label,
             f"{previous_label} client observed a changed {current_label} {case} result"
         )
     return {
-        "storage_format": int(case[-1]),
+        "storage_format": expected_format,
         "first_backend_clean": first_backend_clean,
         "rows": len(current_rows["rows"]),
         "data_compatible": True,
@@ -314,11 +311,19 @@ def main():
                 f"{previous_label} read"
             )
 
+    default_format = previous_version["current_storage"]["format"]
+    journal_formats = {6: 7, 8: 9, 10: 11}
+    if default_format not in journal_formats:
+        raise RuntimeError(f"no journal compatibility case for format {default_format}")
     cases = {
         case: verify_database_case(
-            previous, current, work, previous_label, current_label, case
+            previous, current, work, previous_label, current_label, case, storage_format, journal
         )
-        for case in ["format6", "format7"]
+        for storage_format, journal in [
+            (default_format, False),
+            (journal_formats[default_format], True),
+        ]
+        for case in [f"format{storage_format}"]
     }
 
     print(

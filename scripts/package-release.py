@@ -142,6 +142,10 @@ def main():
             (ROOT / "scripts/validate-tutorial.py").read_bytes(),
             0o755,
         ),
+        f"{package}/tutorial/validate-local-data.py": (
+            (ROOT / "scripts/validate-local-data.py").read_bytes(),
+            0o755,
+        ),
     }
     for source in sorted((ROOT / "docs").rglob("*")):
         if source.is_file():

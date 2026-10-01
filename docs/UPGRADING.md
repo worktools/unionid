@@ -2,19 +2,19 @@
 
 unionid 把应用 schema migration 与数据库内部格式升级视为两件不同的事。应用字段、类型和变体的变化使用版本化 migration；内部格式版本只由明确支持它的 unionid 二进制打开。
 
-## v0.10 格式与源码契约
+## v0.11 格式与源码契约
 
-v0.10 发布包同时携带 `RELEASE.json` 和独立的 `release/contract.json`。打包和验证脚本要求 Cargo、二进制 version report、manifest 与契约一致：
+v0.11 发布包同时携带 `RELEASE.json` 和独立的 `release/contract.json`。打包和验证脚本要求 Cargo、二进制 version report、manifest 与契约一致：
 
-| 层 | v0.10 值 |
+| 层 | v0.11 值 |
 | --- | --- |
-| unionid / 最低 Rust / redb | 0.10.0 / 1.94 / 4.1.0 |
+| unionid / 最低 Rust / redb | 0.11.0 / 1.94 / 4.1.0 |
 | storage / catalog / ADT value | 可读 1–11，默认当前 10 / 6 / 3；maintenance codec 1 |
 | index key / migration ledger / receipt | 4 / 1 / 3 |
 | incremental journal | 默认 0；显式启用的 journal 格式使用 1 |
 | logical backup / JSON Lines protocol / stream | 可读 1–6，当前 6 / 1–2 / 1 |
 
-公开 v0.1.0 使用 storage/catalog/value/index/migration/backup/protocol version 1，并不包含 receipt、cursor identity、生产标量、复合索引或 generation envelope。v0.2.0 引入 format 6；v0.3.0 增加 Rust 接入、关联读取与 migration 使用体验；v0.4.0 增加可移植 ADT 契约与静态查询绑定；v0.5.0 增加显式 format-7 增量备份 journal；v0.6.0 增加安全项目骨架和项目级静态检查；v0.7.0 采用 Rust 形状的规范源码，并增加 typed membership、相关 exists 与集合运算；v0.8.0 增加 count_distinct、typed avg 和基础排名窗口；v0.9.0 增加 schema-aware 内联 Rust 查询宏；v0.9.1 修复宏生成代码与调用模块 serde imports 的名称冲突；v0.10.0 增加有界 typed map、decimal 乘除与显式舍入、partial unique index，并让新库默认具备 map 与 partial 能力。上表描述 v0.10.0 二进制的默认写入格式和全部可读范围，不追溯改写旧版本契约。
+公开 v0.1.0 使用 storage/catalog/value/index/migration/backup/protocol version 1，并不包含 receipt、cursor identity、生产标量、复合索引或 generation envelope。v0.2.0 引入 format 6；v0.3.0 增加 Rust 接入、关联读取与 migration 使用体验；v0.4.0 增加可移植 ADT 契约与静态查询绑定；v0.5.0 增加显式 format-7 增量备份 journal；v0.6.0 增加安全项目骨架和项目级静态检查；v0.7.0 采用 Rust 形状的规范源码，并增加 typed membership、相关 exists 与集合运算；v0.8.0 增加 count_distinct、typed avg 和基础排名窗口；v0.9.0 增加 schema-aware 内联 Rust 查询宏；v0.9.1 修复宏生成代码与调用模块 serde imports 的名称冲突；v0.10.0 增加有界 typed map、decimal 乘除与显式舍入、partial unique index，并让新库默认具备 map 与 partial 能力。上表描述 v0.11.0 二进制的默认写入格式和全部可读范围，不追溯改写旧版本契约。
 
 当前二进制读取 storage format 1–11；新数据库直接创建为 format 10，使用 catalog/value/index-key/receipt/maintenance/journal codec 6/3/4/3/1/0，并写入 logical backup 6。format 1/2 仍会补齐 cursor 身份并升级到 format 3；format 3 可显式升级到 4 以使用生产标量，format 4 可继续读写已有单列升序索引。创建复合或降序索引前必须先升级到 format 5；旧 format 6 可继续读写，或显式升级到 8/10 以获得 typed map 与 partial unique index 能力。
 
@@ -35,6 +35,10 @@ Before upgrading or switching maintenance binaries, export and verify any active
 - 自动化迁移：`python3 scripts/migrate-uid-to-unid.py <目录> --dry-run` 预览、去掉 `--dry-run` 执行批量重命名（用 `--keep` 跳过需要保留 `.uid` 的兼容 fixture）。随后把应用、脚本和生成命令中的路径改为 `.unid`，再运行 `unionid migration status` 确认 applied/pending 不变。
 - 回滚：窗口内把 `.unid` 改回 `.uid` 即可，内容与 ledger 不受影响。
 - 兼容窗口计划在 **v1.0.0** 关闭；届时二进制只接受 `.unid`，未迁移的项目需要先在此窗口内完成重命名。
+
+### 从 v0.10.0 升级
+
+v0.11.0 保留 v0.10.0 的 redb、备份与协议版本；不需要内部格式升级或应用 migration。Parquet 是本地只读 CLI 数据源，不改变已有数据库。project check 改为比较声明结构，允许增量 migration 建立的稳定 ID 与重新声明 schema 的 ID 不同；运行时 hash 和生成 Rust binding 的身份检查仍然严格。统一将 unionid、unionid-derive、unionid-query 依赖更新为 0.11.0。
 
 ### 从 v0.9.1 升级
 
@@ -130,9 +134,9 @@ unionid migration status --db app.redb --dir migrations
 
 unionid separates application schema migrations from internal database-format changes. Versioned migration files evolve fields, variants, types, constraints, indexes, and their data. A unionid binary opens only the internal codec versions it explicitly knows and fails before mutation when it encounters an unknown version.
 
-The v0.10 archive contains both `RELEASE.json` and an independent `release/contract.json`. Packaging and verification require Cargo metadata, the binary version report, the manifest, and this contract to agree. v0.10.0 requires Rust 1.94, uses redb 4.1.0, reads storage formats 1–11 and logical backup formats 1–6, creates storage format 10 by default, writes logical backup format 6, supports data protocols 1/2, and supports stream protocol 1. The detailed component codecs are frozen in the contract.
+The v0.11 archive contains both `RELEASE.json` and an independent `release/contract.json`. Packaging and verification require Cargo metadata, the binary version report, the manifest, and this contract to agree. v0.11.0 requires Rust 1.94, uses redb 4.1.0, reads storage formats 1–11 and logical backup formats 1–6, creates storage format 10 by default, writes logical backup format 6, supports data protocols 1/2, and supports stream protocol 1. The detailed component codecs are frozen in the contract.
 
-The public v0.1.0 release used version 1 for storage, catalog, values, index keys, migration records, backup, and the JSON Lines protocol. It did not contain receipts, cursor identity, production scalars, composite indexes, or generation envelopes. v0.2.0 introduced format 6; v0.3.0 added Rust integration, relational reads, and migration UX; v0.4.0 added portable ADT contracts and static query bindings; v0.5.0 added the explicitly enabled format-7 incremental-backup journal; v0.6.0 added safe project scaffolding and project-level static checking; v0.7.0 adopted canonical Rust-shaped source and added typed membership, correlated exists, and set operations; v0.8.0 added count_distinct, typed averages, and basic ranking windows; v0.9.0 added schema-aware inline Rust query macros; v0.9.1 fixes generated-name conflicts with caller serde imports; v0.10.0 adds bounded typed maps, decimal multiply/divide with explicit rounding, and partial unique indexes, and makes fresh databases map- and partial-capable by default. The v0.10 contract describes default current writes and the complete readable range without changing older release contracts.
+The public v0.1.0 release used version 1 for storage, catalog, values, index keys, migration records, backup, and the JSON Lines protocol. It did not contain receipts, cursor identity, production scalars, composite indexes, or generation envelopes. v0.2.0 introduced format 6; v0.3.0 added Rust integration, relational reads, and migration UX; v0.4.0 added portable ADT contracts and static query bindings; v0.5.0 added the explicitly enabled format-7 incremental-backup journal; v0.6.0 added safe project scaffolding and project-level static checking; v0.7.0 adopted canonical Rust-shaped source and added typed membership, correlated exists, and set operations; v0.8.0 added count_distinct, typed averages, and basic ranking windows; v0.9.0 added schema-aware inline Rust query macros; v0.9.1 fixes generated-name conflicts with caller serde imports; v0.10.0 adds bounded typed maps, decimal multiply/divide with explicit rounding, and partial unique indexes, and makes fresh databases map- and partial-capable by default. The v0.11 contract describes default current writes and the complete readable range without changing older release contracts.
 
 The current binary reads storage formats 1–11. New databases start at format 10 with catalog/value/index-key/receipt/maintenance/journal codecs 6/3/4/3/1/0 and write logical backup 6. Formats 1 and 2 still gain cursor identity and move to format 3; format 3 can be explicitly upgraded to 4 for production scalars. Format 4 remains readable and writable for existing ascending single-column indexes, but composite or descending declarations first require format 5; older format 6 databases stay readable and writable, or can be explicitly upgraded to 8/10 to declare typed maps or partial unique indexes.
 
@@ -141,6 +145,10 @@ Only `backup incremental init` / `Engine::enable_backup_journal` enters a journa
 ### Source file extension: `.uid` to `.unid`
 
 `.unid` is the canonical extension for Unionid source files (schema, query, migration); `.uid` is in a compatibility window. `run`/`cli --file`, `schema check`, `fmt`, `query rust`, and migration/query directory scans accept both. A `.uid` path prints a stable deprecation on stderr (`'<path>' uses the deprecated .uid extension; rename it to .unid`) without changing content or semantics, and `migration new` writes `.unid`. Migration checksums are content-only and do not include the path, so renaming an existing migration from `.uid` to `.unid` preserves the applied ledger and never re-applies it. Automate the rename with `python3 scripts/migrate-uid-to-unid.py <dir> --dry-run` (drop `--dry-run` to run; use `--keep` for compatibility fixtures that must stay `.uid`), then update references and confirm `migration status` is unchanged. Renaming back is also safe during the window. The compatibility window is planned to close in **v1.0.0**, after which only `.unid` is accepted and unmigrated projects must rename first.
+
+### Upgrading from v0.10.0
+
+v0.11.0 preserves the v0.10.0 redb, backup, and protocol versions; no internal format upgrade or application migration is required. Parquet is a local read-only CLI source. Project checks now compare declaration structure, allowing migration-established stable IDs to differ from IDs produced by fresh schema declarations; runtime hashes and generated Rust bindings retain strict identity checks. Update unionid, unionid-derive, and unionid-query together to 0.11.0.
 
 ### Upgrading from v0.9.1
 
