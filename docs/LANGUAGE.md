@@ -327,6 +327,6 @@ TCP 的稳定客户端入口是 [JSON Lines version 1](PROTOCOL.md)：请求包�
 
 ## 原子写入守卫 / Atomic write guards
 
-v0.12 开发版增加独立 `expect affected == 1`，紧随 DML 检查命中行数；失败整体回滚。无参数、无分号，支持六种比较与非负整数常量。已发布 v0.11 不支持。
+v0.12增加独立 `expect affected == 1`，紧随 DML 检查命中行数；失败整体回滚。无参数、无分号，支持六种比较与非负整数常量。已发布 v0.11 不支持。
 
-The v0.12 development language adds an independent affected-row guard immediately after DML. Failure aborts the whole script. Six comparisons and nonnegative literals are supported. Released v0.11 does not support it. See [query reference](QUERY.md#原子业务写入v012-开发中--atomic-business-writes-v012-development).
+The v0.12 language adds an independent affected-row guard immediately after DML. Failure aborts the whole script. Six comparisons and nonnegative literals are supported. Released v0.11 does not support it. See [query reference](QUERY.md).

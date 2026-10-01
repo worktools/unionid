@@ -297,7 +297,7 @@ Common codes:
    source instead of retrying blindly. After a lost response, retry a mutation only with the
    client idempotency key.
 
-## Atomic write guards (v0.12 development)
+## Atomic write guards (v0.12)
 
 Discover `atomic_scripts` in `unionid agent --format json` before emitting guards; released v0.11 does not support them. Append `expect affected == 1` immediately after each mutation that must match exactly one row. Read the schema and bind version/balance conditions in the mutation filter. Do not check affected_rows only after an atomic multi-write script has committed.
 

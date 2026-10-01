@@ -176,8 +176,8 @@ TCP 与 HTTP 复用 `stream::accept`、`AcceptedStream::start` 和同一有界 f
 
 ## 逐语句摘要与写入守卫 / Statement summaries and write guards
 
-v0.12 开发版的 protocol v1/v2 成功响应增加可选 `statements: [{index, kind, affected_rows?}]`，尾随 expect 不替换 DML returning。错误新增可选 `statement_index`（从 1 开始）；`E_EXPECTATION` 与提交前摘要预算错误确定回滚；`E_EXPECTATION_CONTEXT` 在执行前拒绝。失败不提供未提交摘要。
+v0.12的 protocol v1/v2 成功响应增加可选 `statements: [{index, kind, affected_rows?}]`，尾随 expect 不替换 DML returning。错误新增可选 `statement_index`（从 1 开始）；`E_EXPECTATION` 与提交前摘要预算错误确定回滚；`E_EXPECTATION_CONTEXT` 在执行前拒绝。失败不提供未提交摘要。
 
-In v0.12 development, successful v1/v2 responses add optional ordered statement metadata. A trailing guard preserves the mutation output. Optional error `statement_index` counts top-level AST statements from one. Guard and pre-commit summary-budget failures roll back; context errors reject before execution. Receipt replay preserves summaries. Omitted fields in legacy receipts default to empty metadata. No protocol or storage version changes are required for these additive JSON fields.
+In v0.12, successful v1/v2 responses add optional ordered statement metadata. A trailing guard preserves the mutation output. Optional error `statement_index` counts top-level AST statements from one. Guard and pre-commit summary-budget failures roll back; context errors reject before execution. Receipt replay preserves summaries. Omitted fields in legacy receipts default to empty metadata. No protocol or storage version changes are required for these additive JSON fields.
 
 响应交付失败不保证回滚，TCP 16 MiB envelope 检查发生在提交之后；用幂等 key 重试。Transport delivery failures do not prove rollback: the TCP envelope budget runs after commit. Retry using an idempotency key. See [guard contract](rfc/0023-atomic-business-write-guards.md).

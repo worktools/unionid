@@ -1,4 +1,4 @@
-# v0.12 development: one request atomically claims a pending job.
+# v0.12: one request atomically claims a pending job.
 enum State {
   Pending
   Running {

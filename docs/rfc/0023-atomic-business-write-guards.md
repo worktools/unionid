@@ -1,6 +1,6 @@
 # RFC 0023：原子业务写入断言 / Atomic business-write guards
 
-- 状态 / Status: implemented in v0.12 development; unavailable in released v0.11
+- 状态 / Status: implemented in v0.12; unavailable in released v0.11
 - 日期 / Date: 2026-10-01
 - 跟踪 / Tracking: [#399](https://github.com/worktools/unionid/issues/399), [v0.12 milestone](https://github.com/worktools/unionid/milestone/22)
 - 相关 / Related: [RFC 0002](0002-idempotent-write-receipts.md), [RFC 0015](0015-static-query-contract.md), [RFC 0020](0020-inline-rust-query-macros.md)

@@ -126,6 +126,30 @@ def require_query(response, label):
     return {key: response[key] for key in ["columns", "rows", "schema"]}
 
 
+def receipt_request(binary, database, envelope, label):
+    address = unused_local_address()
+    server = subprocess.Popen(
+        [binary, "server", "--db", database, "--addr", address],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        wait_for_server(server, address, label)
+        host, port = address.rsplit(":", 1)
+        with socket.create_connection((host, int(port)), timeout=10) as connection:
+            with connection.makefile("rwb") as stream:
+                stream.write(json.dumps(envelope).encode() + b"\n")
+                stream.flush()
+                encoded = stream.readline(16 * 1024 * 1024 + 1)
+                if not encoded.endswith(b"\n") or len(encoded) > 16 * 1024 * 1024:
+                    raise RuntimeError(f"{label} receipt response exceeded the frame budget")
+                response = json.loads(encoded)
+        if not response.get("ok") or "idempotency" not in response:
+            raise RuntimeError(f"{label} receipt request failed")
+        return response
+    finally:
+        stop_server(server)
+
+
 def verify_database_case(previous, current, work, previous_label, current_label, case, expected_format, journal):
     database = work / f"previous-{case}.redb"
     source = work / f"setup-{case}.unid"
@@ -149,6 +173,12 @@ def verify_database_case(previous, current, work, previous_label, current_label,
                 "json",
             ]
         )
+    envelope = {
+        "version": 2, "request_id": "legacy-receipt",
+        "query": 'update tasks | filter id == 2 | set title = "pending" | returning',
+        "params": {}, "idempotency_key": f"previous-{case}",
+    }
+    original_receipt = receipt_request(previous, database, envelope, previous_label)
     run([previous, "check", "--db", database, "--format", "json"])
     backup = work / f"previous-{case}.backup.json"
     run(
@@ -215,6 +245,17 @@ def verify_database_case(previous, current, work, previous_label, current_label,
             f"{current_label} did not preserve the {previous_label} {case} logical backup"
         )
 
+    for path in [database, restored]:
+        replay = receipt_request(current, path, {**envelope, "request_id": "retry"}, current_label)
+        if replay["idempotency"]["replayed"] is not True or replay.get("statements", []) != original_receipt.get("statements", []):
+            raise RuntimeError(f"{current_label} did not replay the legacy receipt unchanged")
+        for field in ["columns", "rows", "schema", "affected_rows"]:
+            if replay.get(field) != original_receipt.get(field):
+                raise RuntimeError(f"{current_label} changed legacy receipt {field}")
+        for field in ["digest", "committed_sequence"]:
+            if replay["idempotency"][field] != original_receipt["idempotency"][field]:
+                raise RuntimeError(f"{current_label} changed the legacy receipt identity")
+
     address = unused_local_address()
     server = subprocess.Popen(
         [current, "server", "--db", database, "--addr", address, "--read-only"],
@@ -253,6 +294,7 @@ def verify_database_case(previous, current, work, previous_label, current_label,
         "data_compatible": True,
         "backup_compatible": True,
         "client_compatible": True,
+        "legacy_receipt_compatible": True,
     }
 
 

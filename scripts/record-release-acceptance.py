@@ -105,6 +105,7 @@ def main():
         },
         {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
         {"name": "packaged_local_data_journey", "status": "passed"},
+        {"name": "packaged_atomic_write_journey", "status": "passed"},
     ]
     if args.query_macro_evidence is not None:
         validation_results.append(
@@ -160,6 +161,7 @@ def main():
                 "docs/GETTING_STARTED.md"
             ),
             "packaged_local_data_journey": "scripts/validate-local-data.py and docs/PARQUET.md",
+            "packaged_atomic_write_journey": "scripts/validate-atomic-writes.py, tests/atomic_scripts.rs, and docs/rfc/0023-atomic-business-write-guards.md",
             "published_previous_release_data_client_package_compatibility": (
                 "scripts/verify-previous-release-compatibility.py and "
                 "docs/UPGRADING.md"

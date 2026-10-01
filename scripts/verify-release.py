@@ -150,6 +150,7 @@ def main():
             root / "examples" / "tasks.unid",
             root / "examples" / "people.parquet",
             root / "examples" / "account_email.unid",
+            root / "examples" / "atomic_claim.unid",
             root / "docs" / "PARQUET.md",
             root / "examples" / "todolist.rs",
             root / "deploy" / "envoy" / "compose.yaml",
@@ -162,6 +163,7 @@ def main():
             root / "tutorial" / "validate-first-use.py",
             root / "tutorial" / "validate.py",
             root / "tutorial" / "validate-local-data.py",
+            root / "tutorial" / "validate-atomic-writes.py",
             root / "tutorial" / "01_setup.unid",
             root / "tutorial" / "04_reopen.unid",
         ]
@@ -212,6 +214,14 @@ def main():
         )
         if local_data.returncode:
             raise RuntimeError(local_data.stderr)
+        atomic_writes = subprocess.run(
+            ["python3", root / "tutorial" / "validate-atomic-writes.py",
+             "--binary", binary, "--package-root", root],
+            text=True,
+            capture_output=True,
+        )
+        if atomic_writes.returncode:
+            raise RuntimeError(atomic_writes.stderr)
         print(
             json.dumps(
                 {
@@ -221,6 +231,7 @@ def main():
                     "first_use": json.loads(first_use.stdout),
                     "tutorial": json.loads(tutorial.stdout),
                     "local_data": json.loads(local_data.stdout),
+                    "atomic_writes": json.loads(atomic_writes.stdout),
                 }
             )
         )
