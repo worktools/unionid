@@ -436,6 +436,6 @@ filter email == "shared@example.com"
 
 ### English Description
 
-The v0.12 development acceptance adds guarded debit/credit transfers, optimistic version claims, and conditional inventory decrements. Guard each required mutation immediately; insufficient funds, a missing recipient, or a stale version must abort the entire request. Reads before a write and counts inspected after commit do not provide that guarantee.
+The v0.12 acceptance adds guarded debit/credit transfers, optimistic version claims, and conditional inventory decrements. Guard each required mutation immediately; insufficient funds, a missing recipient, or a stale version must abort the entire request. Reads before a write and counts inspected after commit do not provide that guarantee.
 
 The runnable claim example and atomic-script tests cover memory/redb, prepared operations, CLI, TCP v1/v2, HTTP, competing claims, returning, failed-key reuse, and exact receipt replay after restart and backup/journal recovery. Guards prove row counts, not complete domain rules; applications still validate positive amounts and eligible transfer parties. Released v0.11 does not support guards.

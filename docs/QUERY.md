@@ -862,7 +862,7 @@ filter match state {
 
 新增语法只有在 parser、执行器、正反测试和本页同步后，才能从“未实现”移动到“已实现”。
 
-## 原子业务写入（v0.12 开发中） / Atomic business writes (v0.12 development)
+## 原子业务写入（v0.12） / Atomic business writes (v0.12)
 
 ### 中文说明
 
@@ -893,7 +893,7 @@ A false guard returns `E_EXPECTATION` and rolls back the entire script, includin
 
 Successful responses include ordered, value-free `statements` entries with `index`, `kind`, and optional `affected_rows`. Guards have no count. A trailing guard preserves the preceding mutation's result and returning rows; a final read remains the top-level result. Scripts are bounded to 4,096 statements and 512 KiB of encoded summaries, checked before commit. Use batch inserts for large imports.
 
-Engine/prepare, CLI, TCP, and HTTP share execution. Durable receipts replay exact summaries through restart, logical backup, and journal recovery; old receipts default to an empty summary without inventing history. Changing a guard changes the digest. Static bindings and inline macros allow one DML plus a trailing guard; multi-mutation scripts use Engine/prepare. Transport delivery failure, including the post-commit TCP response limit, does not establish rollback; retry with an idempotency key. These APIs are under development for v0.12 and unavailable in released v0.11.
+Engine/prepare, CLI, TCP, and HTTP share execution. Durable receipts replay exact summaries through restart, logical backup, and journal recovery; old receipts default to an empty summary without inventing history. Changing a guard changes the digest. Static bindings and inline macros allow one DML plus a trailing guard; multi-mutation scripts use Engine/prepare. Transport delivery failure, including the post-commit TCP response limit, does not establish rollback; retry with an idempotency key. These APIs are available in v0.12 and unavailable in released v0.11.
 
 ### 旧 WAL 边界 / Legacy WAL boundary
 

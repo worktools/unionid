@@ -2,7 +2,13 @@
 
 unionid 把应用 schema migration 与数据库内部格式升级视为两件不同的事。应用字段、类型和变体的变化使用版本化 migration；内部格式版本只由明确支持它的 unionid 二进制打开。
 
-## v0.11 格式与源码契约
+## v0.12 格式与源码契约 / v0.12 contracts
+
+v0.12 聚焦原子业务守卫与逐语句摘要，三个 crate 同步为 0.12.0。默认 storage 10（可读 1–11）、backup 6（可读 1–6）、protocol 1/2、stream 1、codec 6/3/4/3/1/0 与 v0.11 保持一致，不需要内部格式升级或应用 migration。Rust struct literal 的新增公开字段、脚本预算与旧 WAL 边界见下方 v0.12 API 说明。
+
+v0.12 adds atomic business guards and statement summaries. All three crates use 0.12.0; storage, backup, protocol, stream, and codec versions match v0.11, requiring no format upgrade or application migration. Review the added public Rust fields, script bounds, and legacy WAL restrictions below. See [release notes](RELEASE-v0.12.0.md).
+
+## v0.11 格式与源码契约（历史 / Historical）
 
 v0.11 发布包同时携带 `RELEASE.json` 和独立的 `release/contract.json`。打包和验证脚本要求 Cargo、二进制 version report、manifest 与契约一致：
 
@@ -197,7 +203,7 @@ Before changing binaries, retain the old binary's `version --format json` and `d
 
 Generation reclamation after upgrades or repeated schema migrations does not guarantee physical file shrinkage. If the file high-water mark must be reclaimed, schedule a separate offline window after upgrade validation: stop the server, create and verify a logical backup, resolve migration maintenance, then run `unionid compact --db app.redb`. Compaction preserves the storage format, schema, sequence, ledger, RowIds, receipts, and cursor identity and does not replace the pre-upgrade backup. It reopens the database after native compact to persist redb's region layout, so the reported `after_bytes` is the durable post-reopen size and `changed` is true only when the file actually got smaller. On the [#229 churn data](benchmarks/compaction-2026-09-11.md), 100k drops from about 744.84 to 219.18 MiB. A successful complete run attempts to publish an authenticated adjacent proof, allowing an unchanged database to return a cross-process fast no-op on the next invocation. If native compaction succeeds but proof publication fails, the command still returns the compaction result with `proof_persisted=false`; the next invocation conservatively runs the complete path. A write, replacement, missing, or invalid proof also runs the complete path. The proof is disposable and is not a backup. A complete run performs multiple full traversals and native redb commits; after Ctrl-C or an uncertain result, reopen and run `check`.
 
-## v0.12 开发中的 API 边界 / v0.12 development API boundaries
+## v0.12的 API 边界 / v0.12 API boundaries
 
 新增 Error.statement_index 与 QueryResponse/ProtocolResponse.statements 公开字段，Rust struct literal 需补 None/Vec::new；构造器不受影响。Serde 读取旧响应使用默认空摘要，序列化空摘要时省略字段。每脚本新增 4,096 顶层语句上限；大批量写入改用 insert many。新摘要进入回执、逻辑备份和 journal 的既有 JSON payload，不更改 storage/codec 版本。继续使用同版本二进制执行、维护与恢复带守卫的请求；旧二进制无法执行 guard，不保证经旧程序重写保留新增摘要。
 

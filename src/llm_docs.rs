@@ -316,6 +316,11 @@ const EXAMPLES: &[LlmQueryExample] = &[
         description: "Combine schema-identical ADT projections with stable typed deduplication.",
         source: include_str!("../examples/llm/set-operations.unid"),
     },
+    LlmQueryExample {
+        name: "atomic-claim",
+        description: "Claim one pending job with a version filter and an atomic affected-row guard.",
+        source: include_str!("../examples/atomic_claim.unid"),
+    },
 ];
 
 pub fn query_docs() -> LlmQueryDocs {

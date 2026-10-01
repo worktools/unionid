@@ -11,9 +11,9 @@ unionid = { path = "../unionid" }
 unionid-query = { path = "../unionid/query-macro" }
 ```
 
-以上 path 写法用于源码 checkout。使用正式发布包时改为 crates.io 的同一个精确版本，例如 `unionid = "=0.11.0"` 与 `unionid-query = "=0.11.0"`；两个 crate 不支持跨版本混用。
+以上 path 写法用于源码 checkout。使用正式发布包时改为 crates.io 的同一个精确版本，例如 `unionid = "=0.12.0"` 与 `unionid-query = "=0.12.0"`；两个 crate 不支持跨版本混用。
 
-The path dependencies above are for a source checkout. With published packages, use the same exact crates.io version for both crates, for example `unionid = "=0.11.0"` and `unionid-query = "=0.11.0"`; mixed versions are unsupported.
+The path dependencies above are for a source checkout. With published packages, use the same exact crates.io version for both crates, for example `unionid = "=0.12.0"` and `unionid-query = "=0.12.0"`; mixed versions are unsupported.
 
 ```rust
 unionid_query::queries! {
@@ -79,7 +79,7 @@ See [RFC 0020](rfc/0020-inline-rust-query-macros.md) for the complete contract a
 
 See the [v0.9 compile record](benchmarks/query-macro-2026-09-18.md) for compile cost, schema/query re-expansion acceptance, diagnostic precision, and the migrated-catalog decision. The macro compiles the current Unionid compiler path for the host, so it is intended for short crate-owned queries that benefit from typed bindings; large or cross-language query sets should remain in `.unid` files.
 
-## 写入守卫 / Mutation guards (v0.12 development)
+## 写入守卫 / Mutation guards (v0.12)
 
 宏中的单个 mutation 可在 returning 后追加独立 `expect affected == 1`；仍沿用原 Params/Row/Output 类型，失败返回 `E_EXPECTATION` 与顶层语句序号。guard 进入 canonical source 和 digest。多条 mutation 的静态查询仍不支持。
 
