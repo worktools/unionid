@@ -699,6 +699,16 @@ impl Args {
                 query_response: true,
                 integrity: false,
             },
+            Command::Parquet {
+                query,
+                interactive,
+                format,
+                ..
+            } if query.is_some() || *interactive => ErrorOutput {
+                json: matches!(format, Format::Json),
+                query_response: true,
+                integrity: false,
+            },
             Command::Check { format, .. } => ErrorOutput {
                 json: matches!(format, Format::Json),
                 query_response: false,

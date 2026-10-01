@@ -7,3 +7,4 @@ llms/*.md -diff linguist-generated
 docs/benchmarks/data/*.json -diff linguist-generated
 tests/fixtures/**/*.json -diff linguist-generated
 tests/fixtures/**/*.redb -diff linguist-generated
+examples/*.parquet -diff linguist-generated

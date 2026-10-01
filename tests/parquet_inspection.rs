@@ -283,6 +283,46 @@ fn cli_executes_one_shot_parquet_queries_as_table_or_json() {
 }
 
 #[test]
+fn failed_parquet_queries_emit_exactly_one_query_response() {
+    let temp = TempDir::new();
+    let path = temp.0.join("people.parquet");
+    write_fixture(&path);
+    for (query, code) in [("delete data", "E_READ_ONLY"), ("from missing", "E_TABLE")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args([
+                "parquet",
+                path.to_str().unwrap(),
+                "--query",
+                query,
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["error"]["code"], code);
+        assert!(response["rows"].is_array());
+    }
+    std::fs::remove_file(&path).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args([
+            "parquet",
+            path.to_str().unwrap(),
+            "--query",
+            "from data",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["error"]["code"], "E_PARQUET_IO");
+    assert!(response["rows"].is_array());
+}
+
+#[test]
 fn corrupt_files_and_excessive_limits_fail_with_stable_codes() {
     let temp = TempDir::new();
     let path = temp.0.join("broken.parquet");

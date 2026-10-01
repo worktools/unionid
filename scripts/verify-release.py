@@ -148,6 +148,9 @@ def main():
             root / release["release_notes"],
             root / "release" / "contract.json",
             root / "examples" / "tasks.unid",
+            root / "examples" / "people.parquet",
+            root / "examples" / "account_email.unid",
+            root / "docs" / "PARQUET.md",
             root / "examples" / "todolist.rs",
             root / "deploy" / "envoy" / "compose.yaml",
             root / "deploy" / "envoy" / "envoy.yaml",
@@ -158,6 +161,7 @@ def main():
             root / "deploy" / "envoy" / "verify.sh",
             root / "tutorial" / "validate-first-use.py",
             root / "tutorial" / "validate.py",
+            root / "tutorial" / "validate-local-data.py",
             root / "tutorial" / "01_setup.unid",
             root / "tutorial" / "04_reopen.unid",
         ]
@@ -200,6 +204,14 @@ def main():
         )
         if tutorial.returncode:
             raise RuntimeError(tutorial.stderr)
+        local_data = subprocess.run(
+            ["python3", root / "tutorial" / "validate-local-data.py",
+             "--binary", binary, "--package-root", root],
+            text=True,
+            capture_output=True,
+        )
+        if local_data.returncode:
+            raise RuntimeError(local_data.stderr)
         print(
             json.dumps(
                 {
@@ -208,6 +220,7 @@ def main():
                     "sha256": actual,
                     "first_use": json.loads(first_use.stdout),
                     "tutorial": json.loads(tutorial.stdout),
+                    "local_data": json.loads(local_data.stdout),
                 }
             )
         )
