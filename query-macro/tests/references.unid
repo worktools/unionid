@@ -1,0 +1,10 @@
+enum AccountId {
+  Local(int)
+  External {value: text}
+}
+struct Account {id: AccountId}
+struct Session {id: int, account: Option<AccountId>}
+table accounts: Account
+table sessions: Session {key id}
+create unique index accounts (id)
+create reference sessions (account) references accounts (id)
