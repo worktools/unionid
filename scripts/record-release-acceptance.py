@@ -106,6 +106,7 @@ def main():
         {"name": "external_sha256_contract_package_tutorial", "status": "passed"},
         {"name": "packaged_local_data_journey", "status": "passed"},
         {"name": "packaged_atomic_write_journey", "status": "passed"},
+        {"name": "packaged_deployment_safety_journey", "status": "passed"},
     ]
     if args.query_macro_evidence is not None:
         validation_results.append(
@@ -134,6 +135,7 @@ def main():
         "release": release,
         "validation_results": validation_results,
         "evidence": {
+            "packaged_deployment_safety_journey": "scripts/validate-deployment-safety.py and docs/SERVICE.md",
             "rust_engine_local_cli_tcp_adt": "tests/getting_started.rs",
             "packaged_independent_rust_consumer": (
                 "tests/current-consumer and scripts/verify-current-consumer.py"
@@ -175,8 +177,8 @@ def main():
                 "docs/DEPLOYMENT.md"
             ),
             "capacity_and_known_limits": (
-                "docs/benchmarks/m7-acceptance-2026-09-10.md and "
-                f"docs/RELEASE-v{release['version']}.md"
+                "docs/benchmarks/m7-acceptance-2026-09-10.md, docs/SERVICE.md, and "
+                + release["release_notes"]
             ),
         },
     }

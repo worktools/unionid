@@ -42,9 +42,9 @@ def execute(binary, args, cwd, expected=0):
 
 
 @contextlib.contextmanager
-def server(binary, database, cwd):
+def server(binary, database, cwd, extra=()):
     process = subprocess.Popen(
-        [binary, "server", "--addr", "127.0.0.1:0", "--db", database],
+        [binary, "server", "--addr", "127.0.0.1:0", "--db", database, *extra],
         cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     ready = queue.Queue()

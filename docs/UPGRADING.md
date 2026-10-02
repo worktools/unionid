@@ -1,5 +1,15 @@
 # 升级与格式兼容
 
+## v0.13 候选兼容性 / v0.13 candidate compatibility
+
+v0.13 的三个 crate 同步为 0.13.0。默认 storage 10、可读 1–11、backup 6、可读 1–6、protocol 1/2、stream 1 与 v0.12 一致；不需要存储 upgrade 或应用 migration。回执保留策略默认关闭且不会写入数据库/备份，重启须显式配置。旧 key 重放保留提交时的原告警；清理后的 key 可以再次执行。Rust 手写公开 status/metrics struct literal 应补齐新增 capacity 字段；旧 serde payload 保持可读。
+
+`migration ... --queries` 是显式预检，部署方需提供实际保存的查询目录；它不会自动发现客户端源码，也不消除精确 schema hash 的绑定限制。生成源码布局现在经过 canonical formatter；不要重新格式化已经应用的 migration，checksum 仍不可变。新发布包的 `RELEASE.json.release_notes` 是发布页 URL，该页链接 Discussions 使用指南；不再要求仓库内新增逐版本指南文件。详细发布验收由 [#429](https://github.com/worktools/unionid/issues/429) 跟踪。
+
+All three v0.13 candidate crates use 0.13.0. Storage, readable formats, backup, protocols and stream versions match v0.12; no storage upgrade or application migration is required. Retention is disabled by default and never persisted in databases/backups. Replays preserve original commit-time warnings; pruned keys can execute again. Handwritten public status/metrics struct literals must initialize the new capacity fields; older serde payloads remain readable.
+
+Saved-query preflight requires an explicit directory; it does not discover client code or remove exact schema-hash binding. Generated source is now canonical, but applied migration checksums remain immutable. New package metadata uses a release-page URL for release_notes, linking to the Discussions user guide rather than requiring a duplicate repository guide. Release acceptance is tracked in #429.
+
 unionid 把应用 schema migration 与数据库内部格式升级视为两件不同的事。应用字段、类型和变体的变化使用版本化 migration；内部格式版本只由明确支持它的 unionid 二进制打开。
 
 ## v0.12 格式与源码契约 / v0.12 contracts
