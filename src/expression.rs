@@ -887,7 +887,10 @@ pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
     is_map_scalar_function(name)
         || matches!(
             name,
-            "uuid_parse"
+            "lower"
+                | "upper"
+                | "trim"
+                | "uuid_parse"
                 | "bytes_parse_hex"
                 | "date_parse"
                 | "timestamp_parse"
@@ -943,6 +946,7 @@ fn map_scalar_result(name: &str, value_ty: ScalarType) -> Result<ScalarType> {
 
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
     match name {
+        "lower" | "upper" | "trim" => Some(ScalarType::Text),
         "uuid_parse" => Some(ScalarType::Uuid),
         "bytes_parse_hex" => Some(ScalarType::Bytes),
         "date_parse" => Some(ScalarType::Date),
@@ -1500,6 +1504,9 @@ fn evaluate_scalar<'expression, 'values>(
                 return Err(Error::new("E_TYPE", format!("{name} expects text")));
             };
             let value = match name.as_str() {
+                "lower" => Value::Text(source.to_lowercase()),
+                "upper" => Value::Text(source.to_uppercase()),
+                "trim" => Value::Text(source.trim().to_owned()),
                 "uuid_parse" => Value::Uuid(source.parse()?),
                 "bytes_parse_hex" => Value::Bytes(source.parse()?),
                 "date_parse" => Value::Date(source.parse()?),

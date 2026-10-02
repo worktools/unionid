@@ -324,6 +324,20 @@ from tasks | filter id > 1 | take 1
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
+## 文本规范化 / Text normalization (v0.15 development)
+
+`lower text`、`upper text`、`trim text` 接受一个 text 参数并返回 text，支持嵌套调用：
+
+```text
+from users
+derive normalized = lower (trim name)
+select {id, normalized}
+```
+
+大小写转换采用 Unicode 规则且不依赖本地 locale；例如 `upper "Straße"` 为 `"STRASSE"`，结果长度可能变化。`trim` 只移除两端 Unicode 空白，保留内部空格。这些函数不是 Unicode normalization 或语言地区相关的 case folding，也不隐式转换其他类型。filter、derive、match 分支、prepared 参数、update set 与 migration using 复用相同表达式绑定；`explain` 绑定但不求值。当前为未发布的 v0.15 开发能力。
+
+These unary text-to-text functions nest as shown above. Case conversion follows Unicode rules independently of locale and may change length. Trim removes Unicode whitespace only at the ends, preserving internal spaces. They do not perform Unicode normalization, locale-specific case folding or implicit casts. Query, match, prepared, update and migration expressions share binding; explain binds without evaluation. This is unreleased v0.15 development functionality.
+
 ## Explain、实际剖析与类型化索引计划
 
 `explain` 在相同的 schema、字段、pattern、局部函数和参数绑定规则下准备查询，但不读取、复制或执行数据行：

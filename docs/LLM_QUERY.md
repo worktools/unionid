@@ -188,6 +188,12 @@ derive label = match state {
 Patterns recursively support enum payloads, records, tuples, `Some(value)`, `None`, and
 lists. `_` is a catch-all. `{field, ..}` binds one record field and ignores the rest.
 
+In v0.15 development, `lower text`, `upper text`, and `trim text` return text and
+can nest as `lower (trim owner)`. Case conversion is Unicode and locale-independent
+(it can change length); trim removes Unicode whitespace only at the ends. These
+are not Unicode normalization or locale-specific case folding. They share query,
+prepared parameter, update and migration expression binding; no implicit casts.
+
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,
 `is_some`, `is_none`, `any`, and `all`. For `Map<text, T>`, use `contains_key map key`,
