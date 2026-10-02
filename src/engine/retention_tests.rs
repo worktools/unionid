@@ -261,3 +261,148 @@ fn retention_commit_failures_never_publish_partial_receipt_deletion() {
         }
     }
 }
+
+#[test]
+fn scheduled_retention_retries_definite_failure_but_never_reopens_uncertain_storage() {
+    use crate::server::{ConcurrentEngine, ReceiptRetentionSchedule, ReceiptRetentionState};
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+    for uncertain in [false, true] {
+        let mut engine = seeded();
+        engine.durable = super::tests::engine_with_failure(uncertain).durable;
+        let engine = ConcurrentEngine::new(engine);
+        let worker = engine
+            .start_receipt_retention(
+                ReceiptRetentionSchedule {
+                    policy: ReceiptRetentionPolicy {
+                        min_age_seconds: 1,
+                        max_receipts: 1000,
+                    },
+                    interval_seconds: 1,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(6);
+        while worker.status().state != ReceiptRetentionState::Failed {
+            assert!(Instant::now() < until, "injected failure was not observed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        engine.with_exclusive(|engine| {
+            assert_eq!(engine.idempotency_status().unwrap().count, 5);
+            assert_eq!(engine.write_failed, uncertain);
+            assert_eq!(engine.durable.is_none(), uncertain);
+        });
+        let first_pass = worker.status().as_of_unix_ms;
+        while worker.status().as_of_unix_ms == first_pass {
+            assert!(
+                Instant::now() < until,
+                "worker did not attempt its next scheduled pass"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        worker.stop().unwrap();
+        engine.with_exclusive(|engine| {
+            assert_eq!(
+                engine.idempotency_status().unwrap().count,
+                if uncertain { 5 } else { 0 }
+            );
+            assert_eq!(engine.write_failed, uncertain);
+            if uncertain {
+                assert!(engine.durable.is_none());
+            }
+            assert!(engine.execute("from counters").rows[0]["value"].cmp_eq(&crate::Value::Int(5)));
+        });
+    }
+}
+
+#[test]
+fn retention_stop_joins_inflight_commit_before_releasing_writer_ownership() {
+    use crate::server::{ConcurrentEngine, ReceiptRetentionSchedule};
+    use std::sync::{atomic::AtomicBool, mpsc};
+    use std::time::Duration;
+    struct BlockingCommit {
+        inner: Box<dyn DurableBackend>,
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+    impl DurableBackend for BlockingCommit {
+        fn commit(
+            &mut self,
+            previous: &Database,
+            previous_receipts: &ReceiptMap,
+            database: &Database,
+            receipts: &ReceiptMap,
+            write_set: Option<&LogicalWriteSet>,
+        ) -> std::result::Result<DurableCommitProfile, CommitFailure> {
+            self.entered.send(()).unwrap();
+            self.release.recv_timeout(Duration::from_secs(10)).unwrap();
+            self.inner
+                .commit(previous, previous_receipts, database, receipts, write_set)
+        }
+        fn check_integrity(&mut self) -> Result<(bool, Database, ReceiptMap, StorageCheckProfile)> {
+            self.inner.check_integrity()
+        }
+        fn supports_production_scalars(&self) -> bool {
+            self.inner.supports_production_scalars()
+        }
+        fn versions(&self) -> StorageVersions {
+            self.inner.versions()
+        }
+        fn upgrade(
+            &mut self,
+            database: &Database,
+            receipts: &ReceiptMap,
+            target: u32,
+        ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+            self.inner.upgrade(database, receipts, target)
+        }
+    }
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mut engine = seeded();
+    engine.durable = Some(Box::new(BlockingCommit {
+        inner: super::tests::engine_with_failure(false).durable.unwrap(),
+        entered: entered_tx,
+        release: release_rx,
+    }));
+    let engine = ConcurrentEngine::new(engine);
+    let worker = engine
+        .start_receipt_retention(
+            ReceiptRetentionSchedule {
+                policy: ReceiptRetentionPolicy {
+                    min_age_seconds: 1,
+                    max_receipts: 1000,
+                },
+                interval_seconds: 1,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(engine.stats().active_writes, 1);
+    let (stopping_tx, stopping_rx) = mpsc::channel();
+    let (stopped_tx, stopped_rx) = mpsc::channel();
+    let stopper = std::thread::spawn(move || {
+        stopping_tx.send(()).unwrap();
+        let result = worker.stop();
+        stopped_tx.send(result).unwrap();
+    });
+    stopping_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(
+        stopped_rx.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(engine.stats().active_writes, 1);
+    release_tx.send(()).unwrap();
+    stopped_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    stopper.join().unwrap();
+    assert_eq!(engine.stats().active_writes, 0);
+    engine.with_exclusive(|engine| {
+        assert_eq!(engine.idempotency_status().unwrap().count, 5);
+        assert!(!engine.write_failed);
+    });
+}

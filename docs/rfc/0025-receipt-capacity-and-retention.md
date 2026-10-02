@@ -1,6 +1,6 @@
 # RFC 0025：回执容量与显式保留策略 / Receipt capacity and explicit retention
 
-- 状态 / Status: accepted via #424; capacity signals merged via #425; one-shot retention core/CLI in development, service scheduling pending; not available in released v0.12
+- 状态 / Status: accepted via #424; capacity signals merged via #425; one-shot retention core/CLI in #426; service scheduling and lifecycle acceptance in development; not available in released v0.12
 - Milestone: v0.13.0
 - Issue: [#402](https://github.com/worktools/unionid/issues/402)
 - 前置契约 / Prior contract: [RFC 0002](0002-idempotent-write-receipts.md)

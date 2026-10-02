@@ -22,6 +22,11 @@ use crate::protocol::{
 };
 use crate::{Engine, Error, QueryResponse};
 
+mod retention;
+pub use retention::{
+    ReceiptRetentionSchedule, ReceiptRetentionState, ReceiptRetentionStatus, ReceiptRetentionWorker,
+};
+
 pub const MAX_FRAME_BYTES: usize = crate::syntax::MAX_SOURCE_BYTES * 6 + 256;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CONNECTIONS: usize = 64;
@@ -72,6 +77,7 @@ pub struct ConcurrentEngine {
 }
 
 struct ConcurrentEngineInner {
+    retention_running: AtomicBool,
     engine: Mutex<Engine>,
     read_slots: Mutex<usize>,
     read_ready: Condvar,
@@ -205,6 +211,7 @@ impl ConcurrentEngine {
             .transpose()?;
         Ok(Self {
             inner: Arc::new(ConcurrentEngineInner {
+                retention_running: AtomicBool::new(false),
                 engine: Mutex::new(engine),
                 read_slots: Mutex::new(0),
                 read_ready: Condvar::new(),
@@ -1494,6 +1501,32 @@ pub fn run_server_with_db_read_only(
     snapshot_every: usize,
     read_only: bool,
 ) -> Result<(), String> {
+    run_server_with_receipt_retention(
+        addr,
+        db_path,
+        wal_path,
+        snapshot_path,
+        snapshot_every,
+        read_only,
+        None,
+    )
+}
+
+pub fn run_server_with_receipt_retention(
+    addr: &str,
+    db_path: Option<PathBuf>,
+    wal_path: Option<PathBuf>,
+    snapshot_path: Option<PathBuf>,
+    snapshot_every: usize,
+    read_only: bool,
+    retention: Option<ReceiptRetentionSchedule>,
+) -> Result<(), String> {
+    if let Some(schedule) = retention {
+        schedule.validate().map_err(|error| error.to_string())?;
+        if read_only || wal_path.is_some() || snapshot_path.is_some() || snapshot_every > 0 {
+            return Err("E_CONFIG: receipt retention requires writable redb or memory mode".into());
+        }
+    }
     if db_path.is_some() && (wal_path.is_some() || snapshot_path.is_some() || snapshot_every > 0) {
         return Err("E_CONFIG: --db cannot be combined with WAL or snapshot options".into());
     }
@@ -1516,7 +1549,20 @@ pub fn run_server_with_db_read_only(
     let signal = Arc::clone(&shutdown);
     ctrlc::set_handler(move || signal.store(true, Ordering::Release))
         .map_err(|error| format!("install shutdown handler: {error}"))?;
-    let stats = serve_until(listener, engine, shutdown)?;
+    if let Some(schedule) = retention {
+        eprintln!(
+            "unionid receipt retention enabled: window={}s, interval={}s, max_receipts={}; pruned keys can execute again; require trusted UTC and a window longer than all retries",
+            schedule.policy.min_age_seconds,
+            schedule.interval_seconds,
+            schedule.policy.max_receipts
+        );
+    }
+    let stats = serve_until_concurrent_with_retention(
+        listener,
+        ConcurrentEngine::new(engine),
+        shutdown,
+        retention,
+    )?;
     eprintln!(
         "unionid server stopped: accepted={}, rejected={}, requests={}, failed={}, peak_reads={}, active_reads={}, queued_reads={}, active_writes={}, queued_writes={}",
         stats.accepted_connections,
@@ -1542,6 +1588,27 @@ pub fn serve_until(
     shutdown: Arc<AtomicBool>,
 ) -> Result<ServerStats, String> {
     serve_until_concurrent(listener, ConcurrentEngine::new(engine), shutdown)
+}
+
+/// Serve with optional bounded maintenance, joining the worker on success or error.
+pub fn serve_until_concurrent_with_retention(
+    listener: TcpListener,
+    engine: ConcurrentEngine,
+    shutdown: Arc<AtomicBool>,
+    retention: Option<ReceiptRetentionSchedule>,
+) -> Result<ServerStats, String> {
+    let worker = retention
+        .map(|schedule| engine.start_receipt_retention(schedule, Arc::clone(&shutdown)))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let result = serve_until_concurrent(listener, engine.clone(), shutdown);
+    if let Some(worker) = worker {
+        worker.stop().map_err(|error| error.to_string())?;
+    }
+    result.map(|mut stats| {
+        stats.concurrency = engine.stats();
+        stats
+    })
 }
 
 /// Serve TCP requests through a reusable concurrent execution boundary.

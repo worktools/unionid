@@ -260,6 +260,15 @@ enum Command {
         /// Reject every mutating request; requires --db.
         #[arg(long, requires = "db")]
         read_only: bool,
+        /// Opt in to cleanup; pruned keys can execute again. Requires trusted UTC.
+        #[arg(long)]
+        receipt_retention_seconds: Option<u64>,
+        /// Maintenance cadence (default 60 seconds); requires an explicit window.
+        #[arg(long, requires = "receipt_retention_seconds")]
+        receipt_retention_interval_seconds: Option<u64>,
+        /// Maximum receipts per pass (default 1000); requires an explicit window.
+        #[arg(long, requires = "receipt_retention_seconds")]
+        receipt_retention_max_receipts: Option<usize>,
     },
     /// Execute an atomic script in memory or in a local redb database.
     Run {
@@ -1069,13 +1078,23 @@ fn run(args: Args) -> Result<(), String> {
             snapshot_path,
             snapshot_every,
             read_only,
-        } => server::run_server_with_db_read_only(
+            receipt_retention_seconds,
+            receipt_retention_interval_seconds,
+            receipt_retention_max_receipts,
+        } => server::run_server_with_receipt_retention(
             &addr,
             db,
             wal_path,
             snapshot_path,
             snapshot_every,
             read_only,
+            receipt_retention_seconds.map(|min_age_seconds| server::ReceiptRetentionSchedule {
+                policy: unionid::ReceiptRetentionPolicy {
+                    min_age_seconds,
+                    max_receipts: receipt_retention_max_receipts.unwrap_or(1000),
+                },
+                interval_seconds: receipt_retention_interval_seconds.unwrap_or(60),
+            }),
         ),
         Command::Run {
             db,

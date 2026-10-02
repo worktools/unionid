@@ -83,13 +83,13 @@ unionid receipts prune --db app.redb --before-unix-ms 1700000000000 --max-receip
 
 成功的新 key 提交在达到阈值时返回固定 warning，表示该次提交时的容量。告警计入回执大小检查并与业务数据原子保存。已有 key replay 保持原响应和原告警，即使后来 prune 使当前容量恢复正常；当前状态以 status/metrics 为准。单条超过 1 MiB 是 `E_IDEMPOTENCY_LIMIT`，不能通过清理别的回执解决。10,000 条或 64 MiB 总容量不足是 `E_IDEMPOTENCY_CAPACITY`，hint 指向 status 与显式预览/确认流程。
 
-默认不会清理任何回执。可使用下述显式窗口命令手动执行一轮清理；服务内的周期调度仍由 #402 后续阶段实现。清理之后，同一个 key 可以再次产生效果。容量规划使用“成功的新 key QPS × 最大重试窗口”，同时预留突发、清理延迟和编码字节余量。已有 key 重放不增加条数；不能为腾空间擅自缩短业务重试窗口。
+默认不会清理任何回执。可使用下述显式窗口命令手动执行一轮清理；服务内周期调度见下文。清理之后，同一个 key 可以再次产生效果。容量规划使用“成功的新 key QPS × 最大重试窗口”，同时预留突发、清理延迟和编码字节余量。已有 key 重放不增加条数；不能为腾空间擅自缩短业务重试窗口。
 
 In development toward v0.13, status exposes version-1 `capacity`, while doctor exposes value-free `database.receipt_capacity` from its private copy. Either count or encoded bytes reaching 80% yields `warning`; reaching a limit yields `full`. Remaining bytes do not guarantee that the next receipt fits. Doctor reveals no receipt keys, digests, or business payloads.
 
 Successful new-key commits near capacity include a fixed warning describing that commit. It participates in size checks before atomic data/receipt commit and is preserved unchanged on replay, even after pruning reduces current usage. Use status/metrics for current capacity. `E_IDEMPOTENCY_LIMIT` denotes one oversized receipt; pruning cannot fix it. `E_IDEMPOTENCY_CAPACITY` denotes insufficient total capacity and provides status plus preview/confirm guidance.
 
-No receipts are automatically deleted. The age-window command below supports one explicit manual pass; automatic service scheduling remains later #402 work. Review a cutoff older than every supported retry window before using --confirm; a deleted key may execute again. Plan for successful new-key rate × maximum retry window, bursts, cleanup lag, and byte headroom. Replays consume no new receipt, and pressure is not permission to shorten the retry window.
+No receipts are automatically deleted. The age-window command below supports one explicit manual pass; opt-in service scheduling is described below. Review a cutoff older than every supported retry window before using --confirm; a deleted key may execute again. Plan for successful new-key rate × maximum retry window, bursts, cleanup lag, and byte headroom. Replays consume no new receipt, and pressure is not permission to shorten the retry window.
 
 ### 显式保留窗口 / Explicit retention window
 
@@ -105,10 +105,37 @@ unionid receipts retain --db app.redb --min-age-seconds 3600 --max-receipts 100 
 
 预览在锁定后创建的临时副本上运行，源库字节不变；确认命令在实际 Engine 持有写入所有权时重新采样时间和选择，旧预览不是批准令牌。路径必须为已有数据库，不创建新库。JSON 为单个 version 1 对象，包含 policy、as_of_unix_ms、cutoff_unix_ms、selected_count/bytes、remaining_count、applied 和 key_reuse_warning。清理后的 key 可以再次执行，未删除的 key 继续重放。
 
-Rust 调用方使用 `ReceiptRetentionPolicy { min_age_seconds, max_receipts }`、`Engine::plan_idempotency_retention(policy)` 和 `apply_idempotency_retention(policy)`。预览允许只读 Engine；执行拒绝只读、legacy WAL 和未完成的 migration maintenance。默认没有策略和后台任务，配置不写入数据库或备份。时间是 UTC 墙钟年龄，依赖正确的系统时钟；不宣称跨重启的 monotonic 寿命证明。服务周期调度、进程内时钟回退防护和 shutdown 集成仍未交付。
+Rust 调用方使用 `ReceiptRetentionPolicy { min_age_seconds, max_receipts }`、`Engine::plan_idempotency_retention(policy)` 和 `apply_idempotency_retention(policy)`。预览允许只读 Engine；执行拒绝只读、legacy WAL 和未完成的 migration maintenance。默认没有策略和后台任务，配置不写入数据库或备份。时间是 UTC 墙钟年龄，依赖正确的系统时钟；不宣称跨重启的 monotonic 寿命证明。服务周期调度与生命周期约束见下文。
 
 Development toward v0.13 adds one explicit UTC-age retention pass. Preview is the default; choose a positive window longer than every client, queue, and manual retry horizon. At most 1,000 receipts are selected per pass (default 1,000), in existing sequence/time/key order. Only timestamps strictly before `now - window` qualify; equal-boundary, recent, and future timestamps remain protected. A window extending before the epoch yields a null cutoff and an empty selection, never unrestricted deletion. Empty passes preserve sequence; actual pruning keeps existing transaction/cursor semantics and never deletes business rows.
 
 Preview uses a locked temporary copy and preserves source bytes. Confirm samples time and selection again under the actual Engine's writer ownership; a prior report is not an approval token. The path must already exist. One version-1 JSON report carries policy, evaluation/cutoff times, selection/remaining counts, applied status, and a key-reuse warning. Deleted keys can execute again; retained keys still replay.
 
-Rust callers use ReceiptRetentionPolicy and the Engine plan/apply methods above. Read-only preview is allowed; apply rejects read-only, legacy WAL, and unfinished migration maintenance. No background task or persisted policy is enabled. Age is UTC wall-clock age and assumes correct system time, not a cross-restart monotonic lifetime proof. Service scheduling, in-process backward-clock protection, and shutdown integration remain pending.
+Rust callers use ReceiptRetentionPolicy and the Engine plan/apply methods above. Read-only preview is allowed; apply rejects read-only, legacy WAL, and unfinished migration maintenance. No background task or persisted policy is enabled. Age is UTC wall-clock age and assumes correct system time, not a cross-restart monotonic lifetime proof. Service scheduling and lifecycle constraints are described below.
+
+### 服务内周期清理 / In-service scheduled retention
+
+开发中的 v0.13 可显式开启服务内清理，默认关闭：
+
+```sh
+unionid server --db app.redb \
+  --receipt-retention-seconds 3600 \
+  --receipt-retention-interval-seconds 60 \
+  --receipt-retention-max-receipts 1000
+```
+
+窗口必须长于所有重试来源；周期默认 60 秒，范围 1–86,400 秒；单轮上限默认 1,000，范围 1–1,000。单独设置周期或上限不会开启策略，而是报配置错误。只读、WAL/snapshot 模式拒绝启用；配置错误在打开/创建数据库前报告。启动会提示 key 可再次执行及可信 UTC 的要求。
+
+独立维护线程在一个周期后开始首轮，使用 monotonic 时间计时，每轮完成后再等待一个周期，不追赶积压的周期。写锁忙时跳过而不排队；清理与写入使用相同的写锁，migration maintenance 未完成时暂停。关闭服务会唤醒并等待维护线程；正在执行的提交完成后才退出。清理可能走 full rebuild，删除条数有界不表示锁占用时间固定。需要同时为写速率、保留窗口、字节容量和清理延迟规划容量。
+
+Rust/HTTP 嵌入方可显式使用 `ConcurrentEngine::start_receipt_retention(schedule, shutdown)`，持有 `ReceiptRetentionWorker`；同一个共享 Engine 只允许一个 worker。`status()` 返回版本 1 的最近一轮状态、时间、删除条数和字节数，不含业务 key。`stop()` 或 drop 唤醒并 join 线程。状态包含 idle/busy/maintenance/clock_error/applied/failed；错误状态变化时记录固定日志，无操作周期不刷日志。未启动时没有 worker，数据库与备份不保存策略。
+
+进程内观测到 UTC 回退时不清理，直到墙钟追上此前高水位；无效时间也不删除。未来时间回执仍受保护。向前跳时钟或在错误时钟的机器上恢复不能提供真实时间寿命保证；启动前应确认 UTC 和重试窗口。确定提交失败可在后续周期重试，不确定结果沿用 Engine 写入禁用保护，不自动重开数据库。
+
+Development toward v0.13 supports the opt-in server flags above. Cadence defaults to 60 seconds (1–86,400); each pass defaults to at most 1,000 receipts (1–1,000). Cadence or cap alone is a configuration error. Read-only and legacy WAL/snapshot configurations reject retention before opening or creating a database. Startup explicitly warns about key reuse and trusted UTC.
+
+A dedicated worker waits one monotonic interval before its first pass and between completed passes, without catch-up bursts. Busy writer ownership skips a pass rather than queueing. Cleanup shares the write lock and pauses for unfinished migration maintenance. Shutdown wakes and joins the worker, letting an in-flight transaction finish. Pruning can rebuild durable state; bounded deletion count is not constant latency. Capacity still depends on new-key rate, retry horizon, encoded bytes, and maintenance lag.
+
+Embedded/HTTP applications can call `ConcurrentEngine::start_receipt_retention(schedule, shutdown)` and retain its worker handle. Only one worker may run per shared Engine. Version-1 `status()` contains last-pass state, time, deletion count and bytes, never business keys. Stop or drop wakes and joins the thread. States are idle/busy/maintenance/clock_error/applied/failed; fixed failure-state transition logs avoid per-no-op noise. No worker or persisted configuration exists by default.
+
+Observed backward UTC pauses deletion until the previous high-water time is reached; invalid clocks also delete nothing. Future receipts remain protected. Forward jumps and restoration onto incorrectly configured clocks cannot prove real elapsed age. Definite commit failures may retry on a later interval; uncertain outcomes retain Engine's write prohibition without automatic reopen.
