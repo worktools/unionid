@@ -55,7 +55,7 @@ ReferenceDefinition 使用统一 stable ID、源/目标 table ID、stable field-
 
 普通 mutation 应从 write set 验证新源 key，并从被移除/改变的目标 key 查反向 posting，避免每次扫描全部数据库。反向引用索引是受约束的派生结构，拥有明确 stable key 编码、增量维护和 check 验证；不是不可验证的进程缓存。Schema 构建、migration、restore 可以全量重建。性能验收必须证实少量写入不退回全库 full rebuild。
 
-新持久 metadata/反向索引需要显式 storage、catalog、backup 版本规划；不能利用 serde default 让旧软件静默忽略约束。旧库可读，首次普通写入不隐式升级；新增 reference 若格式不足应要求明确 upgrade。版本号在核对当前完整 codec 矩阵后分配，本草案不猜测数字。
+持久化实现分配 storage 12/13（journal 关闭/开启）、catalog codec 7 与 logical backup 7；value/index-key/receipt/maintenance codec 保持 3/4/3/1。显式升级分别为 10→12、11→13，不把普通写入当作隐式升级。反向 posting 复用 codec 4 的 typed tuple 编码，以全局唯一的 reference stable ID 区分普通 index ID，尾部保存源行 RowId；catalog 的 Reference entry 决定其语义。旧软件必须因未知 storage/catalog 版本拒绝打开，不能利用 serde default 静默忽略约束。开发阶段默认新库仍为 format 10，待完整验收后统一切换。
 
 logical backup、journal delta、incremental chain replay、open 和完整 check 共用引用校验。损坏或存在孤儿的恢复候选不得发布为可使用数据库；失败保留既有目标。部分恢复不能静默去掉 reference。
 
@@ -96,7 +96,7 @@ These are implementation entry points, not claims that the feature exists. Befor
 
 ### 持久化契约核对表 / Durable contract checklist
 
-The inspected v0.13 baseline is storage 10/11 (journal disabled/enabled), catalog 6, value 3, index-key 4, receipt 3, maintenance 1, journal 0/1, logical backup 6, portable schema 2. New version numbers will be assigned in the codec implementation review; this inventory does not allocate them.
+The v0.13 baseline is storage 10/11 (journal disabled/enabled), catalog 6, value 3, index-key 4, receipt 3, maintenance 1, journal 0/1, logical backup 6, portable schema 2. The implementation allocates storage 12/13, catalog 7 and logical backup 7, retaining value/index-key/receipt/maintenance codecs 3/4/3/1. Explicit upgrades are 10→12 and 11→13. Reverse postings reuse codec 4 typed tuples under globally unique reference stable IDs, with source RowId suffixes; Reference catalog entries distinguish them from ordinary index IDs. Unknown storage/catalog versions must reject older readers rather than silently omit constraints. The development default remains format 10 pending complete acceptance.
 
 | Surface | Required change and acceptance |
 | --- | --- |

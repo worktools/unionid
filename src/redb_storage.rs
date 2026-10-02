@@ -51,6 +51,8 @@ pub(crate) const MAP_STORAGE_FORMAT_VERSION: u32 = 8;
 pub(crate) const MAP_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 9;
 pub(crate) const PARTIAL_STORAGE_FORMAT_VERSION: u32 = 10;
 pub(crate) const PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 11;
+pub(crate) const REFERENCE_STORAGE_FORMAT_VERSION: u32 = 12;
+pub(crate) const REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 13;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
 const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
@@ -1274,6 +1276,29 @@ impl StorageLayout {
         }
     }
 
+    const fn references() -> Self {
+        Self {
+            format: REFERENCE_STORAGE_FORMAT_VERSION,
+            catalog: REFERENCE_CATALOG_CODEC_VERSION,
+            ..Self::partial()
+        }
+    }
+
+    const fn references_journal() -> Self {
+        Self {
+            format: REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION,
+            journal: JOURNAL_CODEC_VERSION,
+            ..Self::references()
+        }
+    }
+
+    const fn supports_references(self) -> bool {
+        matches!(
+            self.format,
+            REFERENCE_STORAGE_FORMAT_VERSION | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
+        )
+    }
+
     const fn scalar() -> Self {
         Self {
             format: SCALAR_STORAGE_FORMAT_VERSION,
@@ -1288,7 +1313,11 @@ impl StorageLayout {
     }
 
     const fn for_format(format: u32) -> Self {
-        if format == PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION {
+        if format == REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION {
+            Self::references_journal()
+        } else if format == REFERENCE_STORAGE_FORMAT_VERSION {
+            Self::references()
+        } else if format == PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION {
             Self::partial_journal()
         } else if format == PARTIAL_STORAGE_FORMAT_VERSION {
             Self::partial()
@@ -1329,13 +1358,18 @@ impl StorageLayout {
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         )
     }
 
     const fn supports_partial_indexes(self) -> bool {
         matches!(
             self.format,
-            PARTIAL_STORAGE_FORMAT_VERSION | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+            PARTIAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         )
     }
 
@@ -1350,11 +1384,15 @@ impl StorageLayout {
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         )
     }
 
     const fn backup_format(self) -> u32 {
-        if self.supports_partial_indexes() {
+        if self.supports_references() {
+            crate::backup::REFERENCE_BACKUP_FORMAT_VERSION
+        } else if self.supports_partial_indexes() {
             crate::backup::PARTIAL_BACKUP_FORMAT_VERSION
         } else if self.supports_maps() {
             crate::backup::MAP_BACKUP_FORMAT_VERSION
@@ -1457,6 +1495,13 @@ impl RedbStore {
         if format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
             let (loaded, receipts, committed, source, mut profile) = store.load_bounded_view()?;
             store.committed = committed;
+            if loaded.has_references() {
+                let validation_started = Instant::now();
+                store.validate_bounded_integrity_for(&loaded, store.committed.generation.active)?;
+                profile.validation_micros = profile
+                    .validation_micros
+                    .saturating_add(elapsed_micros(validation_started));
+            }
             profile.total_micros = elapsed_micros(total_started);
             profile.redb_open_micros = redb_open_micros;
             profile.bootstrap_micros = bootstrap_micros;
@@ -1747,6 +1792,10 @@ impl RedbStore {
 
     pub(crate) fn supports_maps(&self) -> bool {
         self.committed.layout.supports_maps()
+    }
+
+    pub(crate) fn supports_references(&self) -> bool {
+        self.committed.layout.supports_references()
     }
 
     pub(crate) fn supports_partial_indexes(&self) -> bool {
@@ -2170,7 +2219,9 @@ impl RedbStore {
         self.invalidate_compaction_proof()
             .map_err(CommitFailure::Definite)?;
         let previous_layout = self.committed.layout;
-        let layout = if previous_layout.supports_partial_indexes() {
+        let layout = if previous_layout.supports_references() {
+            StorageLayout::references_journal()
+        } else if previous_layout.supports_partial_indexes() {
             StorageLayout::partial_journal()
         } else if previous_layout.supports_maps() {
             StorageLayout::map_journal()
@@ -2458,7 +2509,7 @@ impl RedbStore {
         if !self.committed.layout.supports_generation_envelope() {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "recoverable migrations require storage format 6, 7, 8, 9, 10, or 11",
+                "recoverable migrations require storage format 6 through 13",
             )));
         }
         if source.durable_meta() != self.committed.meta {
@@ -3276,6 +3327,8 @@ impl RedbStore {
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
@@ -3325,6 +3378,16 @@ impl RedbStore {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
                 "storage format 11 requires format 9",
+            )));
+        }
+        if (target == REFERENCE_STORAGE_FORMAT_VERSION
+            && previous.format != PARTIAL_STORAGE_FORMAT_VERSION)
+            || (target == REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
+                && previous.format != PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION)
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                "storage format 12/13 requires format 10/11 respectively",
             )));
         }
         if target == PRODUCTION_STORAGE_FORMAT_VERSION {
@@ -4050,10 +4113,12 @@ impl RedbStore {
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(Error::new(
                 "E_STORAGE",
-                "bounded reads require storage format 5, 6, 7, 8, 9, 10, or 11",
+                "bounded reads require storage format 5 through 13",
             ));
         }
         validate_generation_state(&transaction, &meta, layout, generation)?;
@@ -5347,6 +5412,8 @@ fn read_meta(
             | MAP_JOURNAL_STORAGE_FORMAT_VERSION
             | PARTIAL_STORAGE_FORMAT_VERSION
             | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+            | REFERENCE_STORAGE_FORMAT_VERSION
+            | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
     }
@@ -5360,6 +5427,7 @@ fn read_meta(
             | PRODUCTION_CATALOG_CODEC_VERSION
             | MAP_CATALOG_CODEC_VERSION
             | PARTIAL_CATALOG_CODEC_VERSION
+            | REFERENCE_CATALOG_CODEC_VERSION
     ) || (format_version >= SCALAR_STORAGE_FORMAT_VERSION && catalog_version != expected.catalog)
     {
         return Err(Error::new(

@@ -318,6 +318,9 @@ trait DurableBackend: Send {
     fn supports_partial_indexes(&self) -> bool {
         false
     }
+    fn supports_references(&self) -> bool {
+        false
+    }
     fn supports_bounded_row_mutation(&self) -> bool {
         false
     }
@@ -505,6 +508,9 @@ impl DurableBackend for RedbStore {
 
     fn supports_partial_indexes(&self) -> bool {
         RedbStore::supports_partial_indexes(self)
+    }
+    fn supports_references(&self) -> bool {
+        RedbStore::supports_references(self)
     }
 
     fn supports_bounded_row_mutation(&self) -> bool {
@@ -1382,13 +1388,17 @@ impl Engine {
         let mut statements = syntax::parse(source)?;
         crate::script::preflight(&statements)?;
         if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_references())
             && statements
                 .iter()
                 .any(|located| located.statement.declares_references())
         {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "durable typed references are not available yet",
+                "typed references require redb storage format 12 or 13; explicitly upgrade the database first",
             ));
         }
 
@@ -2531,6 +2541,10 @@ impl Engine {
     ) -> Result<bool> {
         ensure_deadline(control)?;
         if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_references())
             && file.steps.iter().any(|step| {
                 matches!(
                     step,
@@ -2541,7 +2555,7 @@ impl Engine {
         {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "durable typed references are not available yet",
+                "typed references require redb storage format 12 or 13; explicitly upgrade the database first",
             ));
         }
 
@@ -2972,10 +2986,16 @@ impl Engine {
         // A committed root never carries changes forward into the next
         // candidate. Row-only callers already extracted the supplied set;
         // full-rebuild callers intentionally discard any internal details.
-        if candidate.has_references() && self.storage_mode != StorageMode::Memory {
+        if candidate.has_references()
+            && self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_references())
+        {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "durable typed references are not available yet",
+                "typed references require redb storage format 12 or 13; explicitly upgrade the database first",
             ));
         }
         let _ = candidate.take_write_set();
@@ -3564,6 +3584,8 @@ impl Engine {
                     && target == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION)
                 && !(format == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION
                     && target == crate::redb_storage::PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION)
+                && !(format == crate::redb_storage::PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                    && target == crate::redb_storage::REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION)
         }) {
             return Err(Error::new(
                 "E_BACKUP_CHAIN_ACTIVE",
@@ -3582,19 +3604,22 @@ impl Engine {
                 .durable
                 .as_ref()
                 .is_some_and(|durable| durable.versions().format == 5);
-        let journal_map_upgrade = self.durable.as_ref().is_some_and(|durable| {
+        let journal_codec_upgrade = self.durable.as_ref().is_some_and(|durable| {
             (durable.versions().format == 7
                 && target == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION)
                 || (durable.versions().format
                     == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION
                     && target == crate::redb_storage::PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION)
+                || (durable.versions().format
+                    == crate::redb_storage::PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                    && target == crate::redb_storage::REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION)
         });
         let mut database = if metadata_only_upgrade {
             self.committed.db.as_ref().clone()
         } else {
             self.mutable_candidate(None)?
         };
-        if journal_map_upgrade {
+        if journal_codec_upgrade {
             database.sequence = database
                 .sequence
                 .checked_add(1)
@@ -3752,6 +3777,14 @@ impl Engine {
     }
 
     pub(crate) fn logical_backup_format(&self) -> u32 {
+        if self.committed.db.has_references()
+            || self
+                .durable
+                .as_ref()
+                .is_some_and(|durable| durable.supports_references())
+        {
+            return crate::backup::REFERENCE_BACKUP_FORMAT_VERSION;
+        }
         if self
             .durable
             .as_ref()
@@ -3793,6 +3826,9 @@ impl Engine {
         drop(reservation);
         let result = (|| {
             let mut engine = Self::open_redb(path.clone())?;
+            if database.has_references() {
+                engine.upgrade_storage(crate::redb_storage::REFERENCE_STORAGE_FORMAT_VERSION)?;
+            }
             let mut response = QueryResponse::ok_message("backup restored");
             engine.commit_candidate(database, None, &mut response, Some(receipts), None)?;
             Ok(engine)

@@ -648,8 +648,8 @@ struct VersionReport {
     target: &'static str,
     protocol_versions: [u32; 2],
     stream_protocol_versions: [u32; 1],
-    readable_storage_formats: [u32; 11],
-    readable_backup_formats: [u32; 6],
+    readable_storage_formats: [u32; 13],
+    readable_backup_formats: [u32; 7],
     current_storage: unionid::StorageVersions,
 }
 
@@ -889,8 +889,8 @@ fn version_report() -> VersionReport {
             unionid::protocol::PRODUCTION_VERSION,
         ],
         stream_protocol_versions: [unionid::stream::VERSION],
-        readable_storage_formats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-        readable_backup_formats: [1, 2, 3, 4, 5, 6],
+        readable_storage_formats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        readable_backup_formats: [1, 2, 3, 4, 5, 6, 7],
         current_storage: unionid::Engine::current_storage_versions(),
     }
 }
@@ -904,7 +904,7 @@ fn print_version(json: bool) -> Result<(), String> {
         );
     } else {
         println!(
-            "unionid {}\ntarget {}\nprotocols 1,2; streams 1\nstorage read 1,2,3,4,5,6,7,8,9,10,11; write {}\ncodecs catalog/value/index/migration/receipt/maintenance/journal/backup {}/{}/{}/{}/{}/{}/{}/{}",
+            "unionid {}\ntarget {}\nprotocols 1,2; streams 1\nstorage read 1,2,3,4,5,6,7,8,9,10,11,12,13; write {}\ncodecs catalog/value/index/migration/receipt/maintenance/journal/backup {}/{}/{}/{}/{}/{}/{}/{}",
             report.software_version,
             report.target,
             report.current_storage.format,
