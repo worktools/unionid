@@ -168,6 +168,10 @@ pub struct ArchiveHeader {
     pub catalog_codec: u32,
     pub value_codec: u32,
     pub receipt_codec: u32,
+    /// Sorted required feature names. Empty legacy headers omit this field.
+    /// Unknown requirements are rejected before decompressing or reading frames.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -744,6 +748,31 @@ fn valid_checksum(value: &str) -> bool {
 }
 
 fn validate_header(kind: ArchiveKind, header: &ArchiveHeader) -> Result<()> {
+    if header
+        .required_capabilities
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(archive_error(
+            "required archive capabilities must be sorted and unique",
+        ));
+    }
+    for capability in &header.required_capabilities {
+        let minimum_catalog = match capability.as_str() {
+            "typed_map" => 5,
+            "partial_unique_index" => 6,
+            "typed_references" => 7,
+            _ => return Err(archive_error("unsupported required archive capability")),
+        };
+        if header.catalog_codec < minimum_catalog
+            || header.value_codec < 3
+            || header.receipt_codec < 3
+        {
+            return Err(archive_error(
+                "required archive capabilities do not match content codecs",
+            ));
+        }
+    }
     if header.chain_id.is_empty() || header.database_digest.is_empty() {
         return Err(archive_error("archive identity fields must not be empty"));
     }
@@ -1018,6 +1047,7 @@ mod tests {
             catalog_codec: 3,
             value_codec: 3,
             receipt_codec: 2,
+            required_capabilities: Vec::new(),
         }
     }
 
@@ -1135,6 +1165,86 @@ mod tests {
                 .frames,
             baseline_frames()
         );
+    }
+
+    #[test]
+    fn required_capabilities_round_trip_and_reject_invalid_declarations() {
+        let limits = ArchiveLimits::default();
+        let mut header = header(7, 7);
+        header.catalog_codec = 7;
+        header.value_codec = 3;
+        header.receipt_codec = 3;
+        header.required_capabilities = vec![
+            "partial_unique_index".into(),
+            "typed_map".into(),
+            "typed_references".into(),
+        ];
+        for compression in [Compression::None, Compression::Zstd] {
+            let encoded = encode_archive(
+                ArchiveKind::Baseline,
+                1,
+                compression,
+                &header,
+                &baseline_frames(),
+                &limits,
+            )
+            .unwrap();
+            let decoded = decode_archive(&encoded.bytes, &limits).unwrap();
+            assert_eq!(decoded.header, header);
+            assert_eq!(decoded.frames, baseline_frames());
+        }
+        for requirements in [
+            vec!["typed_references", "typed_map"],
+            vec!["typed_map", "typed_map"],
+            vec!["generated_defaults"],
+        ] {
+            header.required_capabilities = requirements.into_iter().map(str::to_owned).collect();
+            let error = encode_archive(
+                ArchiveKind::Baseline,
+                1,
+                Compression::None,
+                &header,
+                &baseline_frames(),
+                &limits,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "E_BACKUP_ARCHIVE");
+        }
+        header.required_capabilities = vec!["typed_references".into()];
+        header.catalog_codec = 6;
+        assert!(
+            encode_archive(
+                ArchiveKind::Baseline,
+                1,
+                Compression::None,
+                &header,
+                &baseline_frames(),
+                &limits
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_capability_is_rejected_before_decompression_or_frame_parsing() {
+        let limits = ArchiveLimits::default();
+        let mut header = header(7, 7);
+        header.required_capabilities = vec!["generated_defaults".into()];
+        let json = canonical_header(&header).unwrap();
+        for compression in [Compression::None, Compression::Zstd] {
+            // Deliberately invalid body. The header must fail first in both paths.
+            let mut bytes = Vec::from(BASELINE_MAGIC.as_slice());
+            bytes.extend_from_slice(&ARCHIVE_CODEC_VERSION.to_be_bytes());
+            bytes.extend_from_slice(&1_u16.to_be_bytes());
+            bytes.push(compression.byte());
+            bytes.extend_from_slice(&[0, 0, 0]);
+            bytes.extend_from_slice(&(json.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&json);
+            bytes.extend_from_slice(b"invalid body");
+            let error = decode_archive(&bytes, &limits).unwrap_err();
+            assert_eq!(error.code, "E_BACKUP_ARCHIVE");
+            assert_eq!(error.message, "unsupported required archive capability");
+        }
     }
 
     #[test]

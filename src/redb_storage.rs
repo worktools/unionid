@@ -1702,6 +1702,7 @@ impl RedbStore {
                 catalog_codec: u32::from(self.committed.layout.catalog),
                 value_codec: u32::from(self.committed.layout.value),
                 receipt_codec: u32::from(self.committed.layout.receipt),
+                required_capabilities: self.committed.layout.archive_required_capabilities(),
             },
             frames,
         })
@@ -1772,6 +1773,7 @@ impl RedbStore {
                 catalog_codec: u32::from(self.committed.layout.catalog),
                 value_codec: u32::from(self.committed.layout.value),
                 receipt_codec: u32::from(self.committed.layout.receipt),
+                required_capabilities: self.committed.layout.archive_required_capabilities(),
             },
             frames,
             last_commit_checksum: last_checksum.expect("complete journal commit has checksum"),
