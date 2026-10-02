@@ -46,6 +46,7 @@ jobs:
           cargo test --locked --features asynchronous --test asynchronous --test async_client
       - name: Verify repository consumers and deployment scripts
         run: |
+          python3 scripts/check-release-metadata.py
           python3 scripts/verify-query-bindings.py
           python3 scripts/verify-typed-application.py
           python3 scripts/verify-envoy-deployment.py
