@@ -22,6 +22,7 @@ const SCALAR_BACKUP_FORMAT_VERSION: u32 = 3;
 pub const PRODUCTION_BACKUP_FORMAT_VERSION: u32 = 4;
 pub const MAP_BACKUP_FORMAT_VERSION: u32 = 5;
 pub const PARTIAL_BACKUP_FORMAT_VERSION: u32 = 6;
+pub const REFERENCE_BACKUP_FORMAT_VERSION: u32 = 7;
 const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,14 +112,19 @@ struct StreamingDatabase<'a> {
     source: &'a dyn TypedRowSource,
     tables: BTreeMap<String, DurableTable>,
     indexes: BTreeMap<String, BTreeMap<String, IndexDefinition>>,
+    references: BTreeMap<u64, crate::db::ReferenceDefinition>,
 }
 
 impl<'a> StreamingDatabase<'a> {
     fn new(database: &'a Database, source: &'a dyn TypedRowSource) -> Self {
         let mut tables = BTreeMap::new();
+        let mut references = BTreeMap::new();
         let mut indexes = BTreeMap::<String, BTreeMap<String, IndexDefinition>>::new();
         for entry in database.durable_catalog_entries() {
             match entry {
+                DurableCatalogEntry::Reference(definition) => {
+                    references.insert(definition.id, definition);
+                }
                 DurableCatalogEntry::Type(_) => {}
                 DurableCatalogEntry::Table(table) => {
                     tables.insert(table.name.clone(), table);
@@ -136,6 +142,7 @@ impl<'a> StreamingDatabase<'a> {
             source,
             tables,
             indexes,
+            references,
         }
     }
 }
@@ -145,7 +152,11 @@ impl Serialize for StreamingDatabase<'_> {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("Database", 6)?;
+        let mut state = serializer
+            .serialize_struct("Database", if self.references.is_empty() { 6 } else { 7 })?;
+        if !self.references.is_empty() {
+            state.serialize_field("reference_definitions", &self.references)?;
+        }
         state.serialize_field(
             "objects",
             &StreamingObjects {
@@ -312,6 +323,12 @@ fn write_database_view(
     output: &Path,
     format_version: u32,
 ) -> Result<BackupInfo> {
+    if database.has_references() && format_version < REFERENCE_BACKUP_FORMAT_VERSION {
+        return Err(Error::new(
+            "E_BACKUP",
+            "typed references require backup format 7",
+        ));
+    }
     if std::fs::symlink_metadata(output).is_ok() {
         return Err(Error::new(
             "E_BACKUP",
@@ -403,6 +420,7 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             | PRODUCTION_BACKUP_FORMAT_VERSION
             | MAP_BACKUP_FORMAT_VERSION
             | PARTIAL_BACKUP_FORMAT_VERSION
+            | REFERENCE_BACKUP_FORMAT_VERSION
     ) {
         return Err(Error::new(
             "E_BACKUP",
@@ -438,6 +456,14 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
     if envelope.format_version < SCALAR_BACKUP_FORMAT_VERSION {
         envelope.database.ensure_legacy_scalars()?;
         ensure_legacy_receipts(&envelope.receipts)?;
+    }
+    if envelope.format_version < REFERENCE_BACKUP_FORMAT_VERSION
+        && envelope.database.has_references()
+    {
+        return Err(Error::new(
+            "E_BACKUP",
+            "typed references require backup format 7",
+        ));
     }
     let database = envelope.database.validate_logical_backup()?;
     if envelope.format_version < MAP_BACKUP_FORMAT_VERSION && database.requires_map_storage() {
@@ -489,4 +515,142 @@ fn info(database: &Database, receipts: &ReceiptMap, format_version: u32) -> Resu
         migration_count: database.migration_history().len(),
         receipt_count: receipts.len(),
     })
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Temporary(std::path::PathBuf);
+    impl Temporary {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "unionid-reference-backup-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Temporary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn referenced_database() -> Database {
+        let mut engine = Engine::memory();
+        let result = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: Option<int>}\ntable parents: Parent {key id}\ntable children: Child {key id}\ninsert parents {id: 1}\ninsert many children [{id: 1, parent: Some(1)}, {id: 2, parent: None}]\ncreate reference children (parent) references parents (id)");
+        assert!(result.ok, "{}", result.message);
+        engine.database_snapshot().unwrap()
+    }
+
+    #[test]
+    fn checksummed_reference_corruption_is_rejected_before_restore() {
+        let temp = Temporary::new();
+        let db = referenced_database();
+        let original = temp.0.join("original.json");
+        write_database_view(
+            &db,
+            &db,
+            &ReceiptMap::new(),
+            &original,
+            REFERENCE_BACKUP_FORMAT_VERSION,
+        )
+        .unwrap();
+        let baseline: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&original).unwrap()).unwrap();
+        for corruption in ["orphan", "mode", "cached_path", "duplicate"] {
+            let mut value = baseline.clone();
+            if corruption == "orphan" {
+                assert!(value["database"]["objects"]["parents"]["rows"].is_array());
+                value["database"]["objects"]["parents"]["rows"] = serde_json::json!([]);
+            } else {
+                let references = value["database"]["reference_definitions"]
+                    .as_object_mut()
+                    .unwrap();
+                let first = references.keys().next().unwrap().clone();
+                match corruption {
+                    "mode" => {
+                        references[&first]["components"][0]["mode"] = serde_json::json!("exact")
+                    }
+                    "cached_path" => {
+                        references[&first]["components"][0]["column"] = serde_json::json!("wrong")
+                    }
+                    "duplicate" => {
+                        let mut duplicate = references[&first].clone();
+                        duplicate["id"] = serde_json::json!(100_000);
+                        references.insert("100000".into(), duplicate);
+                        value["database"]["catalog"]["next_id"] = serde_json::json!(100_001);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let mut envelope: BackupEnvelope = serde_json::from_value(value).unwrap();
+            envelope.checksum = info(
+                &envelope.database,
+                &envelope.receipts,
+                REFERENCE_BACKUP_FORMAT_VERSION,
+            )
+            .unwrap()
+            .checksum;
+            let path = temp.0.join(format!("{corruption}.json"));
+            std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+            let error = read_database(&path).unwrap_err();
+            assert_eq!(error.code, "E_STORAGE", "{corruption}: {error}");
+            assert!(!error.message.contains("checksum"), "{corruption}: {error}");
+        }
+    }
+
+    #[test]
+    fn reference_backup_preserves_metadata_rows_and_enforcement() {
+        let temp = Temporary::new();
+        let db = referenced_database();
+        let output = temp.0.join("backup.json");
+        let receipt = ReceiptMap::new();
+        assert_eq!(
+            write_database_view(&db, &db, &receipt, &output, PARTIAL_BACKUP_FORMAT_VERSION)
+                .unwrap_err()
+                .code,
+            "E_BACKUP"
+        );
+        assert!(!output.exists());
+        let written =
+            write_database_view(&db, &db, &receipt, &output, REFERENCE_BACKUP_FORMAT_VERSION)
+                .unwrap();
+        let (mut restored, _, read) = read_database(&output).unwrap();
+        assert_eq!(written.schema, read.schema);
+        assert_eq!(db.schema_text(), restored.schema_text());
+        let statement = crate::syntax::parse("delete parents")
+            .unwrap()
+            .remove(0)
+            .statement;
+        assert_eq!(
+            restored.execute(statement).unwrap_err().constraint,
+            Some(crate::error::ConstraintKind::ReferenceRestricted)
+        );
+        // A forged old format header must not make references disappear.
+        let mut envelope: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        envelope["format_version"] = serde_json::json!(6);
+        std::fs::write(&output, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        // Re-serialization changes payload bytes, so recompute a valid checksum
+        // to prove the version gate, not the checksum check, rejects the file.
+        let mut envelope: BackupEnvelope =
+            serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        envelope.checksum = info(&envelope.database, &envelope.receipts, 6)
+            .unwrap()
+            .checksum;
+        std::fs::write(&output, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let error = read_database(&output).unwrap_err();
+        assert_eq!(error.code, "E_BACKUP");
+        assert!(error.message.contains("format 7"));
+    }
 }

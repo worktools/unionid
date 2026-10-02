@@ -250,6 +250,12 @@ impl Database {
             bound.id = original.id;
             bound.target = original.target.clone();
             let state = self.build_reference_state(&bound, &source.name, &target.name)?;
+            if definitions
+                .values()
+                .any(|existing| same_shape(existing, &bound))
+            {
+                return Err(Error::new("E_SCHEMA", "duplicate reference shape"));
+            }
             definitions.insert(bound.id, bound);
             states.insert(original.id, state);
         }

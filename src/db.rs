@@ -1167,6 +1167,7 @@ pub(crate) struct DurableTable {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
 pub(crate) enum DurableCatalogEntry {
+    Reference(ReferenceDefinition),
     Type(TypeDefinition),
     Table(DurableTable),
     Index {
@@ -1178,6 +1179,7 @@ pub(crate) enum DurableCatalogEntry {
 impl DurableCatalogEntry {
     pub(crate) fn kind_tag(&self) -> u8 {
         match self {
+            Self::Reference(_) => 4,
             Self::Type(_) => 1,
             Self::Table(_) => 2,
             Self::Index { .. } => 3,
@@ -1186,6 +1188,7 @@ impl DurableCatalogEntry {
 
     pub(crate) fn stable_id(&self) -> u64 {
         match self {
+            Self::Reference(definition) => definition.id,
             Self::Type(definition) => definition.id,
             Self::Table(table) => table.id,
             Self::Index { definition, .. } => definition.id,
@@ -7105,6 +7108,12 @@ impl Database {
                         })
                 }),
         );
+        entries.extend(
+            self.reference_definitions
+                .values()
+                .cloned()
+                .map(DurableCatalogEntry::Reference),
+        );
         entries.sort_by_key(DurableCatalogEntry::stable_id);
         entries
     }
@@ -7476,6 +7485,7 @@ impl Database {
             table.rows = rows;
         }
         materialized.rebuild_indexes()?;
+        materialized.rebuild_references()?;
         Ok(materialized)
     }
 
@@ -7519,6 +7529,7 @@ impl Database {
         let mut objects = BTreeMap::new();
         let mut index_definitions: BTreeMap<String, BTreeMap<String, IndexDefinition>> =
             BTreeMap::new();
+        let mut reference_definitions = BTreeMap::new();
         let mut max_id = 0;
         for entry in entries {
             let id = entry.stable_id();
@@ -7530,6 +7541,9 @@ impl Database {
             }
             max_id = max_id.max(id);
             match entry {
+                DurableCatalogEntry::Reference(definition) => {
+                    reference_definitions.insert(definition.id, definition);
+                }
                 DurableCatalogEntry::Type(definition) => {
                     if catalog
                         .types
@@ -7673,7 +7687,7 @@ impl Database {
             }
         }
         let mut database = Self {
-            reference_definitions: BTreeMap::new(),
+            reference_definitions,
             reference_states: BTreeMap::new(),
             objects,
             indexes: imbl::OrdMap::new(),
@@ -7699,6 +7713,23 @@ impl Database {
             ));
         }
         database.rebuild_indexes()?;
+        let encoded_references = serde_json::to_vec(&database.reference_definitions)
+            .map_err(|error| Error::new("E_STORAGE", error.to_string()))?;
+        database.rebuild_references().map_err(|error| {
+            Error::new(
+                "E_STORAGE",
+                format!("invalid durable reference: {}", error.message),
+            )
+        })?;
+        if serde_json::to_vec(&database.reference_definitions)
+            .map_err(|error| Error::new("E_STORAGE", error.to_string()))?
+            != encoded_references
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "durable reference binding is not canonical",
+            ));
+        }
         if database.schema_info().hash != meta.schema_hash {
             return Err(Error::new(
                 "E_STORAGE",

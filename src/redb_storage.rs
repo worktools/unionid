@@ -56,6 +56,7 @@ const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
 const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
 const MAP_CATALOG_CODEC_VERSION: u16 = 5;
 const PARTIAL_CATALOG_CODEC_VERSION: u16 = 6;
+const REFERENCE_CATALOG_CODEC_VERSION: u16 = 7;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
 const SCALAR_INDEX_KEY_VERSION: u16 = 2;
@@ -6386,10 +6387,19 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
             | PRODUCTION_CATALOG_CODEC_VERSION
             | MAP_CATALOG_CODEC_VERSION
             | PARTIAL_CATALOG_CODEC_VERSION
+            | REFERENCE_CATALOG_CODEC_VERSION
     ) {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported catalog codec version {version}"),
+        ));
+    }
+    if matches!(entry, DurableCatalogEntry::Reference(_))
+        && version < REFERENCE_CATALOG_CODEC_VERSION
+    {
+        return Err(Error::new(
+            "E_STORAGE_UPGRADE_REQUIRED",
+            "typed references require catalog codec 7",
         ));
     }
     let mut value = Vec::from(CATALOG_MAGIC.as_slice());
@@ -6478,7 +6488,9 @@ pub(crate) fn decode_catalog_entry(
             version,
             LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION
         );
-    if !supported_legacy_entry && version != expected_version {
+    if !(LEGACY_CATALOG_CODEC_VERSION..=REFERENCE_CATALOG_CODEC_VERSION).contains(&version)
+        || (!supported_legacy_entry && version != expected_version)
+    {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported catalog codec version {version}"),
@@ -6486,6 +6498,14 @@ pub(crate) fn decode_catalog_entry(
     }
     let entry: DurableCatalogEntry = serde_json::from_slice(&value[6..])
         .map_err(|error| Error::new("E_STORAGE", format!("decode catalog entry: {error}")))?;
+    if matches!(entry, DurableCatalogEntry::Reference(_))
+        && version < REFERENCE_CATALOG_CODEC_VERSION
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "reference entry requires catalog codec 7",
+        ));
+    }
     let id = u64::from_be_bytes(key[1..].try_into().unwrap());
     if key[0] != entry.kind_tag() || id != entry.stable_id() {
         return Err(Error::new(
@@ -7357,5 +7377,50 @@ mod tests {
                 crate::scalars::Decimal::new(1, 6, 2).unwrap()
             ))
         );
+    }
+}
+
+#[cfg(test)]
+mod reference_codec_tests {
+    use super::*;
+
+    #[test]
+    fn reference_catalog_requires_its_codec_and_preserves_stable_identity() {
+        let mut engine = crate::Engine::memory();
+        let response = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: int}\ntable parents: Parent {key id}\ntable children: Child {key id}\ncreate reference children (parent) references parents (id)");
+        assert!(response.ok, "{}", response.message);
+        let database = engine.database_snapshot().unwrap();
+        let entry = database
+            .durable_catalog_entries()
+            .into_iter()
+            .find(|entry| matches!(entry, DurableCatalogEntry::Reference(_)))
+            .unwrap();
+        let key = encode_catalog_key(entry.kind_tag(), entry.stable_id());
+        assert_eq!(
+            encode_catalog_entry(&entry, PARTIAL_CATALOG_CODEC_VERSION)
+                .unwrap_err()
+                .code,
+            "E_STORAGE_UPGRADE_REQUIRED"
+        );
+        let encoded = encode_catalog_entry(&entry, REFERENCE_CATALOG_CODEC_VERSION).unwrap();
+        let decoded =
+            decode_catalog_entry(&key, &encoded, REFERENCE_CATALOG_CODEC_VERSION).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&entry).unwrap()
+        );
+        for version in [
+            PARTIAL_CATALOG_CODEC_VERSION,
+            REFERENCE_CATALOG_CODEC_VERSION + 1,
+        ] {
+            let mut forged = encoded.clone();
+            forged[4..6].copy_from_slice(&version.to_be_bytes());
+            assert_eq!(
+                decode_catalog_entry(&key, &forged, version)
+                    .unwrap_err()
+                    .code,
+                "E_STORAGE"
+            );
+        }
     }
 }
