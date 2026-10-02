@@ -112,6 +112,78 @@ fn returning_and_final_query_keep_the_existing_output_contract() {
 }
 
 #[test]
+fn single_statement_outputs_and_receipts_omit_redundant_summaries() {
+    use unionid::{ProtocolRequest, backup};
+    let temp = TempDir::new();
+    let db = temp.0.join("single.redb");
+    let archive = temp.0.join("single.json");
+    let restored = temp.0.join("single-restored.redb");
+    let source =
+        "update accounts | filter id == $id | set version = version + 1 | returning {id, version}";
+    let bound = BTreeMap::from([("id".into(), Value::Int(1))]);
+    let digest = ProtocolRequest::query("single", source)
+        .with_serde_param("id", &1_i64)
+        .unwrap()
+        .canonical_digest()
+        .unwrap();
+    let mut saved = None;
+    for mut engine in [Engine::memory(), Engine::open_redb(&db).unwrap()] {
+        ok(&mut engine, SETUP);
+        let query = ok(
+            &mut engine,
+            "from accounts | filter id == 1 | select {balance}",
+        );
+        assert!(matches!(query.rows[0]["balance"], Value::Int(100)));
+        assert!(query.statements.is_empty());
+        assert!(
+            serde_json::to_value(&query)
+                .unwrap()
+                .get("statements")
+                .is_none()
+        );
+        let prepared = engine.prepare(source).unwrap();
+        let response = engine.execute_prepared(&prepared, bound.clone());
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(response.affected_rows, Some(1));
+        assert!(matches!(response.rows[0]["version"], Value::Int(1)));
+        assert!(response.statements.is_empty());
+        let first = engine
+            .execute_idempotent_with_params("single", &digest, source, bound.clone(), None)
+            .unwrap();
+        assert!(!first.replayed);
+        assert!(matches!(first.response.rows[0]["version"], Value::Int(2)));
+        let expected = serde_json::to_value(&first.response).unwrap();
+        assert!(expected.get("statements").is_none());
+        let replay = engine
+            .execute_idempotent_with_params("single", &digest, source, bound.clone(), None)
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(serde_json::to_value(replay.response).unwrap(), expected);
+        let failure = engine.execute("update accounts | set balance = balance / 0");
+        assert_eq!(failure.error.unwrap().statement_index, Some(1));
+        saved = Some(expected);
+    }
+    backup::create(&db, &archive).unwrap();
+    backup::restore(&archive, &restored).unwrap();
+    for path in [&db, &restored] {
+        let mut engine = Engine::open_redb(path).unwrap();
+        engine.check_integrity().unwrap();
+        let replay = engine
+            .execute_idempotent_with_params("single", &digest, source, bound.clone(), None)
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(
+            serde_json::to_value(replay.response).unwrap(),
+            *saved.as_ref().unwrap()
+        );
+        assert!(matches!(
+            ok(&mut engine, "from accounts | filter id == 1").rows[0]["version"],
+            Value::Int(2)
+        ));
+    }
+}
+
+#[test]
 fn context_and_script_limits_fail_before_any_candidate_effect() {
     let mut engine = Engine::memory();
     ok(&mut engine, SETUP);
@@ -304,6 +376,21 @@ fn cli_and_tcp_share_guard_failures_and_success_summaries() {
         unionid::protocol::VERSION,
         unionid::protocol::PRODUCTION_VERSION,
     ] {
+        let mut single = ProtocolRequest::query(
+            "single-query",
+            "from accounts | filter id == 1 | select {balance}",
+        );
+        single.version = version;
+        let response = cli::send_request(&server.addr, &single).unwrap();
+        assert!(response.ok);
+        assert_eq!(response.rows.len(), 1);
+        assert!(response.statements.is_empty());
+        assert!(
+            serde_json::to_value(response)
+                .unwrap()
+                .get("statements")
+                .is_none()
+        );
         let query = TRANSFER
             .replace("$sender", "2")
             .replace("$recipient", "1")

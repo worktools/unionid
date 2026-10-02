@@ -181,3 +181,7 @@ v0.12的 protocol v1/v2 成功响应增加可选 `statements: [{index, kind, aff
 In v0.12, successful v1/v2 responses add optional ordered statement metadata. A trailing guard preserves the mutation output. Optional error `statement_index` counts top-level AST statements from one. Guard and pre-commit summary-budget failures roll back; context errors reject before execution. Receipt replay preserves summaries. Omitted fields in legacy receipts default to empty metadata. No protocol or storage version changes are required for these additive JSON fields.
 
 响应交付失败不保证回滚，TCP 16 MiB envelope 检查发生在提交之后；用幂等 key 重试。Transport delivery failures do not prove rollback: the TCP envelope budget runs after commit. Retry using an idempotency key. See [guard contract](rfc/0023-atomic-business-write-guards.md).
+
+当前开发版仅在多于一个顶层语句时产生 `statements`；合法 `expect` 必须紧随 DML，因此守卫脚本始终保留摘要。单语句仍提供原有 rows/affected_rows，失败仍有 statement_index。历史回执原样重放，不清除已经保存的单项摘要。
+
+The development version produces `statements` only for multiple top-level statements. Valid guards immediately follow DML, so guarded scripts retain summaries. Single statements keep rows/affected_rows and failure statement_index. Historical receipts replay unchanged, including any stored single-entry summary.
