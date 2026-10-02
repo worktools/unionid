@@ -15,9 +15,9 @@ create reference lines (order_id) references orders (id)
 create reference reservations (tenant, sku) references inventory (tenant, sku)
 ```
 
-第二个例子要求目标存在恰好对应有序路径列表的全表 unique index。组件顺序影响引用身份，排序方向不影响相等性。组件数量复用索引上限 16。不接受跨 list/map 的展开路径；终点可为完整 ADT 值，路径本身遵守现有可绑定 record 路径规则。
+第二个例子要求目标存在恰好对应有序路径列表的全表 unique index。组件顺序影响引用身份，排序方向不影响相等性。若同一路径列表存在多个不同排序方向的唯一索引，绑定优先使用匹配主键，否则选择 stable ID 最小的全表 unique index；绑定结果固定进入 reference metadata，不在查询时重新选择。删除已绑定的目标 key 必须先 drop/re-add reference，即使另有等价 unique index，也不能静默改变依赖。组件数量复用索引上限 16。不接受跨 list/map 的展开路径；终点可为完整 ADT 值，路径本身遵守现有可绑定 record 路径规则。
 
-Migration 对应 `add reference ... references ...` 和 `drop reference ... references ...`；删除声明写全 source/target shape，避免添加另一套用户命名系统。重复声明报错。formatter、schema source、schema diff 共用同一规范语法，Rust 内联宏复用 parser 和 binder。
+顶层删除用 `drop reference lines (order_id) references orders (id)`。Migration 对应 `add reference ... references ...` 和 `drop reference ... references ...`；删除声明写全 source/target shape，避免添加另一套用户命名系统。重复声明报错。formatter、schema source、schema diff 共用同一规范语法，Rust 内联宏复用 parser 和 binder。
 
 ### 值与可选引用
 
@@ -65,7 +65,7 @@ logical backup、journal delta、incremental chain replay、open 和完整 check
 
 ## English Description
 
-This working draft targets #401 in v0.14. It proposes explicit, typed source-path references to a target primary key or unconditional unique index, with restrict semantics and no cascade/set-none. Composite references use the same ordered path lists as indexes; stable IDs preserve identity across renames. Proposed DDL is `create reference lines (order_id) references orders (id)`, with matching migration add/drop and canonical formatting.
+This working draft targets #401 in v0.14. It proposes explicit, typed source-path references to a target primary key or unconditional unique index, with restrict semantics and no cascade/set-none. Composite references use the same ordered path lists as indexes; stable IDs preserve identity across renames. Target binding prefers a matching primary key, otherwise the lowest stable-ID unconditional unique index over those exact ordered paths, irrespective of sort direction. Persist that choice; dropping the bound key requires explicitly dropping/recreating the reference even if an equivalent unique index remains. This prevents implicit dependency changes. Proposed DDL is `create reference lines (order_id) references orders (id)`, with matching migration add/drop and canonical formatting.
 
 Proposed binding resolves each component statically: identical source/target types use Exact mode, including Option equality where None needs a target None. Otherwise Option<T> may reference T in Optional mode: None establishes no relationship; Some unwraps exactly one layer. All other type pairs fail. Preserve nominal identity and decimal shape. For a composite reference, any absent Optional component skips that relationship, while an Exact None does not. Expose the bound mode in schema/portable metadata and require explicit rebuilding when type evolution changes it.
 
