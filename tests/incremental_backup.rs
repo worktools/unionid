@@ -135,6 +135,51 @@ fn init_export_list_verify_and_retry_form_a_contiguous_chain() {
 }
 
 #[test]
+fn migration_journal_restores_rows_from_the_built_target_generation() {
+    let temp = TempTree::new("migration-journal-rows");
+    let db = temp.path().join("app.redb");
+    let repo = temp.path().join("archive");
+    let restored = temp.path().join("restored.redb");
+    create_database(&db);
+    let baseline =
+        backup::incremental::init(&db, &repo, IncrementalInitOptions::default()).unwrap();
+    {
+        let mut engine = Engine::open_redb(&db).unwrap();
+        let migration = unionid::MigrationFile::parse(
+            "migration add_note\n  add field Item.note text = \"migrated\"",
+        )
+        .unwrap();
+        engine.apply_migrations(&[migration]).unwrap();
+        assert_eq!(engine.execute("from items").rows.len(), 1);
+    }
+    assert_eq!(
+        backup::incremental::export(&db, &repo, IncrementalExportOptions::default())
+            .unwrap()
+            .exported_commits,
+        1
+    );
+    backup::incremental::restore(
+        &repo,
+        &restored,
+        baseline.baseline_sequence + 1,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(restored).unwrap();
+    let response = engine.execute("from items");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(
+        response.rows.len(),
+        1,
+        "migration replay must not delete unchanged rows"
+    );
+    assert!(response.rows[0]["label"].cmp_eq(&unionid::Value::Text("one".into())));
+    assert!(response.rows[0]["note"].cmp_eq(&unionid::Value::Text("migrated".into())));
+    assert_eq!(engine.migration_history().len(), 1);
+    engine.check_integrity().unwrap();
+}
+
+#[test]
 fn verify_rejects_changed_artifact_and_list_reports_orphans() {
     let temp = TempTree::new("incremental-corruption");
     let db = temp.path().join("app.redb");

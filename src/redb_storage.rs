@@ -2930,6 +2930,36 @@ impl RedbStore {
                 next_generation,
             )
             .map_err(CommitFailure::Definite)?;
+            // `target` is metadata-only during recoverable migration. Journal
+            // the validated generation's rows, not an empty in-memory table.
+            let target_transaction = self
+                .database
+                .begin_read()
+                .map_err(|error| CommitFailure::definite("read cutover journal target", error))?;
+            let target_rows = target_transaction
+                .open_table(GENERATION_ROWS)
+                .map_err(|error| CommitFailure::definite("open cutover journal rows", error))?;
+            let (lower, upper) =
+                generation_bounds(current.target_generation).map_err(CommitFailure::Definite)?;
+            for entry in target_rows
+                .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+                .map_err(|error| CommitFailure::definite("scan cutover journal rows", error))?
+            {
+                let (key, value) = entry
+                    .map_err(|error| CommitFailure::definite("read cutover journal row", error))?;
+                let key = decode_generation_key(key.value(), current.target_generation)
+                    .map_err(CommitFailure::Definite)?;
+                next.rows.insert(key.to_vec(), value.value().to_vec());
+            }
+            let target_indexes = target_transaction
+                .open_table(GENERATION_INDEX)
+                .map_err(|error| CommitFailure::definite("open cutover journal indexes", error))?;
+            next.secondary_indexes = read_complete_index_table(
+                &target_indexes,
+                self.committed.layout,
+                Some(current.target_generation),
+            )
+            .map_err(CommitFailure::Definite)?;
             next.journal = Some(state.clone());
             let delta = PreparedDelta::between(&previous, &next);
             Some(
