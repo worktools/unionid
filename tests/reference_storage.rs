@@ -200,11 +200,11 @@ fn durable_reference_migration_checks_existing_rows_and_preserves_failed_ledger(
         "migration m0001_refs\n  add reference children (parent) references parents (id)",
     )
     .unwrap();
-    assert!(
-        engine
-            .apply_migrations(std::slice::from_ref(&migration))
-            .is_err()
-    );
+    let error = engine
+        .apply_migrations(std::slice::from_ref(&migration))
+        .unwrap_err();
+    assert_eq!(error.code, "E_CONSTRAINT");
+    assert_eq!(error.constraint, Some(ConstraintKind::ReferenceMissing));
     assert_eq!(engine.schema_info(), before);
     ok(&mut engine, "insert parents {id: 7}");
     engine.apply_migrations(&[migration]).unwrap();
@@ -254,6 +254,163 @@ fn active_format_eleven_journal_can_explicitly_upgrade_to_thirteen() {
     )
     .unwrap();
     let mut engine = Engine::open_redb(&restored).unwrap();
+    rejected(
+        &mut engine,
+        "delete parents",
+        ConstraintKind::ReferenceRestricted,
+    );
+    engine.check_integrity().unwrap();
+}
+
+#[test]
+fn reference_migration_resumes_across_child_first_batches_and_reclaims_after_cutover() {
+    use unionid::migration::MigrationMaintenancePhase;
+    let dir = TempDir::new();
+    let path = dir.0.join("maintenance.redb");
+    let before;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(12).unwrap();
+        ok(
+            &mut engine,
+            "struct Parent {id: int}\nstruct Child {id: int, parent: Option<int>}\ntable children: Child {key id}\ntable parents: Parent {key id}\ninsert parents {id: 7}",
+        );
+        let rows = (0..1500)
+            .map(|id| format!("{{id: {id}, parent: Some(7)}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        ok(&mut engine, &format!("insert many children [{rows}]"));
+        before = engine.schema_info();
+    }
+    let files = [unionid::MigrationFile::parse(
+        "migration m0001_refs\n  add reference children (parent) references parents (id)",
+    )
+    .unwrap()];
+    let mut saw_child_batch = false;
+    let mut saw_ready = false;
+    let mut saw_reclaim = false;
+    let mut completed = false;
+    for _ in 0..32 {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let progress = engine.advance_migrations(&files, 1).unwrap();
+        assert!(progress.committed_steps <= 1);
+        if let Some(maintenance) = &progress.status.maintenance {
+            match maintenance.phase {
+                MigrationMaintenancePhase::Building => {
+                    assert_eq!(engine.schema_info(), before);
+                    if maintenance.source_rows_seen == 1024 {
+                        saw_child_batch = true;
+                    }
+                }
+                MigrationMaintenancePhase::Ready => {
+                    saw_ready = true;
+                    assert_eq!(engine.schema_info(), before);
+                }
+                MigrationMaintenancePhase::Reclaimable => saw_reclaim = true,
+                MigrationMaintenancePhase::Aborting => panic!("valid reference migration aborted"),
+            }
+        }
+        if progress.complete {
+            completed = true;
+            assert_eq!(engine.execute("from children").rows.len(), 1500);
+            rejected(
+                &mut engine,
+                "delete parents",
+                ConstraintKind::ReferenceRestricted,
+            );
+            engine.check_integrity().unwrap();
+            break;
+        }
+    }
+    assert!(completed && saw_child_batch && saw_ready && saw_reclaim);
+    let rename = unionid::MigrationFile::parse("migration m0002_rename {\nparent m0001_refs\nrename table parents to owners\nrename field Parent.id to owner_id\nrename field Child.parent to owner\n}").unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine
+        .apply_migrations(&[files[0].clone(), rename])
+        .unwrap();
+    assert!(engine.schema().contains("references owners (owner_id)"));
+    rejected(
+        &mut engine,
+        "delete owners",
+        ConstraintKind::ReferenceRestricted,
+    );
+    engine.check_integrity().unwrap();
+}
+
+#[test]
+fn abort_discards_unpublished_orphan_reference_batches() {
+    let dir = TempDir::new();
+    let path = dir.0.join("abort.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(12).unwrap();
+    ok(&mut engine, SCHEMA);
+    ok(&mut engine, "insert children {id: 1, parent: Some(7)}");
+    let schema = engine.schema_info();
+    let files = [unionid::MigrationFile::parse(
+        "migration m0001_refs\n  add reference children (parent) references parents (id)",
+    )
+    .unwrap()];
+    engine.advance_migrations(&files, 1).unwrap();
+    let progress = engine.advance_migrations(&files, 1).unwrap();
+    assert_eq!(progress.status.maintenance.unwrap().source_rows_seen, 1);
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(engine.abort_migration().unwrap().cleaned);
+    assert_eq!(engine.schema_info(), schema);
+    assert!(engine.migration_history().is_empty());
+    engine.check_integrity().unwrap();
+    ok(&mut engine, "insert parents {id: 7}");
+    engine.apply_migrations(&files).unwrap();
+    rejected(
+        &mut engine,
+        "delete parents",
+        ConstraintKind::ReferenceRestricted,
+    );
+}
+
+#[test]
+fn reference_migration_cutover_is_one_restorable_journal_commit() {
+    use backup::incremental::{ArchiveLimits, IncrementalExportOptions, IncrementalInitOptions};
+    let dir = TempDir::new();
+    let path = dir.0.join("migration-journal.redb");
+    let repo = dir.0.join("chain");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(12).unwrap();
+        ok(&mut engine, SCHEMA);
+        ok(
+            &mut engine,
+            "insert parents {id: 7}\ninsert children {id: 1, parent: Some(7)}",
+        );
+    }
+    let baseline =
+        backup::incremental::init(&path, &repo, IncrementalInitOptions::default()).unwrap();
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let file = unionid::MigrationFile::parse(
+            "migration m0001_refs\n  add reference children (parent) references parents (id)",
+        )
+        .unwrap();
+        engine.apply_migrations(&[file]).unwrap();
+    }
+    assert_eq!(
+        backup::incremental::export(&path, &repo, IncrementalExportOptions::default())
+            .unwrap()
+            .exported_commits,
+        1
+    );
+    let restored = dir.0.join("restored.redb");
+    backup::incremental::restore(
+        &repo,
+        &restored,
+        baseline.baseline_sequence + 1,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(restored).unwrap();
+    assert_eq!(engine.migration_history().len(), 1);
+    assert_eq!(engine.execute("from parents").rows.len(), 1);
+    assert_eq!(engine.execute("from children").rows.len(), 1);
     rejected(
         &mut engine,
         "delete parents",

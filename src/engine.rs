@@ -2308,7 +2308,7 @@ impl Engine {
             || self
                 .durable
                 .as_ref()
-                .is_some_and(|durable| matches!(durable.versions().format, 6..=11))
+                .is_some_and(|durable| matches!(durable.versions().format, 6..=13))
         {
             self.committed.db.metadata_only()?
         } else {
@@ -2385,11 +2385,11 @@ impl Engine {
         if self
             .durable
             .as_ref()
-            .is_none_or(|durable| !matches!(durable.versions().format, 6..=11))
+            .is_none_or(|durable| !matches!(durable.versions().format, 6..=13))
         {
             return Err(Error::new(
                 "E_CONFIG",
-                "bounded migration progress requires a format-6 through format-11 redb database",
+                "bounded migration progress requires a format-6 through format-13 redb database",
             ));
         }
         let mut budget = MaintenanceStepBudget::bounded(max_steps);
@@ -2568,7 +2568,7 @@ impl Engine {
         if self
             .durable
             .as_ref()
-            .is_some_and(|durable| matches!(durable.versions().format, 6..=11))
+            .is_some_and(|durable| matches!(durable.versions().format, 6..=13))
         {
             return self.apply_migration_file_shadow(file, control, budget);
         }

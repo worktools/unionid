@@ -17,7 +17,7 @@ impl Database {
 
     pub(crate) fn migrate_table_batch(
         &self,
-        name: &str,
+        _name: &str,
         steps: &[SchemaMigration],
         table_name: &str,
         rows: &[Arc<Row>],
@@ -27,18 +27,31 @@ impl Database {
         } else {
             crate::codec::PRODUCTION_VALUE_CODEC_VERSION
         };
-        let mut encoded = Vec::with_capacity(rows.len());
+        let mut batch = self.metadata_only()?;
+        let mut decoded = Vec::with_capacity(rows.len());
         for row in rows {
-            let (table_id, value) = self.durable_row_with_codec(table_name, row, value_codec)?;
-            encoded.push((table_id, row.id, value));
+            let (_, value) = self.durable_row_with_codec(table_name, row, value_codec)?;
+            decoded.push(batch.decode_source_row(table_name, row.id, &value)?);
         }
-        let mut batch = Self::from_durable(
-            self.durable_meta(),
-            self.durable_catalog_entries(),
-            encoded,
-            self.migration_history.clone(),
-        )?;
-        batch.migrate(name, steps.to_vec())?;
+        decoded.sort_by_key(|row| row.id);
+        if decoded.windows(2).any(|pair| pair[0].id == pair[1].id) {
+            return Err(Error::new(
+                "E_STORAGE",
+                "migration batch contains duplicate row IDs",
+            ));
+        }
+        let Some(DbObject::Table(table)) = batch.objects.get_mut(table_name) else {
+            return Err(Error::new("E_STORAGE", "migration source table is missing"));
+        };
+        table.rows = decoded.into_iter().collect();
+        batch.rebuild_indexes()?;
+        for step in steps {
+            batch.apply_schema_migration(step.clone())?;
+        }
+        // This batch may contain children before any parent batch is built.
+        // Validate identities/types now; Ready validates complete row/posting
+        // existence across the entire unpublished target generation.
+        batch.rebind_migration_batch_references()?;
         batch.advance_schema_revision()?;
         batch.sequence = self
             .sequence

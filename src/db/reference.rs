@@ -431,8 +431,38 @@ impl Database {
     }
 
     pub(super) fn rebuild_references(&mut self) -> Result<()> {
-        let mut definitions = BTreeMap::new();
+        let definitions = self.bound_reference_definitions()?;
         let mut states = BTreeMap::new();
+        let tables = self.schema_tables();
+        for definition in definitions.values() {
+            let source = tables
+                .iter()
+                .find(|table| table.id == definition.table_id)
+                .expect("reference binding validated source table");
+            let target = tables
+                .iter()
+                .find(|table| table.id == definition.target_table_id)
+                .expect("reference binding validated target table");
+            states.insert(
+                definition.id,
+                self.build_reference_state(definition, &source.name, &target.name)?,
+            );
+        }
+        self.reference_definitions = definitions;
+        self.reference_states = states;
+        Ok(())
+    }
+
+    /// Only unpublished migration batches may defer row existence validation.
+    /// The complete generation must pass durable integrity checks before Ready.
+    pub(super) fn rebind_migration_batch_references(&mut self) -> Result<()> {
+        self.reference_definitions = self.bound_reference_definitions()?;
+        self.reference_states.clear();
+        Ok(())
+    }
+
+    fn bound_reference_definitions(&self) -> Result<BTreeMap<u64, ReferenceDefinition>> {
+        let mut definitions = BTreeMap::new();
         for original in self.reference_definitions.values() {
             let tables = self.schema_tables();
             let source = tables
@@ -511,7 +541,6 @@ impl Database {
             }
             bound.id = original.id;
             bound.target = original.target.clone();
-            let state = self.build_reference_state(&bound, &source.name, &target.name)?;
             if definitions
                 .values()
                 .any(|existing| same_shape(existing, &bound))
@@ -519,11 +548,8 @@ impl Database {
                 return Err(Error::new("E_SCHEMA", "duplicate reference shape"));
             }
             definitions.insert(bound.id, bound);
-            states.insert(original.id, state);
         }
-        self.reference_definitions = definitions;
-        self.reference_states = states;
-        Ok(())
+        Ok(definitions)
     }
 
     pub(super) fn ensure_field_not_referenced(&self, field_id: u64) -> Result<()> {

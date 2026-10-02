@@ -2873,8 +2873,14 @@ impl RedbStore {
             )));
         }
         let target_generation = GenerationRef::Generated(current.target_generation);
-        self.validate_bounded_integrity_for(target, target_generation)
-            .map_err(CommitFailure::Definite)?;
+        self.validate_bounded_integrity_with_reference_error(target, target_generation, || {
+            Error::new(
+                "E_CONSTRAINT",
+                "reference target is missing in the migration candidate",
+            )
+            .constraint(crate::error::ConstraintKind::ReferenceMissing)
+        })
+        .map_err(CommitFailure::Definite)?;
         let summary = self
             .generation_summary(target_generation)
             .map_err(CommitFailure::Definite)?;
@@ -3759,6 +3765,17 @@ impl RedbStore {
         metadata: &Database,
         generation: GenerationRef,
     ) -> Result<StorageCheckProfile> {
+        self.validate_bounded_integrity_with_reference_error(metadata, generation, || {
+            Error::new("E_STORAGE", "reference target is missing")
+        })
+    }
+
+    fn validate_bounded_integrity_with_reference_error(
+        &self,
+        metadata: &Database,
+        generation: GenerationRef,
+        missing_target_error: fn() -> Error,
+    ) -> Result<StorageCheckProfile> {
         let transaction = self
             .database
             .begin_read()
@@ -3924,7 +3941,7 @@ impl RedbStore {
                     .transpose()
                     .map_err(|error| storage_error("read reference target", error))?;
                 if hit.is_none() {
-                    return Err(Error::new("E_STORAGE", "reference target is missing"));
+                    return Err(missing_target_error());
                 }
             }
             profile.working_peak_bytes = profile.working_peak_bytes.max(row_working);
