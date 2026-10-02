@@ -445,6 +445,7 @@ trait DurableBackend: Send {
         &mut self,
         _file: &MigrationFile,
         _target: &Database,
+        _control: Option<&ExecutionControl>,
     ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
         Err(CommitFailure::Definite(Error::new(
             "E_CONFIG",
@@ -619,8 +620,9 @@ impl DurableBackend for RedbStore {
         &mut self,
         file: &MigrationFile,
         target: &Database,
+        control: Option<&ExecutionControl>,
     ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
-        RedbStore::cutover_maintenance(self, file, target)
+        RedbStore::cutover_maintenance(self, file, target, control)
     }
 
     fn begin_maintenance_abort(
@@ -2805,7 +2807,7 @@ impl Engine {
             .durable
             .as_mut()
             .expect("format-6 migration has a durable backend")
-            .cutover_maintenance(file, &target);
+            .cutover_maintenance(file, &target, control);
         self.finish_maintenance_result(result)?;
         budget.record_commit();
         let view = self
