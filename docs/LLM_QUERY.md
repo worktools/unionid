@@ -190,7 +190,8 @@ lists. `_` is a catch-all. `{field, ..}` binds one record field and ignores the 
 
 In v0.15 development, `lower text`, `upper text`, and `trim text` return text and
 can nest as `lower (trim owner)`. Case conversion is Unicode and locale-independent
-(it can change length); trim removes Unicode whitespace only at the ends. These
+(it can change length); mapped UTF-8 output above 16 MiB fails with E_LIMIT and rolls
+back the request. Trim removes Unicode whitespace only at the ends. These
 are not Unicode normalization or locale-specific case folding. They share query,
 prepared parameter, update and migration expression binding; no implicit casts.
 `starts_with source prefix`, `ends_with source suffix`, and `contains_text source fragment`
@@ -231,6 +232,9 @@ with E_DECIMAL_TYPE. Precision/scaling overflow returns E_DECIMAL_RANGE, without
 rounding or partial mutations. Use this with decimal_mul/div for mixed int/decimal
 arithmetic. Decimal output requires protocol v2; v1 rejects unsupported output
 types before mutation. Explain binds the full target type without evaluating it.
+For assignment/migration, the explicit decimal result P/S must match the target's
+underlying decimal type, even on empty tables; use decimal_rescale/round with the
+actual target P/S when needed. Mismatches return E_TYPE before scanning.
 `to_text value` explicitly formats primitive or named scalars as unquoted text;
 reject enum/record/tuple/Option/list/map (project or match first). Text is unchanged;
 int/bool use decimal/true-false; float is concise and round-trippable with negative

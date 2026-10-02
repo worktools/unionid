@@ -9,6 +9,32 @@ use unionid::{Engine, Value};
 const SCHEMA: &str = "struct Sample {id: int, raw: text}\ntable samples: Sample {key id}";
 const NORMALIZE_QUERY: &str = "from samples\nderive {lowered = lower raw, uppered = upper raw, trimmed = trim raw}\nselect {lowered, uppered, trimmed}";
 
+#[test]
+fn unicode_case_expansion_obeys_value_limits_and_atomic_script_rollback() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(SCHEMA).ok);
+    assert!(
+        engine
+            .execute("insert samples {id: 1, raw: \"original\"}")
+            .ok
+    );
+    // Case mapping can expand UTF-8: İ -> i + dot, ΐ -> Ι + diaeresis + acute.
+    for (function, input) in [
+        ("lower", "İ".repeat(16 * 1024 * 1024 / 3 + 1)),
+        ("upper", "ΐ".repeat(16 * 1024 * 1024 / 6 + 1)),
+    ] {
+        let response = engine.execute_with_params(
+            &format!("insert samples {{id: 2, raw: \"new\"}}\nfrom samples | filter id == 1 | derive value = {function} $input | select value"),
+            BTreeMap::from([("input".into(), Value::Text(input))]),
+        );
+        assert!(!response.ok, "{function} must reject a result above 16 MiB");
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "E_LIMIT");
+        assert!(error.message.contains(function), "{}", error.message);
+        assert_eq!(engine.execute("from samples").rows.len(), 1);
+    }
+}
+
 #[derive(Debug, Deserialize, PartialEq)]
 struct Normalized {
     lowered: String,

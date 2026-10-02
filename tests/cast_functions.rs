@@ -23,6 +23,67 @@ struct DecimalConverted {
 }
 
 #[test]
+fn explicit_decimal_results_match_assignment_and_migration_targets_before_scan() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute("type Money = Decimal<4, 2>\nstruct Price {id: int, qty: int, amount: Money}\ntable prices: Price {key id}").ok);
+    let schema = engine.schema_info();
+    for expression in [
+        "int_to_decimal qty 8 3",
+        "decimal_parse \"1.25\" 8 3",
+        "decimal_rescale amount 8 3",
+        "decimal_round amount 8 3 \"exact\"",
+        "decimal_mul amount amount 8 3 \"exact\"",
+        "decimal_div amount amount 8 3 \"exact\"",
+    ] {
+        let source = format!("update prices | set amount = {expression}");
+        for source in [source.clone(), format!("explain {source}")] {
+            let response = engine.execute(&source);
+            assert!(!response.ok, "{source}");
+            assert_eq!(response.error.unwrap().code, "E_TYPE");
+            let error = engine
+                .prepare(&source)
+                .expect_err("mismatched decimal output must not depend on row count");
+            assert_eq!(error.code, "E_TYPE");
+        }
+    }
+    let response = engine.execute("migration invalid_precision {change field Price.qty to Decimal<4, 2> using old -> int_to_decimal old 8 3}");
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "E_TYPE");
+    assert_eq!(engine.schema_info(), schema);
+    assert!(
+        engine
+            .execute("insert prices {id: 1, qty: 12, amount: decimal \"0.00\"}")
+            .ok
+    );
+    let before = serde_json::to_value(engine.execute("from prices").rows).unwrap();
+    let response = engine.execute("insert prices {id: 2, qty: 1, amount: decimal \"0.00\"}\nupdate prices | set amount = int_to_decimal qty 8 3");
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "E_TYPE");
+    assert_eq!(
+        serde_json::to_value(engine.execute("from prices").rows).unwrap(),
+        before
+    );
+    let response = engine.execute("update prices | set amount = int_to_decimal qty 4 2");
+    assert!(response.ok, "{}", response.message);
+    #[derive(Deserialize)]
+    struct Money(unionid::scalars::Decimal);
+    #[derive(Deserialize)]
+    struct MoneyRow {
+        value: Money,
+    }
+    assert_eq!(
+        engine
+            .execute("from prices | derive value = amount | select value")
+            .typed_rows::<MoneyRow>()
+            .unwrap()[0]
+            .value
+            .0
+            .to_string(),
+        "12.00"
+    );
+}
+
+#[test]
 fn integer_decimal_conversion_preserves_units_and_full_i64_precision() {
     let mut engine = Engine::memory();
     assert!(engine.execute(SCHEMA).ok);

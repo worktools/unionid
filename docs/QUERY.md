@@ -334,9 +334,9 @@ derive normalized = lower (trim name)
 select {id, normalized}
 ```
 
-大小写转换采用 Unicode 规则且不依赖本地 locale；例如 `upper "Straße"` 为 `"STRASSE"`，结果长度可能变化。`trim` 只移除两端 Unicode 空白，保留内部空格。这些函数不是 Unicode normalization 或语言地区相关的 case folding，也不隐式转换其他类型。filter、derive、match 分支、prepared 参数、update set 与 migration using 复用相同表达式绑定；`explain` 绑定但不求值。当前为未发布的 v0.15 开发能力。
+大小写转换采用 Unicode 规则且不依赖本地 locale；例如 `upper "Straße"` 为 `"STRASSE"`，结果长度可能变化；映射后的 UTF-8 结果超过 16 MiB 时返回 `E_LIMIT` 并回滚整个请求。`trim` 只移除两端 Unicode 空白，保留内部空格。这些函数不是 Unicode normalization 或语言地区相关的 case folding，也不隐式转换其他类型。filter、derive、match 分支、prepared 参数、update set 与 migration using 复用相同表达式绑定；`explain` 绑定但不求值。当前为未发布的 v0.15 开发能力。
 
-These unary text-to-text functions nest as shown above. Case conversion follows Unicode rules independently of locale and may change length. Trim removes Unicode whitespace only at the ends, preserving internal spaces. They do not perform Unicode normalization, locale-specific case folding or implicit casts. Query, match, prepared, update and migration expressions share binding; explain binds without evaluation. This is unreleased v0.15 development functionality.
+These unary text-to-text functions nest as shown above. Case conversion follows Unicode rules independently of locale and may change length. A mapped UTF-8 result above 16 MiB returns `E_LIMIT` and rolls back the request. Trim removes Unicode whitespace only at the ends, preserving internal spaces. They do not perform Unicode normalization, locale-specific case folding or implicit casts. Query, match, prepared, update and migration expressions share binding; explain binds without evaluation. This is unreleased v0.15 development functionality.
 
 `starts_with source prefix`、`ends_with source suffix`、`contains_text source fragment` 接受两个 text 参数并返回 bool，可直接用于 filter 或派生值：
 
@@ -404,9 +404,11 @@ derive total = decimal_mul quantity price 18 2 "exact"
 select {id, total}
 ```
 
-这里 `qty` 为 int，`price` 为 decimal。若整数实际代表最小货币单位，应先转换再显式除以倍率，不要把 S 当作分币解释。`int_to_decimal` 与 query、prepared、migration `using`、formatter 和 explain 共用类型与错误契约。输出 decimal 使用 protocol v2；v1 在执行 mutation 前拒绝不支持的结果类型。以上转换属于未发布的 v0.15 开发能力。
+这里 `qty` 为 int，`price` 为 decimal。若整数实际代表最小货币单位，应先转换再显式除以倍率，不要把 S 当作分币解释。`int_to_decimal` 与 query、prepared、migration `using`、formatter 和 explain 共用类型与错误契约。赋值或 migration 时，显式结果 P/S 必须匹配目标字段的底层 decimal 类型，空表也在扫描前以 `E_TYPE` 拒绝不匹配；相同 P/S 的新结果可按字段上下文初始化命名 decimal。输出 decimal 使用 protocol v2；v1 在执行 mutation 前拒绝不支持的结果类型。以上转换属于未发布的 v0.15 开发能力。
 
 `int_to_decimal value P S` takes int and returns Decimal<P, S>, preserving numeric units and exactly padding the scale: 12 at P=8/S=2 becomes 12.00, never 0.12. P/S must be integer literals satisfying 1 <= P <= 38 and 0 <= S <= P. Binding fixes the full result type; dynamic/invalid targets return E_DECIMAL_TYPE. Precision or scaling overflow returns E_DECIMAL_RANGE without rounding, and failed mutations/migrations roll back the whole request. In the example qty is int and price is decimal. Integers representing minor currency units require explicit division after conversion. Query, prepared, migration using, formatter and explain share this contract. Decimal output requires protocol v2; v1 rejects unsupported result types before mutation. This remains an unreleased v0.15 capability.
+
+For assignment/migration, explicit result precision/scale must match the target's underlying decimal type; mismatches return E_TYPE before scanning even on empty tables. Fresh results with matching P/S can initialize a nominal decimal in the declared field context.
 
 ## 标量文本转换 / Scalar text conversion (v0.15 development)
 

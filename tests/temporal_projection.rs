@@ -20,6 +20,69 @@ struct TimestampRow {
     value: Timestamp,
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+struct CalendarEvent {
+    id: i64,
+    day: Option<Date>,
+    bucket: Option<Timestamp>,
+    label: String,
+}
+
+#[test]
+fn nested_event_adts_share_temporal_text_and_optional_wire_results() {
+    let mut engine = Engine::memory();
+    let schema = engine.execute("struct Delivery {at: timestamp, actor: text}\nenum State {Pending, Received {delivery: Delivery}}\nstruct Packet {id: int, state: State}\ntable packets: Packet {key id}\ninsert packets {id: 1, state: Pending}\ninsert packets {id: 2, state: Received {delivery: {at: @2026-10-02T18:00:00Z, actor: \"　ALIce　\"}}}");
+    assert!(schema.ok, "{}", schema.message);
+    let query = r#"from packets
+derive day = match state {
+  Pending => None
+  Received {delivery: {at, ..}} => Some(date_of at "+08:00")
+}
+derive bucket = match state {
+  Pending => None
+  Received {delivery: {at, ..}} => Some(timestamp_trunc at "day" "+08:00")
+}
+derive label = match state {
+  Pending => "pending"
+  Received {delivery: {actor, ..}} => concat "by-" (lower (trim actor))
+}
+select {id, day, bucket, label}
+sort id"#;
+    let expected = vec![
+        CalendarEvent {
+            id: 1,
+            day: None,
+            bucket: None,
+            label: "pending".into(),
+        },
+        CalendarEvent {
+            id: 2,
+            day: Some("2026-10-03".parse().unwrap()),
+            bucket: Some("2026-10-02T16:00:00Z".parse().unwrap()),
+            label: "by-alice".into(),
+        },
+    ];
+    let canonical = unionid::format_source(query).unwrap();
+    assert_eq!(unionid::format_source(&canonical).unwrap(), canonical);
+    let prepared = engine.prepare(&canonical).unwrap();
+    let response = engine.execute_prepared(&prepared, BTreeMap::new());
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.typed_rows::<CalendarEvent>().unwrap(), expected);
+    let request = unionid::protocol::Request::query("nested-calendar", &canonical)
+        .with_version(2)
+        .unwrap();
+    let response = unionid::server::execute_protocol_request(&mut engine, request);
+    assert!(response.ok, "{}", response.message);
+    let decoded: unionid::protocol::Response =
+        serde_json::from_slice(&serde_json::to_vec(&response).unwrap()).unwrap();
+    assert_eq!(decoded.typed_rows::<CalendarEvent>().unwrap(), expected);
+    let response = engine.execute(&format!(
+        "{canonical}\ngroup day {{aggregate {{events = count}}}}"
+    ));
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(response.rows.len(), 2);
+}
+
 fn params(source: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([("input".into(), source.parse::<Timestamp>().unwrap().into())])
 }
@@ -108,6 +171,24 @@ fn calendar_and_clock_truncation_floor_and_are_idempotent_at_fixed_offsets() {
 fn temporal_metadata_is_static_and_checked_before_empty_scans() {
     let mut engine = Engine::memory();
     assert!(engine.execute(SCHEMA).ok);
+    let mismatch = "update events | set day = (timestamp_trunc at \"day\" \"Z\") + 1day";
+    for source in [mismatch.to_string(), format!("explain {mismatch}")] {
+        let response = engine.execute(&source);
+        assert!(!response.ok, "{source}");
+        assert_eq!(response.error.unwrap().code, "E_TYPE");
+        assert_eq!(
+            engine
+                .prepare(&source)
+                .expect_err("temporal result must match target on empty tables")
+                .code,
+            "E_TYPE"
+        );
+    }
+    let schema = engine.schema_info();
+    let response = engine.execute("migration invalid_duration {change field Event.day to timestamp using old -> (@2026-10-03T00:00:00Z - @2026-10-02T00:00:00Z)}");
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "E_TYPE");
+    assert_eq!(engine.schema_info(), schema);
     for offset in [
         "\"America/New_York\"",
         "\"-00:00\"",

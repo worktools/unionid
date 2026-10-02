@@ -489,6 +489,7 @@ pub(crate) fn bind_scalar(
                         reference_kind,
                     )?;
                 }
+                require_fresh_scalar_result(catalog, &target, expected)?;
                 return Ok(target);
             }
             let arity = builtin_scalar_arity(name).expect("known builtin");
@@ -559,6 +560,7 @@ pub(crate) fn bind_scalar(
             )? {
                 bind_scalar(catalog, scope, left, Some(&left_ty), reference_kind)?;
                 bind_scalar(catalog, scope, right, Some(&right_ty), reference_kind)?;
+                require_fresh_scalar_result(catalog, &result, expected)?;
                 *ty = Some(result.clone());
                 return Ok(result);
             }
@@ -589,6 +591,28 @@ pub(crate) fn bind_scalar(
         ));
     }
     Ok(ty)
+}
+
+// Preserve contextual initialization of nominal decimal/temporal values, while
+// checking the computed primitive result before their binding paths return early.
+fn require_fresh_scalar_result(
+    catalog: &Catalog,
+    actual: &ScalarType,
+    expected: Option<&ScalarType>,
+) -> Result<()> {
+    if let Some(expected) = expected
+        && !same_type(actual, catalog.underlying(expected)?)
+    {
+        return Err(Error::new(
+            "E_TYPE",
+            format!(
+                "expression has type {}, expected {}",
+                catalog.describe(actual),
+                catalog.describe(expected)
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn infer_scalar(
@@ -1934,6 +1958,14 @@ fn evaluate_scalar<'expression, 'values>(
                 "duration_parse" => Value::Duration(source.parse()?),
                 _ => unreachable!("known builtin scalar function"),
             };
+            if let Value::Text(result) = &value
+                && result.len() > crate::codec::MAX_VALUE_BYTES
+            {
+                return Err(Error::new(
+                    "E_LIMIT",
+                    format!("{name} result exceeds the text value size limit"),
+                ));
+            }
             Ok(Some(Evaluated::Owned(value)))
         }
         ScalarExpression::Call { name, .. } => Err(Error::new(
