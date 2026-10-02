@@ -7,6 +7,7 @@ use serde::Deserialize;
 use unionid::{Engine, Value};
 
 const SCHEMA: &str = "struct Sample {id: int, raw: text}\ntable samples: Sample {key id}";
+const NORMALIZE_QUERY: &str = "from samples\nderive {lowered = lower raw, uppered = upper raw, trimmed = trim raw}\nselect {lowered, uppered, trimmed}";
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Normalized {
@@ -24,7 +25,7 @@ fn unicode_normalization_and_prepared_filters_share_typed_expressions() {
             .execute("insert samples {id: 1, raw: \"　Straße İ　\"}")
             .ok
     );
-    let result = engine.execute("from samples\nderive {lowered = lower raw, uppered = upper raw, trimmed = trim raw}\nselect {lowered, uppered, trimmed}");
+    let result = engine.execute(NORMALIZE_QUERY);
     assert!(result.ok, "{}", result.message);
     assert_eq!(
         result.typed_rows::<Normalized>().unwrap(),
@@ -43,6 +44,52 @@ fn unicode_normalization_and_prepared_filters_share_typed_expressions() {
     );
     assert!(result.ok, "{}", result.message);
     assert_eq!(result.rows.len(), 1);
+}
+
+#[test]
+fn text_functions_share_explain_formatter_and_both_wire_versions() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(SCHEMA).ok);
+    assert!(engine.execute("insert samples {id: 1, raw: \" A \"}").ok);
+    let expected = engine
+        .execute(NORMALIZE_QUERY)
+        .typed_rows::<Normalized>()
+        .unwrap();
+    let canonical = unionid::format_source(NORMALIZE_QUERY).unwrap();
+    assert_eq!(unionid::format_source(&canonical).unwrap(), canonical);
+    assert_eq!(
+        engine
+            .execute(&canonical)
+            .typed_rows::<Normalized>()
+            .unwrap(),
+        expected
+    );
+    let before = serde_json::to_value(engine.execute("from samples").rows).unwrap();
+    let plan = engine.execute(&format!(
+        "explain\n{}",
+        NORMALIZE_QUERY
+            .lines()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
+    assert!(plan.ok, "{}", plan.message);
+    assert!(plan.rows.is_empty());
+    assert_eq!(plan.plan.unwrap().result_schema.len(), 3);
+    assert_eq!(
+        serde_json::to_value(engine.execute("from samples").rows).unwrap(),
+        before
+    );
+    for version in [1, 2] {
+        let request = unionid::protocol::Request::query("normalization", NORMALIZE_QUERY)
+            .with_version(version)
+            .unwrap();
+        let response = unionid::server::execute_protocol_request(&mut engine, request);
+        assert!(response.ok, "{}", response.message);
+        let encoded = serde_json::to_vec(&response).unwrap();
+        let decoded: unionid::protocol::Response = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.typed_rows::<Normalized>().unwrap(), expected);
+    }
 }
 
 #[test]
