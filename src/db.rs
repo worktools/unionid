@@ -1802,7 +1802,7 @@ impl Database {
                 }
             }
         }
-        Ok(())
+        self.record_reference_changes(table, changes)
     }
 
     fn record_index_entry(
@@ -7290,6 +7290,18 @@ impl Database {
                 }
             }
         }
+        for definition in self.reference_definitions.values() {
+            let table = self
+                .schema_tables()
+                .into_iter()
+                .find(|table| table.id == definition.table_id)
+                .ok_or_else(|| Error::new("E_STORAGE", "reference source table is missing"))?;
+            for row in &table.rows {
+                if let Some(value) = definition.source_value(&row.fields)? {
+                    entries.push((definition.id, value, row.id));
+                }
+            }
+        }
         entries.sort_by_key(|(index_id, _, row_id)| (*index_id, *row_id));
         Ok(entries)
     }
@@ -7319,6 +7331,44 @@ impl Database {
         row_id: RowId,
         map_capable: bool,
     ) -> Result<Vec<u8>> {
+        // References and indexes share the catalog's global stable-ID allocator.
+        // A reference posting maps a projected target key to a source RowId.
+        if let Some(reference) = self.reference_definitions.get(&index_id) {
+            if !map_capable {
+                return Err(Error::new(
+                    "E_STORAGE_UPGRADE_REQUIRED",
+                    "reference postings require index key codec 4",
+                ));
+            }
+            let values = if reference.components.len() == 1 {
+                vec![value]
+            } else {
+                let Value::Tuple(values) = value else {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "composite reference value is not a tuple",
+                    ));
+                };
+                if values.len() != reference.components.len() {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "composite reference tuple has the wrong arity",
+                    ));
+                }
+                values.iter().collect()
+            };
+            let bound = reference
+                .components
+                .iter()
+                .zip(values)
+                .map(|(component, value)| crate::ordered_key::Component {
+                    ty: &component.target_type,
+                    value,
+                    descending: false,
+                })
+                .collect::<Vec<_>>();
+            return crate::ordered_key::encode_complete_v4(&self.catalog, index_id, &bound, row_id);
+        }
         let (table_name, definition) = self
             .index_definitions
             .iter()

@@ -50,12 +50,11 @@ pub(super) struct ReferenceState {
 }
 
 impl ReferenceDefinition {
-    fn key(
+    fn values<'a>(
         &self,
-        db: &Database,
-        fields: &BTreeMap<String, Value>,
+        fields: &'a BTreeMap<String, Value>,
         source: bool,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<Vec<&'a Value>>> {
         let mut components = Vec::with_capacity(self.components.len());
         for component in &self.components {
             let column = if source {
@@ -79,12 +78,40 @@ impl ReferenceDefinition {
             } else {
                 value
             };
-            components.push(crate::ordered_key::Component {
+            components.push(value);
+        }
+        Ok(Some(components))
+    }
+
+    pub(super) fn source_value(&self, fields: &BTreeMap<String, Value>) -> Result<Option<Value>> {
+        Ok(self.values(fields, true)?.map(|values| {
+            if values.len() == 1 {
+                values[0].clone()
+            } else {
+                Value::Tuple(values.into_iter().cloned().collect())
+            }
+        }))
+    }
+
+    fn key(
+        &self,
+        db: &Database,
+        fields: &BTreeMap<String, Value>,
+        source: bool,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(values) = self.values(fields, source)? else {
+            return Ok(None);
+        };
+        let components = self
+            .components
+            .iter()
+            .zip(values)
+            .map(|(component, value)| crate::ordered_key::Component {
                 ty: &component.target_type,
                 value,
                 descending: false,
-            });
-        }
+            })
+            .collect::<Vec<_>>();
         let key = crate::ordered_key::encode_tuple(&db.catalog, &components)?;
         if key.len().saturating_add(23) > crate::ordered_key::MAX_COMPLETE_INDEX_KEY_BYTES {
             return Err(Error::new(
@@ -106,6 +133,46 @@ fn remove(postings: &mut imbl::OrdMap<Vec<u8>, imbl::OrdSet<RowId>>, key: &[u8],
 }
 
 impl Database {
+    pub(super) fn record_reference_changes(
+        &mut self,
+        table: &str,
+        changes: &[RowChange],
+    ) -> Result<()> {
+        let table_id = self.table(table)?.id;
+        let definitions = self
+            .reference_definitions
+            .values()
+            .filter(|definition| definition.table_id == table_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for definition in definitions {
+            for change in changes {
+                let before = change
+                    .before
+                    .as_ref()
+                    .map(|row| definition.source_value(&row.fields))
+                    .transpose()?
+                    .flatten();
+                let after = change
+                    .after
+                    .as_ref()
+                    .map(|row| definition.source_value(&row.fields))
+                    .transpose()?
+                    .flatten();
+                if before.as_ref().map(Value::index_key) == after.as_ref().map(Value::index_key) {
+                    continue;
+                }
+                if let Some(value) = before {
+                    self.record_index_entry(definition.id, &value, change.row_id(), true, false);
+                }
+                if let Some(value) = after {
+                    self.record_index_entry(definition.id, &value, change.row_id(), false, true);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn has_references(&self) -> bool {
         !self.reference_definitions.is_empty()
     }
@@ -476,6 +543,94 @@ mod tests {
             panic!("expected reference")
         };
         spec
+    }
+
+    fn execute(db: &mut Database, source: &str) {
+        for located in crate::syntax::parse(source).unwrap() {
+            db.execute(located.statement).unwrap();
+        }
+    }
+
+    #[test]
+    fn reverse_postings_project_optional_values_and_coalesce_changes() {
+        let mut db = database(
+            "struct User {id: int}\nstruct Task {id: int, assignee: Option<int>}\ntable users: User {key id}\ntable tasks: Task {key id}\ncreate reference tasks (assignee) references users (id)\ninsert many users [{id: 7}, {id: 8}]\ninsert many tasks [{id: 1, assignee: Some(7)}, {id: 2, assignee: None}]",
+        );
+        let reference = db.reference_definitions.values().next().unwrap().clone();
+        let postings = db
+            .durable_secondary_indexes()
+            .unwrap()
+            .into_iter()
+            .filter(|(id, _, _)| *id == reference.id)
+            .collect::<Vec<_>>();
+        assert_eq!(postings.len(), 1);
+        assert_eq!(postings[0].1.index_key(), Value::Int(7).index_key());
+        let encoded = db
+            .encode_secondary_index_key_v4(reference.id, &postings[0].1, postings[0].2)
+            .unwrap();
+        crate::ordered_key::validate_complete_v4(&encoded).unwrap();
+        assert!(
+            db.encode_secondary_index_key_v3(reference.id, &postings[0].1, postings[0].2)
+                .is_err()
+        );
+
+        db.take_write_set();
+        execute(
+            &mut db,
+            "update tasks | filter id == 1 | set assignee = Some(8)\nupdate tasks | filter id == 1 | set assignee = Some(7)\ninsert tasks {id: 3, assignee: Some(8)}\ndelete tasks | filter id == 3",
+        );
+        assert!(
+            db.take_write_set()
+                .index_entries
+                .values()
+                .all(|entry| entry.index_id != reference.id)
+        );
+        execute(
+            &mut db,
+            "update tasks | filter id == 1 | set assignee = None",
+        );
+        let writes = db.take_write_set();
+        let entries = writes
+            .index_entries
+            .values()
+            .filter(|entry| entry.index_id == reference.id)
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].before && !entries[0].after);
+        assert_eq!(entries[0].value.index_key(), Value::Int(7).index_key());
+    }
+
+    #[test]
+    fn reverse_postings_keep_exact_none_and_composite_component_boundaries() {
+        let db = database(
+            "struct Parent {tenant: int, alias: Option<int>}\nstruct Child {tenant: int, alias: Option<int>}\ntable parents: Parent {}\ntable children: Child {}\ncreate unique index parents (-tenant, alias)\ncreate reference children (tenant, alias) references parents (tenant, alias)\ninsert parents {tenant: 1, alias: None}\ninsert children {tenant: 1, alias: None}",
+        );
+        let reference = db.reference_definitions.values().next().unwrap();
+        let postings = db
+            .durable_secondary_indexes()
+            .unwrap()
+            .into_iter()
+            .filter(|(id, _, _)| *id == reference.id)
+            .collect::<Vec<_>>();
+        assert_eq!(postings.len(), 1);
+        assert_eq!(
+            postings[0].1.index_key(),
+            Value::Tuple(vec![Value::Int(1), Value::Option(None)]).index_key()
+        );
+        let encoded = db
+            .encode_secondary_index_key_v4(reference.id, &postings[0].1, postings[0].2)
+            .unwrap();
+        let row = &db.table("children").unwrap().rows[0];
+        let projected = reference.key(&db, &row.fields, true).unwrap().unwrap();
+        assert_eq!(&encoded[15..encoded.len() - 8], projected.as_slice());
+        assert!(
+            db.encode_secondary_index_key_v4(reference.id, &Value::Int(1), 0)
+                .is_err()
+        );
+        assert!(
+            db.encode_secondary_index_key_v4(reference.id, &Value::Tuple(vec![Value::Int(1)]), 0)
+                .is_err()
+        );
     }
 
     #[test]
