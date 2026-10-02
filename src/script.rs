@@ -16,6 +16,8 @@ pub enum StatementKind {
     CreateTable,
     Table,
     CreateIndex,
+    CreateReference,
+    DropReference,
     Insert,
     InsertMany,
     Upsert,
@@ -43,6 +45,8 @@ pub(crate) fn kind(statement: &Statement) -> StatementKind {
         Statement::CreateTable { .. } => StatementKind::CreateTable,
         Statement::TypedTable { .. } => StatementKind::Table,
         Statement::CreateIndex { .. } => StatementKind::CreateIndex,
+        Statement::CreateReference(_) => StatementKind::CreateReference,
+        Statement::DropReference(_) => StatementKind::DropReference,
         Statement::Insert { .. } | Statement::InsertParameter { .. } => StatementKind::Insert,
         Statement::InsertMany { .. } | Statement::InsertManyParameter { .. } => {
             StatementKind::InsertMany

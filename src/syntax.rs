@@ -584,6 +584,9 @@ impl Parser {
                 self.table()?
             } else if self.word("create") {
                 self.create()?
+            } else if self.word("drop") {
+                self.bump();
+                Statement::DropReference(self.reference_spec()?)
             } else if self.word("insert") {
                 self.insert()?
             } else if self.word("upsert") {
@@ -1049,6 +1052,9 @@ impl Parser {
 
     fn create(&mut self) -> Result<Statement> {
         self.expect_word("create")?;
+        if self.word("reference") {
+            return Ok(Statement::CreateReference(self.reference_spec()?));
+        }
         if self.word("table") {
             self.bump();
             let table = self.identifier()?;
@@ -1132,7 +1138,9 @@ impl Parser {
     fn migration_step(&mut self) -> Result<SchemaMigration> {
         if self.word("add") {
             self.bump();
-            if self.word("struct") {
+            if self.word("reference") {
+                Ok(SchemaMigration::AddReference(self.reference_spec()?))
+            } else if self.word("struct") {
                 let Statement::DefineType { name, ty } = self.define_struct()? else {
                     unreachable!()
                 };
@@ -1224,7 +1232,9 @@ impl Parser {
             }
         } else if self.word("drop") {
             self.bump();
-            if self.word("type") {
+            if self.word("reference") {
+                Ok(SchemaMigration::DropReference(self.reference_spec()?))
+            } else if self.word("type") {
                 self.bump();
                 Ok(SchemaMigration::DropType {
                     name: self.identifier()?,
@@ -1368,6 +1378,37 @@ impl Parser {
                 descending: false,
             }],
         ))
+    }
+
+    fn reference_spec(&mut self) -> Result<crate::query::ReferenceSpec> {
+        self.expect_word("reference")?;
+        let table = self.identifier()?;
+        let fields = self.reference_fields()?;
+        self.expect_word("references")?;
+        let target_table = self.identifier()?;
+        let target_fields = self.reference_fields()?;
+        if fields.len() != target_fields.len() {
+            return Err(
+                self.error("reference source and target must have the same number of fields")
+            );
+        }
+        Ok(crate::query::ReferenceSpec {
+            table,
+            fields,
+            target_table,
+            target_fields,
+        })
+    }
+
+    fn reference_fields(&mut self) -> Result<Vec<String>> {
+        let components = self.index_components()?;
+        if components.iter().any(|component| component.descending) {
+            return Err(self.error("reference fields do not accept sort directions"));
+        }
+        Ok(components
+            .into_iter()
+            .map(|component| component.column)
+            .collect())
     }
 
     fn index_components(&mut self) -> Result<Vec<crate::query::IndexComponent>> {

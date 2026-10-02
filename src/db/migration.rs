@@ -52,9 +52,12 @@ impl Database {
         name: &str,
         steps: Vec<SchemaMigration>,
     ) -> Result<QueryResponse> {
+        let mut candidate = self.clone();
         for step in steps {
-            self.apply_schema_migration(step)?;
+            candidate.apply_schema_migration(step)?;
         }
+        candidate.rebuild_references()?;
+        *self = candidate;
         Ok(QueryResponse::ok_message(format!(
             "migration '{name}' applied"
         )))
@@ -62,6 +65,8 @@ impl Database {
 
     fn apply_schema_migration(&mut self, step: SchemaMigration) -> Result<()> {
         match step {
+            SchemaMigration::AddReference(spec) => self.add_migration_reference(&spec),
+            SchemaMigration::DropReference(spec) => self.drop_reference(&spec).map(|_| ()),
             SchemaMigration::AddType { name, ty } => {
                 if self.objects.contains_key(&name) {
                     return Err(Error::new(
@@ -159,6 +164,17 @@ impl Database {
     }
 
     fn drop_table(&mut self, name: &str) -> Result<()> {
+        let id = self.table(name)?.id;
+        if self
+            .reference_definitions
+            .values()
+            .any(|reference| reference.table_id == id || reference.target_table_id == id)
+        {
+            return Err(Error::new(
+                "E_MIGRATION",
+                "table is used by a reference; drop the reference first",
+            ));
+        }
         if self.objects.remove(name).is_none() {
             return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
         }
@@ -247,6 +263,7 @@ impl Database {
         let old_catalog = self.catalog.clone();
         let owner_id = self.named_type_id(owner)?;
         let field_id = direct_record_field(&old_catalog, owner, field)?.id;
+        self.ensure_field_not_referenced(field_id)?;
         if let Some((table, shape)) =
             self.index_definitions
                 .iter()
@@ -372,6 +389,7 @@ impl Database {
         let old_catalog = self.catalog.clone();
         let owner_id = self.named_type_id(owner)?;
         let old_column = direct_record_field(&old_catalog, owner, field)?.clone();
+        self.ensure_field_not_referenced(old_column.id)?;
         if let Some((table, shape)) =
             self.index_definitions
                 .iter()
@@ -630,6 +648,10 @@ impl Database {
                 format!("index '{table} {display}' enforces the primary key; drop the key first"),
             ));
         }
+        if let Some(definition) = self.index_definitions.get(table).and_then(|definitions| definitions.get(&shape))
+            && self.reference_definitions.values().any(|reference| matches!(reference.target, ReferenceTarget::UniqueIndex { index_id } if index_id == definition.id)) {
+                return Err(Error::new("E_MIGRATION", "unique index is used by a reference; drop the reference first"));
+        }
         let definitions = self.index_definitions.get_mut(table).ok_or_else(|| {
             Error::new(
                 "E_INDEX",
@@ -696,6 +718,15 @@ impl Database {
     }
 
     fn drop_key(&mut self, table: &str) -> Result<()> {
+        let id = self.table(table)?.id;
+        if self.reference_definitions.values().any(|reference| {
+            reference.target_table_id == id && reference.target == ReferenceTarget::PrimaryKey
+        }) {
+            return Err(Error::new(
+                "E_MIGRATION",
+                "primary key is used by a reference; drop the reference first",
+            ));
+        }
         let Some(DbObject::Table(source)) = self.objects.get_mut(table) else {
             return Err(Error::new("E_TABLE", format!("table '{table}' not found")));
         };
@@ -1503,7 +1534,7 @@ fn migrate_value(
     }
 }
 
-fn field_path_name(catalog: &Catalog, fields: &[Column], ids: &[u64]) -> Option<String> {
+pub(super) fn field_path_name(catalog: &Catalog, fields: &[Column], ids: &[u64]) -> Option<String> {
     let mut columns = fields;
     let mut names = Vec::new();
     for (index, id) in ids.iter().enumerate() {

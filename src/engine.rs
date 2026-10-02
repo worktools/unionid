@@ -1381,6 +1381,17 @@ impl Engine {
     pub fn prepare(&self, source: &str) -> Result<PreparedQuery> {
         let mut statements = syntax::parse(source)?;
         crate::script::preflight(&statements)?;
+        if self.storage_mode != StorageMode::Memory
+            && statements
+                .iter()
+                .any(|located| located.statement.declares_references())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "durable typed references are not available yet",
+            ));
+        }
+
         let mut mutating = false;
         let mut response_columns = Vec::new();
         for (offset, located) in statements.iter_mut().enumerate() {
@@ -2519,6 +2530,21 @@ impl Engine {
         budget: &mut MaintenanceStepBudget,
     ) -> Result<bool> {
         ensure_deadline(control)?;
+        if self.storage_mode != StorageMode::Memory
+            && file.steps.iter().any(|step| {
+                matches!(
+                    step,
+                    crate::query::SchemaMigration::AddReference(_)
+                        | crate::query::SchemaMigration::DropReference(_)
+                )
+            })
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "durable typed references are not available yet",
+            ));
+        }
+
         if self.write_failed {
             return Err(Error::new(
                 "E_STORAGE",
@@ -2946,6 +2972,12 @@ impl Engine {
         // A committed root never carries changes forward into the next
         // candidate. Row-only callers already extracted the supplied set;
         // full-rebuild callers intentionally discard any internal details.
+        if candidate.has_references() && self.storage_mode != StorageMode::Memory {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "durable typed references are not available yet",
+            ));
+        }
         let _ = candidate.take_write_set();
         let mut durable_commit_micros = 0;
         let mut durable_profile = None;

@@ -11,6 +11,8 @@ pub struct Span {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintKind {
+    ReferenceMissing,
+    ReferenceRestricted,
     /// A duplicate value under a whole-table unique index.
     Unique,
     /// A duplicate value under a partial unique index.
@@ -77,6 +79,12 @@ impl ConstraintKind {
     /// Value-free hint text shared by the CLI and machine-readable responses.
     pub const fn default_hint(self) -> Option<&'static str> {
         match self {
+            Self::ReferenceMissing => {
+                Some("insert the referenced target first or choose an existing typed key")
+            }
+            Self::ReferenceRestricted => {
+                Some("remove or reassign referencing rows before changing the target key")
+            }
             Self::Unique => Some(
                 "the value already exists under a unique index; update the existing row or choose a different key",
             ),

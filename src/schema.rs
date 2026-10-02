@@ -67,10 +67,11 @@ pub(crate) fn parse(source: &str) -> Result<Database> {
                 | Statement::CreateTable { .. }
                 | Statement::TypedTable { .. }
                 | Statement::CreateIndex { .. }
+                | Statement::CreateReference(_)
         ) {
             return Err(Error::new(
                 "E_SCHEMA",
-                "schema files may contain only type, table, and index declarations",
+                "schema files may contain only type, table, index, and reference declarations",
             )
             .at(located.span));
         }
@@ -78,12 +79,13 @@ pub(crate) fn parse(source: &str) -> Result<Database> {
             Statement::DefineType { .. } => 0,
             Statement::CreateTable { .. } | Statement::TypedTable { .. } => 1,
             Statement::CreateIndex { .. } => 2,
+            Statement::CreateReference(_) => 3,
             _ => unreachable!(),
         };
         if statement_phase < phase {
             return Err(Error::new(
                 "E_SCHEMA",
-                "schema declarations must place types before tables and indexes after tables",
+                "schema declarations must place types before tables, then indexes, then references",
             )
             .at(located.span));
         }
@@ -103,6 +105,12 @@ pub(crate) fn diff(
     parent: Option<&str>,
 ) -> Result<SchemaDiff> {
     let target = parse(target_source)?;
+    if current.has_references() || target.has_references() {
+        return Err(Error::new(
+            "E_SCHEMA",
+            "reference schema diff is not available yet",
+        ));
+    }
     let mut generated = Vec::new();
     let mut todos = Vec::new();
     let mut warnings = Vec::new();

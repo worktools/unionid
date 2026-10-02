@@ -246,6 +246,20 @@ pub fn checksum(source: &str) -> String {
 
 pub fn describe_step(step: &SchemaMigration) -> (String, bool) {
     match step {
+        SchemaMigration::AddReference(spec) | SchemaMigration::DropReference(spec) => {
+            let dropping = matches!(step, SchemaMigration::DropReference(_));
+            let action = if dropping { "drop" } else { "add" };
+            (
+                format!(
+                    "{action} reference {} ({}) references {} ({})",
+                    spec.table,
+                    spec.fields.join(", "),
+                    spec.target_table,
+                    spec.target_fields.join(", ")
+                ),
+                dropping,
+            )
+        }
         SchemaMigration::AddType { name, .. } => (format!("add type {name}"), false),
         SchemaMigration::DropType { name } => (format!("drop type {name}"), true),
         SchemaMigration::AddTable {

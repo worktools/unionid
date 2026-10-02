@@ -160,6 +160,8 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
         | Statement::CreateTable { .. }
         | Statement::TypedTable { .. }
         | Statement::CreateIndex { .. }
+        | Statement::CreateReference(_)
+        | Statement::DropReference(_)
         | Statement::Insert { .. }
         | Statement::InsertMany { .. }
         | Statement::Upsert { .. }
@@ -260,6 +262,8 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
         | Statement::CreateTable { .. }
         | Statement::TypedTable { .. }
         | Statement::CreateIndex { .. }
+        | Statement::CreateReference(_)
+        | Statement::DropReference(_)
         | Statement::Insert { .. }
         | Statement::InsertMany { .. }
         | Statement::Upsert { .. }
