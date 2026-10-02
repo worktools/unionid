@@ -205,6 +205,85 @@ fn verify_rejects_changed_artifact_and_list_reports_orphans() {
 }
 
 #[test]
+fn cli_incremental_restore_accepts_current_directory_and_explicit_paths() {
+    let temp = TempTree::new("incremental-restore-paths");
+    let db = temp.path().join("app.redb");
+    let repo = temp.path().join("archive");
+    create_database(&db);
+    let initialized =
+        backup::incremental::init(&db, &repo, IncrementalInitOptions::default()).unwrap();
+    {
+        let mut engine = Engine::open_redb(&db).unwrap();
+        assert!(
+            engine
+                .execute("update items | filter id == 1 | set label = \"two\"")
+                .ok
+        );
+    }
+    backup::incremental::export(&db, &repo, IncrementalExportOptions::default()).unwrap();
+    std::fs::create_dir(temp.path().join("nested")).unwrap();
+    let sequence = (initialized.baseline_sequence + 1).to_string();
+    for target in [
+        PathBuf::from("bare.redb"),
+        PathBuf::from("./explicit.redb"),
+        PathBuf::from("nested/relative.redb"),
+        temp.path().join("absolute.redb"),
+    ] {
+        let restore = || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+                .current_dir(temp.path())
+                .args(["restore", "incremental", "--repo", "archive", "--db"])
+                .arg(&target)
+                .args(["--at-sequence", &sequence, "--format", "json"])
+                .output()
+                .unwrap()
+        };
+        let result = restore();
+        assert!(
+            result.status.success(),
+            "{target:?}: stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            report["restored_sequence"],
+            initialized.baseline_sequence + 1
+        );
+        assert_eq!(report["row_count"], 1);
+        let destination = temp.path().join(&target);
+        {
+            let mut engine = Engine::open_redb(&destination).unwrap();
+            assert!(engine.check_integrity().unwrap().backend_clean);
+            let response = engine.execute("from items | filter id == 1 && label == \"two\"");
+            assert!(response.ok, "{}", response.message);
+            assert_eq!(response.rows.len(), 1);
+        }
+        let before = std::fs::read(&destination).unwrap();
+        let rejected = restore();
+        assert!(!rejected.status.success());
+        let error: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "E_BACKUP");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("already exists")
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+    }
+    for directory in [temp.path().to_path_buf(), temp.path().join("nested")] {
+        assert!(std::fs::read_dir(directory).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|ext| ext != "tmp")
+        }));
+    }
+}
+
+#[test]
 fn restore_replays_each_declared_sequence_to_a_fresh_database() {
     let temp = TempTree::new("incremental-restore");
     let db = temp.path().join("app.redb");
