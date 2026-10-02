@@ -1076,7 +1076,7 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unionid"
-version = "0.13.1"
+version = "0.13.2"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "unionid-derive"
-version = "0.13.1"
+version = "0.13.2"
 dependencies = [
  "proc-macro2",
  "quote",

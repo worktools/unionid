@@ -1,5 +1,11 @@
 # 升级与格式兼容
 
+## v0.13.2 补丁兼容性 / Patch compatibility
+
+v0.13.2 修复启用 journal 时迁移 cutover 的全量物化（#437），以及当前目录增量恢复路径错误（#435）。三个 crate 同步为 0.13.2；存储、备份、协议和公开 API 保持 v0.13.1 兼容，无需额外升级。已有 journal 字节与恢复契约不变；不包含未发布的 v0.14 引用能力。
+
+v0.13.2 fixes migration cutover materialization with journaling (#437) and current-directory incremental restore paths (#435). All three crates use 0.13.2; storage, backup, protocol and public APIs remain compatible with v0.13.1 without additional upgrades. Existing journal bytes and restore contracts are unchanged. Unreleased v0.14 references are excluded.
+
 ## v0.13.1 补丁兼容性 / Patch compatibility
 
 v0.13.1 修复启用增量备份时 migration 提交的行数据恢复问题（#433）。三个 crate 同步为 0.13.1；存储、备份、协议与公开 API 保持 v0.13.0 兼容，无需额外 storage upgrade 或应用 migration。修复不追溯改写旧 journal；仍保有完整源库时可用新版本建立 checkpoint，再验证恢复结果。
