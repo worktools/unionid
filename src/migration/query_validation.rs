@@ -12,6 +12,9 @@ use crate::error::{Error, Result};
 use crate::portable::{CompatibilityLevel, TypeDescription, TypeShape};
 use crate::query_contract::QueryDescription;
 
+mod directory;
+pub use directory::{MAX_QUERY_DIRECTORY_DEPTH, MAX_QUERY_DIRECTORY_ENTRIES, load_query_directory};
+
 pub const MAX_QUERY_FILES: usize = 1_024;
 pub const MAX_QUERY_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_QUERY_BINDS: usize = 65_536;

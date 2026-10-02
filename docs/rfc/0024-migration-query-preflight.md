@@ -1,6 +1,6 @@
 # RFC 0024：迁移前检查已保存查询 / Saved-query preflight before migrations
 
-- 状态 / Status: accepted; shared Engine preflight implemented, CLI/directory loading and full #400 acceptance pending
+- 状态 / Status: accepted; shared Engine and CLI implemented, full #400 acceptance in progress
 - 日期 / Date: 2026-10-01
 - 跟踪 / Tracking: [#400](https://github.com/worktools/unionid/issues/400), [v0.13 milestone](https://github.com/worktools/unionid/milestone/23)
 - 相关 / Related: [RFC 0014](0014-portable-adt-contract.md), [RFC 0015](0015-static-query-contract.md)
@@ -19,7 +19,7 @@ unionid migration apply --db app.redb --dir migrations --queries queries --forma
 
 不传 --queries 时保持已有接口与行为。传入时目录必须存在、包含至少一个查询源文件；不能把空目录的“零项通过”当作业务已检查。按相对路径稳定排序递归加载 .unid；.uid 使用既有过渡兼容规则和警告。拒绝 symlink 与非源文件，不忽略无法读取的文件。文件显示名保留相对路径，不扁平化成函数名，避免不同目录的同名文件冲突。
 
-目录全部内容在首次校验前载入一次。首版最多 1,024 个源文件、目录深度 32、单文件沿用 MAX_SOURCE_BYTES、累计源码最多 16 MiB。额外限制一次预检最多 65,536 次 query/checkpoint bind，报告编码最多 1 MiB；执行前估算绑定次数，提交前检查报告大小。超过限制返回 E_LIMIT，不能先截断文件列表再声称通过。路径与摘要属于源码元数据，不输出业务 rows 或参数值。
+目录全部内容在首次校验前载入一次。首版最多 1,024 个源文件、目录深度 32、总目录条目（含空目录）4,096、单文件沿用 MAX_SOURCE_BYTES、累计源码最多 16 MiB。额外限制一次预检最多 65,536 次 query/checkpoint bind，报告编码最多 1 MiB；执行前估算绑定次数，提交前检查报告大小。超过限制返回 E_LIMIT，不能先截断文件列表再声称通过。路径与摘要属于源码元数据，不输出业务 rows 或参数值。
 
 ### 校验对象与复用边界
 
@@ -71,7 +71,7 @@ JSON 每次命令输出一个对象；失败对象遵循既有 ok=false/error/ex
 
 Adding an enum variant can preserve existing data while invalidating an exhaustive saved match. Detect this before deployment through an opt-in --queries directory on migration plan/apply/rehearse. Without the option, preserve existing commands and APIs.
 
-Load a nonempty directory recursively in deterministic relative-path order. Accept .unid and the existing warned .uid transition. Reject symlinks, non-source entries, unreadable files, and empty input. Preserve relative paths rather than flatten names. Load sources once, with limits of 1,024 files, depth 32, the existing per-source byte limit, and 16 MiB aggregate source. Cap one preflight at 65,536 query/checkpoint binds and 1 MiB encoded reports. Check the planned bind count before binding and report size before committing. Never truncate silently.
+Load a nonempty directory recursively in deterministic relative-path order. Accept .unid and the existing warned .uid transition. Reject symlinks, non-source entries, unreadable files, and empty input. Preserve relative paths rather than flatten names. Load sources once, with limits of 1,024 files, depth 32, 4,096 directory entries including empty directories, the existing per-source byte limit, and 16 MiB aggregate source. Cap one preflight at 65,536 query/checkpoint binds and 1 MiB encoded reports. Check the planned bind count before binding and report size before committing. Never truncate silently.
 
 ### Shared validation and diagnostics
 

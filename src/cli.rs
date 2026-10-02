@@ -1,3 +1,5 @@
+pub mod migration_queries;
+
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::TcpStream;
@@ -1177,24 +1179,13 @@ pub fn migration_rehearse(
     require_existing_database(&source)?;
     warn_deprecated_source_directory(directory.as_ref());
     let files = load_directory(directory).map_err(|error| error.to_string())?;
-    let source_bytes = std::fs::metadata(&source)
-        .map_err(|error| error.to_string())?
-        .len();
-    let (copy_path, keep) = match copy {
-        Some(path) => (path, true),
-        None => {
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default();
-            let name = format!("unionid-rehearsal-{}-{nonce}.redb", std::process::id());
-            (std::env::temp_dir().join(name), false)
-        }
-    };
-    std::fs::copy(&source, &copy_path).map_err(|error| format!("copy database: {error}"))?;
+    let rehearsal_copy = migration_queries::RehearsalCopy::create(&source, copy)
+        .map_err(|error| error.to_string())?;
+    let copy_path = &rehearsal_copy.path;
+    let source_bytes = rehearsal_copy.source_bytes;
     let started = std::time::Instant::now();
     let outcome = (|| -> Result<MigrationRehearsal, String> {
-        let mut engine = Engine::open_redb(&copy_path).map_err(|error| error.to_string())?;
+        let mut engine = Engine::open_redb(copy_path).map_err(|error| error.to_string())?;
         let source_schema = engine.schema_info();
         let applied = engine
             .apply_migrations(&files)
@@ -1206,7 +1197,7 @@ pub fn migration_rehearse(
         Ok(MigrationRehearsal {
             schema_version: 2,
             source_bytes,
-            copy_bytes: std::fs::metadata(&copy_path)
+            copy_bytes: std::fs::metadata(copy_path)
                 .map_err(|error| error.to_string())?
                 .len(),
             source_schema,
@@ -1219,10 +1210,11 @@ pub fn migration_rehearse(
             checked: integrity.backend_clean,
         })
     })();
-    if !keep {
-        let _ = std::fs::remove_file(&copy_path);
-    }
     let report = outcome?;
+    print_migration_rehearsal(&report, json)
+}
+
+fn print_migration_rehearsal(report: &MigrationRehearsal, json: bool) -> Result<(), String> {
     if json {
         println!(
             "{}",
@@ -1242,7 +1234,7 @@ pub fn migration_rehearse(
         report.check_profile.working_peak_bytes,
         report.checked
     );
-    if let Some(profile) = report.migration_profile {
+    if let Some(profile) = &report.migration_profile {
         println!(
             "migration rows {}/{} index entries {} logical bytes {}\nphases prepare/build/validate/cutover/reclaim {}/{}/{}/{}/{} us",
             profile.source_rows_seen,

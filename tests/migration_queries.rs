@@ -446,3 +446,172 @@ fn cutover_catalog_is_checked_before_reclaim_cleanup() {
     );
     engine.check_integrity().unwrap();
 }
+
+#[test]
+fn field_removal_rename_and_type_change_reject_before_memory_or_redb_effects() {
+    for (name, step, source) in [
+        (
+            "remove",
+            "drop field Job.score",
+            "from jobs | select {score}",
+        ),
+        (
+            "rename",
+            "rename field Job.score to points",
+            "from jobs | select {score}",
+        ),
+        (
+            "retype",
+            "change field Job.score to text\n    using old -> \"converted\"",
+            "from jobs | filter score > 0",
+        ),
+    ] {
+        let dir = TempDir::new();
+        let db = dir.0.join("db.redb");
+        for mut engine in [Engine::memory(), Engine::open_redb(&db).unwrap()] {
+            setup(&mut engine);
+            let schema = engine.schema_info();
+            let before = serde_json::to_value(engine.execute("from jobs").rows).unwrap();
+            let files = [initial(), next(name, "initial", step)];
+            let error = engine
+                .apply_migrations_with_queries(&files, &[query("saved.unid", source)])
+                .unwrap_err();
+            assert_eq!(error.error.code, "E_MIGRATION");
+            let report = error.query_validation.unwrap();
+            assert!(report.files[0].current_valid);
+            assert!(!report.files[0].valid);
+            assert_eq!(
+                report.files[0].failures[0].migration_id.as_deref(),
+                Some(name)
+            );
+            assert_eq!(engine.schema_info(), schema);
+            assert_eq!(engine.migration_history().len(), 1);
+            assert_eq!(
+                serde_json::to_value(engine.execute("from jobs").rows).unwrap(),
+                before
+            );
+            assert!(
+                engine
+                    .migration_status(&files)
+                    .unwrap()
+                    .maintenance
+                    .is_none()
+            );
+        }
+        let mut reopened = Engine::open_redb(&db).unwrap();
+        assert_eq!(reopened.migration_history().len(), 1);
+        assert!(reopened.execute("from jobs | filter score == 5").ok);
+        reopened.check_integrity().unwrap();
+    }
+}
+
+#[test]
+fn ready_candidate_cannot_cut_over_or_resume_with_different_migration_sources() {
+    use unionid::migration::MigrationMaintenancePhase;
+    let dir = TempDir::new();
+    let db = dir.0.join("ready.redb");
+    let files = [
+        initial(),
+        next("cancel", "initial", "add variant State.Cancelled"),
+    ];
+    let mut engine = Engine::open_redb(&db).unwrap();
+    setup(&mut engine);
+    for _ in 0..16 {
+        let progress = engine.advance_migrations(&files, 1).unwrap();
+        if progress
+            .status
+            .maintenance
+            .as_ref()
+            .is_some_and(|m| m.phase == MigrationMaintenancePhase::Ready)
+        {
+            break;
+        }
+    }
+    let before = engine.migration_status(&files).unwrap();
+    assert_eq!(
+        before.maintenance.as_ref().unwrap().phase,
+        MigrationMaintenancePhase::Ready
+    );
+    assert!(
+        engine
+            .apply_migrations_with_queries(&files, &[exhaustive()])
+            .is_err()
+    );
+    assert_eq!(engine.migration_status(&files).unwrap(), before);
+    let changed = [
+        initial(),
+        next("cancel", "initial", "add variant State.Other"),
+    ];
+    let valid_query = query("ids.unid", "from jobs | select {id}");
+    let error = engine
+        .apply_migrations_with_queries(&changed, std::slice::from_ref(&valid_query))
+        .unwrap_err();
+    assert_eq!(error.error.code, "E_MIGRATION");
+    assert!(
+        error
+            .error
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("original files")
+    );
+    assert_eq!(engine.migration_status(&files).unwrap(), before);
+    drop(engine);
+    let mut reopened = Engine::open_redb(&db).unwrap();
+    assert_eq!(reopened.migration_status(&files).unwrap(), before);
+    reopened
+        .apply_migrations_with_queries(&files, &[valid_query])
+        .unwrap();
+    assert_eq!(reopened.migration_history().len(), 2);
+    assert!(
+        reopened
+            .migration_status(&files)
+            .unwrap()
+            .maintenance
+            .is_none()
+    );
+    reopened.check_integrity().unwrap();
+}
+
+#[test]
+fn aborting_candidate_is_not_cleaned_by_rejected_query_preflight() {
+    use unionid::migration::MigrationMaintenancePhase;
+    let dir = TempDir::new();
+    let db = dir.0.join("aborting.redb");
+    let files = [
+        initial(),
+        next(
+            "cancel",
+            "initial",
+            "add variant State.Cancelled\n  add unique index jobs.score",
+        ),
+    ];
+    let mut engine = Engine::open_redb(&db).unwrap();
+    setup(&mut engine);
+    assert!(
+        engine
+            .execute("insert jobs {id: 2, state: Done, score: 5}")
+            .ok
+    );
+    engine.advance_migrations(&files, 1).unwrap();
+    // One step records the deterministic unique violation as Aborting, but
+    // leaves cleanup for another step. This exercises a real durable state.
+    assert!(engine.advance_migrations(&files, 1).is_err());
+    let before = engine.migration_status(&files).unwrap();
+    assert_eq!(
+        before.maintenance.as_ref().unwrap().phase,
+        MigrationMaintenancePhase::Aborting
+    );
+    let error = engine
+        .apply_migrations_with_queries(&files, &[exhaustive()])
+        .unwrap_err();
+    assert!(!error.query_validation.unwrap().valid);
+    assert_eq!(engine.migration_status(&files).unwrap(), before);
+    drop(engine);
+    let mut engine = Engine::open_redb(&db).unwrap();
+    assert_eq!(engine.migration_status(&files).unwrap(), before);
+    engine.abort_migration().unwrap();
+    assert_eq!(engine.migration_history().len(), 1);
+    assert_eq!(engine.execute("from jobs").rows.len(), 2);
+    engine.check_integrity().unwrap();
+}
