@@ -83,7 +83,7 @@ impl ReferenceDefinition {
         Ok(Some(components))
     }
 
-    pub(super) fn source_value(&self, fields: &BTreeMap<String, Value>) -> Result<Option<Value>> {
+    pub(crate) fn source_value(&self, fields: &BTreeMap<String, Value>) -> Result<Option<Value>> {
         Ok(self.values(fields, true)?.map(|values| {
             if values.len() == 1 {
                 values[0].clone()
@@ -133,6 +133,56 @@ fn remove(postings: &mut imbl::OrdMap<Vec<u8>, imbl::OrdSet<RowId>>, key: &[u8],
 }
 
 impl Database {
+    pub(crate) fn reference_target_index(
+        &self,
+        definition: &ReferenceDefinition,
+    ) -> Result<(&crate::model::Table, &super::IndexDefinition)> {
+        let target = self
+            .schema_tables()
+            .into_iter()
+            .find(|table| table.id == definition.target_table_id)
+            .ok_or_else(|| Error::new("E_STORAGE", "reference target table is missing"))?;
+        let index = self
+            .index_definitions
+            .get(&target.name)
+            .and_then(|indexes| {
+                indexes.values().find(|index| match definition.target {
+                    ReferenceTarget::PrimaryKey => {
+                        index.is_primary_index(target.primary_key.as_deref())
+                    }
+                    ReferenceTarget::UniqueIndex { index_id } => index.id == index_id,
+                })
+            })
+            .ok_or_else(|| Error::new("E_STORAGE", "reference target index is missing"))?;
+        Ok((target, index))
+    }
+
+    pub(crate) fn reference_target_boundary(
+        &self,
+        definition: &ReferenceDefinition,
+        fields: &BTreeMap<String, Value>,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(values) = definition.values(fields, true)? else {
+            return Ok(None);
+        };
+        let (_, index) = self.reference_target_index(definition)?;
+        let components = index.effective_components();
+        let bound = definition
+            .components
+            .iter()
+            .zip(&components)
+            .zip(values)
+            .map(
+                |((component, index_component), value)| crate::ordered_key::Component {
+                    ty: &component.target_type,
+                    value,
+                    descending: index_component.descending,
+                },
+            )
+            .collect::<Vec<_>>();
+        crate::ordered_key::encode_tuple(&self.catalog, &bound).map(Some)
+    }
+
     pub(super) fn validate_source_reference_changes(
         &self,
         source: &dyn crate::row_source::TypedRowSource,
@@ -158,25 +208,7 @@ impl Database {
             if !source_changed && !target_changed {
                 continue;
             }
-            let tables = self.schema_tables();
-            let target = tables
-                .iter()
-                .find(|table| table.id == definition.target_table_id)
-                .ok_or_else(|| Error::new("E_STORAGE", "reference target table is missing"))?;
-            let indexes = self
-                .index_definitions
-                .get(&target.name)
-                .ok_or_else(|| Error::new("E_STORAGE", "reference target index is missing"))?;
-            let index = indexes
-                .values()
-                .find(|index| match definition.target {
-                    ReferenceTarget::PrimaryKey => {
-                        index.is_primary_index(target.primary_key.as_deref())
-                    }
-                    ReferenceTarget::UniqueIndex { index_id } => index.id == index_id,
-                })
-                .ok_or_else(|| Error::new("E_STORAGE", "reference target index is missing"))?;
-            let components = index.effective_components();
+            let (target, index) = self.reference_target_index(definition)?;
             let mut source_keys = BTreeMap::new();
             let mut removed_targets = BTreeSet::new();
             let mut new_targets = BTreeSet::new();
@@ -213,23 +245,9 @@ impl Database {
                     && let Some(row) = &change.after
                     && let Some(key) = definition.key(self, &row.fields, true)?
                 {
-                    let values = definition
-                        .values(&row.fields, true)?
+                    let boundary = self
+                        .reference_target_boundary(definition, &row.fields)?
                         .expect("present source key");
-                    let bound = definition
-                        .components
-                        .iter()
-                        .zip(&components)
-                        .zip(values)
-                        .map(|((component, index_component), value)| {
-                            crate::ordered_key::Component {
-                                ty: &component.target_type,
-                                value,
-                                descending: index_component.descending,
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    let boundary = crate::ordered_key::encode_tuple(&self.catalog, &bound)?;
                     account(&key)?;
                     account(&boundary)?;
                     source_keys.insert(key, boundary);

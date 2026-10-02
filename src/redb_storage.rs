@@ -3720,6 +3720,7 @@ impl RedbStore {
         let mut tables = BTreeMap::<u64, DurableTable>::new();
         let mut definitions = BTreeMap::<u64, (DurableTable, IndexDefinition)>::new();
         let mut by_table = BTreeMap::<u64, Vec<IndexDefinition>>::new();
+        let mut references = BTreeMap::new();
         let catalog_entries = metadata.durable_catalog_entries();
         for entry in &catalog_entries {
             if let DurableCatalogEntry::Table(table) = entry {
@@ -3727,6 +3728,9 @@ impl RedbStore {
             }
         }
         for entry in catalog_entries {
+            if let DurableCatalogEntry::Reference(definition) = &entry {
+                references.insert(definition.id, definition.clone());
+            }
             if let DurableCatalogEntry::Index { table, definition } = entry {
                 let durable_table = tables
                     .get(&definition.table_id)
@@ -3806,6 +3810,60 @@ impl RedbStore {
                         })?;
                 }
             }
+            for reference in references
+                .values()
+                .filter(|reference| reference.table_id == table_id)
+            {
+                let Some(indexed) = reference.source_value(&row.fields)? else {
+                    continue;
+                };
+                let expected = encode_index_key(
+                    metadata,
+                    reference.id,
+                    &indexed,
+                    row_id,
+                    self.committed.layout.index,
+                )?;
+                let physical_expected = physical_generation_key(generation, &expected)?;
+                row_working = row_working.saturating_add(physical_expected.len());
+                profile.point_lookups = profile.point_lookups.saturating_add(1);
+                if indexes
+                    .get(physical_expected.as_slice())
+                    .map_err(|error| storage_error("lookup reference posting", error))?
+                    .is_none()
+                {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "row is missing its reference posting",
+                    ));
+                }
+                expected_index_entries = expected_index_entries
+                    .checked_add(1)
+                    .ok_or_else(|| Error::new("E_STORAGE", "reference cardinality overflow"))?;
+                let (_, target_index) = metadata.reference_target_index(reference)?;
+                let boundary = metadata
+                    .reference_target_boundary(reference, &row.fields)?
+                    .expect("present reference");
+                let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
+                let (lower, upper) = durable_index_bounds(
+                    target_index.id,
+                    reference.components.len() as u8,
+                    &bounds,
+                    self.committed.layout.index,
+                )?;
+                let lower = physical_generation_bound(generation, lower)?;
+                let upper = physical_generation_bound(generation, upper)?;
+                profile.point_lookups = profile.point_lookups.saturating_add(1);
+                let hit = indexes
+                    .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+                    .map_err(|error| storage_error("lookup reference target", error))?
+                    .next()
+                    .transpose()
+                    .map_err(|error| storage_error("read reference target", error))?;
+                if hit.is_none() {
+                    return Err(Error::new("E_STORAGE", "reference target is missing"));
+                }
+            }
             profile.working_peak_bytes = profile.working_peak_bytes.max(row_working);
         }
 
@@ -3823,6 +3881,59 @@ impl RedbStore {
             let index_id = u64::from_be_bytes(key[6..14].try_into().unwrap());
             let component_count = key[14] as usize;
             let row_id = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+            if let Some(reference) = references.get(&index_id) {
+                if component_count != reference.components.len() {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "reference posting component count does not match its definition",
+                    ));
+                }
+                let table = tables
+                    .get(&reference.table_id)
+                    .ok_or_else(|| Error::new("E_STORAGE", "reference source table is missing"))?;
+                let row_key =
+                    physical_generation_key(generation, &encode_row_key(table.id, row_id))?;
+                profile.point_lookups = profile.point_lookups.saturating_add(1);
+                let stored_row = rows
+                    .get(row_key.as_slice())
+                    .map_err(|error| storage_error("lookup reference source row", error))?
+                    .ok_or_else(|| {
+                        Error::new(
+                            "E_STORAGE",
+                            "reference posting points to a missing source row",
+                        )
+                    })?;
+                let row = metadata.decode_source_row(&table.name, row_id, stored_row.value())?;
+                let indexed = reference.source_value(&row.fields)?.ok_or_else(|| {
+                    Error::new("E_STORAGE", "absent optional reference has a posting")
+                })?;
+                let expected = encode_index_key(
+                    metadata,
+                    index_id,
+                    &indexed,
+                    row_id,
+                    self.committed.layout.index,
+                )?;
+                if key != expected.as_slice() {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "reference posting does not match its source row",
+                    ));
+                }
+                previous_unique_prefix = None;
+                profile.index_entries_checked = profile.index_entries_checked.saturating_add(1);
+                profile.index_key_bytes = profile
+                    .index_key_bytes
+                    .saturating_add(u64::try_from(physical_key.len()).unwrap_or(u64::MAX));
+                profile.working_peak_bytes = profile.working_peak_bytes.max(
+                    physical_key
+                        .len()
+                        .saturating_add(stored_row.value().len())
+                        .saturating_add(row_key.len())
+                        .saturating_add(expected.len()),
+                );
+                continue;
+            }
             let (table, definition) = definitions.get(&index_id).ok_or_else(|| {
                 Error::new(
                     "E_STORAGE",
@@ -5860,6 +5971,17 @@ fn generation_scan_bounds(generation: GenerationRef) -> Result<OwnedKeyBounds> {
     }
 }
 
+fn physical_generation_bound(
+    generation: GenerationRef,
+    bound: Bound<Vec<u8>>,
+) -> Result<Bound<Vec<u8>>> {
+    match bound {
+        Bound::Included(key) => Ok(Bound::Included(physical_generation_key(generation, &key)?)),
+        Bound::Excluded(key) => Ok(Bound::Excluded(physical_generation_key(generation, &key)?)),
+        Bound::Unbounded => Ok(Bound::Unbounded),
+    }
+}
+
 fn physical_generation_key(generation: GenerationRef, logical: &[u8]) -> Result<Vec<u8>> {
     match generation {
         GenerationRef::Legacy0 => Ok(logical.to_vec()),
@@ -7413,6 +7535,177 @@ mod tests {
 #[cfg(test)]
 mod reference_codec_tests {
     use super::*;
+
+    #[test]
+    fn bounded_integrity_rejects_missing_extra_and_orphan_reference_postings() {
+        let mut engine = crate::Engine::memory();
+        let response = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: Option<int>}\ntable parents: Parent {key id}\ntable children: Child {key id}\ncreate reference children (parent) references parents (id)\ninsert many parents [{id: 7}, {id: 8}]\ninsert many children [{id: 1, parent: Some(7)}, {id: 2, parent: Some(7)}, {id: 3, parent: None}]");
+        assert!(response.ok, "{}", response.message);
+        let db = engine.database_snapshot().unwrap();
+        let metadata = db.metadata_only().unwrap();
+        let reference = db
+            .durable_catalog_entries()
+            .into_iter()
+            .find_map(|entry| match entry {
+                DurableCatalogEntry::Reference(reference) => Some(reference),
+                _ => None,
+            })
+            .unwrap();
+        let reference_key =
+            encode_index_key(&db, reference.id, &Value::Int(7), 0, MAP_INDEX_KEY_VERSION).unwrap();
+        let original_rows = db
+            .durable_rows_with_codec(MAP_VALUE_CODEC_VERSION)
+            .unwrap()
+            .into_iter()
+            .map(|(table, row, value)| (encode_row_key(table, row), value))
+            .collect::<BTreeMap<_, _>>();
+        let original_indexes = db
+            .durable_secondary_indexes()
+            .unwrap()
+            .into_iter()
+            .map(|(index, value, row)| {
+                encode_index_key(&db, index, &value, row, MAP_INDEX_KEY_VERSION).unwrap()
+            })
+            .collect::<BTreeSet<_>>();
+        for generation in [GenerationRef::Legacy0, GenerationRef::Generated(1)] {
+            for corruption in [
+                "valid",
+                "missing",
+                "wrong_key",
+                "missing_source",
+                "optional_none",
+                "unknown_reference",
+                "orphan",
+                "dangling_target",
+            ] {
+                let mut row_entries = original_rows.clone();
+                let mut index_entries = original_indexes.clone();
+                match corruption {
+                    "missing" => {
+                        index_entries.remove(&reference_key);
+                    }
+                    "wrong_key" => {
+                        index_entries.insert(
+                            encode_index_key(
+                                &db,
+                                reference.id,
+                                &Value::Int(8),
+                                0,
+                                MAP_INDEX_KEY_VERSION,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    "missing_source" => {
+                        index_entries.insert(
+                            encode_index_key(
+                                &db,
+                                reference.id,
+                                &Value::Int(7),
+                                999,
+                                MAP_INDEX_KEY_VERSION,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    "optional_none" => {
+                        index_entries.insert(
+                            encode_index_key(
+                                &db,
+                                reference.id,
+                                &Value::Int(7),
+                                2,
+                                MAP_INDEX_KEY_VERSION,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    "unknown_reference" => {
+                        let mut key = reference_key.clone();
+                        key[6..14].copy_from_slice(&u64::MAX.to_be_bytes());
+                        index_entries.insert(key);
+                    }
+                    "orphan" | "dangling_target" => {
+                        row_entries.remove(&encode_row_key(reference.target_table_id, 0));
+                        if corruption == "orphan" {
+                            let (_, index) = db.reference_target_index(&reference).unwrap();
+                            index_entries.remove(
+                                &encode_index_key(
+                                    &db,
+                                    index.id,
+                                    &Value::Int(7),
+                                    0,
+                                    MAP_INDEX_KEY_VERSION,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+                let path = std::env::temp_dir().join(format!(
+                    "unionid-reference-integrity-{}-{}-{}.redb",
+                    std::process::id(),
+                    corruption,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let (store, _, _, _, _) = RedbStore::open(&path).unwrap();
+                let tx = store.database.begin_write().unwrap();
+                {
+                    let mut rows = tx
+                        .open_table(match generation {
+                            GenerationRef::Legacy0 => ROWS,
+                            _ => GENERATION_ROWS,
+                        })
+                        .unwrap();
+                    for (key, value) in row_entries {
+                        rows.insert(
+                            physical_generation_key(generation, &key)
+                                .unwrap()
+                                .as_slice(),
+                            value.as_slice(),
+                        )
+                        .unwrap();
+                    }
+                    let mut indexes = tx
+                        .open_table(match generation {
+                            GenerationRef::Legacy0 => SECONDARY_INDEX,
+                            _ => GENERATION_INDEX,
+                        })
+                        .unwrap();
+                    for key in index_entries {
+                        indexes
+                            .insert(
+                                physical_generation_key(generation, &key)
+                                    .unwrap()
+                                    .as_slice(),
+                                0_u8,
+                            )
+                            .unwrap();
+                    }
+                }
+                tx.commit().unwrap();
+                let result = store.validate_bounded_integrity_for(&metadata, generation);
+                if corruption == "valid" {
+                    let profile = result.unwrap();
+                    assert!(profile.bounded);
+                    assert_eq!(profile.rows_checked, 5);
+                    assert_eq!(profile.index_entries_checked, original_indexes.len());
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().code,
+                        "E_STORAGE",
+                        "{generation:?}: {corruption}"
+                    );
+                }
+                drop(store);
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn reference_catalog_requires_its_codec_and_preserves_stable_identity() {
