@@ -13,6 +13,15 @@ pub struct IndexComponent {
     pub descending: bool,
 }
 
+/// Source-level reference shape. Binding resolves paths to stable catalog IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceSpec {
+    pub table: String,
+    pub fields: Vec<String>,
+    pub target_table: String,
+    pub target_fields: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Statement {
     Expect {
@@ -32,6 +41,8 @@ pub enum Statement {
         row_type: String,
         key: Option<String>,
     },
+    CreateReference(ReferenceSpec),
+    DropReference(ReferenceSpec),
     CreateIndex {
         table: String,
         components: Vec<IndexComponent>,
@@ -103,6 +114,8 @@ pub enum Statement {
 
 #[derive(Debug, Clone)]
 pub enum SchemaMigration {
+    AddReference(ReferenceSpec),
+    DropReference(ReferenceSpec),
     AddType {
         name: String,
         ty: ScalarType,
@@ -227,6 +240,19 @@ impl Statement {
         )
     }
 
+    pub(crate) fn declares_references(&self) -> bool {
+        match self {
+            Self::CreateReference(_) | Self::DropReference(_) => true,
+            Self::Migration { steps, .. } => steps.iter().any(|step| {
+                matches!(
+                    step,
+                    SchemaMigration::AddReference(_) | SchemaMigration::DropReference(_)
+                )
+            }),
+            _ => false,
+        }
+    }
+
     pub fn changes_schema(&self) -> bool {
         matches!(
             self,
@@ -234,6 +260,8 @@ impl Statement {
                 | Self::CreateTable { .. }
                 | Self::TypedTable { .. }
                 | Self::CreateIndex { .. }
+                | Self::CreateReference(_)
+                | Self::DropReference(_)
                 | Self::Migration { .. }
         )
     }

@@ -1371,14 +1371,24 @@ fn validate_decoded(
         || decoded.header.first_sequence != artifact.first_sequence
         || decoded.header.last_sequence != artifact.last_sequence
         || content_codecs.is_some_and(|expected| {
-            decoded.header.catalog_codec != expected.catalog_codec
+            !catalog_codec_continues(expected.catalog_codec, decoded.header.catalog_codec)
                 || decoded.header.value_codec != expected.value_codec
                 || decoded.header.receipt_codec != expected.receipt_codec
+                || (decoded.header.catalog_codec != expected.catalog_codec
+                    && (expected.value_codec != 3 || expected.receipt_codec != 3))
         })
     {
         return Err(chain_error("archive header does not match the manifest"));
     }
     Ok(())
+}
+
+fn catalog_codec_continues(baseline: u32, segment: u32) -> bool {
+    // A format-11 -> format-13 upgrade is a journaled full catalog rewrite.
+    // Later segments advertise the new catalog reader even when their writes
+    // only touch rows. Preserve the immutable baseline header; authenticated
+    // commit frames and replay_database validate the actual complete catalog.
+    baseline == segment || (baseline == 6 && segment == 7)
 }
 
 fn verify_segment_commits(

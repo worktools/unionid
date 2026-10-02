@@ -17,7 +17,7 @@ impl Database {
 
     pub(crate) fn migrate_table_batch(
         &self,
-        name: &str,
+        _name: &str,
         steps: &[SchemaMigration],
         table_name: &str,
         rows: &[Arc<Row>],
@@ -27,18 +27,31 @@ impl Database {
         } else {
             crate::codec::PRODUCTION_VALUE_CODEC_VERSION
         };
-        let mut encoded = Vec::with_capacity(rows.len());
+        let mut batch = self.metadata_only()?;
+        let mut decoded = Vec::with_capacity(rows.len());
         for row in rows {
-            let (table_id, value) = self.durable_row_with_codec(table_name, row, value_codec)?;
-            encoded.push((table_id, row.id, value));
+            let (_, value) = self.durable_row_with_codec(table_name, row, value_codec)?;
+            decoded.push(batch.decode_source_row(table_name, row.id, &value)?);
         }
-        let mut batch = Self::from_durable(
-            self.durable_meta(),
-            self.durable_catalog_entries(),
-            encoded,
-            self.migration_history.clone(),
-        )?;
-        batch.migrate(name, steps.to_vec())?;
+        decoded.sort_by_key(|row| row.id);
+        if decoded.windows(2).any(|pair| pair[0].id == pair[1].id) {
+            return Err(Error::new(
+                "E_STORAGE",
+                "migration batch contains duplicate row IDs",
+            ));
+        }
+        let Some(DbObject::Table(table)) = batch.objects.get_mut(table_name) else {
+            return Err(Error::new("E_STORAGE", "migration source table is missing"));
+        };
+        table.rows = decoded.into_iter().collect();
+        batch.rebuild_indexes()?;
+        for step in steps {
+            batch.apply_schema_migration(step.clone())?;
+        }
+        // This batch may contain children before any parent batch is built.
+        // Validate identities/types now; Ready validates complete row/posting
+        // existence across the entire unpublished target generation.
+        batch.rebind_migration_batch_references()?;
         batch.advance_schema_revision()?;
         batch.sequence = self
             .sequence
@@ -52,9 +65,12 @@ impl Database {
         name: &str,
         steps: Vec<SchemaMigration>,
     ) -> Result<QueryResponse> {
+        let mut candidate = self.clone();
         for step in steps {
-            self.apply_schema_migration(step)?;
+            candidate.apply_schema_migration(step)?;
         }
+        candidate.rebuild_references()?;
+        *self = candidate;
         Ok(QueryResponse::ok_message(format!(
             "migration '{name}' applied"
         )))
@@ -62,6 +78,8 @@ impl Database {
 
     fn apply_schema_migration(&mut self, step: SchemaMigration) -> Result<()> {
         match step {
+            SchemaMigration::AddReference(spec) => self.add_migration_reference(&spec),
+            SchemaMigration::DropReference(spec) => self.drop_reference(&spec).map(|_| ()),
             SchemaMigration::AddType { name, ty } => {
                 if self.objects.contains_key(&name) {
                     return Err(Error::new(
@@ -159,6 +177,17 @@ impl Database {
     }
 
     fn drop_table(&mut self, name: &str) -> Result<()> {
+        let id = self.table(name)?.id;
+        if self
+            .reference_definitions
+            .values()
+            .any(|reference| reference.table_id == id || reference.target_table_id == id)
+        {
+            return Err(Error::new(
+                "E_MIGRATION",
+                "table is used by a reference; drop the reference first",
+            ));
+        }
         if self.objects.remove(name).is_none() {
             return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
         }
@@ -247,6 +276,7 @@ impl Database {
         let old_catalog = self.catalog.clone();
         let owner_id = self.named_type_id(owner)?;
         let field_id = direct_record_field(&old_catalog, owner, field)?.id;
+        self.ensure_field_not_referenced(field_id)?;
         if let Some((table, shape)) =
             self.index_definitions
                 .iter()
@@ -372,6 +402,7 @@ impl Database {
         let old_catalog = self.catalog.clone();
         let owner_id = self.named_type_id(owner)?;
         let old_column = direct_record_field(&old_catalog, owner, field)?.clone();
+        self.ensure_field_not_referenced(old_column.id)?;
         if let Some((table, shape)) =
             self.index_definitions
                 .iter()
@@ -630,6 +661,10 @@ impl Database {
                 format!("index '{table} {display}' enforces the primary key; drop the key first"),
             ));
         }
+        if let Some(definition) = self.index_definitions.get(table).and_then(|definitions| definitions.get(&shape))
+            && self.reference_definitions.values().any(|reference| matches!(reference.target, ReferenceTarget::UniqueIndex { index_id } if index_id == definition.id)) {
+                return Err(Error::new("E_MIGRATION", "unique index is used by a reference; drop the reference first"));
+        }
         let definitions = self.index_definitions.get_mut(table).ok_or_else(|| {
             Error::new(
                 "E_INDEX",
@@ -696,6 +731,15 @@ impl Database {
     }
 
     fn drop_key(&mut self, table: &str) -> Result<()> {
+        let id = self.table(table)?.id;
+        if self.reference_definitions.values().any(|reference| {
+            reference.target_table_id == id && reference.target == ReferenceTarget::PrimaryKey
+        }) {
+            return Err(Error::new(
+                "E_MIGRATION",
+                "primary key is used by a reference; drop the reference first",
+            ));
+        }
         let Some(DbObject::Table(source)) = self.objects.get_mut(table) else {
             return Err(Error::new("E_TABLE", format!("table '{table}' not found")));
         };
@@ -1503,7 +1547,7 @@ fn migrate_value(
     }
 }
 
-fn field_path_name(catalog: &Catalog, fields: &[Column], ids: &[u64]) -> Option<String> {
+pub(super) fn field_path_name(catalog: &Catalog, fields: &[Column], ids: &[u64]) -> Option<String> {
     let mut columns = fields;
     let mut names = Vec::new();
     for (index, id) in ids.iter().enumerate() {

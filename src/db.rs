@@ -28,8 +28,10 @@ use crate::row_source::{
 
 mod index_predicate;
 mod migration;
+mod reference;
 
 pub use index_predicate::{IndexPredicate, IndexPredicateAtom};
+pub use reference::{ReferenceComponent, ReferenceDefinition, ReferenceMode, ReferenceTarget};
 
 type PostingRows = imbl::Vector<RowId>;
 type IndexPosting = imbl::OrdMap<Vec<u8>, PostingRows>;
@@ -1165,6 +1167,7 @@ pub(crate) struct DurableTable {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
 pub(crate) enum DurableCatalogEntry {
+    Reference(ReferenceDefinition),
     Type(TypeDefinition),
     Table(DurableTable),
     Index {
@@ -1176,6 +1179,7 @@ pub(crate) enum DurableCatalogEntry {
 impl DurableCatalogEntry {
     pub(crate) fn kind_tag(&self) -> u8 {
         match self {
+            Self::Reference(_) => 4,
             Self::Type(_) => 1,
             Self::Table(_) => 2,
             Self::Index { .. } => 3,
@@ -1184,6 +1188,7 @@ impl DurableCatalogEntry {
 
     pub(crate) fn stable_id(&self) -> u64 {
         match self {
+            Self::Reference(definition) => definition.id,
             Self::Type(definition) => definition.id,
             Self::Table(table) => table.id,
             Self::Index { definition, .. } => definition.id,
@@ -1589,6 +1594,10 @@ impl QueryResponse {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Database {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    reference_definitions: BTreeMap<u64, ReferenceDefinition>,
+    #[serde(skip, default)]
+    reference_states: BTreeMap<u64, reference::ReferenceState>,
     objects: BTreeMap<String, DbObject>,
     #[serde(skip, default)]
     indexes: Indexes,
@@ -1609,6 +1618,15 @@ pub struct Database {
 }
 
 impl TypedRowSource for Database {
+    fn reference_source_exists(
+        &self,
+        reference_id: u64,
+        key: &[u8],
+        excluded: &BTreeSet<RowId>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<bool> {
+        self.memory_reference_source_exists(reference_id, key, excluded, control)
+    }
     fn snapshot_identity(&self) -> SourceIdentity {
         SourceIdentity {
             database_instance: *self.cursor_identity.instance_id(),
@@ -1793,7 +1811,7 @@ impl Database {
                 }
             }
         }
-        Ok(())
+        self.record_reference_changes(table, changes)
     }
 
     fn record_index_entry(
@@ -1869,6 +1887,8 @@ impl Database {
                 };
                 self.create_table(table, columns.clone(), Some(def.id), key)
             }
+            Statement::CreateReference(spec) => self.create_reference(&spec),
+            Statement::DropReference(spec) => self.drop_reference(&spec),
             Statement::CreateIndex {
                 table,
                 components,
@@ -2976,6 +2996,9 @@ impl Database {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
+        let row = Arc::new(Row { id, fields });
+        let changes = [RowChange::inserted(row.clone())];
+        let reference_states = self.reference_candidate(name, &changes)?;
         if let Some(indexes) = self.indexes.get_mut(name) {
             for (shape, key) in index_entries {
                 let posting = indexes
@@ -2987,10 +3010,9 @@ impl Database {
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             unreachable!()
         };
-        table.rows.push_back(Arc::new(Row { id, fields }));
+        table.rows.push_back(row);
         table.next_row_id = next_row_id;
-        let inserted = table.rows.back().expect("inserted row is present").clone();
-        let changes = [RowChange::inserted(inserted)];
+        self.reference_states = reference_states;
         self.record_row_changes(name, &changes);
         self.record_index_changes(name, &definitions, &changes)?;
         self.record_table_watermark(name, id, next_row_id);
@@ -3253,7 +3275,7 @@ impl Database {
                 }
             }
         }
-        Ok(())
+        self.validate_source_reference_changes(source, table_name, changes, control)
     }
 
     fn bind_update_operation(
@@ -3387,6 +3409,7 @@ impl Database {
                 append_mutation_change(&mut changes, RowChange::deleted(before), change_bytes)?;
             execution.observe_working_bytes(change_bytes);
         }
+        self.validate_source_reference_changes(source, &target.from, &changes, control)?;
         let returned_fields = changes
             .iter()
             .filter_map(|change| change.before.as_ref().map(|row| &row.fields))
@@ -3954,10 +3977,12 @@ impl Database {
             }
         }
 
+        let reference_states = self.reference_candidate(name, changes)?;
         let Some(DbObject::Table(table)) = self.objects.get_mut(name) else {
             return Err(Error::new("E_TABLE", format!("table '{name}' not found")));
         };
         table.rows = rows;
+        self.reference_states = reference_states;
         if !definitions.is_empty() {
             self.indexes.insert(name.to_owned(), indexes);
         }
@@ -4296,6 +4321,8 @@ impl Database {
             | Statement::CreateTable { .. }
             | Statement::TypedTable { .. }
             | Statement::CreateIndex { .. }
+            | Statement::CreateReference(_)
+            | Statement::DropReference(_)
             | Statement::Migration { .. }
             | Statement::Expect { .. } => None,
         };
@@ -6811,6 +6838,8 @@ impl Database {
             types: Vec<&'a crate::model::TypeDefinition>,
             tables: Vec<SchemaTable<'a>>,
             indexes: Vec<SchemaIndex>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            references: Vec<&'a ReferenceDefinition>,
         }
 
         #[derive(Serialize)]
@@ -6888,7 +6917,9 @@ impl Database {
             })
             .collect();
         let manifest = SchemaManifest {
-            format_version: if indexes.iter().any(|index| match index {
+            format_version: if self.has_references() {
+                3
+            } else if indexes.iter().any(|index| match index {
                 SchemaIndex::Legacy { predicate, .. }
                 | SchemaIndex::Composite { predicate, .. } => predicate.is_some(),
             }) {
@@ -6899,6 +6930,7 @@ impl Database {
             types,
             tables,
             indexes,
+            references: self.reference_definitions.values().collect(),
         };
         let encoded = serde_json::to_vec(&manifest)
             .expect("serializing the schema manifest to memory cannot fail");
@@ -7086,6 +7118,12 @@ impl Database {
                         })
                 }),
         );
+        entries.extend(
+            self.reference_definitions
+                .values()
+                .cloned()
+                .map(DurableCatalogEntry::Reference),
+        );
         entries.sort_by_key(DurableCatalogEntry::stable_id);
         entries
     }
@@ -7262,6 +7300,18 @@ impl Database {
                 }
             }
         }
+        for definition in self.reference_definitions.values() {
+            let table = self
+                .schema_tables()
+                .into_iter()
+                .find(|table| table.id == definition.table_id)
+                .ok_or_else(|| Error::new("E_STORAGE", "reference source table is missing"))?;
+            for row in &table.rows {
+                if let Some(value) = definition.source_value(&row.fields)? {
+                    entries.push((definition.id, value, row.id));
+                }
+            }
+        }
         entries.sort_by_key(|(index_id, _, row_id)| (*index_id, *row_id));
         Ok(entries)
     }
@@ -7291,6 +7341,44 @@ impl Database {
         row_id: RowId,
         map_capable: bool,
     ) -> Result<Vec<u8>> {
+        // References and indexes share the catalog's global stable-ID allocator.
+        // A reference posting maps a projected target key to a source RowId.
+        if let Some(reference) = self.reference_definitions.get(&index_id) {
+            if !map_capable {
+                return Err(Error::new(
+                    "E_STORAGE_UPGRADE_REQUIRED",
+                    "reference postings require index key codec 4",
+                ));
+            }
+            let values = if reference.components.len() == 1 {
+                vec![value]
+            } else {
+                let Value::Tuple(values) = value else {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "composite reference value is not a tuple",
+                    ));
+                };
+                if values.len() != reference.components.len() {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "composite reference tuple has the wrong arity",
+                    ));
+                }
+                values.iter().collect()
+            };
+            let bound = reference
+                .components
+                .iter()
+                .zip(values)
+                .map(|(component, value)| crate::ordered_key::Component {
+                    ty: &component.target_type,
+                    value,
+                    descending: false,
+                })
+                .collect::<Vec<_>>();
+            return crate::ordered_key::encode_complete_v4(&self.catalog, index_id, &bound, row_id);
+        }
         let (table_name, definition) = self
             .index_definitions
             .iter()
@@ -7423,6 +7511,7 @@ impl Database {
             table.rows = imbl::Vector::new();
         }
         metadata.rebuild_indexes()?;
+        metadata.reference_states.clear();
         metadata.pending_writes = LogicalWriteSet::default();
         Ok(metadata)
     }
@@ -7457,6 +7546,7 @@ impl Database {
             table.rows = rows;
         }
         materialized.rebuild_indexes()?;
+        materialized.rebuild_references()?;
         Ok(materialized)
     }
 
@@ -7500,6 +7590,7 @@ impl Database {
         let mut objects = BTreeMap::new();
         let mut index_definitions: BTreeMap<String, BTreeMap<String, IndexDefinition>> =
             BTreeMap::new();
+        let mut reference_definitions = BTreeMap::new();
         let mut max_id = 0;
         for entry in entries {
             let id = entry.stable_id();
@@ -7511,6 +7602,9 @@ impl Database {
             }
             max_id = max_id.max(id);
             match entry {
+                DurableCatalogEntry::Reference(definition) => {
+                    reference_definitions.insert(definition.id, definition);
+                }
                 DurableCatalogEntry::Type(definition) => {
                     if catalog
                         .types
@@ -7654,6 +7748,8 @@ impl Database {
             }
         }
         let mut database = Self {
+            reference_definitions,
+            reference_states: BTreeMap::new(),
             objects,
             indexes: imbl::OrdMap::new(),
             index_definitions,
@@ -7678,6 +7774,23 @@ impl Database {
             ));
         }
         database.rebuild_indexes()?;
+        let encoded_references = serde_json::to_vec(&database.reference_definitions)
+            .map_err(|error| Error::new("E_STORAGE", error.to_string()))?;
+        database.rebuild_references().map_err(|error| {
+            Error::new(
+                "E_STORAGE",
+                format!("invalid durable reference: {}", error.message),
+            )
+        })?;
+        if serde_json::to_vec(&database.reference_definitions)
+            .map_err(|error| Error::new("E_STORAGE", error.to_string()))?
+            != encoded_references
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "durable reference binding is not canonical",
+            ));
+        }
         if database.schema_info().hash != meta.schema_hash {
             return Err(Error::new(
                 "E_STORAGE",
@@ -7770,6 +7883,20 @@ impl Database {
             );
             lines.extend(source.lines().map(str::to_owned));
         }
+        let references = self
+            .schema_references()
+            .into_iter()
+            .map(|(_, spec)| {
+                format!(
+                    "create reference {} ({}) references {} ({})",
+                    spec.table,
+                    spec.fields.join(", "),
+                    spec.target_table,
+                    spec.target_fields.join(", ")
+                )
+            })
+            .collect::<Vec<_>>();
+        lines.extend(references);
         lines.join("\n")
     }
 }

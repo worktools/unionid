@@ -65,6 +65,21 @@ pub(crate) trait TypedRowSource: Send + Sync {
 
     fn has_index(&self, table: &str, shape: &str) -> bool;
 
+    /// Whether the reverse posting contains an unchanged source row. Excluded
+    /// RowIds belong to the current statement's complete candidate changes.
+    fn reference_source_exists(
+        &self,
+        _reference_id: u64,
+        _key: &[u8],
+        _excluded: &BTreeSet<RowId>,
+        _control: Option<&ExecutionControl>,
+    ) -> Result<bool> {
+        Err(crate::error::Error::new(
+            "E_STORAGE",
+            "row source does not support reference postings",
+        ))
+    }
+
     fn estimate_index_span(
         &self,
         table: &str,
@@ -118,6 +133,16 @@ impl<'a> CandidateRowSource<'a> {
 }
 
 impl TypedRowSource for CandidateRowSource<'_> {
+    fn reference_source_exists(
+        &self,
+        reference_id: u64,
+        key: &[u8],
+        excluded: &BTreeSet<RowId>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<bool> {
+        self.candidate
+            .reference_source_exists(reference_id, key, excluded, control)
+    }
     fn external_scan_kind(&self) -> Option<&'static str> {
         self.candidate.external_scan_kind()
     }

@@ -94,3 +94,18 @@ query claim_task {
     expect affected == 1
 }
 ```
+
+## 引用约束 / Typed references (v0.14 development)
+
+schema 文件中的 `create reference` 会进入宏绑定的 schema identity。生成的 Rust 字段仍使用普通 struct、enum 和 `Option<T>`；例如 `Option<AccountId>` 可以通过整行参数 `$session` 传给内联 insert：
+
+```text
+query add_session {
+    insert sessions $session
+    returning {id, account}
+}
+```
+
+宏在编译期检查类型，目标行是否存在则由运行时数据库在原子写入中检查：不存在的目标返回 `E_CONSTRAINT`，被引用的目标不能删除或修改 key。直接 Optional 引用中的 `None` 不要求目标行；删除引用属于 schema drift，旧绑定返回 `E_SCHEMA_CHANGED`，需要重新生成。ADT 目标可使用全表 unique index；主键仍只接受当前支持的 int/text/uuid 类型。完整内存与 redb 重启示例见 `query-macro/tests/references.rs` 和配套 schema；本能力尚在 v0.14 开发中。
+
+Reference declarations participate in the macro's schema identity. Generated fields remain ordinary Rust structs, enums and `Option<T>`; pass an entire typed row with `$session` as above. Compile-time checks validate types, while atomic runtime writes enforce target existence and restrict deletion/key changes. Direct Optional references skip `None`. Removing the relationship invalidates existing bindings with `E_SCHEMA_CHANGED`. Use an unconditional unique index for ADT targets; primary keys retain their existing int/text/uuid restriction. The reference macro tests cover memory, redb reopen, missing targets and restricted deletion. This capability is still in development for v0.14.

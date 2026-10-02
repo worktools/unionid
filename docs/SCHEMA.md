@@ -2,7 +2,7 @@
 
 状态：v0.2 契约，2026-09-10。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据、[版本化 ADT value codec](CODEC.md)、[显式 schema migration 与版本化 runner](MIGRATIONS.md)，以及[声明式 schema diff](SCHEMA-DIFF.md)。
 
-面向生成客户端的 machine description、无损运行时校验和四方向演进报告见 [RFC 0014](rfc/0014-portable-adt-contract.md)；[RFC 0022](rfc/0022-partial-unique-indexes.md) 起 description 为 version 2，索引可携带 canonical partial predicate，不含 predicate 的 version 1 仍可读取。`schema describe` 中的 ID 使用字符串并明确限定为单个数据库 catalog lineage；它们不能作为跨数据库全局身份。
+面向生成客户端的 machine description、无损运行时校验和四方向演进报告见 [RFC 0014](rfc/0014-portable-adt-contract.md)；v0.14 开发中的 description version 3 增加引用的稳定 ID、源/目标路径、目标 key、Exact/Optional 匹配与 restrict 行为；versions 1/2 仍可读取，但不允许携带引用约束。索引继续保留 canonical partial predicate。`schema describe` 中的 ID 使用字符串并明确限定为单个数据库 catalog lineage；它们不能作为跨数据库全局身份。
 
 存储格式版本、语言／协议版本与应用 schema revision 是三个独立概念：升级 unionid 二进制不自动修改应用 schema，读取目标 schema 文件也不会隐式迁移已有数据。
 

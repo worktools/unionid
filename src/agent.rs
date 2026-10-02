@@ -384,6 +384,8 @@ pub fn manifest() -> AgentManifest {
             ],
             codes: ERROR_CODES,
             constraint_kinds: [
+                ConstraintKind::ReferenceMissing,
+                ConstraintKind::ReferenceRestricted,
                 ConstraintKind::Unique,
                 ConstraintKind::PartialUnique,
                 ConstraintKind::PrimaryKey,
@@ -392,6 +394,8 @@ pub fn manifest() -> AgentManifest {
             .into_iter()
             .map(|kind| AgentConstraintKind {
                 kind: match kind {
+                    ConstraintKind::ReferenceMissing => "reference_missing",
+                    ConstraintKind::ReferenceRestricted => "reference_restricted",
                     ConstraintKind::Unique => "unique",
                     ConstraintKind::PartialUnique => "partial_unique",
                     ConstraintKind::PrimaryKey => "primary_key",
@@ -443,12 +447,16 @@ pub fn render_markdown() -> String {
         "\n## Error contract\n\nFields: `code`, `message`, `span`, `constraint`, `hint`, `statement_index`.\n\n",
     );
     for kind in [
+        ConstraintKind::ReferenceMissing,
+        ConstraintKind::ReferenceRestricted,
         ConstraintKind::Unique,
         ConstraintKind::PartialUnique,
         ConstraintKind::PrimaryKey,
         ConstraintKind::PrimaryKeyMissing,
     ] {
         let name = match kind {
+            ConstraintKind::ReferenceMissing => "reference_missing",
+            ConstraintKind::ReferenceRestricted => "reference_restricted",
             ConstraintKind::Unique => "unique",
             ConstraintKind::PartialUnique => "partial_unique",
             ConstraintKind::PrimaryKey => "primary_key",

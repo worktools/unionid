@@ -601,3 +601,245 @@ fn catalog_backed_validation_rejects_noncanonical_or_unsupported_predicates() {
         "E_CONTRACT_SCHEMA"
     );
 }
+
+const REFERENCE_SCHEMA: &str = r#"
+struct Parent {id: int, tenant: text, code: int, optional: Option<int>}
+struct Child {id: int, parent: Option<int>, tenant: text, code: int, optional: Option<int>}
+table parents: Parent {key id}
+table children: Child {key id}
+create unique index parents (tenant, -code)
+create unique index parents (optional)
+create reference children (parent) references parents (id)
+create reference children (tenant, code) references parents (tenant, code)
+create reference children (optional) references parents (optional)
+"#;
+
+#[test]
+fn portable_references_round_trip_typed_paths_and_pinned_keys() {
+    use unionid::portable::{ReferenceKeyDescription, ReferenceMatchMode};
+    let contract = unionid::portable::PortableContract::from_source(REFERENCE_SCHEMA).unwrap();
+    let description = contract.description();
+    assert_eq!(description.version, 3);
+    contract.validate_description(description).unwrap();
+    let child = description
+        .tables
+        .iter()
+        .find(|table| table.name == "children")
+        .unwrap();
+    assert_eq!(child.references.len(), 3);
+    let optional = &child.references[0];
+    assert_eq!(optional.target, ReferenceKeyDescription::PrimaryKey);
+    assert_eq!(optional.components[0].mode, ReferenceMatchMode::Optional);
+    let composite = &child.references[1];
+    assert!(matches!(
+        composite.target,
+        ReferenceKeyDescription::UniqueIndex { .. }
+    ));
+    assert_eq!(composite.components.len(), 2);
+    assert!(
+        composite
+            .components
+            .iter()
+            .all(|component| component.mode == ReferenceMatchMode::Exact)
+    );
+    assert_eq!(
+        child.references[2].components[0].mode,
+        ReferenceMatchMode::Exact
+    );
+    let decoded = serde_json::from_str(&serde_json::to_string(description).unwrap()).unwrap();
+    contract.validate_description(&decoded).unwrap();
+    assert_eq!(&decoded, description);
+}
+
+#[test]
+fn portable_references_reject_forged_versions_paths_modes_and_keys() {
+    use unionid::portable::{ReferenceKeyDescription, ReferenceMatchMode};
+    let contract = unionid::portable::PortableContract::from_source(REFERENCE_SCHEMA).unwrap();
+    let baseline = contract.description();
+    let child = baseline
+        .tables
+        .iter()
+        .position(|table| table.name == "children")
+        .unwrap();
+    let parent = baseline
+        .tables
+        .iter()
+        .position(|table| table.name == "parents")
+        .unwrap();
+    for scenario in 0..12 {
+        let mut forged = baseline.clone();
+        match scenario {
+            0 => forged.version = 2,
+            1 => forged.tables[child].references[0].target_table_id = "999999".into(),
+            2 => forged.tables[child].references[0].target_table = "wrong".into(),
+            3 => {
+                forged.tables[child].references[0].components[0]
+                    .source
+                    .field = "wrong".into()
+            }
+            4 => forged.tables[child].references[0].components[0].mode = ReferenceMatchMode::Exact,
+            5 => {
+                forged.tables[child].references[2].components[0].mode = ReferenceMatchMode::Optional
+            }
+            6 => forged.tables[child].references[1].target = ReferenceKeyDescription::PrimaryKey,
+            7 => forged.tables[child].references[1].components.reverse(),
+            8 => forged.tables[child].references[0].id = forged.tables[parent].id.clone(),
+            9 => {
+                let mut duplicate = forged.tables[child].references[0].clone();
+                duplicate.id = "999999".into();
+                forged.tables[child].references.push(duplicate);
+            }
+            10 | 11 => {
+                let ReferenceKeyDescription::UniqueIndex { index_id } =
+                    forged.tables[child].references[1].target.clone()
+                else {
+                    panic!()
+                };
+                let index = forged.tables[parent]
+                    .indexes
+                    .iter_mut()
+                    .find(|index| index.id == index_id)
+                    .unwrap();
+                if scenario == 10 {
+                    index.unique = false;
+                } else {
+                    index.predicate = Some("code > 0".into());
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(forged.validate().is_err(), "accepted scenario {scenario}");
+    }
+    // Stripping references is valid standalone older metadata, but cannot
+    // conceal constraints from validation against a live reference catalog.
+    let mut stripped = baseline.clone();
+    stripped.version = 2;
+    stripped.tables[child].references.clear();
+    stripped.validate().unwrap();
+    assert_eq!(
+        contract.validate_description(&stripped).unwrap_err().code,
+        "E_CONTRACT_SCHEMA"
+    );
+    let ordinary =
+        unionid::portable::describe("struct Row {id: int}\ntable rows: Row {key id}").unwrap();
+    for version in [1, 2] {
+        let mut legacy = ordinary.clone();
+        legacy.version = version;
+        legacy.validate().unwrap();
+    }
+}
+
+#[test]
+fn portable_reference_evolution_reports_write_restrictions_and_removed_guarantees() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(REFERENCE_SCHEMA).ok);
+    let before = engine.portable_contract().unwrap().into_description();
+    assert!(
+        engine
+            .execute("drop reference children (parent) references parents (id)")
+            .ok
+    );
+    let after = engine.portable_contract().unwrap().into_description();
+    let removal = before.compare_same_catalog(&after).unwrap();
+    assert!(
+        removal
+            .query
+            .findings
+            .iter()
+            .any(|finding| finding.code == "reference_removed")
+    );
+    assert_eq!(removal.client_write.level, CompatibilityLevel::Compatible);
+    let addition = after.compare_same_catalog(&before).unwrap();
+    assert!(
+        addition
+            .client_write
+            .findings
+            .iter()
+            .any(|finding| finding.code == "reference_added")
+    );
+    assert_eq!(
+        addition.client_write.level,
+        CompatibilityLevel::Incompatible
+    );
+}
+
+#[test]
+fn cli_reference_descriptions_match_file_and_read_only_live_catalog() {
+    let dir = TempDir::new();
+    let schema = dir.0.join("schema.unid");
+    let db = dir.0.join("references.redb");
+    std::fs::write(&schema, REFERENCE_SCHEMA).unwrap();
+    {
+        let mut engine = Engine::open_redb(&db).unwrap();
+        engine.upgrade_storage(12).unwrap();
+        let result = engine.execute(REFERENCE_SCHEMA);
+        assert!(result.ok, "{}", result.message);
+        assert!(
+            engine
+                .introspection()
+                .schema_source
+                .contains("create reference children")
+        );
+    }
+    let before = std::fs::read(&db).unwrap();
+    let mut descriptions = Vec::new();
+    for (flag, path) in [("--file", &schema), ("--db", &db)] {
+        let result = Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args(["schema", "describe", flag, path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let description: unionid::SchemaDescription =
+            serde_json::from_slice(&result.stdout).unwrap();
+        description.validate().unwrap();
+        descriptions.push(description);
+    }
+    assert_eq!(descriptions[0].tables, descriptions[1].tables);
+    assert_eq!(std::fs::read(db).unwrap(), before);
+}
+
+#[test]
+fn portable_reference_validation_preserves_nominal_identity() {
+    let contract = unionid::portable::PortableContract::from_source(
+        r#"
+type ParentId = int
+type OtherId = int
+struct Parent {id: ParentId}
+struct Child {id: int, parent: Option<ParentId>}
+table parents: Parent {key id}
+table children: Child {key id}
+create reference children (parent) references parents (id)
+    "#,
+    )
+    .unwrap();
+    let mut forged = contract.description().clone();
+    let other = forged
+        .types
+        .iter()
+        .find(|ty| ty.name == "OtherId")
+        .unwrap()
+        .clone();
+    let child = forged
+        .types
+        .iter_mut()
+        .find(|ty| ty.name == "Child")
+        .unwrap();
+    let TypeShape::Record { fields } = &mut child.shape else {
+        panic!()
+    };
+    fields
+        .iter_mut()
+        .find(|field| field.name == "parent")
+        .unwrap()
+        .shape = TypeShape::Option {
+        item: Box::new(TypeShape::Ref {
+            type_id: other.id,
+            name: other.name,
+        }),
+    };
+    assert_eq!(forged.validate().unwrap_err().code, "E_CONTRACT_SCHEMA");
+}

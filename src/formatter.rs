@@ -115,6 +115,24 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             }
             line(output, depth, "}");
         }
+        Statement::CreateReference(spec) | Statement::DropReference(spec) => {
+            let action = if matches!(value, Statement::CreateReference(_)) {
+                "create"
+            } else {
+                "drop"
+            };
+            line(
+                output,
+                depth,
+                &format!(
+                    "{action} reference {} ({}) references {} ({})",
+                    spec.table,
+                    spec.fields.join(", "),
+                    spec.target_table,
+                    spec.target_fields.join(", "),
+                ),
+            );
+        }
         Statement::CreateIndex {
             table,
             components,
@@ -825,6 +843,24 @@ fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
 
 fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
     match step {
+        SchemaMigration::AddReference(spec) | SchemaMigration::DropReference(spec) => {
+            let action = if matches!(step, SchemaMigration::AddReference(_)) {
+                "add"
+            } else {
+                "drop"
+            };
+            line(
+                output,
+                depth,
+                &format!(
+                    "{action} reference {} ({}) references {} ({})",
+                    spec.table,
+                    spec.fields.join(", "),
+                    spec.target_table,
+                    spec.target_fields.join(", "),
+                ),
+            );
+        }
         SchemaMigration::AddType { name, ty } => {
             type_definition(output, "add type", name, ty, depth)
         }

@@ -4,6 +4,8 @@
 //! to one database lineage and may exceed lossless JSON-number ranges. Runtime
 //! validation delegates to the same catalog coercion used by query binding.
 
+mod references;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -13,11 +15,11 @@ use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, EnumType, ScalarType};
 use crate::protocol::WireValue;
 
-pub const DESCRIPTION_VERSION: u32 = 2;
+pub const DESCRIPTION_VERSION: u32 = 3;
 
 /// Version 1 descriptions predate partial unique index predicates and remain
-/// readable; version 2 adds an optional normalized predicate per index.
-const SUPPORTED_DESCRIPTION_VERSIONS: &[u32] = &[1, DESCRIPTION_VERSION];
+/// readable; version 2 adds predicates, and version 3 adds typed references.
+const SUPPORTED_DESCRIPTION_VERSIONS: &[u32] = &[1, 2, DESCRIPTION_VERSION];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaDescription {
@@ -154,6 +156,65 @@ pub struct TableDescription {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_key: Option<KeyDescription>,
     pub indexes: Vec<IndexDescription>,
+    /// Source-owned relationships. Requires description v3 when nonempty;
+    /// v1/v2 metadata without references remains readable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<ReferenceDescription>,
+}
+
+/// A typed, restrict-only relationship owned by the source table.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReferenceDescription {
+    /// Stable relationship ID within this database's catalog lineage.
+    pub id: String,
+    /// Stable target table identity, encoded as a decimal string.
+    pub target_table_id: String,
+    /// Current target table name; renames preserve target_table_id.
+    pub target_table: String,
+    /// Pinned primary key or unconditional unique index; no partial targets.
+    pub target: ReferenceKeyDescription,
+    /// Ordered source/target field pairs, preserving nominal ADT identity.
+    pub components: Vec<ReferenceComponentDescription>,
+    /// Referenced targets cannot be deleted while sources remain.
+    pub on_delete: ReferenceAction,
+    /// Referenced key values cannot change while sources remain.
+    pub on_update: ReferenceAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+/// The unique target identity pinned when a relationship is declared.
+pub enum ReferenceKeyDescription {
+    PrimaryKey,
+    UniqueIndex { index_id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReferenceComponentDescription {
+    /// Source path by both current name and stable field IDs.
+    pub source: KeyDescription,
+    /// Corresponding target path, in the unique key's component order.
+    pub target: KeyDescription,
+    /// Exact value matching or one direct Option layer of optionality.
+    pub mode: ReferenceMatchMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+/// How a source component produces a target key value.
+pub enum ReferenceMatchMode {
+    /// Identical types, including `Option<T> -> Option<T>`; `None` is a real key.
+    Exact,
+    /// Direct `Option<T> -> T`; any `None` skips the entire composite relationship.
+    Optional,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+/// Supported behavior for mutations of a referenced target.
+pub enum ReferenceAction {
+    /// Reject conflicting deletion/key changes; never cascade or rewrite sources.
+    Restrict,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -357,6 +418,7 @@ impl SchemaDescription {
                 }
             }
         }
+        references::validate(self, &type_definitions, &mut ids)?;
         Ok(())
     }
 
@@ -526,6 +588,15 @@ fn validate_field_path(
     types: &BTreeMap<u64, (&str, &TypeShape)>,
     owner: &str,
 ) -> Result<String> {
+    resolve_field_path(root, path, types, owner).map(|(name, _)| name)
+}
+
+fn resolve_field_path<'a>(
+    root: &'a TypeShape,
+    path: &[String],
+    types: &BTreeMap<u64, (&str, &'a TypeShape)>,
+    owner: &str,
+) -> Result<(String, &'a TypeShape)> {
     if path.is_empty() {
         return Err(Error::new(
             "E_CONTRACT_SCHEMA",
@@ -569,7 +640,7 @@ fn validate_field_path(
         names.push(field.name.as_str());
         shape = &field.shape;
     }
-    Ok(names.join("."))
+    Ok((names.join("."), shape))
 }
 
 fn validate_shape(
@@ -1003,6 +1074,7 @@ fn compare_tables(
             );
         }
         compare_unique_constraints(&table.indexes, &next.indexes, &path, report);
+        references::compare(&table.references, &next.references, &path, report);
     }
 }
 
@@ -1071,6 +1143,39 @@ impl PortableContract {
     /// `SchemaDescription::validate` alone has no types to bind against.
     pub fn validate_description(&self, description: &SchemaDescription) -> Result<()> {
         description.validate()?;
+        for table in self.description.tables.iter().chain(&description.tables) {
+            let declared = description.tables.iter().find(|item| item.id == table.id);
+            let live = self
+                .description
+                .tables
+                .iter()
+                .find(|item| item.id == table.id);
+            let declared = declared
+                .map(|item| {
+                    item.references
+                        .iter()
+                        .map(|reference| (&reference.id, reference))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let live = live
+                .map(|item| {
+                    item.references
+                        .iter()
+                        .map(|reference| (&reference.id, reference))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            if declared != live {
+                return Err(Error::new(
+                    "E_CONTRACT_SCHEMA",
+                    format!(
+                        "table {} reference metadata does not match the live catalog",
+                        table.name
+                    ),
+                ));
+            }
+        }
         for table in &description.tables {
             let Some(schema) = self.tables.get(&table.name) else {
                 return Err(Error::new(
@@ -1219,6 +1324,7 @@ fn describe_database(database: &Database) -> Result<SchemaDescription> {
         definitions.sort_by_key(|definition| definition.id.parse::<u64>().unwrap_or(u64::MAX));
     }
 
+    let mut references = references::describe(database);
     let mut tables = database.schema_tables();
     tables.sort_by_key(|table| table.id);
     let tables = tables
@@ -1249,6 +1355,7 @@ fn describe_database(database: &Database) -> Result<SchemaDescription> {
                     })
                     .transpose()?,
                 indexes: indexes.remove(&table.id).unwrap_or_default(),
+                references: references.remove(&table.id).unwrap_or_default(),
             })
         })
         .collect::<Result<Vec<_>>>()?;

@@ -51,11 +51,14 @@ pub(crate) const MAP_STORAGE_FORMAT_VERSION: u32 = 8;
 pub(crate) const MAP_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 9;
 pub(crate) const PARTIAL_STORAGE_FORMAT_VERSION: u32 = 10;
 pub(crate) const PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 11;
+pub(crate) const REFERENCE_STORAGE_FORMAT_VERSION: u32 = 12;
+pub(crate) const REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 13;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
 const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
 const MAP_CATALOG_CODEC_VERSION: u16 = 5;
 const PARTIAL_CATALOG_CODEC_VERSION: u16 = 6;
+const REFERENCE_CATALOG_CODEC_VERSION: u16 = 7;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
 const SCALAR_INDEX_KEY_VERSION: u16 = 2;
@@ -361,6 +364,36 @@ struct ReverseIndexGroup {
 }
 
 impl TypedRowSource for RedbReadSource {
+    fn reference_source_exists(
+        &self,
+        reference_id: u64,
+        key: &[u8],
+        excluded: &BTreeSet<u64>,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<bool> {
+        check_source_control(control)?;
+        let component_count = self.metadata.reference_component_count(reference_id)?;
+        let bounds = (Bound::Included(key.to_vec()), Bound::Included(key.to_vec()));
+        let (lower, upper) =
+            durable_index_bounds(reference_id, component_count, &bounds, self.index_version)?;
+        let mut cursor = RedbIndexCursor {
+            source: self,
+            index_id: reference_id,
+            component_count,
+            lower: self.physical_bound(lower)?,
+            upper: self.physical_bound(upper)?,
+            reverse: false,
+            reverse_group: None,
+            remaining: None,
+            done: false,
+        };
+        while let Some(hits) = cursor.next_batch(control)? {
+            if hits.iter().any(|hit| !excluded.contains(&hit.row_id)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     fn snapshot_identity(&self) -> SourceIdentity {
         self.identity.clone()
     }
@@ -1243,6 +1276,29 @@ impl StorageLayout {
         }
     }
 
+    const fn references() -> Self {
+        Self {
+            format: REFERENCE_STORAGE_FORMAT_VERSION,
+            catalog: REFERENCE_CATALOG_CODEC_VERSION,
+            ..Self::partial()
+        }
+    }
+
+    const fn references_journal() -> Self {
+        Self {
+            format: REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION,
+            journal: JOURNAL_CODEC_VERSION,
+            ..Self::references()
+        }
+    }
+
+    const fn supports_references(self) -> bool {
+        matches!(
+            self.format,
+            REFERENCE_STORAGE_FORMAT_VERSION | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
+        )
+    }
+
     const fn scalar() -> Self {
         Self {
             format: SCALAR_STORAGE_FORMAT_VERSION,
@@ -1257,7 +1313,11 @@ impl StorageLayout {
     }
 
     const fn for_format(format: u32) -> Self {
-        if format == PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION {
+        if format == REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION {
+            Self::references_journal()
+        } else if format == REFERENCE_STORAGE_FORMAT_VERSION {
+            Self::references()
+        } else if format == PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION {
             Self::partial_journal()
         } else if format == PARTIAL_STORAGE_FORMAT_VERSION {
             Self::partial()
@@ -1298,13 +1358,18 @@ impl StorageLayout {
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         )
     }
 
     const fn supports_partial_indexes(self) -> bool {
         matches!(
             self.format,
-            PARTIAL_STORAGE_FORMAT_VERSION | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+            PARTIAL_STORAGE_FORMAT_VERSION
+                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         )
     }
 
@@ -1319,11 +1384,15 @@ impl StorageLayout {
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         )
     }
 
     const fn backup_format(self) -> u32 {
-        if self.supports_partial_indexes() {
+        if self.supports_references() {
+            crate::backup::REFERENCE_BACKUP_FORMAT_VERSION
+        } else if self.supports_partial_indexes() {
             crate::backup::PARTIAL_BACKUP_FORMAT_VERSION
         } else if self.supports_maps() {
             crate::backup::MAP_BACKUP_FORMAT_VERSION
@@ -1716,6 +1785,10 @@ impl RedbStore {
 
     pub(crate) fn supports_maps(&self) -> bool {
         self.committed.layout.supports_maps()
+    }
+
+    pub(crate) fn supports_references(&self) -> bool {
+        self.committed.layout.supports_references()
     }
 
     pub(crate) fn supports_partial_indexes(&self) -> bool {
@@ -2139,7 +2212,9 @@ impl RedbStore {
         self.invalidate_compaction_proof()
             .map_err(CommitFailure::Definite)?;
         let previous_layout = self.committed.layout;
-        let layout = if previous_layout.supports_partial_indexes() {
+        let layout = if previous_layout.supports_references() {
+            StorageLayout::references_journal()
+        } else if previous_layout.supports_partial_indexes() {
             StorageLayout::partial_journal()
         } else if previous_layout.supports_maps() {
             StorageLayout::map_journal()
@@ -2337,7 +2412,12 @@ impl RedbStore {
         decode_maintenance_manifest(value.value())
     }
 
-    fn generation_summary(&self, generation: GenerationRef) -> Result<GenerationSummary> {
+    fn generation_summary(
+        &self,
+        generation: GenerationRef,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<GenerationSummary> {
+        check_source_control(control)?;
         let transaction = self
             .database
             .begin_read()
@@ -2373,6 +2453,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
             .map_err(|error| storage_error("scan generation catalog", error))?
         {
+            check_source_control(control)?;
             let (key, value) =
                 entry.map_err(|error| storage_error("read generation catalog", error))?;
             let key = logical_generation_key(generation, key.value())?.to_vec();
@@ -2388,6 +2469,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
             .map_err(|error| storage_error("scan generation rows", error))?
         {
+            check_source_control(control)?;
             let (key, value) =
                 entry.map_err(|error| storage_error("read generation row", error))?;
             let key = logical_generation_key(generation, key.value())?.to_vec();
@@ -2403,6 +2485,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
             .map_err(|error| storage_error("scan generation indexes", error))?
         {
+            check_source_control(control)?;
             let (key, _) = entry.map_err(|error| storage_error("read generation index", error))?;
             let key = logical_generation_key(generation, key.value())?;
             logical_bytes =
@@ -2427,7 +2510,7 @@ impl RedbStore {
         if !self.committed.layout.supports_generation_envelope() {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "recoverable migrations require storage format 6, 7, 8, 9, 10, or 11",
+                "recoverable migrations require storage format 6 through 13",
             )));
         }
         if source.durable_meta() != self.committed.meta {
@@ -2763,11 +2846,15 @@ impl RedbStore {
         Ok(MaintenanceInfo::from_manifest(&manifest))
     }
 
+    /// Validate an unpublished generation before atomically marking it Ready.
+    /// Cancellation retains the last Building checkpoint for a later retry.
     pub(crate) fn mark_maintenance_ready(
         &mut self,
         file: &MigrationFile,
         target: &Database,
+        control: Option<&crate::control::ExecutionControl>,
     ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        check_source_control(control).map_err(CommitFailure::Definite)?;
         let current = self
             .maintenance_info()
             .map_err(CommitFailure::Definite)?
@@ -2791,10 +2878,21 @@ impl RedbStore {
             )));
         }
         let target_generation = GenerationRef::Generated(current.target_generation);
-        self.validate_bounded_integrity_for(target, target_generation)
-            .map_err(CommitFailure::Definite)?;
+        self.validate_bounded_integrity_with_reference_error(
+            target,
+            target_generation,
+            || {
+                Error::new(
+                    "E_CONSTRAINT",
+                    "reference target is missing in the migration candidate",
+                )
+                .constraint(crate::error::ConstraintKind::ReferenceMissing)
+            },
+            control,
+        )
+        .map_err(CommitFailure::Definite)?;
         let summary = self
-            .generation_summary(target_generation)
+            .generation_summary(target_generation, control)
             .map_err(CommitFailure::Definite)?;
         let manifest = self
             .read_manifest(current.target_generation)
@@ -2810,6 +2908,7 @@ impl RedbStore {
                 "target generation counters or rolling digest do not match its manifest",
             )));
         }
+        check_source_control(control).map_err(CommitFailure::Definite)?;
         let mut transaction = self
             .database
             .begin_write()
@@ -2854,6 +2953,7 @@ impl RedbStore {
                 .insert(current.target_generation, encoded.as_slice())
                 .map_err(|error| CommitFailure::definite("mark maintenance ready", error))?;
         }
+        check_source_control(control).map_err(CommitFailure::Definite)?;
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit maintenance validation", error))?;
@@ -3245,6 +3345,8 @@ impl RedbStore {
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
@@ -3294,6 +3396,16 @@ impl RedbStore {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
                 "storage format 11 requires format 9",
+            )));
+        }
+        if (target == REFERENCE_STORAGE_FORMAT_VERSION
+            && previous.format != PARTIAL_STORAGE_FORMAT_VERSION)
+            || (target == REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
+                && previous.format != PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION)
+        {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                "storage format 12/13 requires format 10/11 respectively",
             )));
         }
         if target == PRODUCTION_STORAGE_FORMAT_VERSION {
@@ -3665,6 +3777,22 @@ impl RedbStore {
         metadata: &Database,
         generation: GenerationRef,
     ) -> Result<StorageCheckProfile> {
+        self.validate_bounded_integrity_with_reference_error(
+            metadata,
+            generation,
+            || Error::new("E_STORAGE", "reference target is missing"),
+            None,
+        )
+    }
+
+    fn validate_bounded_integrity_with_reference_error(
+        &self,
+        metadata: &Database,
+        generation: GenerationRef,
+        missing_target_error: fn() -> Error,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<StorageCheckProfile> {
+        check_source_control(control)?;
         let transaction = self
             .database
             .begin_read()
@@ -3689,13 +3817,19 @@ impl RedbStore {
         let mut tables = BTreeMap::<u64, DurableTable>::new();
         let mut definitions = BTreeMap::<u64, (DurableTable, IndexDefinition)>::new();
         let mut by_table = BTreeMap::<u64, Vec<IndexDefinition>>::new();
+        let mut references = BTreeMap::new();
         let catalog_entries = metadata.durable_catalog_entries();
         for entry in &catalog_entries {
+            check_source_control(control)?;
             if let DurableCatalogEntry::Table(table) = entry {
                 tables.insert(table.id, table.clone());
             }
         }
         for entry in catalog_entries {
+            check_source_control(control)?;
+            if let DurableCatalogEntry::Reference(definition) = &entry {
+                references.insert(definition.id, definition.clone());
+            }
             if let DurableCatalogEntry::Index { table, definition } = entry {
                 let durable_table = tables
                     .get(&definition.table_id)
@@ -3722,6 +3856,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&row_lower), borrowed_bound(&row_upper)))
             .map_err(|error| storage_error("iterate rows for integrity check", error))?
         {
+            check_source_control(control)?;
             let (key, value) =
                 entry.map_err(|error| storage_error("read row for integrity check", error))?;
             let logical_key = logical_generation_key(generation, key.value())?;
@@ -3740,6 +3875,7 @@ impl RedbStore {
             let mut row_working = value.value().len();
             if let Some(table_indexes) = by_table.get(&table_id) {
                 for definition in table_indexes {
+                    check_source_control(control)?;
                     let Some(indexed) =
                         metadata.source_index_value_if_included(&table.name, definition, &row)?
                     else {
@@ -3775,6 +3911,61 @@ impl RedbStore {
                         })?;
                 }
             }
+            for reference in references
+                .values()
+                .filter(|reference| reference.table_id == table_id)
+            {
+                check_source_control(control)?;
+                let Some(indexed) = reference.source_value(&row.fields)? else {
+                    continue;
+                };
+                let expected = encode_index_key(
+                    metadata,
+                    reference.id,
+                    &indexed,
+                    row_id,
+                    self.committed.layout.index,
+                )?;
+                let physical_expected = physical_generation_key(generation, &expected)?;
+                row_working = row_working.saturating_add(physical_expected.len());
+                profile.point_lookups = profile.point_lookups.saturating_add(1);
+                if indexes
+                    .get(physical_expected.as_slice())
+                    .map_err(|error| storage_error("lookup reference posting", error))?
+                    .is_none()
+                {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "row is missing its reference posting",
+                    ));
+                }
+                expected_index_entries = expected_index_entries
+                    .checked_add(1)
+                    .ok_or_else(|| Error::new("E_STORAGE", "reference cardinality overflow"))?;
+                let (_, target_index) = metadata.reference_target_index(reference)?;
+                let boundary = metadata
+                    .reference_target_boundary(reference, &row.fields)?
+                    .expect("present reference");
+                let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
+                let (lower, upper) = durable_index_bounds(
+                    target_index.id,
+                    reference.components.len() as u8,
+                    &bounds,
+                    self.committed.layout.index,
+                )?;
+                let lower = physical_generation_bound(generation, lower)?;
+                let upper = physical_generation_bound(generation, upper)?;
+                profile.point_lookups = profile.point_lookups.saturating_add(1);
+                let hit = indexes
+                    .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+                    .map_err(|error| storage_error("lookup reference target", error))?
+                    .next()
+                    .transpose()
+                    .map_err(|error| storage_error("read reference target", error))?;
+                if hit.is_none() {
+                    return Err(missing_target_error());
+                }
+            }
             profile.working_peak_bytes = profile.working_peak_bytes.max(row_working);
         }
 
@@ -3784,6 +3975,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&index_lower), borrowed_bound(&index_upper)))
             .map_err(|error| storage_error("iterate indexes for integrity check", error))?
         {
+            check_source_control(control)?;
             let (key, _) =
                 entry.map_err(|error| storage_error("read index for integrity check", error))?;
             let physical_key = key.value();
@@ -3792,6 +3984,59 @@ impl RedbStore {
             let index_id = u64::from_be_bytes(key[6..14].try_into().unwrap());
             let component_count = key[14] as usize;
             let row_id = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+            if let Some(reference) = references.get(&index_id) {
+                if component_count != reference.components.len() {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "reference posting component count does not match its definition",
+                    ));
+                }
+                let table = tables
+                    .get(&reference.table_id)
+                    .ok_or_else(|| Error::new("E_STORAGE", "reference source table is missing"))?;
+                let row_key =
+                    physical_generation_key(generation, &encode_row_key(table.id, row_id))?;
+                profile.point_lookups = profile.point_lookups.saturating_add(1);
+                let stored_row = rows
+                    .get(row_key.as_slice())
+                    .map_err(|error| storage_error("lookup reference source row", error))?
+                    .ok_or_else(|| {
+                        Error::new(
+                            "E_STORAGE",
+                            "reference posting points to a missing source row",
+                        )
+                    })?;
+                let row = metadata.decode_source_row(&table.name, row_id, stored_row.value())?;
+                let indexed = reference.source_value(&row.fields)?.ok_or_else(|| {
+                    Error::new("E_STORAGE", "absent optional reference has a posting")
+                })?;
+                let expected = encode_index_key(
+                    metadata,
+                    index_id,
+                    &indexed,
+                    row_id,
+                    self.committed.layout.index,
+                )?;
+                if key != expected.as_slice() {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "reference posting does not match its source row",
+                    ));
+                }
+                previous_unique_prefix = None;
+                profile.index_entries_checked = profile.index_entries_checked.saturating_add(1);
+                profile.index_key_bytes = profile
+                    .index_key_bytes
+                    .saturating_add(u64::try_from(physical_key.len()).unwrap_or(u64::MAX));
+                profile.working_peak_bytes = profile.working_peak_bytes.max(
+                    physical_key
+                        .len()
+                        .saturating_add(stored_row.value().len())
+                        .saturating_add(row_key.len())
+                        .saturating_add(expected.len()),
+                );
+                continue;
+            }
             let (table, definition) = definitions.get(&index_id).ok_or_else(|| {
                 Error::new(
                     "E_STORAGE",
@@ -3908,10 +4153,12 @@ impl RedbStore {
                 | MAP_JOURNAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_STORAGE_FORMAT_VERSION
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+                | REFERENCE_STORAGE_FORMAT_VERSION
+                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
         ) {
             return Err(Error::new(
                 "E_STORAGE",
-                "bounded reads require storage format 5, 6, 7, 8, 9, 10, or 11",
+                "bounded reads require storage format 5 through 13",
             ));
         }
         validate_generation_state(&transaction, &meta, layout, generation)?;
@@ -5205,6 +5452,8 @@ fn read_meta(
             | MAP_JOURNAL_STORAGE_FORMAT_VERSION
             | PARTIAL_STORAGE_FORMAT_VERSION
             | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
+            | REFERENCE_STORAGE_FORMAT_VERSION
+            | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
     ) {
         return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
     }
@@ -5218,6 +5467,7 @@ fn read_meta(
             | PRODUCTION_CATALOG_CODEC_VERSION
             | MAP_CATALOG_CODEC_VERSION
             | PARTIAL_CATALOG_CODEC_VERSION
+            | REFERENCE_CATALOG_CODEC_VERSION
     ) || (format_version >= SCALAR_STORAGE_FORMAT_VERSION && catalog_version != expected.catalog)
     {
         return Err(Error::new(
@@ -5829,6 +6079,17 @@ fn generation_scan_bounds(generation: GenerationRef) -> Result<OwnedKeyBounds> {
     }
 }
 
+fn physical_generation_bound(
+    generation: GenerationRef,
+    bound: Bound<Vec<u8>>,
+) -> Result<Bound<Vec<u8>>> {
+    match bound {
+        Bound::Included(key) => Ok(Bound::Included(physical_generation_key(generation, &key)?)),
+        Bound::Excluded(key) => Ok(Bound::Excluded(physical_generation_key(generation, &key)?)),
+        Bound::Unbounded => Ok(Bound::Unbounded),
+    }
+}
+
 fn physical_generation_key(generation: GenerationRef, logical: &[u8]) -> Result<Vec<u8>> {
     match generation {
         GenerationRef::Legacy0 => Ok(logical.to_vec()),
@@ -6386,10 +6647,19 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
             | PRODUCTION_CATALOG_CODEC_VERSION
             | MAP_CATALOG_CODEC_VERSION
             | PARTIAL_CATALOG_CODEC_VERSION
+            | REFERENCE_CATALOG_CODEC_VERSION
     ) {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported catalog codec version {version}"),
+        ));
+    }
+    if matches!(entry, DurableCatalogEntry::Reference(_))
+        && version < REFERENCE_CATALOG_CODEC_VERSION
+    {
+        return Err(Error::new(
+            "E_STORAGE_UPGRADE_REQUIRED",
+            "typed references require catalog codec 7",
         ));
     }
     let mut value = Vec::from(CATALOG_MAGIC.as_slice());
@@ -6478,7 +6748,9 @@ pub(crate) fn decode_catalog_entry(
             version,
             LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION
         );
-    if !supported_legacy_entry && version != expected_version {
+    if !(LEGACY_CATALOG_CODEC_VERSION..=REFERENCE_CATALOG_CODEC_VERSION).contains(&version)
+        || (!supported_legacy_entry && version != expected_version)
+    {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported catalog codec version {version}"),
@@ -6486,6 +6758,14 @@ pub(crate) fn decode_catalog_entry(
     }
     let entry: DurableCatalogEntry = serde_json::from_slice(&value[6..])
         .map_err(|error| Error::new("E_STORAGE", format!("decode catalog entry: {error}")))?;
+    if matches!(entry, DurableCatalogEntry::Reference(_))
+        && version < REFERENCE_CATALOG_CODEC_VERSION
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "reference entry requires catalog codec 7",
+        ));
+    }
     let id = u64::from_be_bytes(key[1..].try_into().unwrap());
     if key[0] != entry.kind_tag() || id != entry.stable_id() {
         return Err(Error::new(
@@ -7357,5 +7637,342 @@ mod tests {
                 crate::scalars::Decimal::new(1, 6, 2).unwrap()
             ))
         );
+    }
+}
+
+#[cfg(test)]
+mod reference_codec_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_integrity_rejects_missing_extra_and_orphan_reference_postings() {
+        let mut engine = crate::Engine::memory();
+        let response = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: Option<int>}\ntable parents: Parent {key id}\ntable children: Child {key id}\ncreate reference children (parent) references parents (id)\ninsert many parents [{id: 7}, {id: 8}]\ninsert many children [{id: 1, parent: Some(7)}, {id: 2, parent: Some(7)}, {id: 3, parent: None}]");
+        assert!(response.ok, "{}", response.message);
+        let db = engine.database_snapshot().unwrap();
+        let metadata = db.metadata_only().unwrap();
+        let reference = db
+            .durable_catalog_entries()
+            .into_iter()
+            .find_map(|entry| match entry {
+                DurableCatalogEntry::Reference(reference) => Some(reference),
+                _ => None,
+            })
+            .unwrap();
+        let reference_key =
+            encode_index_key(&db, reference.id, &Value::Int(7), 0, MAP_INDEX_KEY_VERSION).unwrap();
+        let original_rows = db
+            .durable_rows_with_codec(MAP_VALUE_CODEC_VERSION)
+            .unwrap()
+            .into_iter()
+            .map(|(table, row, value)| (encode_row_key(table, row), value))
+            .collect::<BTreeMap<_, _>>();
+        let original_indexes = db
+            .durable_secondary_indexes()
+            .unwrap()
+            .into_iter()
+            .map(|(index, value, row)| {
+                encode_index_key(&db, index, &value, row, MAP_INDEX_KEY_VERSION).unwrap()
+            })
+            .collect::<BTreeSet<_>>();
+        for generation in [GenerationRef::Legacy0, GenerationRef::Generated(1)] {
+            for corruption in [
+                "valid",
+                "missing",
+                "wrong_key",
+                "missing_source",
+                "optional_none",
+                "unknown_reference",
+                "orphan",
+                "dangling_target",
+            ] {
+                let mut row_entries = original_rows.clone();
+                let mut index_entries = original_indexes.clone();
+                match corruption {
+                    "missing" => {
+                        index_entries.remove(&reference_key);
+                    }
+                    "wrong_key" => {
+                        index_entries.insert(
+                            encode_index_key(
+                                &db,
+                                reference.id,
+                                &Value::Int(8),
+                                0,
+                                MAP_INDEX_KEY_VERSION,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    "missing_source" => {
+                        index_entries.insert(
+                            encode_index_key(
+                                &db,
+                                reference.id,
+                                &Value::Int(7),
+                                999,
+                                MAP_INDEX_KEY_VERSION,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    "optional_none" => {
+                        index_entries.insert(
+                            encode_index_key(
+                                &db,
+                                reference.id,
+                                &Value::Int(7),
+                                2,
+                                MAP_INDEX_KEY_VERSION,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    "unknown_reference" => {
+                        let mut key = reference_key.clone();
+                        key[6..14].copy_from_slice(&u64::MAX.to_be_bytes());
+                        index_entries.insert(key);
+                    }
+                    "orphan" | "dangling_target" => {
+                        row_entries.remove(&encode_row_key(reference.target_table_id, 0));
+                        if corruption == "orphan" {
+                            let (_, index) = db.reference_target_index(&reference).unwrap();
+                            index_entries.remove(
+                                &encode_index_key(
+                                    &db,
+                                    index.id,
+                                    &Value::Int(7),
+                                    0,
+                                    MAP_INDEX_KEY_VERSION,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+                let path = std::env::temp_dir().join(format!(
+                    "unionid-reference-integrity-{}-{}-{}.redb",
+                    std::process::id(),
+                    corruption,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                let (store, _, _, _, _) = RedbStore::open(&path).unwrap();
+                let tx = store.database.begin_write().unwrap();
+                {
+                    let mut rows = tx
+                        .open_table(match generation {
+                            GenerationRef::Legacy0 => ROWS,
+                            _ => GENERATION_ROWS,
+                        })
+                        .unwrap();
+                    for (key, value) in row_entries {
+                        rows.insert(
+                            physical_generation_key(generation, &key)
+                                .unwrap()
+                                .as_slice(),
+                            value.as_slice(),
+                        )
+                        .unwrap();
+                    }
+                    let mut indexes = tx
+                        .open_table(match generation {
+                            GenerationRef::Legacy0 => SECONDARY_INDEX,
+                            _ => GENERATION_INDEX,
+                        })
+                        .unwrap();
+                    for key in index_entries {
+                        indexes
+                            .insert(
+                                physical_generation_key(generation, &key)
+                                    .unwrap()
+                                    .as_slice(),
+                                0_u8,
+                            )
+                            .unwrap();
+                    }
+                }
+                tx.commit().unwrap();
+                let result = store.validate_bounded_integrity_for(&metadata, generation);
+                if corruption == "valid" {
+                    let profile = result.unwrap();
+                    assert!(profile.bounded);
+                    assert_eq!(profile.rows_checked, 5);
+                    assert_eq!(profile.index_entries_checked, original_indexes.len());
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().code,
+                        "E_STORAGE",
+                        "{generation:?}: {corruption}"
+                    );
+                }
+                drop(store);
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn reference_readiness_control_preserves_building_and_can_resume() {
+        use crate::control::ExecutionControl;
+        use std::sync::{Arc, atomic::AtomicBool};
+        let path = std::env::temp_dir().join(format!(
+            "unionid-reference-ready-control-{}-{}.redb",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = {
+            let mut engine = crate::Engine::open_redb(&path).unwrap();
+            engine.upgrade_storage(12).unwrap();
+            let response = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: Option<int>}\ntable parents: Parent {key id}\ntable children: Child {key id}\ncreate reference children (parent) references parents (id)\ninsert parents {id: 7}\ninsert children {id: 1, parent: Some(7)}");
+            assert!(response.ok, "{}", response.message);
+            engine.database_snapshot().unwrap()
+        };
+        let file =
+            MigrationFile::parse("migration enabled\n  add field Child.enabled bool = true\n")
+                .unwrap();
+        let target = source.migration_target(&file.id, &file.steps).unwrap();
+        let (mut store, _, _, _, _) = RedbStore::open(&path).unwrap();
+        let (_, row_source) = store.committed_view(&source).unwrap();
+        store.start_maintenance(&source, &target, &file).unwrap();
+        let mut tables = source.schema_tables();
+        tables.sort_by_key(|table| table.id);
+        for table in tables {
+            let name = &table.name;
+            let mut cursor = row_source.scan_rows(name).unwrap();
+            let mut observation = ExecutionObservation::default();
+            while let Some(batch) = cursor.next_batch(None, &mut observation).unwrap() {
+                let transformed = source
+                    .migrate_table_batch(&file.id, &file.steps, name, &batch.rows)
+                    .unwrap();
+                let DurableCatalogEntry::Table(table) =
+                    source.durable_table_catalog_entry(name).unwrap()
+                else {
+                    unreachable!()
+                };
+                store
+                    .append_maintenance_batch(
+                        &file,
+                        &transformed,
+                        (table.id, batch.rows.last().unwrap().id),
+                        batch.rows.len(),
+                    )
+                    .unwrap();
+            }
+        }
+        drop(row_source);
+        let before = store.maintenance_info().unwrap().unwrap();
+        assert_eq!(before.state, MaintenanceState::Building);
+        assert_eq!(before.source_rows_seen, 2);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        let controls = [
+            (ExecutionControl::deadline(Instant::now()), "E_TIMEOUT"),
+            (
+                ExecutionControl::cancellable(deadline, Arc::new(AtomicBool::new(true)), None),
+                "E_CANCELLED",
+            ),
+            (
+                ExecutionControl::cancellable(
+                    deadline,
+                    Arc::new(AtomicBool::new(false)),
+                    Some(Arc::new(AtomicBool::new(true))),
+                ),
+                "E_SHUTDOWN",
+            ),
+        ];
+        for (control, code) in controls {
+            let error = store
+                .mark_maintenance_ready(&file, &target, Some(&control))
+                .unwrap_err()
+                .into_error();
+            assert_eq!(error.code, code);
+            // Exercise the underlying scans independently of the Ready entry gate.
+            assert_eq!(
+                store
+                    .validate_bounded_integrity_with_reference_error(
+                        &target,
+                        GenerationRef::Generated(before.target_generation),
+                        || Error::new("E_STORAGE", "missing target"),
+                        Some(&control)
+                    )
+                    .unwrap_err()
+                    .code,
+                code
+            );
+            assert_eq!(
+                store
+                    .generation_summary(
+                        GenerationRef::Generated(before.target_generation),
+                        Some(&control)
+                    )
+                    .unwrap_err()
+                    .code,
+                code
+            );
+            let after = store.maintenance_info().unwrap().unwrap();
+            assert_eq!(after.state, before.state);
+            assert_eq!(after.checkpoint, before.checkpoint);
+            assert_eq!(after.source_rows_seen, before.source_rows_seen);
+            assert_eq!(store.committed.meta.sequence, source.sequence);
+        }
+        drop(store);
+        let (mut reopened, loaded, _, _, _) = RedbStore::open(&path).unwrap();
+        assert_eq!(loaded.schema_info(), source.schema_info());
+        assert_eq!(
+            reopened.maintenance_info().unwrap().unwrap().state,
+            MaintenanceState::Building
+        );
+        let ready = reopened
+            .mark_maintenance_ready(&file, &target, None)
+            .unwrap();
+        assert_eq!(ready.state, MaintenanceState::Ready);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reference_catalog_requires_its_codec_and_preserves_stable_identity() {
+        let mut engine = crate::Engine::memory();
+        let response = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: int}\ntable parents: Parent {key id}\ntable children: Child {key id}\ncreate reference children (parent) references parents (id)");
+        assert!(response.ok, "{}", response.message);
+        let database = engine.database_snapshot().unwrap();
+        let entry = database
+            .durable_catalog_entries()
+            .into_iter()
+            .find(|entry| matches!(entry, DurableCatalogEntry::Reference(_)))
+            .unwrap();
+        let key = encode_catalog_key(entry.kind_tag(), entry.stable_id());
+        assert_eq!(
+            encode_catalog_entry(&entry, PARTIAL_CATALOG_CODEC_VERSION)
+                .unwrap_err()
+                .code,
+            "E_STORAGE_UPGRADE_REQUIRED"
+        );
+        let encoded = encode_catalog_entry(&entry, REFERENCE_CATALOG_CODEC_VERSION).unwrap();
+        let decoded =
+            decode_catalog_entry(&key, &encoded, REFERENCE_CATALOG_CODEC_VERSION).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&entry).unwrap()
+        );
+        for version in [
+            PARTIAL_CATALOG_CODEC_VERSION,
+            REFERENCE_CATALOG_CODEC_VERSION + 1,
+        ] {
+            let mut forged = encoded.clone();
+            forged[4..6].copy_from_slice(&version.to_be_bytes());
+            assert_eq!(
+                decode_catalog_entry(&key, &forged, version)
+                    .unwrap_err()
+                    .code,
+                "E_STORAGE"
+            );
+        }
     }
 }
