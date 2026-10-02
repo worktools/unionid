@@ -191,10 +191,9 @@ impl Database {
             input_rows,
             updated_fields,
             returning_schema,
-            reference_checks: crate::query_contract::reference_checks_from(
-                self.reference_descriptions(),
-                mutation,
-            ),
+            // Preparation needs only the bound shape; render reference
+            // metadata once when producing a response or static description.
+            reference_checks: Vec::new(),
         })
     }
 
@@ -204,7 +203,9 @@ impl Database {
         mut mutation: Statement,
         control: Option<&ExecutionControl>,
     ) -> Result<QueryResponse> {
-        let plan = self.bind_mutation_explain(&mut mutation, control)?;
+        let mut plan = self.bind_mutation_explain(&mut mutation, control)?;
+        plan.reference_checks =
+            crate::query_contract::reference_checks_from(self.reference_descriptions(), &mutation);
         let mut response = match mutation {
             Statement::Update { target, .. } | Statement::Delete { target, .. } => {
                 let mut response = self.explain_from(source, target)?;

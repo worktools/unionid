@@ -186,6 +186,9 @@ fn describe_prepared(engine: &Engine, prepared: &PreparedQuery) -> Result<QueryD
 }
 
 fn reference_checks(engine: &Engine, statement: &Statement) -> Vec<QueryReferenceCheck> {
+    if !crate::script::is_dml(statement) && !matches!(statement, Statement::ExplainMutation(_)) {
+        return Vec::new();
+    }
     reference_checks_from(engine.reference_descriptions(), statement)
 }
 
