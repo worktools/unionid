@@ -231,6 +231,17 @@ with E_DECIMAL_TYPE. Precision/scaling overflow returns E_DECIMAL_RANGE, without
 rounding or partial mutations. Use this with decimal_mul/div for mixed int/decimal
 arithmetic. Decimal output requires protocol v2; v1 rejects unsupported output
 types before mutation. Explain binds the full target type without evaluating it.
+`to_text value` explicitly formats primitive or named scalars as unquoted text;
+reject enum/record/tuple/Option/list/map (project or match first). Text is unchanged;
+int/bool use decimal/true-false; float is concise and round-trippable with negative
+zero normalized; uuid uses lowercase hyphens, date YYYY-MM-DD, timestamp UTC/Z,
+duration the largest exactly divisible unit, decimal its declared scale, bytes
+lowercase hex. No source tags or @ prefix. Example: `concat "item-" (to_text id)`.
+Input needs a static type: use `let show = (value: int) -> to_text value` for
+prepared `show $id`; bare `to_text $unknown` does not infer a type. Hex expansion
+over 16 MiB returns E_LIMIT before allocation and rolls back the whole request;
+full response budgets still apply. Text output supports protocols 1/2, but native
+parameters require v2. Query/update/migration using/explain/macros share the rule.
 
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,

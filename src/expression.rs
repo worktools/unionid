@@ -381,6 +381,23 @@ pub(crate) fn bind_scalar(
         }
         ScalarExpression::Call {
             name, arguments, ..
+        } if name == "to_text" => {
+            let [argument] = arguments.as_mut_slice() else {
+                return Err(Error::new("E_TYPE", "to_text expects 1 argument"));
+            };
+            let input =
+                infer_scalar(catalog, scope, argument, reference_kind)?.ok_or_else(|| {
+                    Error::new(
+                        "E_TYPE",
+                        "cannot infer to_text input; use a typed field or typed local function",
+                    )
+                })?;
+            require_text_convertible(catalog, &input)?;
+            bind_scalar(catalog, scope, argument, Some(&input), reference_kind)?;
+            ScalarType::Text
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
@@ -604,6 +621,17 @@ pub(crate) fn infer_scalar(
                 return Err(Error::new("E_TYPE", format!("{name} expects a text key")));
             }
             Ok(Some(map_scalar_result(name, value_ty.as_ref().clone())?))
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
+        } if name == "to_text" => {
+            let [argument] = arguments.as_slice() else {
+                return Err(Error::new("E_TYPE", "to_text expects 1 argument"));
+            };
+            if let Some(input) = infer_scalar(catalog, scope, argument, reference_kind)? {
+                require_text_convertible(catalog, &input)?;
+            }
+            Ok(Some(ScalarType::Text))
         }
         ScalarExpression::Call {
             name, arguments, ..
@@ -922,6 +950,7 @@ pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
                 | "int_to_float"
                 | "float_to_int"
                 | "int_to_decimal"
+                | "to_text"
                 | "uuid_parse"
                 | "bytes_parse_hex"
                 | "date_parse"
@@ -989,7 +1018,7 @@ fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
         "int_to_float" => Some(ScalarType::Float),
         "float_to_int" => Some(ScalarType::Int),
         "starts_with" | "ends_with" | "contains_text" => Some(ScalarType::Bool),
-        "lower" | "upper" | "trim" | "concat" | "substring" => Some(ScalarType::Text),
+        "lower" | "upper" | "trim" | "concat" | "substring" | "to_text" => Some(ScalarType::Text),
         "uuid_parse" => Some(ScalarType::Uuid),
         "bytes_parse_hex" => Some(ScalarType::Bytes),
         "date_parse" => Some(ScalarType::Date),
@@ -997,6 +1026,66 @@ fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
         "duration_parse" => Some(ScalarType::Duration),
         _ => None,
     }
+}
+
+fn require_text_convertible(catalog: &Catalog, ty: &ScalarType) -> Result<()> {
+    match catalog.underlying(ty)? {
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes => Ok(()),
+        _ => Err(Error::new(
+            "E_TYPE",
+            "to_text expects a scalar; project or match compound ADTs explicitly",
+        )),
+    }
+}
+
+fn scalar_to_text(value: &Value) -> Result<String> {
+    let value = value.unwrapped();
+    let length = match value {
+        Value::Text(text) => Some(text.len()),
+        Value::Bytes(bytes) => bytes.as_slice().len().checked_mul(2),
+        _ => None,
+    };
+    let mut result = String::new();
+    if matches!(value, Value::Text(_) | Value::Bytes(_)) {
+        let length = length
+            .filter(|length| *length <= crate::codec::MAX_VALUE_BYTES)
+            .ok_or_else(|| Error::new("E_LIMIT", "to_text result exceeds 16 MiB"))?;
+        result
+            .try_reserve_exact(length)
+            .map_err(|_| Error::new("E_LIMIT", "to_text allocation failed"))?;
+    }
+    use std::fmt::Write;
+    match value {
+        Value::Text(text) => {
+            result.push_str(text);
+            Ok(())
+        }
+        Value::Int(value) => write!(result, "{value}"),
+        Value::Bool(value) => write!(result, "{value}"),
+        Value::Float(value) if value.is_finite() => {
+            let value = if *value == 0.0 { 0.0 } else { *value };
+            write!(result, "{value:?}")
+        }
+        Value::Float(_) => return Err(Error::new("E_ARITH", "to_text requires a finite float")),
+        Value::Uuid(value) => write!(result, "{value}"),
+        Value::Date(value) => write!(result, "{value}"),
+        Value::Timestamp(value) => write!(result, "{value}"),
+        Value::Duration(value) => write!(result, "{value}"),
+        Value::Decimal(value) => write!(result, "{value}"),
+        Value::Bytes(value) => write!(result, "{value}"),
+        _ => return Err(Error::new("E_TYPE", "to_text expects a scalar")),
+    }
+    .map_err(|_| Error::new("E_LIMIT", "to_text formatting failed"))?;
+    Ok(result)
 }
 
 fn builtin_scalar_input_type(name: &str, position: usize) -> ScalarType {
@@ -1649,6 +1738,11 @@ fn evaluate_scalar<'expression, 'values>(
             let Some(argument) = evaluate_scalar(catalog, argument, values, budget)? else {
                 return Ok(None);
             };
+            if name == "to_text" {
+                return Ok(Some(Evaluated::Owned(Value::Text(scalar_to_text(
+                    argument.as_value(),
+                )?))));
+            }
             if name == "float_to_int" {
                 let Value::Float(value) = argument.as_value().unwrapped() else {
                     return Err(Error::new("E_TYPE", "float_to_int expects float"));

@@ -408,6 +408,23 @@ select {id, total}
 
 `int_to_decimal value P S` takes int and returns Decimal<P, S>, preserving numeric units and exactly padding the scale: 12 at P=8/S=2 becomes 12.00, never 0.12. P/S must be integer literals satisfying 1 <= P <= 38 and 0 <= S <= P. Binding fixes the full result type; dynamic/invalid targets return E_DECIMAL_TYPE. Precision or scaling overflow returns E_DECIMAL_RANGE without rounding, and failed mutations/migrations roll back the whole request. In the example qty is int and price is decimal. Integers representing minor currency units require explicit division after conversion. Query, prepared, migration using, formatter and explain share this contract. Decimal output requires protocol v2; v1 rejects unsupported result types before mutation. This remains an unreleased v0.15 capability.
 
+## 标量文本转换 / Scalar text conversion (v0.15 development)
+
+`to_text value` 显式转换 int/float/bool/text/uuid/date/timestamp/duration/decimal/bytes（包括命名标量）为 text。它不添加引号、类型标签或 `@`；不是 ADT 的源码序列化。text 原样保留，int 为十进制，bool 为 true/false；有限 float 使用可往返的简洁表示（如 1.0、5e-324），负零归一为 0.0。UUID 为小写连字符形式，date 为 YYYY-MM-DD，timestamp 为 UTC 且以 Z 结尾，duration 使用可精确整除的最大单位，decimal 保留 scale，bytes 为小写 hex。
+
+```text
+from items
+derive label = concat "item-" (to_text id)
+derive price_text = to_text price
+select {label, price_text}
+```
+
+enum/record/tuple/Option/list/map 返回 `E_TYPE`；应先投影或 match，再转换标量，不隐式展开或把 None 变为空串。输入须有静态类型。prepared 参数可经 typed 局部函数声明，例如 `let show = (value: int) -> to_text value` 后调用 `show $id`；单独 `to_text $unknown` 不猜测类型。
+
+bytes 转 hex 会翻倍。结果 UTF-8 超过 16 MiB 时，在分配前返回 `E_LIMIT`，整请求旧状态保留；完整 codec/transport 预算仍适用。query、prepared、update、migration using、formatter/explain 和 Rust 内联宏共用此契约。text 输出可用 protocol v1/v2，但 native 参数仍要求 v2。上述能力尚未发布。
+
+`to_text value` explicitly converts primitive and named scalars to unquoted text without type tags or an @ prefix; it is not ADT source serialization. Text is unchanged; integers use decimal and bool uses true/false. Finite floats use concise round-trippable forms such as 1.0 and 5e-324, normalizing negative zero to 0.0. UUID uses lowercase hyphens, date uses YYYY-MM-DD, timestamp uses UTC/Z, duration uses the largest exactly divisible unit, decimal retains scale, and bytes use lowercase hex. Reject compound ADTs with E_TYPE; project or match first, without implicit unwrapping of Option or conversion of None to empty text. Input needs a static type; typed local functions can declare prepared parameters, while to_text $unknown does not guess. Hex expansion is checked against 16 MiB before allocation; E_LIMIT rolls back the entire request and full codec/transport budgets still apply. Query/prepared/update/migration/formatter/explain/macros share this contract. Text output works with protocols 1/2, but native parameters still require v2. This remains unreleased v0.15 development functionality.
+
 ## Explain、实际剖析与类型化索引计划
 
 `explain` 在相同的 schema、字段、pattern、局部函数和参数绑定规则下准备查询，但不读取、复制或执行数据行：

@@ -68,6 +68,23 @@ unionid_query::queries! {
         derive value = int_to_decimal $value 8 2
         select value
     }
+
+    query scalar_label {
+        from tasks
+        filter id == $id
+        derive value = concat (to_text priority) (concat "@" (to_text due_on))
+        select value
+    }
+}
+
+#[test]
+fn inline_text_conversion_formats_int_and_native_date_as_typed_text() {
+    let mut engine = unionid::Engine::memory();
+    assert!(engine.execute(include_str!("schema.unid")).ok);
+    assert!(engine.execute("insert tasks {id: 1, title: \"label\", state: Pending, priority: 1, due_on: @2026-09-17}").ok);
+    let rows =
+        scalar_label::scalar_label(&mut engine, scalar_label::ScalarLabelParams { id: 1 }).unwrap();
+    assert_eq!(rows[0].value, "1@2026-09-17");
 }
 
 #[test]
