@@ -1,5 +1,7 @@
 //! Transactional redb storage for the durable Engine mode.
 
+mod maintenance_journal;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
@@ -2965,7 +2967,9 @@ impl RedbStore {
         &mut self,
         file: &MigrationFile,
         target: &Database,
+        control: Option<&crate::control::ExecutionControl>,
     ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        check_source_control(control).map_err(CommitFailure::Definite)?;
         let current = self
             .maintenance_info()
             .map_err(CommitFailure::Definite)?
@@ -3022,55 +3026,20 @@ impl RedbStore {
         let mut reclaimable = expected_manifest.clone();
         reclaimable.state = MaintenanceState::Reclaimable;
         reclaimable.updated_at_unix_ms = maintenance_time_ms().map_err(CommitFailure::Definite)?;
-        let journal = if let Some(state) = self.committed.journal.as_ref() {
-            let (_, receipts, previous, _) = self.load().map_err(CommitFailure::Definite)?;
-            let mut next = PreparedState::new_in_generation(
-                target,
-                &receipts,
-                self.committed.layout,
-                next_generation,
+        if self.committed.journal.is_some() {
+            // The old full-state loader validated the source before deriving
+            // its journal delta. Preserve that corruption boundary using a
+            // bounded catalog view and row/index iterators instead of maps.
+            let (metadata, _, _, _, _) =
+                self.load_bounded_view().map_err(CommitFailure::Definite)?;
+            self.validate_bounded_integrity_with_reference_error(
+                &metadata,
+                self.committed.generation.active,
+                || Error::new("E_STORAGE", "reference source row has no target"),
+                control,
             )
             .map_err(CommitFailure::Definite)?;
-            // `target` is metadata-only during recoverable migration. Journal
-            // the validated generation's rows, not an empty in-memory table.
-            let target_transaction = self
-                .database
-                .begin_read()
-                .map_err(|error| CommitFailure::definite("read cutover journal target", error))?;
-            let target_rows = target_transaction
-                .open_table(GENERATION_ROWS)
-                .map_err(|error| CommitFailure::definite("open cutover journal rows", error))?;
-            let (lower, upper) =
-                generation_bounds(current.target_generation).map_err(CommitFailure::Definite)?;
-            for entry in target_rows
-                .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
-                .map_err(|error| CommitFailure::definite("scan cutover journal rows", error))?
-            {
-                let (key, value) = entry
-                    .map_err(|error| CommitFailure::definite("read cutover journal row", error))?;
-                let key = decode_generation_key(key.value(), current.target_generation)
-                    .map_err(CommitFailure::Definite)?;
-                next.rows.insert(key.to_vec(), value.value().to_vec());
-            }
-            let target_indexes = target_transaction
-                .open_table(GENERATION_INDEX)
-                .map_err(|error| CommitFailure::definite("open cutover journal indexes", error))?;
-            next.secondary_indexes = read_complete_index_table(
-                &target_indexes,
-                self.committed.layout,
-                Some(current.target_generation),
-            )
-            .map_err(CommitFailure::Definite)?;
-            next.journal = Some(state.clone());
-            let delta = PreparedDelta::between(&previous, &next);
-            Some(
-                delta
-                    .prepare_journal_append(state)
-                    .map_err(CommitFailure::Definite)?,
-            )
-        } else {
-            None
-        };
+        }
         let mut transaction = self
             .database
             .begin_write()
@@ -3142,25 +3111,32 @@ impl RedbStore {
                 .insert(current.target_generation, encoded.as_slice())
                 .map_err(|error| CommitFailure::definite("mark source reclaimable", error))?;
         }
-        if let Some(append) = &journal {
-            apply_journal_append(
-                &transaction,
-                self.committed
-                    .journal
-                    .as_ref()
-                    .expect("journal append requires an active state"),
-                append,
-            )
+        let journal = self
+            .committed
+            .journal
+            .as_ref()
+            .map(|state| {
+                maintenance_journal::append(
+                    &self.database,
+                    &transaction,
+                    state,
+                    (self.committed.generation.active, target_generation),
+                    target,
+                    migration_position,
+                    control,
+                )
+            })
+            .transpose()
             .map_err(CommitFailure::Definite)?;
-        }
+        check_source_control(control).map_err(CommitFailure::Definite)?;
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit maintenance cutover", error))?;
         self.committed.meta = target.durable_meta();
         self.committed.generation = next_generation;
         self.committed.catalog_canonical = true;
-        if let Some(append) = journal {
-            self.committed.journal = Some(append.state);
+        if let Some(state) = journal {
+            self.committed.journal = Some(state);
         }
         Ok(MaintenanceInfo::from_manifest(&reclaimable))
     }
