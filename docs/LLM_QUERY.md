@@ -235,13 +235,25 @@ types before mutation. Explain binds the full target type without evaluating it.
 reject enum/record/tuple/Option/list/map (project or match first). Text is unchanged;
 int/bool use decimal/true-false; float is concise and round-trippable with negative
 zero normalized; uuid uses lowercase hyphens, date YYYY-MM-DD, timestamp UTC/Z,
-duration the largest exactly divisible unit, decimal its declared scale, bytes
+duration the largest exactly divisible unit (zero is 0microseconds), decimal its declared scale, bytes
 lowercase hex. No source tags or @ prefix. Example: `concat "item-" (to_text id)`.
 Input needs a static type: use `let show = (value: int) -> to_text value` for
 prepared `show $id`; bare `to_text $unknown` does not infer a type. Hex expansion
 over 16 MiB returns E_LIMIT before allocation and rolls back the whole request;
 full response budgets still apply. Text output supports protocols 1/2, but native
 parameters require v2. Query/update/migration using/explain/macros share the rule.
+`date_of timestamp "offset"` returns the local civil date at an explicit fixed
+offset. `timestamp_trunc timestamp "unit" "offset"` shifts to local time, floors
+to a period boundary and shifts back to UTC. Require literal units:
+year/month/week/day/hour/minute/second/millisecond/microsecond; weeks start Monday.
+Require literal offset Z/z or signed HH:MM (00–23 hours, 00–59 minutes); reject
+unknown -00:00. No system timezone, named zones or DST. Invalid/dynamic metadata
+fails binding with E_TEMPORAL_UNIT/E_TEMPORAL_OFFSET. Local and final UTC times
+must stay in years 0001–9999 or E_ARITH rolls back the whole request, even for
+microsecond truncation. Before-epoch values floor, not truncate toward zero.
+At +08:00, @2026-10-02T18:00:00Z gives date @2026-10-03 and day bucket
+@2026-10-02T16:00:00Z. Prepared/update/migration/macros share this contract;
+explain does not evaluate ranges. Native output/parameters require protocol v2.
 
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,

@@ -32,6 +32,59 @@ fn digits(source: &[u8]) -> Result<i32> {
     Ok(source.iter().fold(0, |n, b| n * 10 + i32::from(b - b'0')))
 }
 
+pub(crate) fn fixed_offset_seconds(source: &str) -> Result<i32> {
+    if matches!(source, "Z" | "z") {
+        return Ok(0);
+    }
+    let raw = source.as_bytes();
+    if raw.len() != 6 || !matches!(raw[0], b'+' | b'-') || raw[3] != b':' {
+        return Err(literal("timestamp requires an explicit offset"));
+    }
+    let hours = digits(&raw[1..3])?;
+    let minutes = digits(&raw[4..6])?;
+    if hours > 23 || minutes > 59 || source == "-00:00" {
+        return Err(literal("invalid or unknown timestamp offset"));
+    }
+    Ok((hours * 3600 + minutes * 60) * if raw[0] == b'-' { -1 } else { 1 })
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TimestampUnit {
+    Year,
+    Month,
+    Week,
+    Day,
+    Hour,
+    Minute,
+    Second,
+    Millisecond,
+    Microsecond,
+}
+
+impl TimestampUnit {
+    pub(crate) fn parse(source: &str) -> Option<Self> {
+        Some(match source {
+            "year" => Self::Year,
+            "month" => Self::Month,
+            "week" => Self::Week,
+            "day" => Self::Day,
+            "hour" => Self::Hour,
+            "minute" => Self::Minute,
+            "second" => Self::Second,
+            "millisecond" => Self::Millisecond,
+            "microsecond" => Self::Microsecond,
+            _ => return None,
+        })
+    }
+}
+
+fn temporal_range() -> Error {
+    Error::new(
+        "E_ARITH",
+        "temporal projection is outside local or UTC years 0001 through 9999",
+    )
+}
+
 /// A Gregorian civil day, without a time zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Date(i32);
@@ -174,6 +227,58 @@ impl Timestamp {
     pub const fn epoch_microseconds(self) -> i64 {
         self.0
     }
+
+    fn local_at_offset(self, offset_seconds: i32) -> Result<Self> {
+        let shifted = self
+            .0
+            .checked_add(i64::from(offset_seconds) * 1_000_000)
+            .ok_or_else(temporal_range)?;
+        Self::from_epoch_microseconds(shifted).map_err(|_| temporal_range())
+    }
+
+    pub(crate) fn date_at_offset(self, offset_seconds: i32) -> Result<Date> {
+        let local = self.local_at_offset(offset_seconds)?;
+        Date::from_epoch_days((local.0.div_euclid(DAY_MICROS)) as i32).map_err(|_| temporal_range())
+    }
+
+    pub(crate) fn truncate_at_offset(
+        self,
+        unit: TimestampUnit,
+        offset_seconds: i32,
+    ) -> Result<Self> {
+        let local = self.local_at_offset(offset_seconds)?;
+        let days = local.0.div_euclid(DAY_MICROS) as i32;
+        let (year, month, _) = Date(days).components();
+        let start = match unit {
+            TimestampUnit::Year => i64::from(year_days(year) - EPOCH_DAYS) * DAY_MICROS,
+            TimestampUnit::Month => {
+                i64::from(
+                    year_days(year) - EPOCH_DAYS
+                        + (1..month)
+                            .map(|m| i32::from(month_days(year, m)))
+                            .sum::<i32>(),
+                ) * DAY_MICROS
+            }
+            // 1970-01-01 is Thursday; +3 makes Monday the zero weekday.
+            TimestampUnit::Week => i64::from(days - (days + 3).rem_euclid(7)) * DAY_MICROS,
+            unit => {
+                let size = match unit {
+                    TimestampUnit::Day => DAY_MICROS,
+                    TimestampUnit::Hour => 3_600_000_000,
+                    TimestampUnit::Minute => 60_000_000,
+                    TimestampUnit::Second => 1_000_000,
+                    TimestampUnit::Millisecond => 1_000,
+                    TimestampUnit::Microsecond => 1,
+                    _ => unreachable!(),
+                };
+                local.0.div_euclid(size) * size
+            }
+        };
+        let utc = start
+            .checked_sub(i64::from(offset_seconds) * 1_000_000)
+            .ok_or_else(temporal_range)?;
+        Self::from_epoch_microseconds(utc).map_err(|_| temporal_range())
+    }
 }
 impl FromStr for Timestamp {
     type Err = Error;
@@ -216,20 +321,7 @@ impl FromStr for Timestamp {
             micros *= 10_i64.pow(6_usize.saturating_sub(position - start) as u32);
         }
         let offset = &source[position..];
-        let offset_seconds = if matches!(offset, "Z" | "z") {
-            0
-        } else {
-            let raw = offset.as_bytes();
-            if raw.len() != 6 || !matches!(raw[0], b'+' | b'-') || raw[3] != b':' {
-                return Err(literal("timestamp requires an explicit offset"));
-            }
-            let hours = digits(&raw[1..3])?;
-            let minutes = digits(&raw[4..6])?;
-            if hours > 23 || minutes > 59 || offset == "-00:00" {
-                return Err(literal("invalid or unknown timestamp offset"));
-            }
-            (hours * 3600 + minutes * 60) * if raw[0] == b'-' { -1 } else { 1 }
-        };
+        let offset_seconds = fixed_offset_seconds(offset)?;
         Self::from_epoch_microseconds(
             i64::from(date.0) * DAY_MICROS
                 + i64::from(hour * 3600 + minute * 60 + second - offset_seconds) * 1_000_000

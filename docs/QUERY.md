@@ -410,7 +410,7 @@ select {id, total}
 
 ## 标量文本转换 / Scalar text conversion (v0.15 development)
 
-`to_text value` 显式转换 int/float/bool/text/uuid/date/timestamp/duration/decimal/bytes（包括命名标量）为 text。它不添加引号、类型标签或 `@`；不是 ADT 的源码序列化。text 原样保留，int 为十进制，bool 为 true/false；有限 float 使用可往返的简洁表示（如 1.0、5e-324），负零归一为 0.0。UUID 为小写连字符形式，date 为 YYYY-MM-DD，timestamp 为 UTC 且以 Z 结尾，duration 使用可精确整除的最大单位，decimal 保留 scale，bytes 为小写 hex。
+`to_text value` 显式转换 int/float/bool/text/uuid/date/timestamp/duration/decimal/bytes（包括命名标量）为 text。它不添加引号、类型标签或 `@`；不是 ADT 的源码序列化。text 原样保留，int 为十进制，bool 为 true/false；有限 float 使用可往返的简洁表示（如 1.0、5e-324），负零归一为 0.0。UUID 为小写连字符形式，date 为 YYYY-MM-DD，timestamp 为 UTC 且以 Z 结尾，duration 使用可精确整除的最大单位（0 为 0microseconds），decimal 保留 scale，bytes 为小写 hex。
 
 ```text
 from items
@@ -423,7 +423,34 @@ enum/record/tuple/Option/list/map 返回 `E_TYPE`；应先投影或 match，再�
 
 bytes 转 hex 会翻倍。结果 UTF-8 超过 16 MiB 时，在分配前返回 `E_LIMIT`，整请求旧状态保留；完整 codec/transport 预算仍适用。query、prepared、update、migration using、formatter/explain 和 Rust 内联宏共用此契约。text 输出可用 protocol v1/v2，但 native 参数仍要求 v2。上述能力尚未发布。
 
-`to_text value` explicitly converts primitive and named scalars to unquoted text without type tags or an @ prefix; it is not ADT source serialization. Text is unchanged; integers use decimal and bool uses true/false. Finite floats use concise round-trippable forms such as 1.0 and 5e-324, normalizing negative zero to 0.0. UUID uses lowercase hyphens, date uses YYYY-MM-DD, timestamp uses UTC/Z, duration uses the largest exactly divisible unit, decimal retains scale, and bytes use lowercase hex. Reject compound ADTs with E_TYPE; project or match first, without implicit unwrapping of Option or conversion of None to empty text. Input needs a static type; typed local functions can declare prepared parameters, while to_text $unknown does not guess. Hex expansion is checked against 16 MiB before allocation; E_LIMIT rolls back the entire request and full codec/transport budgets still apply. Query/prepared/update/migration/formatter/explain/macros share this contract. Text output works with protocols 1/2, but native parameters still require v2. This remains unreleased v0.15 development functionality.
+`to_text value` explicitly converts primitive and named scalars to unquoted text without type tags or an @ prefix; it is not ADT source serialization. Text is unchanged; integers use decimal and bool uses true/false. Finite floats use concise round-trippable forms such as 1.0 and 5e-324, normalizing negative zero to 0.0. UUID uses lowercase hyphens, date uses YYYY-MM-DD, timestamp uses UTC/Z, duration uses the largest exactly divisible unit (zero is 0microseconds), decimal retains scale, and bytes use lowercase hex. Reject compound ADTs with E_TYPE; project or match first, without implicit unwrapping of Option or conversion of None to empty text. Input needs a static type; typed local functions can declare prepared parameters, while to_text $unknown does not guess. Hex expansion is checked against 16 MiB before allocation; E_LIMIT rolls back the entire request and full codec/transport budgets still apply. Query/prepared/update/migration/formatter/explain/macros share this contract. Text output works with protocols 1/2, but native parameters still require v2. This remains unreleased v0.15 development functionality.
+
+## 显式偏移的时间投影 / Temporal projection with explicit offsets (v0.15 development)
+
+`date_of value "offset"` 接受 timestamp（含命名标量），返回该固定偏移下的 date。`timestamp_trunc value "unit" "offset"` 返回 timestamp：先加 offset，在当地时间向下取单位起点，再减 offset 转回 UTC。即使 epoch 前的时间也向下取整，不向零截断；结果不晚于原值，同一单位/偏移下重复截断不变。
+
+```text
+from events
+derive day = date_of occurred_at "+08:00"
+derive bucket = timestamp_trunc occurred_at "day" "+08:00"
+select {day, bucket}
+
+from events
+derive day = date_of occurred_at "+08:00"
+group day {
+  aggregate {events = count}
+}
+```
+
+例如 `@2026-10-02T18:00:00Z` 在 +08:00 下的 day 为 `@2026-10-03`，day bucket 为 UTC 的 `@2026-10-02T16:00:00Z`。偏移是调用的显式规则，不恢复输入字面量原有偏移，也不读取系统时区。
+
+unit 是 `year`、`month`、`week`、`day`、`hour`、`minute`、`second`、`millisecond` 或 `microsecond` 的 text literal。年/月取当地 Gregorian 起点，周从周一零点开始；无季度、DST、时区名称或 calendar 加减。offset 必须为 text literal `Z`/`z` 或 `±HH:MM`，HH 为 00–23，MM 为 00–59，未知偏移 `-00:00` 拒绝；`+00:00` 是已知 UTC。动态/非法 unit 和 offset 分别返回 `E_TEMPORAL_UNIT` / `E_TEMPORAL_OFFSET`，在扫描前检查。
+
+当地时间和最终 UTC 时间都必须在 0001–9999 年内，否则 `E_ARITH`，整请求回滚。例如最小 UTC timestamp 用 +08:00 截断 day 会产生范围外 UTC 起点，因此失败；microsecond 也仍检查当地范围。formatter、prepared、explain、update、migration using 和 Rust 宏复用同一规则；explain 不执行值计算。date/timestamp 输出及 native 参数要求 protocol v2。能力尚未发布。
+
+Date_of takes timestamp (including named scalars) plus a literal fixed offset and returns its civil date. Timestamp_trunc takes timestamp, a literal unit and a literal offset: shift to local time, floor to the period boundary, then shift back to UTC. This floors even before the epoch, never truncates toward zero, and is idempotent for the same unit/offset. At +08:00, 2026-10-02T18:00:00Z has date 2026-10-03 and day bucket 2026-10-02T16:00:00Z. The explicit offset neither recovers the original input spelling nor reads system time zones.
+
+Units are year/month/week/day/hour/minute/second/millisecond/microsecond; year/month use local Gregorian boundaries and weeks start Monday at midnight. No quarter, zone names, DST or calendar addition/subtraction. Offsets are literal Z/z or signed HH:MM (hours 00–23, minutes 00–59); reject unknown -00:00 while +00:00 means UTC. Invalid/dynamic units or offsets fail before scanning with E_TEMPORAL_UNIT/E_TEMPORAL_OFFSET. Both the shifted local time and final UTC result must stay in years 0001–9999 or return E_ARITH and roll back the entire request. This applies even to microsecond truncation. Formatter/prepared/explain/update/migration/macros share the contract; explain does not evaluate values. Native outputs/parameters require protocol v2. These are unreleased v0.15 functions.
 
 ## Explain、实际剖析与类型化索引计划
 
@@ -931,6 +958,8 @@ take 20
 | `E_CAST_PRECISION` | int_to_float 失去整数精度，或 float_to_int exact 丢弃小数 |
 | `E_CAST_MODE` | float_to_int 舍入模式不是合法 text literal |
 | `E_CAST_RANGE` | float_to_int 舍入结果超出 int 范围 |
+| `E_TEMPORAL_OFFSET` | 时间投影偏移不是合法固定偏移 literal |
+| `E_TEMPORAL_UNIT` | timestamp_trunc 单位不是合法 literal |
 | `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |

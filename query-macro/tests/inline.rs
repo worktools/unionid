@@ -75,6 +75,40 @@ unionid_query::queries! {
         derive value = concat (to_text priority) (concat "@" (to_text due_on))
         select value
     }
+
+    query calendar_bucket {
+        from tasks
+        filter id == $id
+        derive day = date_of $at "+08:00"
+        derive bucket = timestamp_trunc $at "day" "+08:00"
+        select {day, bucket}
+    }
+}
+
+#[test]
+fn inline_temporal_functions_infer_native_params_outputs_and_range_errors() {
+    let mut engine = unionid::Engine::memory();
+    assert!(engine.execute(include_str!("schema.unid")).ok);
+    assert!(engine.execute("insert tasks {id: 1, title: \"calendar\", state: Pending, priority: 1, due_on: @2026-09-17}").ok);
+    let rows = calendar_bucket::calendar_bucket(
+        &mut engine,
+        calendar_bucket::CalendarBucketParams {
+            id: 1,
+            at: "2026-10-02T18:00:00Z".parse().unwrap(),
+        },
+    )
+    .unwrap();
+    assert_eq!(rows[0].day.to_string(), "2026-10-03");
+    assert_eq!(rows[0].bucket.to_string(), "2026-10-02T16:00:00Z");
+    let error = calendar_bucket::calendar_bucket(
+        &mut engine,
+        calendar_bucket::CalendarBucketParams {
+            id: 1,
+            at: "9999-12-31T23:59:59Z".parse().unwrap(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "E_ARITH");
 }
 
 #[test]

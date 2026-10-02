@@ -134,6 +134,8 @@ pub const ERROR_CODES: &[&str] = &[
     "E_STREAM_VERSION",
     "E_SYNTAX",
     "E_TABLE",
+    "E_TEMPORAL_OFFSET",
+    "E_TEMPORAL_UNIT",
     "E_TEXT_RANGE",
     "E_TIME",
     "E_TIMEOUT",

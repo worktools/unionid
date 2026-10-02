@@ -381,6 +381,22 @@ pub(crate) fn bind_scalar(
         }
         ScalarExpression::Call {
             name, arguments, ..
+        } if is_temporal_projection(name) => {
+            temporal_function_arguments(name, arguments)?;
+            let input = infer_scalar(catalog, scope, &arguments[0], reference_kind)?
+                .unwrap_or(ScalarType::Timestamp);
+            require_timestamp_input(catalog, &input)?;
+            bind_scalar(
+                catalog,
+                scope,
+                &mut arguments[0],
+                Some(&input),
+                reference_kind,
+            )?;
+            temporal_result_type(name)
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
         } if name == "to_text" => {
             let [argument] = arguments.as_mut_slice() else {
                 return Err(Error::new("E_TYPE", "to_text expects 1 argument"));
@@ -621,6 +637,15 @@ pub(crate) fn infer_scalar(
                 return Err(Error::new("E_TYPE", format!("{name} expects a text key")));
             }
             Ok(Some(map_scalar_result(name, value_ty.as_ref().clone())?))
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
+        } if is_temporal_projection(name) => {
+            temporal_function_arguments(name, arguments)?;
+            if let Some(input) = infer_scalar(catalog, scope, &arguments[0], reference_kind)? {
+                require_timestamp_input(catalog, &input)?;
+            }
+            Ok(Some(temporal_result_type(name)))
         }
         ScalarExpression::Call {
             name, arguments, ..
@@ -940,6 +965,7 @@ fn temporal_arithmetic_signature(
 pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
     is_map_scalar_function(name)
         || is_text_predicate(name)
+        || is_temporal_projection(name)
         || matches!(
             name,
             "lower"
@@ -972,15 +998,78 @@ fn is_text_predicate(name: &str) -> bool {
     matches!(name, "starts_with" | "ends_with" | "contains_text")
 }
 
+fn is_temporal_projection(name: &str) -> bool {
+    matches!(name, "date_of" | "timestamp_trunc")
+}
+
+fn temporal_result_type(name: &str) -> ScalarType {
+    if name == "date_of" {
+        ScalarType::Date
+    } else {
+        ScalarType::Timestamp
+    }
+}
+
+fn require_timestamp_input(catalog: &Catalog, ty: &ScalarType) -> Result<()> {
+    if matches!(catalog.underlying(ty)?, ScalarType::Timestamp) {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "E_TYPE",
+            "temporal projection expects timestamp input",
+        ))
+    }
+}
+
+fn temporal_function_arguments(
+    name: &str,
+    arguments: &[ScalarExpression],
+) -> Result<(i32, Option<crate::scalars::TimestampUnit>)> {
+    let arity = if name == "date_of" { 2 } else { 3 };
+    if arguments.len() != arity {
+        return Err(Error::new(
+            "E_TYPE",
+            format!("{name} expects {arity} arguments"),
+        ));
+    }
+    let unit = if name == "timestamp_trunc" {
+        let ScalarExpression::Literal(Value::Text(unit)) = &arguments[1] else {
+            return Err(Error::new(
+                "E_TEMPORAL_UNIT",
+                "timestamp_trunc unit must be a text literal",
+            ));
+        };
+        Some(crate::scalars::TimestampUnit::parse(unit).ok_or_else(|| Error::new("E_TEMPORAL_UNIT", "timestamp_trunc expects year, month, week, day, hour, minute, second, millisecond, or microsecond"))?)
+    } else {
+        None
+    };
+    let ScalarExpression::Literal(Value::Text(offset)) = &arguments[arity - 1] else {
+        return Err(Error::new(
+            "E_TEMPORAL_OFFSET",
+            "temporal offset must be a text literal",
+        ));
+    };
+    let offset = crate::scalars::fixed_offset_seconds(offset).map_err(|_| {
+        Error::new(
+            "E_TEMPORAL_OFFSET",
+            "temporal offset requires Z or signed HH:MM; unknown -00:00 is rejected",
+        )
+    })?;
+    Ok((offset, unit))
+}
+
 pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
-    if matches!(name, "contains_key" | "get" | "concat" | "float_to_int") || is_text_predicate(name)
+    if matches!(
+        name,
+        "contains_key" | "get" | "concat" | "float_to_int" | "date_of"
+    ) || is_text_predicate(name)
     {
         Some(2)
     } else if matches!(name, "keys" | "values" | "entries") {
         Some(1)
     } else if matches!(
         name,
-        "int_to_decimal" | "decimal_parse" | "decimal_rescale" | "substring"
+        "int_to_decimal" | "decimal_parse" | "decimal_rescale" | "substring" | "timestamp_trunc"
     ) {
         Some(3)
     } else if name == "decimal_round" {
@@ -1742,6 +1831,20 @@ fn evaluate_scalar<'expression, 'values>(
                 return Ok(Some(Evaluated::Owned(Value::Text(scalar_to_text(
                     argument.as_value(),
                 )?))));
+            }
+            if is_temporal_projection(name) {
+                let Value::Timestamp(value) = argument.as_value().unwrapped() else {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        "temporal projection expects timestamp input",
+                    ));
+                };
+                let (offset, unit) = temporal_function_arguments(name, arguments)?;
+                let result = match unit {
+                    Some(unit) => Value::Timestamp(value.truncate_at_offset(unit, offset)?),
+                    None => Value::Date(value.date_at_offset(offset)?),
+                };
+                return Ok(Some(Evaluated::Owned(result)));
             }
             if name == "float_to_int" {
                 let Value::Float(value) = argument.as_value().unwrapped() else {

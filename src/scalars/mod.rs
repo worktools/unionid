@@ -10,6 +10,7 @@ mod temporal;
 pub(crate) use decimal::validate_type as validate_decimal_type;
 pub use decimal::{Decimal, DecimalRounding};
 pub use temporal::{Date, Duration, Timestamp};
+pub(crate) use temporal::{TimestampUnit, fixed_offset_seconds};
 
 use crate::error::{Error, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
