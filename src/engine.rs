@@ -15,7 +15,7 @@ use crate::idempotency::{
     IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult, IdempotencyReceipt,
     IdempotencyStatus, IdempotentExecution, MAX_IDEMPOTENCY_PRUNE_RECEIPTS,
     MAX_IDEMPOTENCY_RECEIPTS, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap, boundary,
-    receipt_encoded_len, validate_digest, validate_key, validate_new_receipt, validate_receipts,
+    prepare_new_receipt, receipt_encoded_len, validate_digest, validate_key, validate_receipts,
 };
 use crate::introspection::{Introspection, StorageMode, StorageVersions};
 use crate::migration::{
@@ -1156,6 +1156,12 @@ impl Engine {
             oldest: ordered.first().map(|(key, receipt)| boundary(key, receipt)),
             newest: ordered.last().map(|(key, receipt)| boundary(key, receipt)),
             durability: self.idempotency_durability(),
+            capacity: Some(crate::ReceiptCapacity::from_usage(
+                self.committed.receipts.len(),
+                encoded_bytes,
+                MAX_IDEMPOTENCY_RECEIPTS,
+                MAX_IDEMPOTENCY_TOTAL_BYTES,
+            )),
         })
     }
 
@@ -2001,13 +2007,14 @@ impl Engine {
             let mut write_set = candidate.take_write_set();
             let receipt_state = if let Some(idempotency) = idempotency {
                 response.schema = Some(candidate.schema_info());
-                let receipt = IdempotencyReceipt {
+                let mut receipt = IdempotencyReceipt {
                     digest: idempotency.digest.to_owned(),
                     committed_sequence: candidate.sequence,
                     completed_at_unix_ms: unix_time_ms()?,
                     response: response.clone(),
                 };
-                validate_new_receipt(&self.committed.receipts, &receipt)?;
+                prepare_new_receipt(&self.committed.receipts, &mut receipt)?;
+                response.warnings.clone_from(&receipt.response.warnings);
                 let mut receipts = self.committed.receipts.as_ref().clone();
                 receipts.insert(idempotency.key.to_owned(), receipt);
                 write_set.record_receipt(idempotency.key);

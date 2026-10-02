@@ -85,6 +85,8 @@ pub struct ReceiptMetrics {
     pub encoded_bytes: usize,
     pub max_count: usize,
     pub max_encoded_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<crate::ReceiptCapacity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -224,6 +226,10 @@ impl MetricsRegistry {
                 count: *count,
             })
             .collect();
+        let count = self.receipt_count.load(Ordering::Relaxed);
+        let encoded_bytes = self.receipt_encoded_bytes.load(Ordering::Relaxed);
+        let max_count = self.receipt_max_count.load(Ordering::Relaxed);
+        let max_encoded_bytes = self.receipt_max_encoded_bytes.load(Ordering::Relaxed);
         MetricsSnapshot {
             version: METRICS_VERSION,
             uptime_micros: duration_micros(self.started.elapsed()),
@@ -244,10 +250,18 @@ impl MetricsRegistry {
             error_code_overflow: self.error_code_overflow.load(Ordering::Relaxed),
             concurrency,
             receipts: ReceiptMetrics {
-                count: self.receipt_count.load(Ordering::Relaxed),
-                encoded_bytes: self.receipt_encoded_bytes.load(Ordering::Relaxed),
-                max_count: self.receipt_max_count.load(Ordering::Relaxed),
-                max_encoded_bytes: self.receipt_max_encoded_bytes.load(Ordering::Relaxed),
+                count,
+                encoded_bytes,
+                max_count,
+                max_encoded_bytes,
+                capacity: (max_count > 0 && max_encoded_bytes > 0).then(|| {
+                    crate::ReceiptCapacity::from_usage(
+                        count,
+                        encoded_bytes,
+                        max_count,
+                        max_encoded_bytes,
+                    )
+                }),
             },
         }
     }

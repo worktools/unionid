@@ -628,6 +628,7 @@ struct DoctorReport {
 
 #[derive(Serialize)]
 struct DatabaseDiagnostics {
+    receipt_capacity: unionid::ReceiptCapacity,
     storage: unionid::StorageMode,
     storage_versions: Option<unionid::StorageVersions>,
     read_only: bool,
@@ -952,10 +953,16 @@ fn doctor(db: Option<PathBuf>, json: bool) -> Result<(), String> {
             // private byte-for-byte copy so the requested path is never repaired,
             // upgraded, created, or otherwise changed by doctor.
             let copy = DoctorCopy::create(&path)?;
-            let introspection = unionid::Engine::open_redb_read_only(&copy.0)
+            let engine =
+                unionid::Engine::open_redb_read_only(&copy.0).map_err(|error| error.to_string())?;
+            let introspection = engine.introspection();
+            let receipt_capacity = engine
+                .idempotency_status()
                 .map_err(|error| error.to_string())?
-                .introspection();
+                .capacity
+                .expect("current Engine always supplies capacity");
             Some(DatabaseDiagnostics {
+                receipt_capacity,
                 storage: introspection.storage,
                 storage_versions: introspection.storage_versions,
                 read_only: introspection.read_only,
@@ -983,6 +990,14 @@ fn doctor(db: Option<PathBuf>, json: bool) -> Result<(), String> {
     } else {
         print_version(false)?;
         if let Some(database) = report.database {
+            println!(
+                "receipt capacity {:?}: {}/{} entries, {}/{} bytes",
+                database.receipt_capacity.state,
+                database.receipt_capacity.count,
+                database.receipt_capacity.max_count,
+                database.receipt_capacity.encoded_bytes,
+                database.receipt_capacity.max_encoded_bytes
+            );
             println!(
                 "database {:?}\nread only yes\nschema revision {}\nschema hash {}\nmigrations {}",
                 database.storage,

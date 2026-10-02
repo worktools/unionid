@@ -74,7 +74,8 @@ pub use error::{ConstraintKind, Error, Result, Span};
 pub use formatter::format_source;
 pub use idempotency::{
     IdempotencyBoundary, IdempotencyDurability, IdempotencyPruneOptions, IdempotencyPruneResult,
-    IdempotencyReceipt, IdempotencyStatus, IdempotentExecution,
+    IdempotencyReceipt, IdempotencyStatus, IdempotentExecution, ReceiptCapacity,
+    ReceiptCapacityState,
 };
 pub use introspection::{Introspection, IntrospectionKind, StorageMode, StorageVersions};
 pub use llm_docs::{

@@ -320,6 +320,17 @@ pub fn receipt_status(path: PathBuf, json: bool) -> Result<(), String> {
             status.max_encoded_bytes,
             status.durability
         );
+        if let Some(capacity) = status.capacity {
+            println!(
+                "capacity {:?}; remaining {} receipts / {} bytes",
+                capacity.state, capacity.remaining_count, capacity.remaining_encoded_bytes
+            );
+            if capacity.state != crate::ReceiptCapacityState::Normal {
+                println!(
+                    "warning: receipt capacity is at least 80% used; preview receipts prune and verify the retry window before --confirm"
+                );
+            }
+        }
         if let Some(oldest) = status.oldest {
             println!(
                 "oldest {} sequence {} completed {}",

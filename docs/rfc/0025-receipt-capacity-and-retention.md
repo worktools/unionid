@@ -1,6 +1,6 @@
 # RFC 0025：回执容量与显式保留策略 / Receipt capacity and explicit retention
 
-- 状态 / Status: proposed; not available in released v0.12
+- 状态 / Status: accepted via #424; capacity signals in development, retention implementation pending; not available in released v0.12
 - Milestone: v0.13.0
 - Issue: [#402](https://github.com/worktools/unionid/issues/402)
 - 前置契约 / Prior contract: [RFC 0002](0002-idempotent-write-receipts.md)

@@ -65,3 +65,9 @@ Metrics have the process-local lifetime of one `ConcurrentEngine`; counters rest
 The default build has no exporter. Enabling `metrics` adds `MetricsSnapshot::prometheus_text()` without adding a listener or route. Mount the returned text only behind an authenticated management endpoint or controlled network. Scraping copies bounded counters and at most 64 error entries and never reads database rows. Use queue gauges, operation latency, error overflow, and receipt capacity together for capacity decisions.
 
 Metrics expose aggregate trends. Use [structured request and slow-query events](OBSERVABILITY.md) when one request needs correlation or sanitized plan/work and phase timings. Both surfaces share operation and error semantics; observers remain disabled by default and the application owns sampling and retention.
+
+## 容量状态 / Capacity state
+
+开发中的 v0.13 在 `snapshot.receipts.capacity` 增加可选 version 1 描述，包含 normal/warning/full、剩余条数与字节。字段缺失表示旧 producer/无法获得容量，而不是零用量。状态由快照同一组 count/bytes/limits 计算，仍遵守上述弱一致性；不会为渲染状态重新扫描或编码回执。`metrics` feature 额外导出无 label 的 `unionid_receipts_capacity_warning` 与 `unionid_receipts_capacity_full` 两个 0/1 gauge。warning 在任一预算至少使用 80% 时为 1（包括 full）。
+
+Development toward v0.13 adds optional version-1 `snapshot.receipts.capacity`. Missing means an older producer or unavailable capacity, not zero usage. Derive normal/warning/full and remaining budgets from the same sampled count/bytes/limits without scanning or encoding receipts. Existing weak consistency still applies. The optional metrics exporter adds two label-free 0/1 gauges: `unionid_receipts_capacity_warning` (either budget at least 80%, including full) and `unionid_receipts_capacity_full` (either budget at its limit).

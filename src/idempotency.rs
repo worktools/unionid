@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::db::QueryResponse;
 use crate::error::{Error, Result};
 
+mod capacity;
+pub use capacity::{ReceiptCapacity, ReceiptCapacityState};
+
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 pub const MAX_IDEMPOTENCY_RECEIPT_BYTES: usize = 1024 * 1024;
 pub const MAX_IDEMPOTENCY_RECEIPTS: usize = 10_000;
@@ -52,6 +55,8 @@ pub struct IdempotencyStatus {
     pub oldest: Option<IdempotencyBoundary>,
     pub newest: Option<IdempotencyBoundary>,
     pub durability: IdempotencyDurability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<ReceiptCapacity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,12 +153,12 @@ pub(crate) fn validate_receipts(receipts: &ReceiptMap, sequence: u64) -> Result<
     Ok(total)
 }
 
-pub(crate) fn validate_new_receipt(
+pub(crate) fn prepare_new_receipt(
     receipts: &ReceiptMap,
-    receipt: &IdempotencyReceipt,
+    receipt: &mut IdempotencyReceipt,
 ) -> Result<()> {
     let encoded = encoded_receipt(receipt)?;
-    let encoded_len = encoded.len().saturating_add(DURABLE_CODEC_OVERHEAD);
+    let mut encoded_len = encoded.len().saturating_add(DURABLE_CODEC_OVERHEAD);
     if encoded_len > MAX_IDEMPOTENCY_RECEIPT_BYTES {
         return Err(Error::new(
             "E_IDEMPOTENCY_LIMIT",
@@ -172,6 +177,27 @@ pub(crate) fn validate_new_receipt(
             )
             .ok_or_else(|| Error::new("E_IDEMPOTENCY_CAPACITY", "receipt size overflow"))
     })?;
+    let projected = ReceiptCapacity::from_usage(
+        receipts.len().saturating_add(1),
+        total.saturating_add(encoded_len),
+        MAX_IDEMPOTENCY_RECEIPTS,
+        MAX_IDEMPOTENCY_TOTAL_BYTES,
+    );
+    if projected.state != ReceiptCapacityState::Normal {
+        receipt
+            .response
+            .warnings
+            .push(capacity::CAPACITY_WARNING.into());
+        encoded_len = receipt_encoded_len(receipt)?;
+    }
+    // The persisted warning is part of the actual receipt budget. Replays return
+    // this exact original warning, never today's capacity state.
+    if encoded_len > MAX_IDEMPOTENCY_RECEIPT_BYTES {
+        return Err(Error::new(
+            "E_IDEMPOTENCY_LIMIT",
+            "idempotency receipt including its capacity warning exceeds the single-receipt limit",
+        ));
+    }
     if receipts.len() >= MAX_IDEMPOTENCY_RECEIPTS
         || total.saturating_add(encoded_len) > MAX_IDEMPOTENCY_TOTAL_BYTES
     {
@@ -181,7 +207,7 @@ pub(crate) fn validate_new_receipt(
                 "idempotency receipt capacity exhausted (count {}/{MAX_IDEMPOTENCY_RECEIPTS}, bytes {total}/{MAX_IDEMPOTENCY_TOTAL_BYTES})",
                 receipts.len()
             ),
-        ));
+        ).with_hint(capacity::CAPACITY_HINT));
     }
     Ok(())
 }
@@ -259,20 +285,56 @@ mod tests {
 
     #[test]
     fn rejects_an_oversized_receipt_before_commit() {
-        let oversized = receipt("x".repeat(MAX_IDEMPOTENCY_RECEIPT_BYTES));
-        let error = validate_new_receipt(&ReceiptMap::new(), &oversized).unwrap_err();
+        let mut oversized = receipt("x".repeat(MAX_IDEMPOTENCY_RECEIPT_BYTES));
+        let error = prepare_new_receipt(&ReceiptMap::new(), &mut oversized).unwrap_err();
         assert_eq!(error.code, "E_IDEMPOTENCY_LIMIT");
     }
 
     #[test]
     fn rejects_new_receipts_at_count_capacity_but_validates_existing_state() {
-        let stored = receipt("ok".into());
+        let mut stored = receipt("ok".into());
         let mut receipts = ReceiptMap::new();
         for index in 0..MAX_IDEMPOTENCY_RECEIPTS {
             receipts.insert(format!("key-{index}"), stored.clone());
         }
-        let error = validate_new_receipt(&receipts, &stored).unwrap_err();
+        let error = prepare_new_receipt(&receipts, &mut stored).unwrap_err();
         assert_eq!(error.code, "E_IDEMPOTENCY_CAPACITY");
+        assert!(error.hint.as_deref().unwrap().contains("--before-unix-ms"));
         assert!(validate_receipts(&receipts, 1).is_ok());
+    }
+
+    #[test]
+    fn projected_warning_is_included_in_the_final_receipt_size() {
+        let mut receipts = ReceiptMap::new();
+        for index in 0..7_999 {
+            receipts.insert(format!("key-{index}"), receipt("ok".into()));
+        }
+        let mut next = receipt("next".into());
+        prepare_new_receipt(&receipts, &mut next).unwrap();
+        assert_eq!(next.response.warnings, [capacity::CAPACITY_WARNING]);
+        let mut exact_limit = receipt(String::new());
+        exact_limit.response.message =
+            "x".repeat(MAX_IDEMPOTENCY_RECEIPT_BYTES - receipt_encoded_len(&exact_limit).unwrap());
+        assert_eq!(
+            receipt_encoded_len(&exact_limit).unwrap(),
+            MAX_IDEMPOTENCY_RECEIPT_BYTES
+        );
+        let mut without_warning = exact_limit.clone();
+        prepare_new_receipt(&ReceiptMap::new(), &mut without_warning).unwrap();
+        assert!(without_warning.response.warnings.is_empty());
+        assert_eq!(
+            prepare_new_receipt(&receipts, &mut exact_limit)
+                .unwrap_err()
+                .code,
+            "E_IDEMPOTENCY_LIMIT"
+        );
+        assert_eq!(receipts.len(), 7_999);
+    }
+
+    #[test]
+    fn legacy_status_deserializes_without_inventing_capacity() {
+        let old = serde_json::json!({"count":0,"encoded_bytes":0,"max_count":10000,"max_encoded_bytes":67108864,"oldest":null,"newest":null,"durability":"durable"});
+        let decoded: IdempotencyStatus = serde_json::from_value(old).unwrap();
+        assert!(decoded.capacity.is_none());
     }
 }
