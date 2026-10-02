@@ -312,3 +312,76 @@ fn help_agent_and_bundled_docs_expose_query_preflight() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("--queries queries"));
 }
+
+#[test]
+fn recursive_application_queries_report_contract_changes_and_migrate_nested_defaults() {
+    let dir = fixture();
+    fs::remove_file(dir.0.join("db.redb")).unwrap();
+    fs::remove_file(dir.0.join("migrations/002.unid")).unwrap();
+    fs::write(dir.0.join("migrations/001.unid"), "migration initial\n  add type Chain =\n    value int\n    next Option<Chain> = None\n  add table chains Chain key value\n").unwrap();
+    fs::write(dir.0.join("queries/nested/jobs.unid"), "from chains").unwrap();
+    run(command(&dir.0, "apply"), 0);
+    {
+        let mut engine = Engine::open_redb(dir.0.join("db.redb")).unwrap();
+        let inserted = engine.execute("insert chains {value: 1, next: Some({value: 2})}");
+        assert!(inserted.ok, "{}", inserted.message);
+    }
+    fs::write(
+        dir.0.join("migrations/002.unid"),
+        "migration notes\n  parent initial\n  add field Chain.note: text = \"default\"\n",
+    )
+    .unwrap();
+    fs::write(dir.0.join("queries/nested/jobs.unid"), "update chains | filter value == $id | set next = $next | returning {next}\nexpect affected == 1").unwrap();
+    let plan = run(command(&dir.0, "plan"), 0);
+    assert_eq!(
+        plan["query_validation"]["files"][0]["parameters_changed"],
+        true
+    );
+    assert_eq!(plan["query_validation"]["files"][0]["result_changed"], true);
+    assert_eq!(
+        plan["query_validation"]["files"][0]["compatibility"],
+        "conditional"
+    );
+    run(command(&dir.0, "rehearse"), 0);
+    run(command(&dir.0, "apply"), 0);
+    let mut reopened = Engine::open_redb(dir.0.join("db.redb")).unwrap();
+    let rows = reopened.execute("from chains");
+    assert!(rows.ok);
+    assert_eq!(rows.rows.len(), 1);
+    assert!(rows.rows[0]["note"].cmp_eq(&unionid::Value::Text("default".into())));
+    assert!(
+        rows.rows[0]["next"]
+            .source_text()
+            .contains("note: \"default\"")
+    );
+    #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+    struct Chain {
+        value: i64,
+        next: Option<Box<Chain>>,
+        note: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Returned {
+        next: Option<Chain>,
+    }
+    let replacement = Some(Chain {
+        value: 3,
+        next: None,
+        note: "application".into(),
+    });
+    let response = reopened.execute_with_params(
+        &fs::read_to_string(dir.0.join("queries/nested/jobs.unid")).unwrap(),
+        std::collections::BTreeMap::from([
+            ("id".into(), unionid::Value::Int(1)),
+            (
+                "next".into(),
+                unionid::Value::from_serde(&replacement).unwrap(),
+            ),
+        ]),
+    );
+    assert!(response.ok, "{}", response.message);
+    let returned = response.typed_rows::<Returned>().unwrap();
+    assert_eq!(returned.len(), 1);
+    assert_eq!(returned[0].next, replacement);
+    reopened.check_integrity().unwrap();
+}
