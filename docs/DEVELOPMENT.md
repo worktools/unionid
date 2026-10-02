@@ -2,6 +2,26 @@
 
 本文保留 v0.1 开发期间的实现与验证细节，不承担实时状态导航。v0.1.0 已通过 GitHub Actions 发布；发布后的生产边界与应用体验工作由 [ROADMAP.md](ROADMAP.md) 和 GitHub issues 跟踪。当前语法见 [LANGUAGE.md](LANGUAGE.md)，查询的详细语义见 [QUERY.md](QUERY.md)，面向用户的入口见 [README](../README.md)。
 
+## 文档维护策略 / Documentation policy
+
+### 中文说明
+
+- README 负责产品定位与最短入门路径；LANGUAGE、QUERY、SCHEMA、MIGRATIONS、STORAGE 等专题文档负责当前行为与契约。同一规则只在一个专题中详细描述，其他入口通过链接引用。ROADMAP 只提供计划索引；实时优先级、依赖和验收状态由 GitHub issues 与 milestones 维护，不复制到开发记录。
+- 每个正式版本，包括补丁版本，面向用户的中英双语使用指南只发布到 Discussions/Announcements；验证示例后从 Release 和验收 issue 链接。仓库维护当前教程、升级契约和可执行示例，不再增加逐版本指南。已有 RELEASE 文档只有在对应 Discussion 的内容与链接核对完成后才移除，不能因本规则直接删除。
+- RFC 用于需要讨论的持久格式、协议或公共语言契约变化；常规 CLI 体验、内部重构和测试整理在 issue 或 PR 中说明设计与验收即可。RFC 是设计依据，不是当前能力清单：标明 proposed、implemented 或 superseded 状态，并链接实现或后继设计。涉及旧契约时保留迁移依据。
+- 新 RFC 使用简短的中英双语说明，覆盖问题、决定、明确不做的事情、兼容与失败边界、验证方式；仅在这些内容无法说明决定时展开更多细节。避免复制已有契约、实现日志或测试结果全文，通过链接引用。
+- benchmark 文档注明测量日期、提交、规模与复现方式，历史结果不能作为当前性能承诺。保留能解释架构决定的基线与对照；原始样本的删除或归档需要先确认下载位置、引用和复现脚本。测试 fixture 按所保护的兼容边界筛选，不按文件数量或体积裁剪。
+- 文档修改应检查链接和示例是否仍对应实现。普通 PR 保持 Ubuntu 快速检查；完整 macOS 与 release evaluator 验收在发版前运行，具体检查由现有 workflow 定义。
+
+### English Description
+
+- README owns product positioning and the shortest onboarding path. Topic documents such as LANGUAGE, QUERY, SCHEMA, MIGRATIONS and STORAGE own current behavior and contracts. Describe each rule in one authoritative topic and link to it elsewhere. ROADMAP is an index to the plans. GitHub issues and milestones own priorities, dependencies and acceptance status; development records do not duplicate live status.
+- Publish bilingual user guides for every official release, including patches, only in Discussions/Announcements. Validate examples and link the guide from the Release and acceptance issue. Keep current tutorials, upgrade contracts and executable examples in the repository instead of adding per-version guides. Remove an existing RELEASE document only after verifying its corresponding Discussion content and links.
+- Use an RFC for persistent-format, protocol or public-language contract changes that need a design decision. Describe routine CLI improvements, internal refactors and test consolidation in an issue or PR. RFCs explain design decisions rather than advertise current capabilities: identify proposed, implemented or superseded status and link the implementation or successor. Preserve migration rationale for historical contracts.
+- Keep new RFCs concise and bilingual: state the problem, decision, non-goals, compatibility and failure boundaries, and validation. Add detail when needed to explain the decision. Link existing contracts and evidence instead of copying implementation histories or full test results.
+- Benchmark documents identify the measurement date, commit, scale and reproduction steps; historical measurements are not current performance promises. Retain baselines and comparisons that explain architectural decisions. Before removing or archiving raw samples, verify their download location, references and reproduction scripts. Select test fixtures by the compatibility boundary they protect rather than file count or size.
+- Check that documentation links and examples still match the implementation. Ordinary PRs use Ubuntu fast checks; full macOS and release evaluators run before release, as defined by the existing workflows.
+
 ## 发布后进展
 
 - v0.8.0 交付完整 ADT equality 的 `count_distinct`、typed `avg` 与显式 partition/sort 的 `row_number`/`rank`/`dense_rank` 基础窗口；storage、codec、backup 与 protocol 不变，候选流程验证真实 v0.7 数据、backup 和客户端兼容。
@@ -108,4 +128,4 @@ cargo run --example embedded
 
 ## 后续工作
 
-实时执行顺序、依赖和验收范围统一维护在 [ROADMAP.md](ROADMAP.md) 与 GitHub issues。本文只记录已经实现并验证过的事实，避免复制 issue 状态后再次过时。
+[ROADMAP.md](ROADMAP.md) 仅作计划索引；实时执行顺序、依赖和验收范围由 GitHub issues 与 milestones 维护。本文只记录已经实现并验证过的事实，避免复制 issue 状态后再次过时。
