@@ -22,6 +22,16 @@
 - Benchmark documents identify the measurement date, commit, scale and reproduction steps; historical measurements are not current performance promises. Retain baselines and comparisons that explain architectural decisions. Before removing or archiving raw samples, verify their download location, references and reproduction scripts. Select test fixtures by the compatibility boundary they protect rather than file count or size.
 - Check that documentation links and examples still match the implementation. Ordinary PRs use Ubuntu fast checks; full macOS and release evaluators run before release, as defined by the existing workflows.
 
+## 发布版本同步 / Release version synchronization
+
+根 `Cargo.toml` 的 `package.version` 是当前软件版本来源。准备已授权的版本更新时，只在此处修改版本，再运行 `python3 scripts/check-release-metadata.py --sync-version`，同步两个宏 crate、query macro 的精确依赖、Git 跟踪的本地包 lockfile 和发布合约的 `software_version`。默认不带参数只检查，不写文件；普通 Ubuntu CI 使用检查模式。
+
+工具先解析全部待改文件，再写入工作区；这些改动仍须通过 diff 审阅和 `cargo --locked` 验证，不是跨文件原子事务。不会运行依赖更新、改写已发布版本文档、历史兼容基线、存储能力或 Rust/redb 合约字段；相关变化需要独立设计与验证。发布 workflow 的前一版本兼容基线仍需显式选择。此工具不创建 tag、不推送、不发布。
+
+Root `Cargo.toml`'s `package.version` is the current software-version source. For an authorized version update, edit it once and run `python3 scripts/check-release-metadata.py --sync-version`. This synchronizes both macro crates, the query macro's exact dependency, local packages in Git-tracked lockfiles, and the release contract's `software_version`. With no arguments, the tool only checks; ordinary Ubuntu CI uses that read-only mode.
+
+The tool parses every planned edit before writing working-tree files. Review the diff and verify with locked Cargo commands; this is not an atomic transaction across files. It does not update dependency resolution, published-version documentation, historical compatibility baselines, storage capabilities, or Rust/redb contract fields. Those changes need their own decisions and verification. Explicitly select the previous-release baseline in the release workflow. The tool creates no tags, pushes nothing and publishes nothing.
+
 ## 发布后进展
 
 - v0.8.0 交付完整 ADT equality 的 `count_distinct`、typed `avg` 与显式 partition/sort 的 `row_number`/`rank`/`dense_rank` 基础窗口；storage、codec、backup 与 protocol 不变，候选流程验证真实 v0.7 数据、backup 和客户端兼容。
