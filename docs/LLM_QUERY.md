@@ -216,6 +216,14 @@ For mixed arithmetic write `(int_to_float qty) * price` when price is float.
 No implicit casts or silent rounding are added. Prepared parameters, filters,
 derives and migration using share this contract; failed mutations/migrations
 roll back the whole request. Explain checks types without evaluating precision.
+`float_to_int value "mode"` explicitly converts float to int. Require a literal
+mode: exact, toward_zero, away_from_zero, floor, ceil, half_up, or half_even.
+Invalid/dynamic modes fail binding with E_CAST_MODE. Exact rejects fractions with
+E_CAST_PRECISION; all modes reject results outside i64 with E_CAST_RANGE rather
+than saturating. Half_up rounds ties away from zero; half_even rounds ties to even.
+Rounding uses the actual binary f64, not its original decimal spelling; negative
+zero becomes integer zero. Example: `float_to_int price "half_even"`. It shares
+the same prepared/query/migration rollback and nonexecuting explain contracts.
 
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,

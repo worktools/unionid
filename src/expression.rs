@@ -462,6 +462,9 @@ pub(crate) fn bind_scalar(
                     format!("{name} expects {arity} arguments, got {}", arguments.len()),
                 ));
             }
+            if name == "float_to_int" {
+                float_rounding(&arguments[1])?;
+            }
             for (position, argument) in arguments.iter_mut().enumerate() {
                 let input_type = builtin_scalar_input_type(name, position);
                 bind_scalar(catalog, scope, argument, Some(&input_type), reference_kind)?;
@@ -661,6 +664,9 @@ pub(crate) fn infer_scalar(
                     "E_TYPE",
                     format!("{name} expects {arity} arguments, got {}", arguments.len()),
                 ));
+            }
+            if name == "float_to_int" {
+                float_rounding(&arguments[1])?;
             }
             for (position, argument) in arguments.iter().enumerate() {
                 let input_type = builtin_scalar_input_type(name, position);
@@ -903,6 +909,7 @@ pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
                 | "concat"
                 | "substring"
                 | "int_to_float"
+                | "float_to_int"
                 | "uuid_parse"
                 | "bytes_parse_hex"
                 | "date_parse"
@@ -925,7 +932,8 @@ fn is_text_predicate(name: &str) -> bool {
 }
 
 pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
-    if matches!(name, "contains_key" | "get" | "concat") || is_text_predicate(name) {
+    if matches!(name, "contains_key" | "get" | "concat" | "float_to_int") || is_text_predicate(name)
+    {
         Some(2)
     } else if matches!(name, "keys" | "values" | "entries") {
         Some(1)
@@ -964,6 +972,7 @@ fn map_scalar_result(name: &str, value_ty: ScalarType) -> Result<ScalarType> {
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
     match name {
         "int_to_float" => Some(ScalarType::Float),
+        "float_to_int" => Some(ScalarType::Int),
         "starts_with" | "ends_with" | "contains_text" => Some(ScalarType::Bool),
         "lower" | "upper" | "trim" | "concat" | "substring" => Some(ScalarType::Text),
         "uuid_parse" => Some(ScalarType::Uuid),
@@ -976,11 +985,60 @@ fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
 }
 
 fn builtin_scalar_input_type(name: &str, position: usize) -> ScalarType {
-    if (name == "substring" && position > 0) || name == "int_to_float" {
+    if name == "float_to_int" && position == 0 {
+        ScalarType::Float
+    } else if (name == "substring" && position > 0) || name == "int_to_float" {
         ScalarType::Int
     } else {
         ScalarType::Text
     }
+}
+
+fn float_rounding(expression: &ScalarExpression) -> Result<crate::scalars::DecimalRounding> {
+    let ScalarExpression::Literal(Value::Text(value)) = expression else {
+        return Err(Error::new(
+            "E_CAST_MODE",
+            "float_to_int rounding mode must be a text literal",
+        ));
+    };
+    value.parse().map_err(|_| Error::new("E_CAST_MODE", "float_to_int expects exact, toward_zero, away_from_zero, floor, ceil, half_up, or half_even"))
+}
+
+fn float_to_integer(value: f64, rounding: crate::scalars::DecimalRounding) -> Result<i64> {
+    use crate::scalars::DecimalRounding;
+    if !value.is_finite() {
+        return Err(Error::new(
+            "E_CAST_RANGE",
+            "float_to_int requires a finite value",
+        ));
+    }
+    let rounded = match rounding {
+        DecimalRounding::Exact => {
+            if value.fract() != 0.0 {
+                return Err(Error::new(
+                    "E_CAST_PRECISION",
+                    "float_to_int exact would discard a fractional part",
+                ));
+            }
+            value
+        }
+        DecimalRounding::TowardZero => value.trunc(),
+        DecimalRounding::AwayFromZero if value < 0.0 => value.floor(),
+        DecimalRounding::AwayFromZero => value.ceil(),
+        DecimalRounding::Floor => value.floor(),
+        DecimalRounding::Ceil => value.ceil(),
+        DecimalRounding::HalfUp => value.round(),
+        DecimalRounding::HalfEven => value.round_ties_even(),
+    };
+    // i64::MAX as f64 is +2^63, which must be excluded before a saturating cast.
+    const UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if !(-UPPER_EXCLUSIVE..UPPER_EXCLUSIVE).contains(&rounded) {
+        return Err(Error::new(
+            "E_CAST_RANGE",
+            "float_to_int result is outside the int range",
+        ));
+    }
+    Ok(rounded as i64)
 }
 
 fn substring_text(source: &str, start: i64, end: i64) -> Result<String> {
@@ -1568,6 +1626,15 @@ fn evaluate_scalar<'expression, 'values>(
             let Some(argument) = evaluate_scalar(catalog, argument, values, budget)? else {
                 return Ok(None);
             };
+            if name == "float_to_int" {
+                let Value::Float(value) = argument.as_value().unwrapped() else {
+                    return Err(Error::new("E_TYPE", "float_to_int expects float"));
+                };
+                return Ok(Some(Evaluated::Owned(Value::Int(float_to_integer(
+                    *value,
+                    float_rounding(&arguments[1])?,
+                )?))));
+            }
             if name == "int_to_float" {
                 let Value::Int(value) = argument.as_value().unwrapped() else {
                     return Err(Error::new("E_TYPE", "int_to_float expects int"));

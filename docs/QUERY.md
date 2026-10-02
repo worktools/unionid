@@ -361,7 +361,7 @@ Concat takes two text arguments and appends them without separators or implicit 
 
 Substring takes text/int/int and returns text using zero-based, half-open Unicode scalar positions, matching length text rather than byte or grapheme positions. `substring "aé🦀z" 1 3` yields `"é🦀"`. Require `0 <= start <= end <= length source`; empty ranges including the end are valid. Negative, reversed or out-of-range positions return E_TEXT_RANGE during evaluation instead of clamping; explain only binds types. Combining sequences can be split, without normalization. Results over 16 MiB return E_LIMIT. Typed parameters/expressions provide positions; failed updates/migrations preserve the original request state.
 
-## 显式整数转换 / Explicit integer conversion (v0.15 development)
+## 显式数值转换 / Explicit numeric conversion (v0.15 development)
 
 `int_to_float value` 接受 int 并返回 float；只允许能被 f64 精确表示的整数。它不是隐式 cast，也不会静默舍入；失去精度时返回 `E_CAST_PRECISION`，并回滚整个 mutation/migration 请求。`explain` 仅检查类型，不求值。该函数可用于 prepared 参数、过滤、派生和 migration `using`。
 
@@ -371,9 +371,29 @@ derive total = (int_to_float qty) * price
 select {id, total}
 ```
 
-这里 `qty` 是 int，`price` 是 float。例如 9007199254740992 和 9007199254740994 可精确转换，9007199254740993 不可；i64 最小值可精确转换，最大值不可。这与 `avg int` 允许 IEEE-754 精度损失的既有契约不同。需要舍入的转换尚未提供。
+这里 `qty` 是 int，`price` 是 float。例如 9007199254740992 和 9007199254740994 可精确转换，9007199254740993 不可；i64 最小值可精确转换，最大值不可。这与 `avg int` 允许 IEEE-754 精度损失的既有契约不同。
 
-`int_to_float value` takes int and returns float only when the integer is exactly representable by f64. It performs no implicit coercion or silent rounding: precision loss returns E_CAST_PRECISION and rolls back the complete mutation/migration request. Explain checks types without evaluating values. Prepared parameters, filters, derives and migration using share this function. In the example, qty is int and price is float. 9007199254740992 and 9007199254740994 convert exactly, while 9007199254740993 does not; i64::MIN converts exactly but i64::MAX does not. This differs from the existing avg-int contract, which permits IEEE-754 precision loss. Rounded conversions are not yet available. This is an unreleased v0.15 capability.
+`int_to_float value` takes int and returns float only when the integer is exactly representable by f64. It performs no implicit coercion or silent rounding: precision loss returns E_CAST_PRECISION and rolls back the complete mutation/migration request. Explain checks types without evaluating values. Prepared parameters, filters, derives and migration using share this function. In the example, qty is int and price is float. 9007199254740992 and 9007199254740994 convert exactly, while 9007199254740993 does not; i64::MIN converts exactly but i64::MAX does not. This differs from the existing avg-int contract, which permits IEEE-754 precision loss. This is an unreleased v0.15 capability.
+
+`float_to_int value "mode"` 接受 float，返回 int。mode 必须在绑定时为下表中的 text literal，不能由字段或参数提供；无效模式返回 `E_CAST_MODE`。舍入针对实际保存的二进制 f64，不重新解释原始十进制文字。`exact` 遇到小数部分返回 `E_CAST_PRECISION`；舍入后超出 i64 范围返回 `E_CAST_RANGE`，不饱和或回绕。负零变为整数 0。
+
+| mode | 规则 / Rule | 2.5 | -2.5 |
+|---|---|---:|---:|
+| `exact` | 必须已是整数 / Require integral input | error | error |
+| `toward_zero` | 向零 / Toward zero | 2 | -2 |
+| `away_from_zero` | 离零 / Away from zero | 3 | -3 |
+| `floor` | 向负无穷 / Toward negative infinity | 2 | -3 |
+| `ceil` | 向正无穷 / Toward positive infinity | 3 | -2 |
+| `half_up` | 最近整数，半值离零 / Nearest, ties away from zero | 3 | -3 |
+| `half_even` | 最近整数，半值取偶 / Nearest, ties to even | 2 | -2 |
+
+```text
+from items
+derive rounded = float_to_int price "half_even"
+select {id, rounded}
+```
+
+`float_to_int value "mode"` takes float and returns int. The mode must be a known text literal at binding time, never a field or parameter; invalid modes return E_CAST_MODE. Rounding operates on the stored binary f64, not the original decimal spelling. Exact rejects fractional parts with E_CAST_PRECISION; a rounded result outside i64 returns E_CAST_RANGE instead of saturation or wrapping. Negative zero becomes integer zero. Query/prepared parameters/migration share this contract; failures roll back the entire request, while explain binds without evaluating values. Both conversions remain unreleased v0.15 development functions.
 
 ## Explain、实际剖析与类型化索引计划
 
@@ -878,7 +898,9 @@ take 20
 | `E_QUERY` | 局部函数前向引用／递归／参数数量错误，或 pipeline stage 的作用域冲突 |
 | `E_MATCH` | 未知/重复构造器、非穷尽 match、错误负载字段或分支绑定 |
 | `E_ARITH` | 整数溢出、除零或产生非有限 float |
-| `E_CAST_PRECISION` | 显式 int_to_float 转换无法精确保留整数 |
+| `E_CAST_PRECISION` | int_to_float 失去整数精度，或 float_to_int exact 丢弃小数 |
+| `E_CAST_MODE` | float_to_int 舍入模式不是合法 text literal |
+| `E_CAST_RANGE` | float_to_int 舍入结果超出 int 范围 |
 | `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |

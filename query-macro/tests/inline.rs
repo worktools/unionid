@@ -54,6 +54,35 @@ unionid_query::queries! {
         derive value = int_to_float $value
         select value
     }
+
+    query round_float {
+        from tasks
+        filter id == $id
+        derive value = float_to_int $value "half_even"
+        select value
+    }
+}
+
+#[test]
+fn inline_float_conversion_infers_float_params_and_preserves_range_errors() {
+    let mut engine = unionid::Engine::memory();
+    assert!(engine.execute(include_str!("schema.unid")).ok);
+    assert!(engine.execute("insert tasks {id: 1, title: \"round\", state: Pending, priority: 1, due_on: @2026-09-17}").ok);
+    let rows = round_float::round_float(
+        &mut engine,
+        round_float::RoundFloatParams { id: 1, value: 2.5 },
+    )
+    .unwrap();
+    assert_eq!(rows[0].value, 2);
+    let error = round_float::round_float(
+        &mut engine,
+        round_float::RoundFloatParams {
+            id: 1,
+            value: 9_223_372_036_854_775_808.0,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "E_CAST_RANGE");
 }
 
 #[test]
