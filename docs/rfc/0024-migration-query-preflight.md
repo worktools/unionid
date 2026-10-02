@@ -1,6 +1,6 @@
 # RFC 0024：迁移前检查已保存查询 / Saved-query preflight before migrations
 
-- 状态 / Status: proposed; not implemented
+- 状态 / Status: accepted; shared Engine preflight implemented, CLI/directory loading and full #400 acceptance pending
 - 日期 / Date: 2026-10-01
 - 跟踪 / Tracking: [#400](https://github.com/worktools/unionid/issues/400), [v0.13 milestone](https://github.com/worktools/unionid/milestone/23)
 - 相关 / Related: [RFC 0014](0014-portable-adt-contract.md), [RFC 0015](0015-static-query-contract.md)
