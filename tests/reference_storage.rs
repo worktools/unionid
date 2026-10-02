@@ -18,6 +18,85 @@ fn rejected(engine: &mut Engine, source: &str, kind: ConstraintKind) {
 }
 
 #[test]
+fn optional_reference_conversion_requires_explicit_rebinding() {
+    let child_rows =
+        |engine: &mut Engine| serde_json::to_value(engine.execute("from children").rows).unwrap();
+    for durable in [false, true] {
+        let dir = TempDir::new();
+        let path = dir.0.join("reference-conversion.redb");
+        let mut engine = if durable {
+            let mut engine = Engine::open_redb(&path).unwrap();
+            engine.upgrade_storage(12).unwrap();
+            engine
+        } else {
+            Engine::memory()
+        };
+        ok(&mut engine, SCHEMA);
+        ok(&mut engine, REFERENCE);
+        ok(&mut engine, "insert parents {id: 7}");
+        ok(&mut engine, "insert children {id: 1, parent: None}");
+        let schema = engine.schema_info();
+        let source = engine.schema();
+        let before = child_rows(&mut engine);
+        let response = engine.execute(
+            "migration make_required {\nchange field Child.parent to int using old -> 7\n}",
+        );
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "E_MIGRATION");
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(engine.schema(), source);
+        assert_eq!(child_rows(&mut engine), before);
+        if durable {
+            drop(engine);
+            engine = Engine::open_redb(&path).unwrap();
+            assert_eq!(engine.schema_info(), schema);
+            assert_eq!(child_rows(&mut engine), before);
+            engine.check_integrity().unwrap();
+        }
+        // Rebinding also validates the converted rows: a missing target must
+        // roll back the conversion and the dropped reference together.
+        let migration = |target| {
+            format!(
+                "migration make_required {{\ndrop reference children (parent) references parents (id)\nchange field Child.parent to int using old -> {target}\nadd reference children (parent) references parents (id)\n}}"
+            )
+        };
+        rejected(
+            &mut engine,
+            &migration(99),
+            ConstraintKind::ReferenceMissing,
+        );
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(engine.schema(), source);
+        assert_eq!(child_rows(&mut engine), before);
+        ok(&mut engine, &migration(7));
+        let expected = child_rows(&mut engine);
+        assert_eq!(
+            expected,
+            serde_json::json!([{
+                "id": {"kind": "Int", "value": 1},
+                "parent": {"kind": "Int", "value": 7}
+            }])
+        );
+        if durable {
+            drop(engine);
+            engine = Engine::open_redb(&path).unwrap();
+            assert_eq!(child_rows(&mut engine), expected);
+            engine.check_integrity().unwrap();
+        }
+        rejected(
+            &mut engine,
+            "delete parents",
+            ConstraintKind::ReferenceRestricted,
+        );
+        rejected(
+            &mut engine,
+            "insert children {id: 2, parent: 99}",
+            ConstraintKind::ReferenceMissing,
+        );
+    }
+}
+
+#[test]
 fn upgraded_backup_without_references_restores_logical_state_without_storage_upgrade() {
     for previously_declared in [false, true] {
         let dir = TempDir::new();

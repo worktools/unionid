@@ -135,11 +135,15 @@ create reference lines (tenant, product.sku) references products (tenant, sku)
 
 缺失目标返回 `E_CONSTRAINT` / `reference_missing`；仍被引用的目标删除或 key 变化返回 `reference_restricted`，hint 指引先删除或重新分配源行。没有 cascade 或自动 set-none。每条完整 DML（含整个 batch）检查最终候选；批内自引用不要求行顺序，跨语句必须先插 parent、先删 child。一条语句失败会回滚整个脚本。`drop reference` 重复完整 source/target 声明；migration 中用 `add reference` / `drop reference`，添加时校验已有行。引用有稳定 ID 并进入 schema hash；rename 保留 ID，移除被依赖的字段或目标 unique index 前需先移除引用。
 
+类型转换若改变引用的目标类型或 Exact/Optional 模式，需在同一个 migration 中先 `drop reference`，转换字段，再 `add reference`。例如将负责人从 `Option<int>` 改为 `int`，必须为原来的 `None` 选择实际存在的负责人。重新添加会检查全部转换后的行；缺失目标时整次 migration 回滚，旧字段类型、数据与引用均保留。
+
 内存模式无需升级。当前开发版 redb 默认仍为 format 10；添加引用前显式 `unionid upgrade --db app.redb --target 12`，已启用 journal 的 format 11 则升级到 13。普通写入不会隐式升级。可运行示例复用[订单/明细](../examples/orders_and_lines.unid)，也可从 `unionid docs query --format json` 的 `typed-references` 获取。完整演进契约见 [RFC 0026](rfc/0026-typed-references.md)，Rust 内联用法见 [RUST_QUERY_MACRO.md](RUST_QUERY_MACRO.md)。
 
 This capability is implemented on main and remains unreleased in v0.13. Declare typed references independently from indexes. A target must be a primary key or an unconditional unique index over the same ordered paths; partial unique targets are rejected. Nested record paths and whole ADT components retain nominal type identity. Identical types use Exact equality, including Option None. Otherwise source Option<T> may reference target T, unwrapping one layer: None skips the relationship; Some requires a target. Any absent Optional component skips the complete composite relationship, so declare a separate tenant reference when tenant existence is mandatory.
 
 Missing targets and restricted parent deletion/key changes return precise E_CONSTRAINT kinds and hints. Remove or reassign source rows first; there is no cascade or automatic set-none. Validate the final batch after each statement, allowing order-independent batch self-references while requiring parent-before-child insertion and child-before-parent deletion across statements. A failure rolls back the entire script. Drop repeats the source/target declaration; migration add/drop preserves stable identity and rejects existing orphans. References participate in schema identity and protect dependent fields/target keys. Memory needs no upgrade; development redb requires explicit upgrade to 12 (13 from journal-enabled 11), with no implicit write upgrade. The existing order/line example is bundled as typed-references in docs query.
+
+If a conversion changes a reference's target type or Exact/Optional mode, explicitly drop the reference, convert the fields, and add the reference in the same migration. Converting an assignee from Option<int> to int requires an existing assignee for former None values. Re-adding validates all converted rows; a missing target rolls back the complete migration, preserving the previous field type, rows and reference.
 
 ## 查询
 
