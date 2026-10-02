@@ -2931,10 +2931,9 @@ impl RedbStore {
             // bounded catalog view and row/index iterators instead of maps.
             let (metadata, _, _, _, _) =
                 self.load_bounded_view().map_err(CommitFailure::Definite)?;
-            self.validate_bounded_integrity_with_reference_error(
+            self.validate_bounded_integrity_controlled_for(
                 &metadata,
                 self.committed.generation.active,
-                || Error::new("E_STORAGE", "reference source row has no target"),
                 control,
             )
             .map_err(CommitFailure::Definite)?;
@@ -3641,6 +3640,16 @@ impl RedbStore {
         metadata: &Database,
         generation: GenerationRef,
     ) -> Result<StorageCheckProfile> {
+        self.validate_bounded_integrity_controlled_for(metadata, generation, None)
+    }
+
+    fn validate_bounded_integrity_controlled_for(
+        &self,
+        metadata: &Database,
+        generation: GenerationRef,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<StorageCheckProfile> {
+        check_source_control(control)?;
         let transaction = self
             .database
             .begin_read()
@@ -3667,11 +3676,13 @@ impl RedbStore {
         let mut by_table = BTreeMap::<u64, Vec<IndexDefinition>>::new();
         let catalog_entries = metadata.durable_catalog_entries();
         for entry in &catalog_entries {
+            check_source_control(control)?;
             if let DurableCatalogEntry::Table(table) = entry {
                 tables.insert(table.id, table.clone());
             }
         }
         for entry in catalog_entries {
+            check_source_control(control)?;
             if let DurableCatalogEntry::Index { table, definition } = entry {
                 let durable_table = tables
                     .get(&definition.table_id)
@@ -3698,6 +3709,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&row_lower), borrowed_bound(&row_upper)))
             .map_err(|error| storage_error("iterate rows for integrity check", error))?
         {
+            check_source_control(control)?;
             let (key, value) =
                 entry.map_err(|error| storage_error("read row for integrity check", error))?;
             let logical_key = logical_generation_key(generation, key.value())?;
@@ -3716,6 +3728,7 @@ impl RedbStore {
             let mut row_working = value.value().len();
             if let Some(table_indexes) = by_table.get(&table_id) {
                 for definition in table_indexes {
+                    check_source_control(control)?;
                     let Some(indexed) =
                         metadata.source_index_value_if_included(&table.name, definition, &row)?
                     else {
@@ -3760,6 +3773,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&index_lower), borrowed_bound(&index_upper)))
             .map_err(|error| storage_error("iterate indexes for integrity check", error))?
         {
+            check_source_control(control)?;
             let (key, _) =
                 entry.map_err(|error| storage_error("read index for integrity check", error))?;
             let physical_key = key.value();
@@ -3854,6 +3868,7 @@ impl RedbStore {
                 ),
             ));
         }
+        check_source_control(control)?;
         Ok(profile)
     }
 
