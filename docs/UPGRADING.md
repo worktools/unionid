@@ -1,5 +1,11 @@
 # 升级与格式兼容
 
+## v0.13.1 补丁兼容性 / Patch compatibility
+
+v0.13.1 修复启用增量备份时 migration 提交的行数据恢复问题（#433）。三个 crate 同步为 0.13.1；存储、备份、协议与公开 API 保持 v0.13.0 兼容，无需额外 storage upgrade 或应用 migration。修复不追溯改写旧 journal；仍保有完整源库时可用新版本建立 checkpoint，再验证恢复结果。
+
+v0.13.1 fixes row loss when replaying a migration commit from an incremental backup (#433). All three crates use 0.13.1; storage, backup, protocol and public APIs remain compatible with v0.13.0, with no additional storage upgrade or application migration. Existing journal records are not rewritten; when the intact source database remains available, create a checkpoint with the updated version and verify its restore.
+
 ## v0.13 候选兼容性 / v0.13 candidate compatibility
 
 v0.13 的三个 crate 同步为 0.13.0。默认 storage 10、可读 1–11、backup 6、可读 1–6、protocol 1/2、stream 1 与 v0.12 一致；不需要存储 upgrade 或应用 migration。回执保留策略默认关闭且不会写入数据库/备份，重启须显式配置。旧 key 重放保留提交时的原告警；清理后的 key 可以再次执行。Rust 手写公开 status/metrics struct literal 应补齐新增 capacity 字段；旧 serde payload 保持可读。
