@@ -2412,7 +2412,12 @@ impl RedbStore {
         decode_maintenance_manifest(value.value())
     }
 
-    fn generation_summary(&self, generation: GenerationRef) -> Result<GenerationSummary> {
+    fn generation_summary(
+        &self,
+        generation: GenerationRef,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<GenerationSummary> {
+        check_source_control(control)?;
         let transaction = self
             .database
             .begin_read()
@@ -2448,6 +2453,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
             .map_err(|error| storage_error("scan generation catalog", error))?
         {
+            check_source_control(control)?;
             let (key, value) =
                 entry.map_err(|error| storage_error("read generation catalog", error))?;
             let key = logical_generation_key(generation, key.value())?.to_vec();
@@ -2463,6 +2469,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
             .map_err(|error| storage_error("scan generation rows", error))?
         {
+            check_source_control(control)?;
             let (key, value) =
                 entry.map_err(|error| storage_error("read generation row", error))?;
             let key = logical_generation_key(generation, key.value())?.to_vec();
@@ -2478,6 +2485,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
             .map_err(|error| storage_error("scan generation indexes", error))?
         {
+            check_source_control(control)?;
             let (key, _) = entry.map_err(|error| storage_error("read generation index", error))?;
             let key = logical_generation_key(generation, key.value())?;
             logical_bytes =
@@ -2838,11 +2846,15 @@ impl RedbStore {
         Ok(MaintenanceInfo::from_manifest(&manifest))
     }
 
+    /// Validate an unpublished generation before atomically marking it Ready.
+    /// Cancellation retains the last Building checkpoint for a later retry.
     pub(crate) fn mark_maintenance_ready(
         &mut self,
         file: &MigrationFile,
         target: &Database,
+        control: Option<&crate::control::ExecutionControl>,
     ) -> std::result::Result<MaintenanceInfo, CommitFailure> {
+        check_source_control(control).map_err(CommitFailure::Definite)?;
         let current = self
             .maintenance_info()
             .map_err(CommitFailure::Definite)?
@@ -2866,16 +2878,21 @@ impl RedbStore {
             )));
         }
         let target_generation = GenerationRef::Generated(current.target_generation);
-        self.validate_bounded_integrity_with_reference_error(target, target_generation, || {
-            Error::new(
-                "E_CONSTRAINT",
-                "reference target is missing in the migration candidate",
-            )
-            .constraint(crate::error::ConstraintKind::ReferenceMissing)
-        })
+        self.validate_bounded_integrity_with_reference_error(
+            target,
+            target_generation,
+            || {
+                Error::new(
+                    "E_CONSTRAINT",
+                    "reference target is missing in the migration candidate",
+                )
+                .constraint(crate::error::ConstraintKind::ReferenceMissing)
+            },
+            control,
+        )
         .map_err(CommitFailure::Definite)?;
         let summary = self
-            .generation_summary(target_generation)
+            .generation_summary(target_generation, control)
             .map_err(CommitFailure::Definite)?;
         let manifest = self
             .read_manifest(current.target_generation)
@@ -2891,6 +2908,7 @@ impl RedbStore {
                 "target generation counters or rolling digest do not match its manifest",
             )));
         }
+        check_source_control(control).map_err(CommitFailure::Definite)?;
         let mut transaction = self
             .database
             .begin_write()
@@ -2935,6 +2953,7 @@ impl RedbStore {
                 .insert(current.target_generation, encoded.as_slice())
                 .map_err(|error| CommitFailure::definite("mark maintenance ready", error))?;
         }
+        check_source_control(control).map_err(CommitFailure::Definite)?;
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit maintenance validation", error))?;
@@ -3758,9 +3777,12 @@ impl RedbStore {
         metadata: &Database,
         generation: GenerationRef,
     ) -> Result<StorageCheckProfile> {
-        self.validate_bounded_integrity_with_reference_error(metadata, generation, || {
-            Error::new("E_STORAGE", "reference target is missing")
-        })
+        self.validate_bounded_integrity_with_reference_error(
+            metadata,
+            generation,
+            || Error::new("E_STORAGE", "reference target is missing"),
+            None,
+        )
     }
 
     fn validate_bounded_integrity_with_reference_error(
@@ -3768,7 +3790,9 @@ impl RedbStore {
         metadata: &Database,
         generation: GenerationRef,
         missing_target_error: fn() -> Error,
+        control: Option<&crate::control::ExecutionControl>,
     ) -> Result<StorageCheckProfile> {
+        check_source_control(control)?;
         let transaction = self
             .database
             .begin_read()
@@ -3796,11 +3820,13 @@ impl RedbStore {
         let mut references = BTreeMap::new();
         let catalog_entries = metadata.durable_catalog_entries();
         for entry in &catalog_entries {
+            check_source_control(control)?;
             if let DurableCatalogEntry::Table(table) = entry {
                 tables.insert(table.id, table.clone());
             }
         }
         for entry in catalog_entries {
+            check_source_control(control)?;
             if let DurableCatalogEntry::Reference(definition) = &entry {
                 references.insert(definition.id, definition.clone());
             }
@@ -3830,6 +3856,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&row_lower), borrowed_bound(&row_upper)))
             .map_err(|error| storage_error("iterate rows for integrity check", error))?
         {
+            check_source_control(control)?;
             let (key, value) =
                 entry.map_err(|error| storage_error("read row for integrity check", error))?;
             let logical_key = logical_generation_key(generation, key.value())?;
@@ -3848,6 +3875,7 @@ impl RedbStore {
             let mut row_working = value.value().len();
             if let Some(table_indexes) = by_table.get(&table_id) {
                 for definition in table_indexes {
+                    check_source_control(control)?;
                     let Some(indexed) =
                         metadata.source_index_value_if_included(&table.name, definition, &row)?
                     else {
@@ -3887,6 +3915,7 @@ impl RedbStore {
                 .values()
                 .filter(|reference| reference.table_id == table_id)
             {
+                check_source_control(control)?;
                 let Some(indexed) = reference.source_value(&row.fields)? else {
                     continue;
                 };
@@ -3946,6 +3975,7 @@ impl RedbStore {
             .range::<&[u8]>((borrowed_bound(&index_lower), borrowed_bound(&index_upper)))
             .map_err(|error| storage_error("iterate indexes for integrity check", error))?
         {
+            check_source_control(control)?;
             let (key, _) =
                 entry.map_err(|error| storage_error("read index for integrity check", error))?;
             let physical_key = key.value();
@@ -7783,6 +7813,127 @@ mod reference_codec_tests {
                 std::fs::remove_file(path).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn reference_readiness_control_preserves_building_and_can_resume() {
+        use crate::control::ExecutionControl;
+        use std::sync::{Arc, atomic::AtomicBool};
+        let path = std::env::temp_dir().join(format!(
+            "unionid-reference-ready-control-{}-{}.redb",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = {
+            let mut engine = crate::Engine::open_redb(&path).unwrap();
+            engine.upgrade_storage(12).unwrap();
+            let response = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: Option<int>}\ntable parents: Parent {key id}\ntable children: Child {key id}\ncreate reference children (parent) references parents (id)\ninsert parents {id: 7}\ninsert children {id: 1, parent: Some(7)}");
+            assert!(response.ok, "{}", response.message);
+            engine.database_snapshot().unwrap()
+        };
+        let file =
+            MigrationFile::parse("migration enabled\n  add field Child.enabled bool = true\n")
+                .unwrap();
+        let target = source.migration_target(&file.id, &file.steps).unwrap();
+        let (mut store, _, _, _, _) = RedbStore::open(&path).unwrap();
+        let (_, row_source) = store.committed_view(&source).unwrap();
+        store.start_maintenance(&source, &target, &file).unwrap();
+        let mut tables = source.schema_tables();
+        tables.sort_by_key(|table| table.id);
+        for table in tables {
+            let name = &table.name;
+            let mut cursor = row_source.scan_rows(name).unwrap();
+            let mut observation = ExecutionObservation::default();
+            while let Some(batch) = cursor.next_batch(None, &mut observation).unwrap() {
+                let transformed = source
+                    .migrate_table_batch(&file.id, &file.steps, name, &batch.rows)
+                    .unwrap();
+                let DurableCatalogEntry::Table(table) =
+                    source.durable_table_catalog_entry(name).unwrap()
+                else {
+                    unreachable!()
+                };
+                store
+                    .append_maintenance_batch(
+                        &file,
+                        &transformed,
+                        (table.id, batch.rows.last().unwrap().id),
+                        batch.rows.len(),
+                    )
+                    .unwrap();
+            }
+        }
+        drop(row_source);
+        let before = store.maintenance_info().unwrap().unwrap();
+        assert_eq!(before.state, MaintenanceState::Building);
+        assert_eq!(before.source_rows_seen, 2);
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+        let controls = [
+            (ExecutionControl::deadline(Instant::now()), "E_TIMEOUT"),
+            (
+                ExecutionControl::cancellable(deadline, Arc::new(AtomicBool::new(true)), None),
+                "E_CANCELLED",
+            ),
+            (
+                ExecutionControl::cancellable(
+                    deadline,
+                    Arc::new(AtomicBool::new(false)),
+                    Some(Arc::new(AtomicBool::new(true))),
+                ),
+                "E_SHUTDOWN",
+            ),
+        ];
+        for (control, code) in controls {
+            let error = store
+                .mark_maintenance_ready(&file, &target, Some(&control))
+                .unwrap_err()
+                .into_error();
+            assert_eq!(error.code, code);
+            // Exercise the underlying scans independently of the Ready entry gate.
+            assert_eq!(
+                store
+                    .validate_bounded_integrity_with_reference_error(
+                        &target,
+                        GenerationRef::Generated(before.target_generation),
+                        || Error::new("E_STORAGE", "missing target"),
+                        Some(&control)
+                    )
+                    .unwrap_err()
+                    .code,
+                code
+            );
+            assert_eq!(
+                store
+                    .generation_summary(
+                        GenerationRef::Generated(before.target_generation),
+                        Some(&control)
+                    )
+                    .unwrap_err()
+                    .code,
+                code
+            );
+            let after = store.maintenance_info().unwrap().unwrap();
+            assert_eq!(after.state, before.state);
+            assert_eq!(after.checkpoint, before.checkpoint);
+            assert_eq!(after.source_rows_seen, before.source_rows_seen);
+            assert_eq!(store.committed.meta.sequence, source.sequence);
+        }
+        drop(store);
+        let (mut reopened, loaded, _, _, _) = RedbStore::open(&path).unwrap();
+        assert_eq!(loaded.schema_info(), source.schema_info());
+        assert_eq!(
+            reopened.maintenance_info().unwrap().unwrap().state,
+            MaintenanceState::Building
+        );
+        let ready = reopened
+            .mark_maintenance_ready(&file, &target, None)
+            .unwrap();
+        assert_eq!(ready.state, MaintenanceState::Ready);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

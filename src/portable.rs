@@ -156,6 +156,8 @@ pub struct TableDescription {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_key: Option<KeyDescription>,
     pub indexes: Vec<IndexDescription>,
+    /// Source-owned relationships. Requires description v3 when nonempty;
+    /// v1/v2 metadata without references remains readable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<ReferenceDescription>,
 }
@@ -163,17 +165,25 @@ pub struct TableDescription {
 /// A typed, restrict-only relationship owned by the source table.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReferenceDescription {
+    /// Stable relationship ID within this database's catalog lineage.
     pub id: String,
+    /// Stable target table identity, encoded as a decimal string.
     pub target_table_id: String,
+    /// Current target table name; renames preserve target_table_id.
     pub target_table: String,
+    /// Pinned primary key or unconditional unique index; no partial targets.
     pub target: ReferenceKeyDescription,
+    /// Ordered source/target field pairs, preserving nominal ADT identity.
     pub components: Vec<ReferenceComponentDescription>,
+    /// Referenced targets cannot be deleted while sources remain.
     pub on_delete: ReferenceAction,
+    /// Referenced key values cannot change while sources remain.
     pub on_update: ReferenceAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+/// The unique target identity pinned when a relationship is declared.
 pub enum ReferenceKeyDescription {
     PrimaryKey,
     UniqueIndex { index_id: String },
@@ -181,21 +191,29 @@ pub enum ReferenceKeyDescription {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReferenceComponentDescription {
+    /// Source path by both current name and stable field IDs.
     pub source: KeyDescription,
+    /// Corresponding target path, in the unique key's component order.
     pub target: KeyDescription,
+    /// Exact value matching or one direct Option layer of optionality.
     pub mode: ReferenceMatchMode,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// How a source component produces a target key value.
 pub enum ReferenceMatchMode {
+    /// Identical types, including `Option<T> -> Option<T>`; `None` is a real key.
     Exact,
+    /// Direct `Option<T> -> T`; any `None` skips the entire composite relationship.
     Optional,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+/// Supported behavior for mutations of a referenced target.
 pub enum ReferenceAction {
+    /// Reject conflicting deletion/key changes; never cascade or rewrite sources.
     Restrict,
 }
 
