@@ -61,6 +61,35 @@ unionid_query::queries! {
         derive value = float_to_int $value "half_even"
         select value
     }
+
+    query convert_decimal {
+        from tasks
+        filter id == $id
+        derive value = int_to_decimal $value 8 2
+        select value
+    }
+}
+
+#[test]
+fn inline_decimal_conversion_has_typed_output_and_preserves_precision_errors() {
+    let mut engine = unionid::Engine::memory();
+    assert!(engine.execute(include_str!("schema.unid")).ok);
+    assert!(engine.execute("insert tasks {id: 1, title: \"decimal\", state: Pending, priority: 1, due_on: @2026-09-17}").ok);
+    let rows = convert_decimal::convert_decimal(
+        &mut engine,
+        convert_decimal::ConvertDecimalParams { id: 1, value: 12 },
+    )
+    .unwrap();
+    assert_eq!(rows[0].value.to_string(), "12.00");
+    let error = convert_decimal::convert_decimal(
+        &mut engine,
+        convert_decimal::ConvertDecimalParams {
+            id: 1,
+            value: 1_000_000,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "E_DECIMAL_RANGE");
 }
 
 #[test]

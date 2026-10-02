@@ -384,7 +384,8 @@ pub(crate) fn bind_scalar(
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
-                "decimal_parse"
+                "int_to_decimal"
+                    | "decimal_parse"
                     | "decimal_rescale"
                     | "decimal_round"
                     | "decimal_mul"
@@ -413,13 +414,15 @@ pub(crate) fn bind_scalar(
                 ) {
                     decimal_rounding(&arguments[scale_index + 1])?;
                 }
-                let input = if name == "decimal_parse" {
+                let input = if name == "int_to_decimal" {
+                    ScalarType::Int
+                } else if name == "decimal_parse" {
                     ScalarType::Text
                 } else {
                     infer_scalar(catalog, scope, &arguments[0], reference_kind)?
                         .ok_or_else(|| Error::new("E_TYPE", format!("cannot infer {name} input")))?
                 };
-                if name != "decimal_parse"
+                if !matches!(name.as_str(), "decimal_parse" | "int_to_decimal")
                     && !matches!(catalog.underlying(&input)?, ScalarType::Decimal { .. })
                 {
                     return Err(Error::new(
@@ -607,7 +610,8 @@ pub(crate) fn infer_scalar(
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
-                "decimal_parse"
+                "int_to_decimal"
+                    | "decimal_parse"
                     | "decimal_rescale"
                     | "decimal_round"
                     | "decimal_mul"
@@ -629,7 +633,14 @@ pub(crate) fn infer_scalar(
                     } else {
                         (1, 2)
                     };
-                if name != "decimal_parse" {
+                if name == "int_to_decimal" {
+                    if let Some(input) =
+                        infer_scalar(catalog, scope, &arguments[0], reference_kind)?
+                        && !same_type(&input, &ScalarType::Int)
+                    {
+                        return Err(Error::new("E_TYPE", "int_to_decimal expects int input"));
+                    }
+                } else if name != "decimal_parse" {
                     for argument in
                         &arguments[..if matches!(name.as_str(), "decimal_mul" | "decimal_div") {
                             2
@@ -910,6 +921,7 @@ pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
                 | "substring"
                 | "int_to_float"
                 | "float_to_int"
+                | "int_to_decimal"
                 | "uuid_parse"
                 | "bytes_parse_hex"
                 | "date_parse"
@@ -937,7 +949,10 @@ pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
         Some(2)
     } else if matches!(name, "keys" | "values" | "entries") {
         Some(1)
-    } else if matches!(name, "decimal_parse" | "decimal_rescale" | "substring") {
+    } else if matches!(
+        name,
+        "int_to_decimal" | "decimal_parse" | "decimal_rescale" | "substring"
+    ) {
         Some(3)
     } else if name == "decimal_round" {
         Some(4)
@@ -1539,7 +1554,8 @@ fn evaluate_scalar<'expression, 'values>(
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
-                "decimal_parse"
+                "int_to_decimal"
+                    | "decimal_parse"
                     | "decimal_rescale"
                     | "decimal_round"
                     | "decimal_mul"
@@ -1575,6 +1591,10 @@ fn evaluate_scalar<'expression, 'values>(
                     None
                 };
                 let decimal = match (name.as_str(), left) {
+                    ("int_to_decimal", Value::Int(value)) => {
+                        crate::scalars::Decimal::new(i128::from(*value), 38, 0)?
+                            .rescale(precision, scale)?
+                    }
                     ("decimal_parse", Value::Text(source)) => {
                         crate::scalars::Decimal::parse(source, precision, scale)?
                     }
@@ -1610,6 +1630,9 @@ fn evaluate_scalar<'expression, 'values>(
                     }
                     ("decimal_parse", _) => {
                         return Err(Error::new("E_TYPE", "decimal_parse expects text"));
+                    }
+                    ("int_to_decimal", _) => {
+                        return Err(Error::new("E_TYPE", "int_to_decimal expects int"));
                     }
                     _ => {
                         return Err(Error::new(

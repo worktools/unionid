@@ -17,6 +17,154 @@ struct Rounded {
     value: i64,
 }
 
+#[derive(Debug, Deserialize, PartialEq)]
+struct DecimalConverted {
+    value: unionid::scalars::Decimal,
+}
+
+#[test]
+fn integer_decimal_conversion_preserves_units_and_full_i64_precision() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(SCHEMA).ok);
+    assert!(
+        engine
+            .execute("insert samples {id: 1, qty: 12, price: 0.5}")
+            .ok
+    );
+    let prepared = engine
+        .prepare("from samples | derive value = int_to_decimal $input 38 19 | select value")
+        .unwrap();
+    for input in [0, 12, -12, i64::MIN, i64::MAX] {
+        let response = engine.execute_prepared(
+            &prepared,
+            BTreeMap::from([("input".into(), Value::Int(input))]),
+        );
+        assert!(response.ok, "{input}: {}", response.message);
+        let value = response.typed_rows::<DecimalConverted>().unwrap()[0].value;
+        assert_eq!(value.coefficient(), i128::from(input) * 10_i128.pow(19));
+        assert_eq!(value.scale(), 19);
+    }
+    let query = "from samples | derive value = (int_to_decimal qty 8 2) + decimal_parse \"0.50\" 8 2 | select value";
+    let canonical = unionid::format_source(query).unwrap();
+    assert_eq!(unionid::format_source(&canonical).unwrap(), canonical);
+    assert_eq!(
+        engine
+            .execute(&canonical)
+            .typed_rows::<DecimalConverted>()
+            .unwrap()[0]
+            .value
+            .to_string(),
+        "12.50"
+    );
+    let request = unionid::protocol::Request::query("decimal-cast", query)
+        .with_version(2)
+        .unwrap();
+    let response = unionid::server::execute_protocol_request(&mut engine, request);
+    assert!(response.ok, "{}", response.message);
+    let decoded: unionid::protocol::Response =
+        serde_json::from_slice(&serde_json::to_vec(&response).unwrap()).unwrap();
+    assert_eq!(
+        decoded.typed_rows::<DecimalConverted>().unwrap()[0]
+            .value
+            .to_string(),
+        "12.50"
+    );
+    let request = unionid::protocol::Request::query(
+        "legacy-cast",
+        "insert samples {id: 2, qty: 1, price: 0.0}\nfrom samples | derive value = int_to_decimal qty 8 2",
+    );
+    let response = unionid::server::execute_protocol_request(&mut engine, request);
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "E_PROTOCOL_TYPE");
+    assert_eq!(engine.execute("from samples").rows.len(), 1);
+    let explain = engine.execute("explain from samples | derive value = int_to_decimal 100 2 0");
+    assert!(explain.ok, "{}", explain.message);
+    assert!(explain.rows.is_empty());
+    assert_eq!(
+        explain.plan.unwrap().result_schema.last().unwrap().ty,
+        "Decimal<2, 0>"
+    );
+}
+
+#[test]
+fn integer_decimal_target_and_input_are_bound_before_empty_scans() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(SCHEMA).ok);
+    for target in [
+        "0 0",
+        "39 0",
+        "8 9",
+        "-1 0",
+        "8 -1",
+        "$precision 2",
+        "8 $scale",
+        "8 2.0",
+    ] {
+        let error = engine
+            .prepare(&format!(
+                "from samples | derive value = int_to_decimal qty {target}"
+            ))
+            .expect_err("invalid decimal target");
+        assert_eq!(error.code, "E_DECIMAL_TYPE", "{target}");
+    }
+    for input in ["price", "\"12\"", "None", "true"] {
+        let response = engine.execute(&format!(
+            "from samples | derive value = int_to_decimal {input} 8 2"
+        ));
+        assert!(!response.ok, "{input}");
+        assert_eq!(response.error.unwrap().code, "E_TYPE");
+    }
+}
+
+#[test]
+fn integer_decimal_overflow_is_atomic_and_success_survives_reopen() {
+    let dir = common::TempDir::new();
+    let path = dir.0.join("decimal-cast.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(engine.execute("struct Amount {id: int, qty: int, amount: Decimal<4, 2>}\ntable amounts: Amount {key id}\ninsert amounts {id: 1, qty: 12, amount: decimal \"0.00\"}\ninsert amounts {id: 2, qty: 100, amount: decimal \"0.00\"}").ok);
+        let before = serde_json::to_value(engine.execute("from amounts | sort id").rows).unwrap();
+        let response = engine.execute("insert amounts {id: 3, qty: 3, amount: decimal \"0.00\"}\nupdate amounts | set amount = int_to_decimal qty 4 2");
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "E_DECIMAL_RANGE");
+        assert_eq!(
+            serde_json::to_value(engine.execute("from amounts | sort id").rows).unwrap(),
+            before
+        );
+        let schema = engine.schema_info();
+        let response = engine.execute("migration too_small {change field Amount.qty to Decimal<4, 2> using old -> int_to_decimal old 4 2}");
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "E_DECIMAL_RANGE");
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(
+            serde_json::to_value(engine.execute("from amounts | sort id").rows).unwrap(),
+            before
+        );
+        // Scaling can exceed i128 even before the target precision check.
+        let response = engine.execute("from amounts | derive value = int_to_decimal 2 38 38");
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "E_DECIMAL_RANGE");
+        assert!(engine.execute("delete amounts | filter id == 2").ok);
+        let response = engine
+            .execute("update amounts | set amount = int_to_decimal qty 4 2 | returning amount");
+        assert!(response.ok, "{}", response.message);
+        let response = engine.execute("migration exact_amount {change field Amount.qty to Decimal<4, 2> using old -> int_to_decimal old 4 2}");
+        assert!(response.ok, "{}", response.message);
+        engine.check_integrity().unwrap();
+    }
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert_eq!(
+        engine
+            .execute("from amounts | derive value = qty | select value")
+            .typed_rows::<DecimalConverted>()
+            .unwrap()[0]
+            .value
+            .to_string(),
+        "12.00"
+    );
+    engine.check_integrity().unwrap();
+}
+
 #[test]
 fn float_conversion_rounds_the_actual_binary_value_with_explicit_modes() {
     let mut engine = Engine::memory();

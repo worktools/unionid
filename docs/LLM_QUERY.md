@@ -224,6 +224,13 @@ than saturating. Half_up rounds ties away from zero; half_even rounds ties to ev
 Rounding uses the actual binary f64, not its original decimal spelling; negative
 zero becomes integer zero. Example: `float_to_int price "half_even"`. It shares
 the same prepared/query/migration rollback and nonexecuting explain contracts.
+`int_to_decimal value P S` converts int to Decimal<P, S> exactly, preserving
+numeric units: `int_to_decimal 12 8 2` produces 12.00, not 0.12. P/S must be integer
+literals with 1 <= P <= 38 and 0 <= S <= P; dynamic/invalid targets fail binding
+with E_DECIMAL_TYPE. Precision/scaling overflow returns E_DECIMAL_RANGE, without
+rounding or partial mutations. Use this with decimal_mul/div for mixed int/decimal
+arithmetic. Decimal output requires protocol v2; v1 rejects unsupported output
+types before mutation. Explain binds the full target type without evaluating it.
 
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,

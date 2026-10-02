@@ -395,6 +395,19 @@ select {id, rounded}
 
 `float_to_int value "mode"` takes float and returns int. The mode must be a known text literal at binding time, never a field or parameter; invalid modes return E_CAST_MODE. Rounding operates on the stored binary f64, not the original decimal spelling. Exact rejects fractional parts with E_CAST_PRECISION; a rounded result outside i64 returns E_CAST_RANGE instead of saturation or wrapping. Negative zero becomes integer zero. Query/prepared parameters/migration share this contract; failures roll back the entire request, while explain binds without evaluating values. Both conversions remain unreleased v0.15 development functions.
 
+`int_to_decimal value P S` 接受 int，返回 `Decimal<P, S>`，保持整数的数值单位并精确补齐 scale：`int_to_decimal 12 8 2` 是 `12.00`，不是 `0.12`。P/S 必须是整数 literal，满足 `1 <= P <= 38`、`0 <= S <= P`，绑定时检查并确定完整结果类型；动态或无效目标返回 `E_DECIMAL_TYPE`。放不进 P 位精度或缩放溢出时返回 `E_DECIMAL_RANGE`，不舍入、不绕过请求回滚。
+
+```text
+from items
+derive quantity = int_to_decimal qty 18 0
+derive total = decimal_mul quantity price 18 2 "exact"
+select {id, total}
+```
+
+这里 `qty` 为 int，`price` 为 decimal。若整数实际代表最小货币单位，应先转换再显式除以倍率，不要把 S 当作分币解释。`int_to_decimal` 与 query、prepared、migration `using`、formatter 和 explain 共用类型与错误契约。输出 decimal 使用 protocol v2；v1 在执行 mutation 前拒绝不支持的结果类型。以上转换属于未发布的 v0.15 开发能力。
+
+`int_to_decimal value P S` takes int and returns Decimal<P, S>, preserving numeric units and exactly padding the scale: 12 at P=8/S=2 becomes 12.00, never 0.12. P/S must be integer literals satisfying 1 <= P <= 38 and 0 <= S <= P. Binding fixes the full result type; dynamic/invalid targets return E_DECIMAL_TYPE. Precision or scaling overflow returns E_DECIMAL_RANGE without rounding, and failed mutations/migrations roll back the whole request. In the example qty is int and price is decimal. Integers representing minor currency units require explicit division after conversion. Query, prepared, migration using, formatter and explain share this contract. Decimal output requires protocol v2; v1 rejects unsupported result types before mutation. This remains an unreleased v0.15 capability.
+
 ## Explain、实际剖析与类型化索引计划
 
 `explain` 在相同的 schema、字段、pattern、局部函数和参数绑定规则下准备查询，但不读取、复制或执行数据行：
