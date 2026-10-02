@@ -125,3 +125,19 @@ JSON 输出仍是 `MigrationProgress`，包含本次 `committed_steps`、`comple
 每个 shadow generation 的 catalog 加 rows 加 indexes 设有 1 GiB 逻辑上限；超过时返回 `E_MAINTENANCE_LIMIT` 并自动清理未切换的 target。执行仍需扫描全部受影响数据，耗时随数据量增长，但常驻转换状态受批次边界限制。schema diff 会列出受影响表的当前行数和索引数，并在新增 sum variant 时提示客户端穷尽 match 的兼容风险。
 
 声明式目标 schema 的检查、规范输出、影响报告和 `migration diff` 草稿规则见 [声明式 Schema 与 Diff](SCHEMA-DIFF.md)。diff 不推断 rename 或转换；未决项会阻止草稿被 runner 解析。
+
+## Rust 已保存查询预检 / Rust saved-query preflight
+
+开发中的 v0.13 提供 `Engine::plan_migrations_with_queries` 与 `apply_migrations_with_queries`。输入为现有 `MigrationFile` 列表和 `migration::query_validation::MigrationQuery { path, source }` 列表；源码在目标 catalog 上通过同一个静态 binder 检查，不执行查询或扫描业务数据。当前已发布 v0.12 没有这些 API，CLI `--queries` 接入仍在 #400 后续阶段。
+
+plan 返回原有 plan 与 `query_validation`：`valid` 表示全部文件在最终 schema 上可绑定，`files` 按路径排序，`failures` 保留 current/各 migration checkpoint 的原始错误和 span。新查询可以在当前 schema 失败、在最终 schema 成功；中间失效但最终修复的轨迹保留。`parameters_changed`/`result_changed` 包含递归命名 ADT 的可达定义变化；`conditional` 表示新查询无有效 baseline 或契约变化需要复核，不代表旧生成客户端已兼容。
+
+apply 在第一次 migration/maintenance 提交前重新进行预检，失败返回 `MigrationQueryError`（含原始 error 和可选完整报告）。同一个 Engine 持有数据库写入所有权，报告不能作为跨进程的“批准令牌”复用。校验成功后，实际数据转换仍逐 migration 文件提交，后续文件失败可能留下前面已提交的文件。无 pending 时仍会校验查询；Building/Ready/Aborting 使用 source catalog，Reclaimable 使用已经 cutover 的 target catalog，身份或文件 checksum 不一致时拒绝。
+
+每次预检最多 1,024 个文件、每个文件沿用 1 MiB 源码限制、源码合计 16 MiB、65,536 次绑定、4,096 条诊断和 1 MiB 编码报告；超过预算明确返回 E_LIMIT。详见 [RFC 0024](rfc/0024-migration-query-preflight.md)。
+
+Development toward v0.13 adds the two query-aware Engine methods with existing MigrationFile inputs and immutable MigrationQuery path/source pairs. They are unavailable in released v0.12; CLI --queries and directory loading remain follow-up #400 work. The shared static binder checks metadata without executing business operations or scanning rows.
+
+The plan includes a versioned query_validation report: final validity, path-sorted files, current/migration checkpoint errors with spans, and parameter/result changes including reachable recursive named definitions. New queries may lack a valid baseline; repaired intermediate failures remain visible. Conditional compatibility requires review and does not relax exact generated-client schema hashes.
+
+Apply repeats preflight under the same Engine's write ownership before any migration or maintenance commit, returning MigrationQueryError with its report on failure. Reports are not reusable approval tokens. Later data conversion retains per-file commits. No-pending calls still validate queries; active maintenance checks the actual source or cutover catalog identity and original migration checksum before proceeding. Source, bind, diagnostic, and encoded-report budgets fail explicitly; see the RFC for limits and remaining CLI/acceptance work.

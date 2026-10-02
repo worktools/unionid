@@ -1,3 +1,5 @@
+pub mod query_validation;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

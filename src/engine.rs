@@ -2125,18 +2125,102 @@ impl Engine {
     }
 
     pub fn plan_migrations(&self, files: &[MigrationFile]) -> Result<MigrationPlan> {
+        self.plan_migrations_observed(files, false, |_, _| Ok(()))
+    }
+
+    /// Bind saved static queries without scanning rows or changing durable state.
+    /// Invalid final queries are represented in the returned validation report.
+    pub fn plan_migrations_with_queries(
+        &self,
+        files: &[MigrationFile],
+        queries: &[crate::migration::query_validation::MigrationQuery],
+    ) -> Result<crate::migration::query_validation::MigrationQueryPlan> {
+        use crate::migration::query_validation::{MigrationQueryPlan, QueryValidator};
+        let applied = validate_files_against_history(files, self.committed.db.migration_history())?;
+        if let Some(info) = self
+            .durable
+            .as_ref()
+            .map(|d| d.maintenance_info())
+            .transpose()?
+            .flatten()
+        {
+            let schema = self.schema_info();
+            let expected = if matches!(info.state, MaintenanceState::Reclaimable) {
+                (&info.target_schema_hash, info.target_schema_revision)
+            } else {
+                (&info.source_schema_hash, info.source_schema_revision)
+            };
+            let matching_file = files
+                .iter()
+                .any(|f| f.id == info.migration_id && f.checksum == info.migration_checksum);
+            if schema.hash != *expected.0 || schema.revision != expected.1 || !matching_file {
+                return Err(Error::new("E_MIGRATION", "saved-query preflight cannot reconcile active maintenance with the supplied migrations")
+                    .with_hint("inspect migration status and use the original files to advance or explicitly abort maintenance"));
+            }
+        }
+        let mut validator = QueryValidator::new(queries, files.len() - applied + 1)?;
+        let plan =
+            self.plan_migrations_observed(files, true, |id, db| validator.inspect(id, db))?;
+        let query_validation = validator.finish(&plan)?;
+        Ok(MigrationQueryPlan {
+            plan,
+            query_validation,
+        })
+    }
+
+    /// Validate all final queries before the first migration or maintenance commit.
+    /// Data conversion retains the existing per-migration-file commit boundary.
+    pub fn apply_migrations_with_queries(
+        &mut self,
+        files: &[MigrationFile],
+        queries: &[crate::migration::query_validation::MigrationQuery],
+    ) -> std::result::Result<
+        crate::migration::query_validation::MigrationQueryApply,
+        crate::migration::query_validation::MigrationQueryError,
+    > {
+        use crate::migration::query_validation::{MigrationQueryApply, MigrationQueryError};
+        let validation = self
+            .plan_migrations_with_queries(files, queries)?
+            .query_validation;
+        if !validation.valid {
+            return Err(MigrationQueryError {
+                error: Error::new("E_MIGRATION", "saved queries are invalid for the target schema")
+                    .with_hint("inspect query_validation and update the failing saved queries before applying migrations").into(),
+                query_validation: Some(Box::new(validation)),
+            });
+        }
+        match self.apply_migrations(files) {
+            Ok(applied) => Ok(MigrationQueryApply {
+                applied,
+                query_validation: validation,
+            }),
+            Err(error) => Err(MigrationQueryError {
+                error: Box::new(error),
+                query_validation: Some(Box::new(validation)),
+            }),
+        }
+    }
+
+    fn plan_migrations_observed(
+        &self,
+        files: &[MigrationFile],
+        metadata_only: bool,
+        mut inspect: impl FnMut(Option<&str>, &Database) -> Result<()>,
+    ) -> Result<MigrationPlan> {
         let applied_count =
             validate_files_against_history(files, self.committed.db.migration_history())?;
         let current_schema = self.committed.db.schema_info();
-        let mut candidate = if self
-            .durable
-            .as_ref()
-            .is_some_and(|durable| matches!(durable.versions().format, 6..=11))
+        let mut candidate = if metadata_only
+            || self
+                .durable
+                .as_ref()
+                .is_some_and(|durable| matches!(durable.versions().format, 6..=11))
         {
             self.committed.db.metadata_only()?
         } else {
             self.mutable_candidate(None)?
         };
+        inspect(None, &candidate)?;
         let mut pending = Vec::new();
         for file in &files[applied_count..] {
             let before = candidate.schema_info();
@@ -2177,6 +2261,7 @@ impl Engine {
                 schema_hash: after.hash,
                 applied_at_unix_ms: 0,
             })?;
+            inspect(Some(&file.id), &candidate)?;
         }
         Ok(MigrationPlan {
             current_schema,
