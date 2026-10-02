@@ -397,6 +397,21 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ReceiptCommand {
+    /// Preview age-based receipt cleanup. Pruned keys can execute again.
+    Retain {
+        #[arg(long)]
+        db: PathBuf,
+        /// Must exceed every supported client, queue, and manual retry window.
+        #[arg(long)]
+        min_age_seconds: u64,
+        #[arg(long, default_value_t = 1000)]
+        max_receipts: usize,
+        /// Delete the selected receipts; without this flag only preview.
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long, value_enum, default_value = "table")]
+        format: Format,
+    },
     /// Show receipt capacity and oldest/newest retained boundaries.
     Status {
         #[arg(long)]
@@ -753,7 +768,9 @@ impl Args {
             | Command::ImportLegacy { format, .. }
             | Command::Receipts {
                 command:
-                    ReceiptCommand::Status { format, .. } | ReceiptCommand::Prune { format, .. },
+                    ReceiptCommand::Status { format, .. }
+                    | ReceiptCommand::Prune { format, .. }
+                    | ReceiptCommand::Retain { format, .. },
             }
             | Command::Schema {
                 command: SchemaCommand::Check { format, .. } | SchemaCommand::Print { format, .. },
@@ -1176,6 +1193,21 @@ fn run(args: Args) -> Result<(), String> {
             } => cli::migration_diff(db, schema, dir, &name, matches!(format, Format::Json)),
         },
         Command::Receipts { command } => match command {
+            ReceiptCommand::Retain {
+                db,
+                min_age_seconds,
+                max_receipts,
+                confirm,
+                format,
+            } => cli::receipt_retain(
+                db,
+                unionid::ReceiptRetentionPolicy {
+                    min_age_seconds,
+                    max_receipts,
+                },
+                confirm,
+                matches!(format, Format::Json),
+            ),
             ReceiptCommand::Status { db, format } => {
                 cli::receipt_status(db, matches!(format, Format::Json))
             }

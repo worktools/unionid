@@ -5,6 +5,8 @@ use crate::error::{Error, Result};
 
 mod capacity;
 pub use capacity::{ReceiptCapacity, ReceiptCapacityState};
+mod retention;
+pub use retention::{ReceiptRetentionPolicy, ReceiptRetentionResult};
 
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 pub const MAX_IDEMPOTENCY_RECEIPT_BYTES: usize = 1024 * 1024;

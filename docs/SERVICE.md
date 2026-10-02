@@ -83,10 +83,32 @@ unionid receipts prune --db app.redb --before-unix-ms 1700000000000 --max-receip
 
 成功的新 key 提交在达到阈值时返回固定 warning，表示该次提交时的容量。告警计入回执大小检查并与业务数据原子保存。已有 key replay 保持原响应和原告警，即使后来 prune 使当前容量恢复正常；当前状态以 status/metrics 为准。单条超过 1 MiB 是 `E_IDEMPOTENCY_LIMIT`，不能通过清理别的回执解决。10,000 条或 64 MiB 总容量不足是 `E_IDEMPOTENCY_CAPACITY`，hint 指向 status 与显式预览/确认流程。
 
-默认不会清理任何回执。本阶段只增加容量信号；显式保留策略仍由 #402 后续阶段实现。清理之后，同一个 key 可以再次产生效果。容量规划使用“成功的新 key QPS × 最大重试窗口”，同时预留突发、清理延迟和编码字节余量。已有 key 重放不增加条数；不能为腾空间擅自缩短业务重试窗口。
+默认不会清理任何回执。可使用下述显式窗口命令手动执行一轮清理；服务内的周期调度仍由 #402 后续阶段实现。清理之后，同一个 key 可以再次产生效果。容量规划使用“成功的新 key QPS × 最大重试窗口”，同时预留突发、清理延迟和编码字节余量。已有 key 重放不增加条数；不能为腾空间擅自缩短业务重试窗口。
 
 In development toward v0.13, status exposes version-1 `capacity`, while doctor exposes value-free `database.receipt_capacity` from its private copy. Either count or encoded bytes reaching 80% yields `warning`; reaching a limit yields `full`. Remaining bytes do not guarantee that the next receipt fits. Doctor reveals no receipt keys, digests, or business payloads.
 
 Successful new-key commits near capacity include a fixed warning describing that commit. It participates in size checks before atomic data/receipt commit and is preserved unchanged on replay, even after pruning reduces current usage. Use status/metrics for current capacity. `E_IDEMPOTENCY_LIMIT` denotes one oversized receipt; pruning cannot fix it. `E_IDEMPOTENCY_CAPACITY` denotes insufficient total capacity and provides status plus preview/confirm guidance.
 
-No receipts are automatically deleted. Explicit retention remains later #402 work. Review a cutoff older than every supported retry window before using --confirm; a deleted key may execute again. Plan for successful new-key rate × maximum retry window, bursts, cleanup lag, and byte headroom. Replays consume no new receipt, and pressure is not permission to shorten the retry window.
+No receipts are automatically deleted. The age-window command below supports one explicit manual pass; automatic service scheduling remains later #402 work. Review a cutoff older than every supported retry window before using --confirm; a deleted key may execute again. Plan for successful new-key rate × maximum retry window, bursts, cleanup lag, and byte headroom. Replays consume no new receipt, and pressure is not permission to shorten the retry window.
+
+### 显式保留窗口 / Explicit retention window
+
+开发中的 v0.13 提供按 UTC 完成时间计算的单轮清理。以下命令默认只预览；窗口必须大于零并长于所有客户端、队列与人工重放的最大重试时间。每轮最多 1,000 条，默认 1,000，实际选择按提交 sequence/time/key 排序。
+
+```sh
+unionid receipts retain --db app.redb --min-age-seconds 3600 --max-receipts 100 --format json
+# After verifying the preview and your retry window:
+unionid receipts retain --db app.redb --min-age-seconds 3600 --max-receipts 100 --confirm --format json
+```
+
+只删除 `completed_at_unix_ms < now - window` 的回执，等号处、较新与未来时间的回执全部保留。窗口跨越 Unix epoch 时选择为空，报告 `cutoff_unix_ms: null`；不会退化为无时间限制的删除。没有候选时为 no-op，不增加 sequence。实际删除沿用 prune 的事务与 cursor 过期语义；业务 rows 不随回执删除。
+
+预览在锁定后创建的临时副本上运行，源库字节不变；确认命令在实际 Engine 持有写入所有权时重新采样时间和选择，旧预览不是批准令牌。路径必须为已有数据库，不创建新库。JSON 为单个 version 1 对象，包含 policy、as_of_unix_ms、cutoff_unix_ms、selected_count/bytes、remaining_count、applied 和 key_reuse_warning。清理后的 key 可以再次执行，未删除的 key 继续重放。
+
+Rust 调用方使用 `ReceiptRetentionPolicy { min_age_seconds, max_receipts }`、`Engine::plan_idempotency_retention(policy)` 和 `apply_idempotency_retention(policy)`。预览允许只读 Engine；执行拒绝只读、legacy WAL 和未完成的 migration maintenance。默认没有策略和后台任务，配置不写入数据库或备份。时间是 UTC 墙钟年龄，依赖正确的系统时钟；不宣称跨重启的 monotonic 寿命证明。服务周期调度、进程内时钟回退防护和 shutdown 集成仍未交付。
+
+Development toward v0.13 adds one explicit UTC-age retention pass. Preview is the default; choose a positive window longer than every client, queue, and manual retry horizon. At most 1,000 receipts are selected per pass (default 1,000), in existing sequence/time/key order. Only timestamps strictly before `now - window` qualify; equal-boundary, recent, and future timestamps remain protected. A window extending before the epoch yields a null cutoff and an empty selection, never unrestricted deletion. Empty passes preserve sequence; actual pruning keeps existing transaction/cursor semantics and never deletes business rows.
+
+Preview uses a locked temporary copy and preserves source bytes. Confirm samples time and selection again under the actual Engine's writer ownership; a prior report is not an approval token. The path must already exist. One version-1 JSON report carries policy, evaluation/cutoff times, selection/remaining counts, applied status, and a key-reuse warning. Deleted keys can execute again; retained keys still replay.
+
+Rust callers use ReceiptRetentionPolicy and the Engine plan/apply methods above. Read-only preview is allowed; apply rejects read-only, legacy WAL, and unfinished migration maintenance. No background task or persisted policy is enabled. Age is UTC wall-clock age and assumes correct system time, not a cross-restart monotonic lifetime proof. Service scheduling, in-process backward-clock protection, and shutdown integration remain pending.
