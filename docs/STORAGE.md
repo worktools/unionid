@@ -130,3 +130,7 @@ M7 的早期 profile 定位到 full-resident open 与 full-rebuild migration 的
 [#439](https://github.com/worktools/unionid/issues/439) tracks separating physical layout, required capabilities and journaling. Until that design is completed, freeze additional feature/journal format pairs beyond the already implemented reference formats 12/13. New durable capabilities first specify old-binary rejection, explicit upgrades, codecs and logical/incremental recovery; silently ignored optional serde fields are insufficient.
 
 `src/redb_storage/layout.rs` centralizes existing format 1–13 codec/capability definitions. Runtime gates use scalar/map/partial/reference, cursor, bounded-read, generation and journal capabilities instead of repeatedly listing format numbers; the legacy adapter still translates existing journal pairs. Capabilities here are internal interpretations, not new persisted metadata. Existing formats, new-database defaults and upgrade routes retain their contracts. This preparatory step neither completes #439 nor provides durable generated defaults for #404.
+
+持久 header、显式能力安装与跨升级增量链的具体提案见 [RFC 0028](rfc/0028-capability-storage-header.md)。它仍是设计提案，尚未增加数据库格式或命令；当前可执行契约以上文为准。
+
+See [RFC 0028](rfc/0028-capability-storage-header.md) for the proposed persistent header, explicit capability installation and incremental chains across upgrades. It is not implemented and introduces no supported database format or command; the executable contract remains as documented above.
