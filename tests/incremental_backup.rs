@@ -180,6 +180,75 @@ fn migration_journal_restores_rows_from_the_built_target_generation() {
 }
 
 #[test]
+fn journal_cutover_rejects_source_corruption_without_publishing_ready_target() {
+    use redb::{Database as RedbDatabase, Durability, TableDefinition};
+    use unionid::{MigrationFile, MigrationMaintenancePhase};
+
+    let temp = TempTree::new("cutover-source-corruption");
+    let db = temp.path().join("app.redb");
+    let repo = temp.path().join("archive");
+    create_database(&db);
+    backup::incremental::init(&db, &repo, Default::default()).unwrap();
+    let files =
+        [
+            MigrationFile::parse("migration add_note\n  add field Item.note text = \"migrated\"")
+                .unwrap(),
+        ];
+    let before = Engine::open_redb(&db).unwrap().schema_info();
+    let mut ready = None;
+    for _ in 0..10 {
+        let mut engine = Engine::open_redb(&db).unwrap();
+        let progress = engine.advance_migrations(&files, 1).unwrap();
+        if let Some(maintenance) = progress.status.maintenance
+            && maintenance.phase == MigrationMaintenancePhase::Ready
+        {
+            ready = Some(maintenance);
+            break;
+        }
+    }
+    let ready = ready.expect("candidate did not reach Ready");
+    assert!(ready.source_generation > 0);
+    {
+        // Corrupt only the committed source after the target passed Ready.
+        // Ordinary bounded open must remain lazy; cutover still validates
+        // the source, as the former full-state loader did.
+        let database = RedbDatabase::open(&db).unwrap();
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        let mut prefix = b"UIDG".to_vec();
+        prefix.extend_from_slice(&1_u16.to_be_bytes());
+        prefix.extend_from_slice(&ready.source_generation.to_be_bytes());
+        transaction
+            .open_table(TableDefinition::<&[u8], u8>::new("generation_index"))
+            .unwrap()
+            .retain(|key, _| !key.starts_with(&prefix))
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    let mut engine = Engine::open_redb(&db).unwrap();
+    assert_eq!(
+        engine.advance_migrations(&files, 1).unwrap_err().code,
+        "E_STORAGE"
+    );
+    assert_eq!(engine.schema_info(), before);
+    assert!(engine.migration_history().is_empty());
+    assert_eq!(engine.backup_journal_status().unwrap().commit_count, 0);
+    assert_eq!(
+        engine
+            .migration_status(&files)
+            .unwrap()
+            .maintenance
+            .unwrap(),
+        ready
+    );
+    let rows = engine.execute("from items");
+    assert!(rows.ok);
+    assert_eq!(rows.rows.len(), 1);
+    assert!(!rows.rows[0].contains_key("note"));
+}
+
+#[test]
 fn verify_rejects_changed_artifact_and_list_reports_orphans() {
     let temp = TempTree::new("incremental-corruption");
     let db = temp.path().join("app.redb");
