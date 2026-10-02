@@ -7883,7 +7883,7 @@ impl Database {
             );
             lines.extend(source.lines().map(str::to_owned));
         }
-        let mut references = self
+        let references = self
             .schema_references()
             .into_iter()
             .map(|(_, spec)| {
@@ -7896,7 +7896,6 @@ impl Database {
                 )
             })
             .collect::<Vec<_>>();
-        references.sort();
         lines.extend(references);
         lines.join("\n")
     }

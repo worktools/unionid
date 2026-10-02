@@ -414,16 +414,16 @@ fn reference_diff_rebinds_replaced_target_key_and_orders_table_removal() {
 }
 
 #[test]
-fn reference_schema_normalization_ignores_creation_order() {
+fn reference_schema_round_trip_preserves_identity_while_diff_ignores_order() {
     let a = "create reference children (parent) references parents (id)";
     let b = "create reference children (parent) references parents (alternate)";
     let base = format!("{REFERENCE_BASE}\ncreate unique index parents (alternate)");
     let left = format!("{base}\n{a}\n{b}");
     let right = format!("{base}\n{b}\n{a}");
-    assert_eq!(
-        Engine::check_schema(&left).unwrap().normalized,
-        Engine::check_schema(&right).unwrap().normalized
-    );
+    for source in [&left, &right] {
+        let checked = Engine::check_schema(source).unwrap();
+        assert_eq!(Engine::check_schema(&checked.normalized).unwrap(), checked);
+    }
     let mut engine = Engine::memory();
     ok(&mut engine, &left);
     assert!(

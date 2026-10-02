@@ -165,7 +165,7 @@ pub(crate) fn diff(
             steps: migration.steps,
         })?;
         candidate.advance_schema_revision()?;
-        if candidate.schema_text() != target.schema_text() {
+        if diff_comparison_source(&candidate) != diff_comparison_source(&target) {
             return Err(Error::new(
                 "E_SCHEMA_DIFF",
                 "generated migration does not reproduce the normalized target schema; explicit edits are required",
@@ -182,6 +182,18 @@ pub(crate) fn diff(
         warnings,
         migration_source: source,
     })
+}
+
+// schema_text retains declaration order so it can reconstruct stable IDs.
+// References themselves are unordered constraints for migration diff purposes.
+fn diff_comparison_source(database: &Database) -> String {
+    let source = database.schema_text();
+    let (mut references, mut declarations): (Vec<_>, Vec<_>) = source
+        .lines()
+        .partition(|line| line.starts_with("create reference "));
+    references.sort_unstable();
+    declarations.extend(references);
+    declarations.join("\n")
 }
 
 fn diff_types(
