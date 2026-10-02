@@ -197,6 +197,12 @@ pub struct AgentDocs {
 
 const COMMANDS: &[AgentCommand] = &[
     AgentCommand {
+        name: "server",
+        summary: "Serve TCP requests; receipt retention is opt-in, requires trusted UTC, and permits pruned keys to execute again.",
+        usage: "unionid server --db <path> [--receipt-retention-seconds <retry-safe-window> --receipt-retention-interval-seconds 60 --receipt-retention-max-receipts 1000]",
+        json: false,
+    },
+    AgentCommand {
         name: "run",
         summary: "Execute one atomic script in memory or a local redb database.",
         usage: "unionid run --db <path> --query <source> --format json [--read-only]",

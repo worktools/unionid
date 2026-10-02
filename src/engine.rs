@@ -1249,6 +1249,16 @@ impl Engine {
         Ok(result)
     }
 
+    pub(crate) fn validate_receipt_retention_service(&self) -> Result<()> {
+        if self.read_only || !matches!(self.storage_mode, StorageMode::Memory | StorageMode::Redb) {
+            return Err(Error::new(
+                "E_CONFIG",
+                "receipt retention service requires writable redb or memory mode",
+            ));
+        }
+        Ok(())
+    }
+
     /// Preview one bounded retention pass without deleting receipts. No policy
     /// is persisted. A later apply samples the time and selection again.
     pub fn plan_idempotency_retention(
@@ -3788,7 +3798,7 @@ fn elapsed_micros(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-fn unix_time_ms() -> Result<u64> {
+pub(crate) fn unix_time_ms() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| Error::new("E_TIME", error.to_string()))?
