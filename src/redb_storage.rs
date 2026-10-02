@@ -20,9 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backup::incremental::{ArchiveFrame, ArchiveHeader, BaselineSource, JournalSource};
 use crate::codec::{MAP_VALUE_CODEC_VERSION, PRODUCTION_VALUE_CODEC_VERSION, VALUE_CODEC_VERSION};
-use crate::db::{
-    Database, DurableCatalogEntry, DurableMeta, DurableTable, IndexDefinition, LogicalWriteSet,
-};
+use crate::db::{Database, DurableCatalogEntry, DurableMeta, DurableTable, LogicalWriteSet};
 use crate::error::{Error, Result};
 use crate::idempotency::{
     IdempotencyReceipt, MAX_IDEMPOTENCY_RECEIPT_BYTES, MAX_IDEMPOTENCY_TOTAL_BYTES, ReceiptMap,
@@ -39,6 +37,9 @@ use crate::row_source::{
     SOURCE_BATCH_MAX_ROWS, SourceIdentity, TableStats, TypedRowSource,
 };
 use crate::{ExecutionObservation, RowId};
+
+mod posting;
+use posting::PostingDefinition;
 
 const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
 const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
@@ -3815,9 +3816,8 @@ impl RedbStore {
         };
 
         let mut tables = BTreeMap::<u64, DurableTable>::new();
-        let mut definitions = BTreeMap::<u64, (DurableTable, IndexDefinition)>::new();
-        let mut by_table = BTreeMap::<u64, Vec<IndexDefinition>>::new();
-        let mut references = BTreeMap::new();
+        let mut definitions = BTreeMap::new();
+        let mut by_table = BTreeMap::<u64, Vec<PostingDefinition<'_>>>::new();
         let catalog_entries = metadata.durable_catalog_entries();
         for entry in &catalog_entries {
             check_source_control(control)?;
@@ -3825,25 +3825,31 @@ impl RedbStore {
                 tables.insert(table.id, table.clone());
             }
         }
-        for entry in catalog_entries {
+        for entry in &catalog_entries {
             check_source_control(control)?;
-            if let DurableCatalogEntry::Reference(definition) = &entry {
-                references.insert(definition.id, definition.clone());
+            let definition = match entry {
+                DurableCatalogEntry::Reference(reference) => {
+                    PostingDefinition::Reference(reference)
+                }
+                DurableCatalogEntry::Index { table, definition } => {
+                    tables
+                        .get(&definition.table_id)
+                        .filter(|candidate| candidate.name == *table)
+                        .ok_or_else(|| {
+                            Error::new("E_STORAGE", "index references an unknown durable table")
+                        })?;
+                    PostingDefinition::Index(definition)
+                }
+                _ => continue,
+            };
+            if !tables.contains_key(&definition.table_id()) {
+                return Err(Error::new("E_STORAGE", "posting source table is missing"));
             }
-            if let DurableCatalogEntry::Index { table, definition } = entry {
-                let durable_table = tables
-                    .get(&definition.table_id)
-                    .filter(|candidate| candidate.name == table)
-                    .cloned()
-                    .ok_or_else(|| {
-                        Error::new("E_STORAGE", "index references an unknown durable table")
-                    })?;
-                by_table
-                    .entry(definition.table_id)
-                    .or_default()
-                    .push(definition.clone());
-                definitions.insert(definition.id, (durable_table, definition));
-            }
+            by_table
+                .entry(definition.table_id())
+                .or_default()
+                .push(definition);
+            definitions.insert(definition.id(), definition);
         }
 
         let mut profile = StorageCheckProfile {
@@ -3873,97 +3879,68 @@ impl RedbStore {
                 .row_bytes
                 .saturating_add(u64::try_from(value.value().len()).unwrap_or(u64::MAX));
             let mut row_working = value.value().len();
-            if let Some(table_indexes) = by_table.get(&table_id) {
-                for definition in table_indexes {
+            if let Some(table_postings) = by_table.get(&table_id) {
+                for &definition in table_postings {
                     check_source_control(control)?;
-                    let Some(indexed) =
-                        metadata.source_index_value_if_included(&table.name, definition, &row)?
-                    else {
+                    let Some(indexed) = definition.project(metadata, table, &row)? else {
                         continue;
                     };
                     let expected = encode_index_key(
                         metadata,
-                        definition.id,
+                        definition.id(),
                         &indexed,
                         row_id,
                         self.committed.layout.index,
                     )?;
-                    row_working = row_working.saturating_add(expected.len());
-                    profile.point_lookups = profile.point_lookups.saturating_add(1);
                     let physical_expected = physical_generation_key(generation, &expected)?;
+                    row_working = row_working.saturating_add(physical_expected.len());
+                    profile.point_lookups = profile.point_lookups.saturating_add(1);
                     if indexes
                         .get(physical_expected.as_slice())
-                        .map_err(|error| storage_error("lookup expected secondary index", error))?
+                        .map_err(|error| storage_error("lookup expected index posting", error))?
                         .is_none()
                     {
                         return Err(Error::new(
                             "E_STORAGE",
                             format!(
-                                "durable secondary indexes do not match the stored rows and catalog: row {row_id} is missing from index '{} ({})'",
-                                table.name,
-                                definition.display_shape()
+                                "durable secondary indexes do not match the stored rows and catalog: row {row_id} is missing from {}",
+                                definition.description(table)
                             ),
                         ));
                     }
                     expected_index_entries =
                         expected_index_entries.checked_add(1).ok_or_else(|| {
-                            Error::new("E_STORAGE", "secondary index cardinality overflow")
+                            Error::new("E_STORAGE", "index posting cardinality overflow")
                         })?;
-                }
-            }
-            for reference in references
-                .values()
-                .filter(|reference| reference.table_id == table_id)
-            {
-                check_source_control(control)?;
-                let Some(indexed) = reference.source_value(&row.fields)? else {
-                    continue;
-                };
-                let expected = encode_index_key(
-                    metadata,
-                    reference.id,
-                    &indexed,
-                    row_id,
-                    self.committed.layout.index,
-                )?;
-                let physical_expected = physical_generation_key(generation, &expected)?;
-                row_working = row_working.saturating_add(physical_expected.len());
-                profile.point_lookups = profile.point_lookups.saturating_add(1);
-                if indexes
-                    .get(physical_expected.as_slice())
-                    .map_err(|error| storage_error("lookup reference posting", error))?
-                    .is_none()
-                {
-                    return Err(Error::new(
-                        "E_STORAGE",
-                        "row is missing its reference posting",
-                    ));
-                }
-                expected_index_entries = expected_index_entries
-                    .checked_add(1)
-                    .ok_or_else(|| Error::new("E_STORAGE", "reference cardinality overflow"))?;
-                let (_, target_index) = metadata.reference_target_index(reference)?;
-                let boundary = metadata
-                    .reference_target_boundary(reference, &row.fields)?
-                    .expect("present reference");
-                let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
-                let (lower, upper) = durable_index_bounds(
-                    target_index.id,
-                    reference.components.len() as u8,
-                    &bounds,
-                    self.committed.layout.index,
-                )?;
-                let lower = physical_generation_bound(generation, lower)?;
-                let upper = physical_generation_bound(generation, upper)?;
-                profile.point_lookups = profile.point_lookups.saturating_add(1);
-                let hit = indexes
-                    .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
-                    .map_err(|error| storage_error("lookup reference target", error))?
-                    .next()
-                    .transpose()
-                    .map_err(|error| storage_error("read reference target", error))?;
-                if hit.is_none() {
-                    return Err(missing_target_error());
+                    // Projection and posting consistency are common. Only a
+                    // reference additionally requires a live target key.
+                    if let PostingDefinition::Reference(reference) = definition {
+                        let (_, target_index) = metadata.reference_target_index(reference)?;
+                        let boundary = metadata
+                            .reference_target_boundary(reference, &row.fields)?
+                            .ok_or_else(|| {
+                                Error::new("E_STORAGE", "present reference has no target boundary")
+                            })?;
+                        let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
+                        let (lower, upper) = durable_index_bounds(
+                            target_index.id,
+                            reference.components.len() as u8,
+                            &bounds,
+                            self.committed.layout.index,
+                        )?;
+                        let lower = physical_generation_bound(generation, lower)?;
+                        let upper = physical_generation_bound(generation, upper)?;
+                        profile.point_lookups = profile.point_lookups.saturating_add(1);
+                        let hit = indexes
+                            .range::<&[u8]>((borrowed_bound(&lower), borrowed_bound(&upper)))
+                            .map_err(|error| storage_error("lookup reference target", error))?
+                            .next()
+                            .transpose()
+                            .map_err(|error| storage_error("read reference target", error))?;
+                        if hit.is_none() {
+                            return Err(missing_target_error());
+                        }
+                    }
                 }
             }
             profile.working_peak_bytes = profile.working_peak_bytes.max(row_working);
@@ -3984,96 +3961,49 @@ impl RedbStore {
             let index_id = u64::from_be_bytes(key[6..14].try_into().unwrap());
             let component_count = key[14] as usize;
             let row_id = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
-            if let Some(reference) = references.get(&index_id) {
-                if component_count != reference.components.len() {
-                    return Err(Error::new(
-                        "E_STORAGE",
-                        "reference posting component count does not match its definition",
-                    ));
-                }
-                let table = tables
-                    .get(&reference.table_id)
-                    .ok_or_else(|| Error::new("E_STORAGE", "reference source table is missing"))?;
-                let row_key =
-                    physical_generation_key(generation, &encode_row_key(table.id, row_id))?;
-                profile.point_lookups = profile.point_lookups.saturating_add(1);
-                let stored_row = rows
-                    .get(row_key.as_slice())
-                    .map_err(|error| storage_error("lookup reference source row", error))?
-                    .ok_or_else(|| {
-                        Error::new(
-                            "E_STORAGE",
-                            "reference posting points to a missing source row",
-                        )
-                    })?;
-                let row = metadata.decode_source_row(&table.name, row_id, stored_row.value())?;
-                let indexed = reference.source_value(&row.fields)?.ok_or_else(|| {
-                    Error::new("E_STORAGE", "absent optional reference has a posting")
-                })?;
-                let expected = encode_index_key(
-                    metadata,
-                    index_id,
-                    &indexed,
-                    row_id,
-                    self.committed.layout.index,
-                )?;
-                if key != expected.as_slice() {
-                    return Err(Error::new(
-                        "E_STORAGE",
-                        "reference posting does not match its source row",
-                    ));
-                }
-                previous_unique_prefix = None;
-                profile.index_entries_checked = profile.index_entries_checked.saturating_add(1);
-                profile.index_key_bytes = profile
-                    .index_key_bytes
-                    .saturating_add(u64::try_from(physical_key.len()).unwrap_or(u64::MAX));
-                profile.working_peak_bytes = profile.working_peak_bytes.max(
-                    physical_key
-                        .len()
-                        .saturating_add(stored_row.value().len())
-                        .saturating_add(row_key.len())
-                        .saturating_add(expected.len()),
-                );
-                continue;
-            }
-            let (table, definition) = definitions.get(&index_id).ok_or_else(|| {
+            let definition = *definitions.get(&index_id).ok_or_else(|| {
                 Error::new(
                     "E_STORAGE",
                     format!("secondary index references unknown index ID {index_id}"),
                 )
             })?;
-            if component_count != definition.effective_components().len() {
+            if component_count != definition.component_count() {
                 return Err(Error::new(
                     "E_STORAGE",
-                    "secondary index component count does not match its catalog definition",
+                    "index posting component count does not match its catalog definition",
                 ));
             }
-            let row_key = encode_row_key(table.id, row_id);
-            let physical_row_key = physical_generation_key(generation, &row_key)?;
+            let table = tables
+                .get(&definition.table_id())
+                .ok_or_else(|| Error::new("E_STORAGE", "posting source table is missing"))?;
+            let physical_row_key =
+                physical_generation_key(generation, &encode_row_key(table.id, row_id))?;
             profile.point_lookups = profile.point_lookups.saturating_add(1);
             let stored_row = rows
                 .get(physical_row_key.as_slice())
                 .map_err(|error| storage_error("lookup indexed row", error))?
                 .ok_or_else(|| {
-                    Error::new("E_STORAGE", "secondary index references a missing row")
+                    Error::new(
+                        "E_STORAGE",
+                        format!(
+                            "{} references a missing row {row_id}",
+                            definition.description(table)
+                        ),
+                    )
                 })?;
             let row = metadata.decode_source_row(&table.name, row_id, stored_row.value())?;
-            let Some(indexed) =
-                metadata.source_index_value_if_included(&table.name, definition, &row)?
-            else {
-                return Err(Error::new(
+            let indexed = definition.project(metadata, table, &row)?.ok_or_else(|| {
+                Error::new(
                     "E_STORAGE",
                     format!(
-                        "secondary index '{} ({})' contains a posting for row {row_id} that does not satisfy its predicate",
-                        table.name,
-                        definition.display_shape()
+                        "{} has a posting for excluded row {row_id}",
+                        definition.description(table)
                     ),
-                ));
-            };
+                )
+            })?;
             let expected = encode_index_key(
                 metadata,
-                definition.id,
+                definition.id(),
                 &indexed,
                 row_id,
                 self.committed.layout.index,
@@ -4082,22 +4012,23 @@ impl RedbStore {
                 return Err(Error::new(
                     "E_STORAGE",
                     format!(
-                        "secondary index '{} ({})' does not match row {row_id}",
-                        table.name,
-                        definition.display_shape()
+                        "{} does not match source row {row_id}",
+                        definition.description(table)
                     ),
                 ));
             }
-            let unique = definition.kind.is_unique()
-                || definition.is_primary_index(table.primary_key.as_deref());
+            let unique = definition.is_unique(table);
             let prefix = &key[..key.len() - 8];
-            if unique && previous_unique_prefix.as_deref() == Some(prefix) {
+            if let PostingDefinition::Index(index) = definition
+                && unique
+                && previous_unique_prefix.as_deref() == Some(prefix)
+            {
                 return Err(Error::new(
                     "E_STORAGE",
                     format!(
                         "unique index '{} ({})' contains duplicate values",
                         table.name,
-                        definition.display_shape()
+                        index.display_shape()
                     ),
                 ));
             }
@@ -7647,7 +7578,21 @@ mod reference_codec_tests {
     #[test]
     fn bounded_integrity_rejects_missing_extra_and_orphan_reference_postings() {
         let mut engine = crate::Engine::memory();
-        let response = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: Option<int>}\ntable parents: Parent {key id}\ntable children: Child {key id}\ncreate reference children (parent) references parents (id)\ninsert many parents [{id: 7}, {id: 8}]\ninsert many children [{id: 1, parent: Some(7)}, {id: 2, parent: Some(7)}, {id: 3, parent: None}]");
+        let response = engine.execute(
+            r#"struct Parent {id: int}
+struct Child {id: int, parent: Option<int>, active: bool, email: text}
+table parents: Parent {key id}
+table children: Child {key id}
+create index children (parent)
+create unique index children (email) if active == true
+create reference children (parent) references parents (id)
+insert many parents [{id: 7}, {id: 8}]
+insert many children [
+  {id: 1, parent: Some(7), active: true, email: "shared"},
+  {id: 2, parent: Some(7), active: false, email: "shared"},
+  {id: 3, parent: None, active: false, email: "shared"}
+]"#,
+        );
         assert!(response.ok, "{}", response.message);
         let db = engine.database_snapshot().unwrap();
         let metadata = db.metadata_only().unwrap();
@@ -7661,6 +7606,32 @@ mod reference_codec_tests {
             .unwrap();
         let reference_key =
             encode_index_key(&db, reference.id, &Value::Int(7), 0, MAP_INDEX_KEY_VERSION).unwrap();
+        let ordinary = db
+            .durable_catalog_entries()
+            .into_iter()
+            .find_map(|entry| match entry {
+                DurableCatalogEntry::Index { table, definition }
+                    if table == "children"
+                        && definition.effective_components()[0].column == "parent" =>
+                {
+                    Some(definition)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let partial = db
+            .durable_catalog_entries()
+            .into_iter()
+            .find_map(|entry| match entry {
+                DurableCatalogEntry::Index { table, definition }
+                    if table == "children"
+                        && definition.effective_components()[0].column == "email" =>
+                {
+                    Some(definition)
+                }
+                _ => None,
+            })
+            .unwrap();
         let original_rows = db
             .durable_rows_with_codec(MAP_VALUE_CODEC_VERSION)
             .unwrap()
@@ -7678,6 +7649,8 @@ mod reference_codec_tests {
         for generation in [GenerationRef::Legacy0, GenerationRef::Generated(1)] {
             for corruption in [
                 "valid",
+                "ordinary_missing",
+                "partial_excluded",
                 "missing",
                 "wrong_key",
                 "missing_source",
@@ -7689,6 +7662,30 @@ mod reference_codec_tests {
                 let mut row_entries = original_rows.clone();
                 let mut index_entries = original_indexes.clone();
                 match corruption {
+                    "ordinary_missing" => {
+                        index_entries.remove(
+                            &encode_index_key(
+                                &db,
+                                ordinary.id,
+                                &Value::Option(Some(Box::new(Value::Int(7)))),
+                                0,
+                                MAP_INDEX_KEY_VERSION,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    "partial_excluded" => {
+                        index_entries.insert(
+                            encode_index_key(
+                                &db,
+                                partial.id,
+                                &Value::Text("shared".into()),
+                                1,
+                                MAP_INDEX_KEY_VERSION,
+                            )
+                            .unwrap(),
+                        );
+                    }
                     "missing" => {
                         index_entries.remove(&reference_key);
                     }
