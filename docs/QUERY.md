@@ -342,6 +342,28 @@ explain
   select {id, state}
 ```
 
+### Mutation explain（v0.14 开发中） / Mutation explain (v0.14 in development)
+
+`explain` 也接受 insert/upsert（含 many）、update/delete。支持字面量和 prepared 参数，以及正常 DML 的 returning；可以同样使用缩进布局：
+
+```text
+explain
+  update tasks
+  filter id == 1
+  set assignee = None
+  returning {id, assignee}
+```
+
+这是只读计划，不执行写入，read-only 数据库和一致读快照也可使用。它会检查表、字段、输入类型、upsert 主键要求、target stage 和 returning 结构；不会扫描业务行求值 set，也不会检查实际唯一冲突、目标存在性或 restrict 是否命中。因此重复 key、缺失引用目标或受限删除仍可产生计划，真正执行 DML 时才按完整候选检查并原子拒绝。
+
+响应的可选 `mutation_plan` 包含 operation、table、insert/upsert 的输入行数、更新字段路径、returning schema 和潜在 `reference_checks`。检查复用静态 query describe 的 stable identity、路径、Exact/Optional 模式和绑定目标 key；upsert/update 保守列出存在性与 restrict 义务，不声称每条都会触发。update/delete 另用已有 `plan` 展示实际目标访问方式和源码 stage 顺序；其 result_schema 是 returning 类型。insert/upsert 不生成虚构的行扫描计划。rows/columns 为空，无 affected_rows、写入回执或业务值。普通读取响应不增加空字段。
+
+参数在 Engine/prepare、静态 query describe、CLI 和 version 1/2 TCP/HTTP 入口按相同规则绑定。不能给计划请求设置幂等写入 key，也不能在其后使用 `expect affected`。`explain analyze` 仍只支持读取，避免误执行写入。
+
+Explain accepts insert/upsert (including many) and update/delete, with literal or prepared inputs and normal returning projections. It is a read-only operation available on read-only databases and consistent snapshots. It validates schema, input types, upsert key requirements, target stages and returning shape without evaluating assignments against rows or checking actual uniqueness/existence/restrict outcomes. A plan can therefore describe a write that would fail at execution.
+
+The optional mutation_plan reports operation/table, supplied insert/upsert row count, updated paths, returning schema and conservative reference_checks using the same stable identities, paths, modes and target keys as static query describe. Update/delete additionally reuse plan for actual target access/stage order with the returning result schema; insert/upsert have no fabricated scan plan. No business rows/values, affected-row count or write receipt is produced. Empty metadata is omitted from ordinary responses. Parameters share Engine/static/CLI/TCP/HTTP binding; idempotency keys and trailing affected-row guards are rejected. Explain analyze remains read-only query execution, with mutations rejected.
+
 需要测量真实执行时，在 `explain` 后增加 `analyze`：
 
 ```text

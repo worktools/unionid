@@ -60,6 +60,7 @@ pub use client::http::{HttpClient, HttpStream};
 #[cfg(feature = "asynchronous")]
 pub use client::{AsyncTcpClient, AsyncTcpStream};
 pub use client::{MAX_RESPONSE_BYTES, TcpClient, TypedStreamEvent};
+pub use db::MutationPlan;
 pub use db::{
     ExecutionPlanObservation, ExistsCorrelationPlan, ExistsPlan, IndexRangePlan, IndexTraversal,
     LookupPlan, MAX_EXECUTION_PLAN_STAGES, MAX_EXISTS_DRIVERS, MAX_PREDICATE_REJECTIONS,

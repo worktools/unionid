@@ -527,6 +527,8 @@ pub struct Response {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueryPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_plan: Option<crate::MutationPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection: Option<Introspection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency: Option<IdempotencyMetadata>,
@@ -643,6 +645,7 @@ impl Response {
             upsert_action: response.upsert_action,
             upsert_actions: response.upsert_actions,
             plan: response.plan,
+            mutation_plan: response.mutation_plan,
             page: response.page,
             analysis: response.analysis,
             execution,
@@ -690,6 +693,7 @@ impl Response {
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
+            mutation_plan: None,
             introspection: Some(introspection),
             idempotency: None,
             receipts: None,

@@ -645,6 +645,27 @@ impl Parser {
         if nested {
             self.block()?;
         }
+        if !self.word("from") {
+            if analyze {
+                return Err(self.error("explain analyze supports read pipelines only"));
+            }
+            let mutation = if self.word("insert") {
+                self.insert()?
+            } else if self.word("upsert") {
+                self.upsert()?
+            } else if self.word("update") {
+                self.update()?
+            } else if self.word("delete") {
+                self.delete()?
+            } else {
+                return Err(self.error("explain requires from, insert, upsert, update, or delete"));
+            };
+            if nested {
+                self.newlines();
+                self.expect(Kind::Dedent)?;
+            }
+            return Ok(Statement::ExplainMutation(Box::new(mutation)));
+        }
         let Statement::Pipeline(pipeline) = self.pipeline()? else {
             unreachable!("pipeline parser must return a pipeline statement")
         };

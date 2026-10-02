@@ -99,6 +99,7 @@ fn display_names(names: &[String]) -> String {
 
 fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpression)) {
     match statement {
+        Statement::ExplainMutation(mutation) => visit_statement(mutation, visitor),
         Statement::Update {
             target,
             assignments,
@@ -171,6 +172,7 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
 
 fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut ScalarExpression)) {
     match statement {
+        Statement::ExplainMutation(mutation) => visit_statement_mut(mutation, visitor),
         Statement::Update {
             target,
             assignments,

@@ -58,7 +58,7 @@ pub(crate) fn kind(statement: &Statement) -> StatementKind {
         Statement::Update { .. } => StatementKind::Update,
         Statement::Delete { .. } => StatementKind::Delete,
         Statement::Migration { .. } => StatementKind::Migration,
-        Statement::Explain(_) => StatementKind::Explain,
+        Statement::Explain(_) | Statement::ExplainMutation(_) => StatementKind::Explain,
         Statement::ExplainAnalyze(_) => StatementKind::ExplainAnalyze,
         Statement::Pipeline(_) => StatementKind::Query,
         Statement::Expect { .. } => StatementKind::Expect,

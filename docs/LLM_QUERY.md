@@ -163,6 +163,13 @@ fields removed by `select` are unavailable later.
   primary key. Continue with the opaque response cursor.
 - `explain <query>` returns a plan without reading result rows. `explain analyze <query>`
   executes it and returns value-free work and timing measurements.
+- In development for v0.14, `explain insert/upsert/update/delete ...` also accepts normal
+  DML syntax, batch inputs, parameters and returning. It binds schema/input types without
+  executing writes or evaluating actual uniqueness/existence/restrict outcomes. Inspect
+  `mutation_plan.reference_checks` for potential obligations and `plan` for update/delete
+  target access. A successful plan is not proof that the write will succeed. It returns no
+  rows or affected count and accepts no idempotency key or trailing `expect affected`.
+  Mutation `explain analyze` is rejected; never use it as a write preview.
 
 ## Expressions and ADTs
 

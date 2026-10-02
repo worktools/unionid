@@ -2107,6 +2107,59 @@ fn print_response(response: &QueryResponse, json: bool) -> Result<(), String> {
         eprintln!("warning: {warning}");
     }
     if !json {
+        if let Some(plan) = &response.mutation_plan {
+            let operation =
+                serde_json::to_string(&plan.operation).map_err(|error| error.to_string())?;
+            println!(
+                "mutation | {} {} (no writes executed)",
+                operation.trim_matches('"'),
+                plan.table
+            );
+            if let Some(rows) = plan.input_rows {
+                println!("input | {rows} row(s)");
+            }
+            if !plan.updated_fields.is_empty() {
+                println!("set | {}", plan.updated_fields.join(", "));
+            }
+            for check in &plan.reference_checks {
+                let kind = match check.kind {
+                    crate::QueryReferenceCheckKind::TargetExists => "target_exists",
+                    crate::QueryReferenceCheckKind::Restrict => "restrict",
+                };
+                println!(
+                    "reference | {kind}: {} ({}) -> {} ({})",
+                    check.source_table,
+                    check
+                        .reference
+                        .components
+                        .iter()
+                        .map(|part| part.source.field.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    check.reference.target_table,
+                    check
+                        .reference
+                        .components
+                        .iter()
+                        .map(|part| part.target.field.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            println!(
+                "checks | potential obligations; data constraints are checked only when executing the mutation"
+            );
+            if !plan.returning_schema.is_empty() {
+                println!(
+                    "returning | {}",
+                    plan.returning_schema
+                        .iter()
+                        .map(|column| format!("{} {}", column.name, column.ty))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
         if let Some(plan) = &response.plan {
             let access = match plan.access.kind {
                 QueryAccessKind::FullScan => "full_scan",
