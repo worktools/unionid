@@ -6,7 +6,7 @@
 
 ### 中文说明
 
-- README 负责产品定位与最短入门路径；LANGUAGE、QUERY、SCHEMA、MIGRATIONS、STORAGE 等专题文档负责当前行为与契约。同一规则只在一个专题中详细描述，其他入口通过链接引用。实时优先级、依赖和验收状态由 GitHub issues 与 milestones 维护，不复制到开发记录。
+- README 负责产品定位与最短入门路径；LANGUAGE、QUERY、SCHEMA、MIGRATIONS、STORAGE 等专题文档负责当前行为与契约。同一规则只在一个专题中详细描述，其他入口通过链接引用。ROADMAP 只提供计划索引；实时优先级、依赖和验收状态由 GitHub issues 与 milestones 维护，不复制到开发记录。
 - 每个正式版本，包括补丁版本，面向用户的中英双语使用指南只发布到 Discussions/Announcements；验证示例后从 Release 和验收 issue 链接。仓库维护当前教程、升级契约和可执行示例，不再增加逐版本指南。已有 RELEASE 文档只有在对应 Discussion 的内容与链接核对完成后才移除，不能因本规则直接删除。
 - RFC 用于需要讨论的持久格式、协议或公共语言契约变化；常规 CLI 体验、内部重构和测试整理在 issue 或 PR 中说明设计与验收即可。RFC 是设计依据，不是当前能力清单：标明 proposed、implemented 或 superseded 状态，并链接实现或后继设计。涉及旧契约时保留迁移依据。
 - 新 RFC 使用简短的中英双语说明，覆盖问题、决定、明确不做的事情、兼容与失败边界、验证方式；仅在这些内容无法说明决定时展开更多细节。避免复制已有契约、实现日志或测试结果全文，通过链接引用。
@@ -15,7 +15,7 @@
 
 ### English Description
 
-- README owns product positioning and the shortest onboarding path. Topic documents such as LANGUAGE, QUERY, SCHEMA, MIGRATIONS and STORAGE own current behavior and contracts. Describe each rule in one authoritative topic and link to it elsewhere. GitHub issues and milestones own priorities, dependencies and acceptance status; development records do not duplicate live status.
+- README owns product positioning and the shortest onboarding path. Topic documents such as LANGUAGE, QUERY, SCHEMA, MIGRATIONS and STORAGE own current behavior and contracts. Describe each rule in one authoritative topic and link to it elsewhere. ROADMAP is an index to the plans. GitHub issues and milestones own priorities, dependencies and acceptance status; development records do not duplicate live status.
 - Publish bilingual user guides for every official release, including patches, only in Discussions/Announcements. Validate examples and link the guide from the Release and acceptance issue. Keep current tutorials, upgrade contracts and executable examples in the repository instead of adding per-version guides. Remove an existing RELEASE document only after verifying its corresponding Discussion content and links.
 - Use an RFC for persistent-format, protocol or public-language contract changes that need a design decision. Describe routine CLI improvements, internal refactors and test consolidation in an issue or PR. RFCs explain design decisions rather than advertise current capabilities: identify proposed, implemented or superseded status and link the implementation or successor. Preserve migration rationale for historical contracts.
 - Keep new RFCs concise and bilingual: state the problem, decision, non-goals, compatibility and failure boundaries, and validation. Add detail when needed to explain the decision. Link existing contracts and evidence instead of copying implementation histories or full test results.
@@ -128,4 +128,4 @@ cargo run --example embedded
 
 ## 后续工作
 
-实时执行顺序、依赖和验收范围统一维护在 [ROADMAP.md](ROADMAP.md) 与 GitHub issues。本文只记录已经实现并验证过的事实，避免复制 issue 状态后再次过时。
+[ROADMAP.md](ROADMAP.md) 仅作计划索引；实时执行顺序、依赖和验收范围由 GitHub issues 与 milestones 维护。本文只记录已经实现并验证过的事实，避免复制 issue 状态后再次过时。
