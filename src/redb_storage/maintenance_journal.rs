@@ -350,7 +350,7 @@ mod tests {
                     .unwrap();
                 let next = engine.database_snapshot().unwrap();
                 let metadata = next.metadata_only().unwrap();
-                let layout = StorageLayout::partial_journal();
+                let layout = StorageLayout::partial().with_journal().unwrap();
                 let previous = PreparedState::new(&previous, &ReceiptMap::new(), layout).unwrap();
                 let next = PreparedState::new(&next, &ReceiptMap::new(), layout).unwrap();
                 let current = JournalState {
