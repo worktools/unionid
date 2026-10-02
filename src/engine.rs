@@ -1426,6 +1426,13 @@ impl Engine {
                         .map_err(|error| error.at(located.span).at_statement(index))?;
                     response_columns.clear();
                 }
+                Statement::ExplainMutation(mutation) => {
+                    self.committed
+                        .db
+                        .bind_mutation_explain(mutation, None)
+                        .map_err(|error| error.at(located.span).at_statement(index))?;
+                    response_columns.clear();
+                }
                 Statement::ExplainAnalyze(pipeline) => {
                     self.committed
                         .db
@@ -3729,22 +3736,7 @@ impl Engine {
     pub(crate) fn reference_descriptions(
         &self,
     ) -> Vec<(String, String, crate::portable::ReferenceDescription)> {
-        let mut references = crate::portable::describe_references(&self.committed.db);
-        if references.is_empty() {
-            return Vec::new();
-        }
-        self.committed
-            .db
-            .schema_tables()
-            .into_iter()
-            .flat_map(|table| {
-                references
-                    .remove(&table.id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(move |reference| (table.id.to_string(), table.name.clone(), reference))
-            })
-            .collect()
+        self.committed.db.reference_descriptions()
     }
 
     pub fn migration_history(&self) -> &[MigrationEntry] {

@@ -28,7 +28,7 @@ pub struct QueryDescription {
     pub parameters: Vec<QueryParameterDescription>,
     /// Typed fields and successful-execution row guarantee.
     pub result: QueryResultDescription,
-    /// Potential reference checks performed at execution, never evaluated here.
+    /// Potential checks of the described mutation; explain never evaluates them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reference_checks: Vec<QueryReferenceCheck>,
 }
@@ -186,18 +186,31 @@ fn describe_prepared(engine: &Engine, prepared: &PreparedQuery) -> Result<QueryD
 }
 
 fn reference_checks(engine: &Engine, statement: &Statement) -> Vec<QueryReferenceCheck> {
-    let (table, outgoing, incoming) =
-        match statement {
-            Statement::InsertParameter { table, .. }
-            | Statement::InsertManyParameter { table, .. } => (table.as_str(), true, false),
-            Statement::UpsertParameter { table, .. }
-            | Statement::UpsertManyParameter { table, .. } => (table.as_str(), true, true),
-            Statement::Update { target, .. } => (target.from.as_str(), true, true),
-            Statement::Delete { target, .. } => (target.from.as_str(), false, true),
-            _ => return Vec::new(),
-        };
+    reference_checks_from(engine.reference_descriptions(), statement)
+}
+
+pub(crate) fn reference_checks_from(
+    descriptions: Vec<(String, String, crate::portable::ReferenceDescription)>,
+    statement: &Statement,
+) -> Vec<QueryReferenceCheck> {
+    if let Statement::ExplainMutation(mutation) = statement {
+        return reference_checks_from(descriptions, mutation);
+    }
+    let (table, outgoing, incoming) = match statement {
+        Statement::Insert { table, .. }
+        | Statement::InsertMany { table, .. }
+        | Statement::InsertParameter { table, .. }
+        | Statement::InsertManyParameter { table, .. } => (table.as_str(), true, false),
+        Statement::Upsert { table, .. }
+        | Statement::UpsertMany { table, .. }
+        | Statement::UpsertParameter { table, .. }
+        | Statement::UpsertManyParameter { table, .. } => (table.as_str(), true, true),
+        Statement::Update { target, .. } => (target.from.as_str(), true, true),
+        Statement::Delete { target, .. } => (target.from.as_str(), false, true),
+        _ => return Vec::new(),
+    };
     let mut checks = Vec::new();
-    for (source_table_id, source_table, reference) in engine.reference_descriptions() {
+    for (source_table_id, source_table, reference) in descriptions {
         for (included, kind) in [
             (
                 outgoing && source_table == table,
@@ -224,7 +237,9 @@ fn reference_checks(engine: &Engine, statement: &Statement) -> Vec<QueryReferenc
 fn operation(statement: &Statement) -> QueryOperation {
     match statement {
         Statement::Pipeline(_) => QueryOperation::Read,
-        Statement::Explain(_) | Statement::ExplainAnalyze(_) => QueryOperation::Explain,
+        Statement::Explain(_) | Statement::ExplainMutation(_) | Statement::ExplainAnalyze(_) => {
+            QueryOperation::Explain
+        }
         Statement::InsertParameter { .. } => QueryOperation::Insert,
         Statement::InsertManyParameter { .. } => QueryOperation::InsertMany,
         Statement::UpsertParameter { .. } => QueryOperation::Upsert,
@@ -250,7 +265,9 @@ fn result_cardinality(statement: &Statement, has_fields: bool) -> QueryCardinali
         Statement::Update { target, .. } | Statement::Delete { target, .. } => {
             pipeline_cardinality(target)
         }
-        Statement::Explain(_) | Statement::ExplainAnalyze(_) => QueryCardinality::None,
+        Statement::Explain(_) | Statement::ExplainMutation(_) | Statement::ExplainAnalyze(_) => {
+            QueryCardinality::None
+        }
         _ => QueryCardinality::None,
     }
 }

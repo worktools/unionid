@@ -28,6 +28,8 @@ use crate::row_source::{
 
 mod index_predicate;
 mod migration;
+mod mutation_plan;
+pub use mutation_plan::MutationPlan;
 mod reference;
 
 pub use index_predicate::{IndexPredicate, IndexPredicateAtom};
@@ -1480,6 +1482,8 @@ pub struct QueryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueryPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_plan: Option<mutation_plan::MutationPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<PageInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analysis: Option<QueryAnalysis>,
@@ -1555,6 +1559,7 @@ impl QueryResponse {
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
+            mutation_plan: None,
             page: None,
             analysis: None,
             execution: None,
@@ -1578,6 +1583,7 @@ impl QueryResponse {
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
+            mutation_plan: None,
             page: None,
             analysis: None,
             execution: None,
@@ -1937,6 +1943,9 @@ impl Database {
                 steps,
             } => self.migrate(&name, steps),
             Statement::Explain(pipeline) => self.explain(pipeline),
+            Statement::ExplainMutation(mutation) => {
+                self.explain_mutation_from(self, *mutation, control)
+            }
             Statement::ExplainAnalyze(pipeline) => {
                 let source = CandidateRowSource::new(self);
                 self.explain_analyze_from(&source, pipeline, control)
@@ -1953,6 +1962,9 @@ impl Database {
     ) -> Result<QueryResponse> {
         match stmt {
             Statement::Explain(pipeline) => self.explain_from(source, pipeline),
+            Statement::ExplainMutation(mutation) => {
+                self.explain_mutation_from(source, *mutation, control)
+            }
             Statement::ExplainAnalyze(pipeline) => {
                 self.explain_analyze_from(source, pipeline, control)
             }
@@ -4272,6 +4284,10 @@ impl Database {
         statement: &mut Statement,
     ) -> Result<Vec<ScalarType>> {
         let columns = match statement {
+            Statement::ExplainMutation(mutation) => {
+                self.bind_mutation_explain(mutation, None)?;
+                return Ok(Vec::new());
+            }
             Statement::Pipeline(pipeline)
             | Statement::Explain(pipeline)
             | Statement::ExplainAnalyze(pipeline) => {
@@ -6402,6 +6418,7 @@ impl Database {
             upsert_action: None,
             upsert_actions: Vec::new(),
             plan: None,
+            mutation_plan: None,
             page: page_info,
             analysis: None,
             execution: Some(observation),

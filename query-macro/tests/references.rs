@@ -12,6 +12,12 @@ unionid_query::queries! {
         returning {id}
     }
 
+    query plan_account_removal {
+        explain delete accounts
+        filter id == $id
+        returning {id}
+    }
+
     query list_sessions {
         from sessions
         sort id
@@ -61,6 +67,18 @@ fn exercise(engine: &mut unionid::Engine) {
         },
     )
     .unwrap();
+    let planned = plan_account_removal::plan_account_removal(
+        engine,
+        plan_account_removal::PlanAccountRemovalParams {
+            id: AccountId::Local(7),
+        },
+    )
+    .unwrap();
+    assert!(planned.rows.is_empty());
+    assert_eq!(
+        planned.mutation_plan.unwrap().operation,
+        unionid::QueryOperation::Delete
+    );
     let error = remove_account::remove_account(
         engine,
         remove_account::RemoveAccountParams {

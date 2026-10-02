@@ -108,6 +108,7 @@ pub enum Statement {
         steps: Vec<SchemaMigration>,
     },
     Explain(Pipeline),
+    ExplainMutation(Box<Statement>),
     ExplainAnalyze(Pipeline),
     Pipeline(Pipeline),
 }
@@ -236,7 +237,11 @@ impl Statement {
     pub fn is_mutating(&self) -> bool {
         !matches!(
             self,
-            Self::Expect { .. } | Self::Explain(_) | Self::ExplainAnalyze(_) | Self::Pipeline(_)
+            Self::Expect { .. }
+                | Self::Explain(_)
+                | Self::ExplainMutation(_)
+                | Self::ExplainAnalyze(_)
+                | Self::Pipeline(_)
         )
     }
 
