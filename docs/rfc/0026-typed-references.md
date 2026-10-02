@@ -90,7 +90,7 @@ Inspected against v0.13 release commit f730114cc66bfe0e7a962e961351c2ebab594150:
 - `src/db/migration.rs::apply_schema_migration`: validate references against the completed candidate catalog and rows, following transformation and index reconstruction, before publishing the migration.
 - `src/engine.rs`: preserve candidate isolation, keyed receipt atomicity and `LogicalWriteSet` incremental commits. Reference checks must be part of ordinary DML execution so local Database and prepared paths cannot bypass them, not just a CLI wrapper.
 - `src/error.rs::ConstraintKind`: add precise value-free kinds and actionable hints; update the agent error vocabulary and all serialization tests together.
-- `src/portable.rs`: currently supports description versions 1/2; a new reference-bearing version must refuse lossy export to older versions rather than omit relationships.
+- `src/portable.rs`: description version 3 carries source-owned references with decimal-string IDs, ordered source/target paths, pinned primary/unique key, Exact/Optional mode and restrict actions. Versions 1/2 remain readable only without reference metadata. Catalog-backed validation rejects stripped or altered reference metadata; evolution reports flag new restrictions and removed existence guarantees.
 
 These are implementation entry points, not claims that the feature exists. Before changing persistent encoding, inventory catalog, redb reverse keys, journal, backup, upgrade and schema-identity consumers and assign compatible versions as one reviewed contract.
 
