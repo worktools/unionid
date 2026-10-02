@@ -15,6 +15,8 @@ fn cli_returns_versioned_llm_query_docs_as_markdown_and_json() {
     assert!(markdown.contains("Pending =>"));
     assert!(markdown.contains("(value: Type) -> expression"));
     assert!(markdown.contains("union {"));
+    assert!(markdown.contains("create reference order_lines"));
+    assert!(markdown.contains("reference_missing"));
     assert!(markdown.contains("# Runnable examples"));
 
     let json = Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -28,7 +30,7 @@ fn cli_returns_versioned_llm_query_docs_as_markdown_and_json() {
     assert_eq!(json["software_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(json["language_version"], "0.7");
     assert_eq!(json["topic"], "query");
-    assert_eq!(json["examples"].as_array().unwrap().len(), 5);
+    assert_eq!(json["examples"].as_array().unwrap().len(), 6);
     for example in json["examples"].as_array().unwrap() {
         let source = example["source"].as_str().unwrap();
         assert_eq!(unionid::format_source(source).unwrap(), source);
