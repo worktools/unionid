@@ -34,6 +34,7 @@ fn load(root: &Path, allow_empty: bool) -> Result<Vec<MigrationQuery>> {
         entries: 0,
         source_bytes: 0,
         path_bytes: 0,
+        discovery: allow_empty,
     };
     loader.visit(root, root, 0)?;
     if loader.queries.is_empty() && !allow_empty {
@@ -55,6 +56,7 @@ struct Loader {
     entries: usize,
     source_bytes: usize,
     path_bytes: usize,
+    discovery: bool,
 }
 
 impl Loader {
@@ -91,6 +93,9 @@ impl Loader {
                 path.extension().and_then(|x| x.to_str()),
                 Some("unid" | "uid")
             ) {
+                if self.discovery {
+                    continue;
+                }
                 return Err(Error::new(
                     "E_MIGRATION",
                     "query directory accepts only .unid or legacy .uid files",

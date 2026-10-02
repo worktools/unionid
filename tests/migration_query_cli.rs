@@ -389,6 +389,7 @@ fn recursive_application_queries_report_contract_changes_and_migrate_nested_defa
 #[test]
 fn automatic_preflight_and_explicit_opt_out_preserve_the_apply_boundary() {
     let dir = fixture();
+    fs::write(dir.0.join("queries/README.md"), "Saved query documentation").unwrap();
     for action in ["plan", "rehearse", "apply"] {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_unionid"));
         cmd.current_dir(dir.0.join("migrations")).args([
@@ -449,6 +450,7 @@ fn missing_or_empty_discovered_queries_keep_legacy_execution() {
     for empty in [false, true] {
         if empty {
             fs::create_dir(dir.0.join("queries")).unwrap();
+            fs::write(dir.0.join("queries/README.md"), "No query sources yet").unwrap();
         }
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_unionid"));
         cmd.current_dir(&dir.0)
