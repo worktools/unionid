@@ -1163,16 +1163,28 @@ fn reject_existing_restore_target(path: &Path) -> Result<()> {
     }
 }
 
-fn restore_temp_path(destination: &Path) -> Result<PathBuf> {
-    let parent = destination
+fn restore_parent_directory(destination: &Path) -> Result<&Path> {
+    destination
         .parent()
-        .filter(|path| !path.as_os_str().is_empty())
+        // Path::parent returns an empty path for a filename in the cwd. Both
+        // temporary publication and directory sync must resolve it alike.
+        .map(|parent| {
+            if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            }
+        })
         .ok_or_else(|| {
             Error::new(
                 "E_BACKUP",
                 "incremental restore target must have a parent directory",
             )
-        })?;
+        })
+}
+
+fn restore_temp_path(destination: &Path) -> Result<PathBuf> {
+    let parent = restore_parent_directory(destination)?;
     let metadata = fs::symlink_metadata(parent)
         .map_err(|error| archive_error(format!("inspect restore parent: {error}")))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1198,9 +1210,7 @@ fn restore_temp_path(destination: &Path) -> Result<PathBuf> {
 }
 
 fn sync_parent_directory(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| archive_error("restore target has no parent"))?;
+    let parent = restore_parent_directory(path)?;
     let directory = fs::File::open(parent)
         .map_err(|error| archive_error(format!("open restore parent for sync: {error}")))?;
     directory
