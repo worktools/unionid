@@ -14,7 +14,14 @@ pub const MAX_QUERY_DIRECTORY_ENTRIES: usize = 4_096;
 /// Reject symlinks and non-source entries instead of silently skipping them.
 /// The caller owns warnings and presentation; this loader never writes output.
 pub fn load_query_directory(root: impl AsRef<Path>) -> Result<Vec<MigrationQuery>> {
-    let root = root.as_ref();
+    load(root.as_ref(), false)
+}
+
+pub(crate) fn load_optional_query_directory(root: &Path) -> Result<Vec<MigrationQuery>> {
+    load(root, true)
+}
+
+fn load(root: &Path, allow_empty: bool) -> Result<Vec<MigrationQuery>> {
     let metadata = fs::symlink_metadata(root).map_err(io_error)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(Error::new(
@@ -27,9 +34,10 @@ pub fn load_query_directory(root: impl AsRef<Path>) -> Result<Vec<MigrationQuery
         entries: 0,
         source_bytes: 0,
         path_bytes: 0,
+        discovery: allow_empty,
     };
     loader.visit(root, root, 0)?;
-    if loader.queries.is_empty() {
+    if loader.queries.is_empty() && !allow_empty {
         return Err(Error::new(
             "E_MIGRATION",
             "query directory contains no query files",
@@ -48,6 +56,7 @@ struct Loader {
     entries: usize,
     source_bytes: usize,
     path_bytes: usize,
+    discovery: bool,
 }
 
 impl Loader {
@@ -84,6 +93,9 @@ impl Loader {
                 path.extension().and_then(|x| x.to_str()),
                 Some("unid" | "uid")
             ) {
+                if self.discovery {
+                    continue;
+                }
                 return Err(Error::new(
                     "E_MIGRATION",
                     "query directory accepts only .unid or legacy .uid files",

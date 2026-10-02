@@ -385,3 +385,81 @@ fn recursive_application_queries_report_contract_changes_and_migrate_nested_defa
     assert_eq!(returned[0].next, replacement);
     reopened.check_integrity().unwrap();
 }
+
+#[test]
+fn automatic_preflight_and_explicit_opt_out_preserve_the_apply_boundary() {
+    let dir = fixture();
+    fs::write(dir.0.join("queries/README.md"), "Saved query documentation").unwrap();
+    for action in ["plan", "rehearse", "apply"] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_unionid"));
+        cmd.current_dir(dir.0.join("migrations")).args([
+            "migration",
+            action,
+            "--db",
+            "../db.redb",
+            "--dir",
+            ".",
+            "--format",
+            "json",
+        ]);
+        let report = run(cmd, 3);
+        assert_eq!(report["query_validation"]["valid"], false);
+        assert_eq!(
+            report["query_validation"]["files"][0]["failures"][0]["error"]["code"],
+            "E_MATCH"
+        );
+        assert_eq!(
+            Engine::open_redb(dir.0.join("db.redb"))
+                .unwrap()
+                .migration_history()
+                .len(),
+            1
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .current_dir(&dir.0)
+        .args([
+            "migration",
+            "apply",
+            "--db",
+            "db.redb",
+            "--no-queries",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("preflight explicitly disabled"));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report.get("query_validation").is_none());
+    let mut engine = Engine::open_redb(dir.0.join("db.redb")).unwrap();
+    assert_eq!(engine.migration_history().len(), 2);
+    assert_eq!(engine.execute(QUERY).error.unwrap().code, "E_MATCH");
+    engine.check_integrity().unwrap();
+}
+
+#[test]
+fn missing_or_empty_discovered_queries_keep_legacy_execution() {
+    let dir = fixture();
+    fs::remove_dir_all(dir.0.join("queries")).unwrap();
+    for empty in [false, true] {
+        if empty {
+            fs::create_dir(dir.0.join("queries")).unwrap();
+            fs::write(dir.0.join("queries/README.md"), "No query sources yet").unwrap();
+        }
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_unionid"));
+        cmd.current_dir(&dir.0)
+            .args(["migration", "plan", "--db", "db.redb", "--format", "json"]);
+        assert!(run(cmd, 0).get("query_validation").is_none());
+    }
+    let output = command(&dir.0, "apply")
+        .arg("--no-queries")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}

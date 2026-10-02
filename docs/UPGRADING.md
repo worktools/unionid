@@ -1,5 +1,9 @@
 # 升级与格式兼容
 
+开发版迁移 CLI 默认发现 migrations 同级 queries 并预检，既有项目可能提前收到查询契约错误；显式 --no-queries 可关闭并在 stderr 提示，--queries 仍可覆盖目录。init 新增 scripts/check.sh，project check 优先报告绑定错误。数据库格式/API 不变，详细行为见 [MIGRATIONS](MIGRATIONS.md#默认项目查询预检--automatic-project-preflight-development)。
+
+Development migration CLI discovers sibling saved queries by default and may reject existing projects before apply; --no-queries explicitly disables with a stderr notice, while --queries overrides the directory. Init adds scripts/check.sh; project check prioritizes binding errors. Database formats/APIs are unchanged; see [MIGRATIONS](MIGRATIONS.md).
+
 ## 开发版：单语句摘要精简 / Development: single-statement summaries
 
 #441：新执行的单语句响应省略 `statements`（Rust 中为空 Vec），多语句和守卫脚本保持摘要；rows、returning、affected_rows 和错误 statement_index 不变。使用者不要依赖单语句的 statements[0]，改读顶层 affected_rows。既有回执按保存的完整结果重放，可能仍有单项摘要；重开、backup/restore 不改写它。公开字段、协议与存储 codec 不变，不需要升级数据库。其他预算/轨迹评估仍未完成。

@@ -464,9 +464,12 @@ enum MigrationCommand {
         db: PathBuf,
         #[arg(long, default_value = "migrations")]
         dir: PathBuf,
-        /// Validate saved .unid queries against the migration target before committing.
+        /// Use an explicit query directory (default: queries beside the migrations directory).
         #[arg(long, value_name = "DIR")]
         queries: Option<PathBuf>,
+        /// Explicitly disable automatic saved-query preflight.
+        #[arg(long, conflicts_with = "queries")]
+        no_queries: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -476,9 +479,12 @@ enum MigrationCommand {
         db: PathBuf,
         #[arg(long, default_value = "migrations")]
         dir: PathBuf,
-        /// Validate saved .unid queries against the migration target before committing.
+        /// Use an explicit query directory (default: queries beside the migrations directory).
         #[arg(long, value_name = "DIR")]
         queries: Option<PathBuf>,
+        /// Explicitly disable automatic saved-query preflight.
+        #[arg(long, conflicts_with = "queries")]
+        no_queries: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -521,9 +527,12 @@ enum MigrationCommand {
         /// Keep the rehearsal copy at this path instead of a temporary file.
         #[arg(long)]
         copy: Option<PathBuf>,
-        /// Validate saved .unid queries against the migration target before committing.
+        /// Use an explicit query directory (default: queries beside the migrations directory).
         #[arg(long, value_name = "DIR")]
         queries: Option<PathBuf>,
+        /// Explicitly disable automatic saved-query preflight.
+        #[arg(long, conflicts_with = "queries")]
+        no_queries: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -1432,37 +1441,42 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
     let Command::Migration { command } = &args.command else {
         return None;
     };
-    let (action, db, dir, queries, format) = match command {
+    let (action, db, dir, queries, no_queries, format) = match command {
         MigrationCommand::Plan {
             db,
             dir,
-            queries: Some(queries),
+            queries,
+            no_queries,
             format,
-        } => (Action::Plan, db, dir, queries, format),
+        } => (Action::Plan, db, dir, queries, *no_queries, format),
         MigrationCommand::Apply {
             db,
             dir,
-            queries: Some(queries),
+            queries,
+            no_queries,
             format,
-        } => (Action::Apply, db, dir, queries, format),
+        } => (Action::Apply, db, dir, queries, *no_queries, format),
         MigrationCommand::Rehearse {
             db,
             dir,
             copy,
-            queries: Some(queries),
+            queries,
+            no_queries,
             format,
         } => (
             Action::Rehearse { copy: copy.clone() },
             db,
             dir,
             queries,
+            *no_queries,
             format,
         ),
         _ => return None,
     };
     let json = matches!(format, Format::Json);
-    match migration_queries::run(action, db, dir, queries) {
-        Ok(report) => match report.print(json) {
+    match migration_queries::run_with_discovery(action, db, dir, queries.as_deref(), no_queries) {
+        Ok(None) => None,
+        Ok(Some(report)) => match report.print(json) {
             Ok(()) => Some(0),
             Err(message) => exit_error(format!("E_IO: {message}"), args.error_output(), None),
         },

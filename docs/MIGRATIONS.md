@@ -163,3 +163,14 @@ These commands are available in development toward v0.13. Each file contains one
 Success adds `query_validation` to the existing report. Failure emits exactly one `ok: false` JSON envelope. Invalid final queries return `E_MIGRATION` and exit 3, with original file/checkpoint errors in `query_validation.files[].failures`; I/O returns exit 5 and resource limits exit 3. A valid preflight does not guarantee successful data conversion: later migration failures may retain earlier per-file commits. Use `query_validation.valid` to distinguish preflight rejection from later execution failure.
 
 Plan uses a locked temporary copy to avoid touching the source's redb recovery metadata. Rehearsal also preserves source bytes and removes automatic copies after success or failure. Explicit `--copy` destinations must not exist; `retained_copy` identifies a copy created and retained by this attempt, whose schema/ledger should be inspected before reuse. Existing files and source aliases are never overwritten. An active source owner returns `E_BUSY` with exit 4. Apply preflights and commits within the same actual Engine; rejected new-database queries create no database file.
+
+
+## 默认项目查询预检 / Automatic project preflight (development)
+
+开发版的 plan/apply/rehearse 在未传 --queries 时发现 migrations 实际目录同级的 queries/；存在 .unid 或兼容 .uid 源码时自动预检，源码只读取一次，在打开数据库之前固定。自动发现忽略普通非源码文件；没有源码时保留原执行路径。无法读取的目录和 symlink 仍报错。显式 --queries 指定目录覆盖发现路径，并要求至少一个查询。--no-queries 与 --queries 互斥，显式关闭时 stderr 输出提示，包括 JSON 模式；stdout 仍为单个 JSON 文档。已有项目因此可能在 apply 前收到新的查询契约错误，需修复查询或明确 opt out，不需要数据库格式升级。
+
+Project plan/apply/rehearse automatically discover queries/ beside the resolved migrations directory when --queries is omitted. Sources are loaded once before database access; .unid and legacy .uid queries trigger preflight. Discovery ignores regular non-source files and preserves legacy execution when no sources exist. Unreadable directories and symlinks are rejected. Explicit --queries overrides discovery and requires a nonempty set. Mutually exclusive --no-queries explicitly disables checks with a stderr notice, including JSON mode; stdout stays one JSON document. Existing projects can now fail before apply with query-contract errors: fix queries or explicitly opt out. No storage upgrade is required.
+
+init 的 README 和 scripts/check.sh 提供 project check → migration plan --queries queries 的 CI 顺序，部署 apply 也带显式目录；runner 需先安装项目使用的 CLI 版本。project check 先绑定全部 query，再报告格式差异，避免必要的 ADT/match 错误被排版提示遮住。
+
+The starter README and scripts/check.sh provide project check → migration plan --queries queries for CI, with explicit directories for deployment apply. Install the project's CLI version on the runner first. Project check binds all queries before reporting layout differences, so ADT/match errors remain visible.
