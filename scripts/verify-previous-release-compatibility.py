@@ -299,7 +299,10 @@ def verify_database_case(previous, current, work, previous_label, current_label,
 
 
 def require_rejected(command, code, message=None):
-    result = subprocess.run(command, text=True, capture_output=True)
+    try:
+        result = subprocess.run(command, text=True, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"rejection check timed out: {command}") from error
     if not result.returncode:
         raise RuntimeError(f"old binary accepted unsupported data: {command}")
     encoded = result.stdout.strip() or result.stderr.strip()
@@ -395,6 +398,19 @@ from assignments | sort id
     }
 
 
+def reference_boundary_skip_reasons(previous, current):
+    reasons = []
+    if previous["current_storage"]["format"] != 10:
+        reasons.append("previous_default_is_not_format_10")
+    if not {12, 13}.issubset(current["readable_storage_formats"]):
+        reasons.append("current_does_not_read_both_reference_formats")
+    if {12, 13}.intersection(previous["readable_storage_formats"]):
+        reasons.append("previous_already_reads_reference_storage")
+    if 7 in previous["readable_backup_formats"]:
+        reasons.append("previous_already_reads_reference_backup")
+    return reasons
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", required=True, type=pathlib.Path)
@@ -466,10 +482,8 @@ def main():
     }
 
     reference_cases = {}
-    if (default_format == 10
-            and {12, 13}.issubset(current_version["readable_storage_formats"])
-            and not {12, 13}.intersection(previous_version["readable_storage_formats"])
-            and 7 not in previous_version["readable_backup_formats"]):
+    skip_reasons = reference_boundary_skip_reasons(previous_version, current_version)
+    if not skip_reasons:
         reference_cases = {
             f"format{target}": verify_reference_boundary(previous, current, work, source, target)
             for source, target in [(10, 12), (11, 13)]
@@ -485,6 +499,10 @@ def main():
                 "current_version": current_version["software_version"],
                 "cases": cases,
                 "reference_boundaries": reference_cases,
+                "reference_boundary_verification": {
+                    "status": "skipped" if skip_reasons else "passed",
+                    "skip_reasons": skip_reasons,
+                },
             },
             sort_keys=True,
         )
