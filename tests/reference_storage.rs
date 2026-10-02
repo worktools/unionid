@@ -418,3 +418,53 @@ fn reference_migration_cutover_is_one_restorable_journal_commit() {
     );
     engine.check_integrity().unwrap();
 }
+
+#[test]
+fn reference_open_keeps_bounded_view_and_defers_posting_scan_to_explicit_check() {
+    use redb::{Database as RedbDatabase, Durability, TableDefinition};
+    const INDEXES: TableDefinition<&[u8], u8> = TableDefinition::new("generation_index");
+    let dir = TempDir::new();
+    let path = dir.0.join("bounded-reference-open.redb");
+    let schema;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(12).unwrap();
+        ok(&mut engine, SCHEMA);
+        ok(&mut engine, REFERENCE);
+        ok(
+            &mut engine,
+            "insert parents {id: 7}\ninsert children {id: 1, parent: Some(7)}",
+        );
+        schema = engine.schema_info();
+        engine.check_integrity().unwrap();
+    }
+    // Missing postings are an at-rest logical corruption. If open scans them,
+    // this fixture fails before the explicit check and breaks the open contract.
+    {
+        let database = RedbDatabase::open(&path).unwrap();
+        let mut transaction = database.begin_write().unwrap();
+        transaction.set_durability(Durability::Immediate).unwrap();
+        transaction.set_two_phase_commit(true);
+        transaction
+            .open_table(INDEXES)
+            .unwrap()
+            .retain(|_, _| false)
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    for read_only in [false, true] {
+        let mut engine = if read_only {
+            Engine::open_redb_read_only(&path).unwrap()
+        } else {
+            Engine::open_redb(&path).unwrap()
+        };
+        assert_eq!(engine.schema_info(), schema);
+        let profile = engine.open_profile().unwrap();
+        assert!(profile.bounded_view);
+        assert_eq!(profile.row_entries, 0);
+        assert_eq!(profile.index_entries, 0);
+        assert_eq!(profile.row_bytes, 0);
+        assert_eq!(profile.index_key_bytes, 0);
+        assert_eq!(engine.check_integrity().unwrap_err().code, "E_STORAGE");
+    }
+}

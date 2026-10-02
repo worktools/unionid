@@ -1495,13 +1495,6 @@ impl RedbStore {
         if format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
             let (loaded, receipts, committed, source, mut profile) = store.load_bounded_view()?;
             store.committed = committed;
-            if loaded.has_references() {
-                let validation_started = Instant::now();
-                store.validate_bounded_integrity_for(&loaded, store.committed.generation.active)?;
-                profile.validation_micros = profile
-                    .validation_micros
-                    .saturating_add(elapsed_micros(validation_started));
-            }
             profile.total_micros = elapsed_micros(total_started);
             profile.redb_open_micros = redb_open_micros;
             profile.bootstrap_micros = bootstrap_micros;
