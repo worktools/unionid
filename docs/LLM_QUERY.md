@@ -209,6 +209,14 @@ Negative/reversed/out-of-range positions fail at evaluation with E_TEXT_RANGE;
 there is no clamping or normalization, and combining sequences may be split.
 Results above 16 MiB fail with E_LIMIT; explain checks types without running ranges.
 
+In unreleased v0.15 development, `int_to_float value` explicitly converts int to
+float only when exactly representable by f64. Precision loss returns
+E_CAST_PRECISION, including 9007199254740993 and i64::MAX; i64::MIN is exact.
+For mixed arithmetic write `(int_to_float qty) * price` when price is float.
+No implicit casts or silent rounding are added. Prepared parameters, filters,
+derives and migration using share this contract; failed mutations/migrations
+roll back the whole request. Explain checks types without evaluating precision.
+
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,
 `is_some`, `is_none`, `any`, and `all`. For `Map<text, T>`, use `contains_key map key`,

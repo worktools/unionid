@@ -25,6 +25,7 @@ pub const ERROR_CODES: &[&str] = &[
     "E_BUSY",
     "E_BYTES",
     "E_CANCELLED",
+    "E_CAST_PRECISION",
     "E_CELLS",
     "E_CHECKPOINT",
     "E_CODEC",

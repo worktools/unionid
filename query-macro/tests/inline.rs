@@ -47,6 +47,35 @@ unionid_query::queries! {
         derive matched = starts_with label $prefix
         select {label, matched}
     }
+
+    query convert_integer {
+        from tasks
+        filter id == $id
+        derive value = int_to_float $value
+        select value
+    }
+}
+
+#[test]
+fn inline_integer_conversion_infers_int_params_and_float_rows() {
+    let mut engine = unionid::Engine::memory();
+    assert!(engine.execute(include_str!("schema.unid")).ok);
+    assert!(engine.execute("insert tasks {id: 1, title: \"cast\", state: Pending, priority: 1, due_on: @2026-09-17}").ok);
+    let rows = convert_integer::convert_integer(
+        &mut engine,
+        convert_integer::ConvertIntegerParams { id: 1, value: 2 },
+    )
+    .unwrap();
+    assert_eq!(rows[0].value, 2.0);
+    let error = convert_integer::convert_integer(
+        &mut engine,
+        convert_integer::ConvertIntegerParams {
+            id: 1,
+            value: i64::MAX,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "E_CAST_PRECISION");
 }
 
 #[test]

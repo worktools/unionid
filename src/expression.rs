@@ -463,11 +463,7 @@ pub(crate) fn bind_scalar(
                 ));
             }
             for (position, argument) in arguments.iter_mut().enumerate() {
-                let input_type = if name == "substring" && position > 0 {
-                    ScalarType::Int
-                } else {
-                    ScalarType::Text
-                };
+                let input_type = builtin_scalar_input_type(name, position);
                 bind_scalar(catalog, scope, argument, Some(&input_type), reference_kind)?;
             }
             builtin_scalar_result(name).expect("known builtin")
@@ -667,11 +663,7 @@ pub(crate) fn infer_scalar(
                 ));
             }
             for (position, argument) in arguments.iter().enumerate() {
-                let input_type = if name == "substring" && position > 0 {
-                    ScalarType::Int
-                } else {
-                    ScalarType::Text
-                };
+                let input_type = builtin_scalar_input_type(name, position);
                 if let Some(argument) = infer_scalar(catalog, scope, argument, reference_kind)?
                     && !same_type(&argument, &input_type)
                 {
@@ -910,6 +902,7 @@ pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
                 | "trim"
                 | "concat"
                 | "substring"
+                | "int_to_float"
                 | "uuid_parse"
                 | "bytes_parse_hex"
                 | "date_parse"
@@ -970,6 +963,7 @@ fn map_scalar_result(name: &str, value_ty: ScalarType) -> Result<ScalarType> {
 
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
     match name {
+        "int_to_float" => Some(ScalarType::Float),
         "starts_with" | "ends_with" | "contains_text" => Some(ScalarType::Bool),
         "lower" | "upper" | "trim" | "concat" | "substring" => Some(ScalarType::Text),
         "uuid_parse" => Some(ScalarType::Uuid),
@@ -978,6 +972,14 @@ fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
         "timestamp_parse" => Some(ScalarType::Timestamp),
         "duration_parse" => Some(ScalarType::Duration),
         _ => None,
+    }
+}
+
+fn builtin_scalar_input_type(name: &str, position: usize) -> ScalarType {
+    if (name == "substring" && position > 0) || name == "int_to_float" {
+        ScalarType::Int
+    } else {
+        ScalarType::Text
     }
 }
 
@@ -1566,6 +1568,21 @@ fn evaluate_scalar<'expression, 'values>(
             let Some(argument) = evaluate_scalar(catalog, argument, values, budget)? else {
                 return Ok(None);
             };
+            if name == "int_to_float" {
+                let Value::Int(value) = argument.as_value().unwrapped() else {
+                    return Err(Error::new("E_TYPE", "int_to_float expects int"));
+                };
+                let converted = *value as f64;
+                // i128 keeps +2^63 distinct from i64::MAX, unlike a saturating
+                // f64-to-i64 round trip at the positive endpoint.
+                if converted as i128 != i128::from(*value) {
+                    return Err(Error::new(
+                        "E_CAST_PRECISION",
+                        "int_to_float would lose integer precision",
+                    ));
+                }
+                return Ok(Some(Evaluated::Owned(Value::Float(converted))));
+            }
             let Value::Text(source) = argument.as_value().unwrapped() else {
                 return Err(Error::new("E_TYPE", format!("{name} expects text")));
             };
