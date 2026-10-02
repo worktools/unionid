@@ -298,6 +298,103 @@ def verify_database_case(previous, current, work, previous_label, current_label,
     }
 
 
+def require_rejected(command, code, message=None):
+    result = subprocess.run(command, text=True, capture_output=True)
+    if not result.returncode:
+        raise RuntimeError(f"old binary accepted unsupported data: {command}")
+    encoded = result.stdout.strip() or result.stderr.strip()
+    if encoded.startswith("{"):
+        response = json.loads(encoded)
+    else:
+        # Opening a database can fail before the query JSON response exists.
+        prefix, separator, detail = encoded.partition(": ")
+        if not separator:
+            raise RuntimeError(f"unclassified compatibility failure: {encoded}")
+        response = {"error": {"code": prefix, "message": detail}}
+    if response.get("error", {}).get("code") != code:
+        raise RuntimeError(f"unexpected compatibility failure: {response}")
+    if message and message not in response["error"].get("message", ""):
+        raise RuntimeError(f"failure did not identify unsupported format: {response}")
+    return response
+
+
+def verify_reference_boundary(previous, current, work, source_format, reference_format):
+    database = work / f"previous-format{source_format}.redb"
+    run([current, "upgrade", "--db", database, "--target", str(reference_format),
+         "--format", "json"])
+    source = """struct Assignment {id: int, task: Option<int>}
+table assignments: Assignment {key id}
+create reference assignments (task) references tasks (id)
+insert many assignments [{id: 1, task: Some(1)}, {id: 2, task: None}]
+from assignments | sort id
+"""
+    before = require_query(
+        run([current, "run", "--db", database, "--query", source, "--format", "json"]),
+        "reference boundary setup",
+    )
+    for query in ["from assignments", "delete tasks"]:
+        require_rejected(
+            [previous, "run", "--db", database, "--query", query, "--format", "json"],
+            "E_STORAGE",
+            "unsupported storage_format_version",
+        )
+    after = require_query(
+        run([current, "run", "--db", database, "--query",
+             "from assignments | sort id", "--format", "json"]),
+        "reference boundary after rejected old reader/writer",
+    )
+    if before != after:
+        raise RuntimeError("old reader/writer changed reference rows or schema")
+    run([current, "check", "--db", database, "--format", "json"])
+    backup = work / f"references-format{reference_format}.backup.json"
+    run([current, "backup", "--db", database, "--output", backup, "--format", "json"])
+    if json.loads(backup.read_text()).get("format_version") != 7:
+        raise RuntimeError("reference backup did not use format 7")
+    rejected_path = work / f"old-restore-format{reference_format}.redb"
+    require_rejected(
+        [previous, "restore", "--backup", backup, "--db", rejected_path,
+         "--format", "json"],
+        "E_BACKUP",
+        "unsupported backup format",
+    )
+    if rejected_path.exists():
+        raise RuntimeError("old restore published an unsupported reference database")
+    restored = work / f"current-restore-format{reference_format}.redb"
+    run([current, "restore", "--backup", backup, "--db", restored, "--format", "json"])
+    restored_rows = require_query(
+        run([current, "run", "--db", restored, "--query",
+             "from assignments | sort id", "--format", "json"]),
+        "reference boundary restored rows",
+    )
+    if restored_rows != before:
+        raise RuntimeError("current restore changed reference rows or schema")
+    for path in [database, restored]:
+        run([current, "check", "--db", path, "--format", "json"])
+        result = require_rejected(
+            [current, "run", "--db", path, "--query",
+             "delete tasks | filter id == 1", "--format", "json"],
+            "E_CONSTRAINT",
+        )
+        if (result.get("ok") is not False
+                or result.get("error", {}).get("constraint") != "reference_restricted"):
+            raise RuntimeError("current database/restore lost reference enforcement")
+        missing = require_rejected(
+            [current, "run", "--db", path, "--query",
+             "insert assignments {id: 3, task: Some(999)}", "--format", "json"],
+            "E_CONSTRAINT",
+        )
+        if missing.get("error", {}).get("constraint") != "reference_missing":
+            raise RuntimeError("current database/restore accepted a missing target")
+    return {
+        "storage_format": reference_format,
+        "backup_format": 7,
+        "old_reader_rejected": True,
+        "old_writer_rejected": True,
+        "old_restore_rejected": True,
+        "current_restore_preserves_constraints": True,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", required=True, type=pathlib.Path)
@@ -368,6 +465,16 @@ def main():
         for case in [f"format{storage_format}"]
     }
 
+    reference_cases = {}
+    if (default_format == 10
+            and {12, 13}.issubset(current_version["readable_storage_formats"])
+            and not {12, 13}.intersection(previous_version["readable_storage_formats"])
+            and 7 not in previous_version["readable_backup_formats"]):
+        reference_cases = {
+            f"format{target}": verify_reference_boundary(previous, current, work, source, target)
+            for source, target in [(10, 12), (11, 13)]
+        }
+
     print(
         json.dumps(
             {
@@ -377,6 +484,7 @@ def main():
                 "previous_version": previous_version["software_version"],
                 "current_version": current_version["software_version"],
                 "cases": cases,
+                "reference_boundaries": reference_cases,
             },
             sort_keys=True,
         )
