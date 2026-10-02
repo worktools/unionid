@@ -319,3 +319,21 @@ async fn typed_http_client_does_not_retry_permanent_http_statuses() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     server.abort();
 }
+
+#[path = "common/reference_requests.rs"]
+mod reference_requests;
+
+#[tokio::test]
+async fn typed_http_preserves_adt_reference_diagnostics_and_atomic_effects() {
+    let app = http::router(ConcurrentEngine::new(Engine::memory()), Config::default());
+    let (base_url, server) = serve(app).await;
+    let client = HttpClient::connect(base_url).unwrap();
+    for (request, expected) in reference_requests::steps() {
+        let response = tokio::time::timeout(Duration::from_secs(5), client.request(&request))
+            .await
+            .unwrap()
+            .unwrap();
+        expected.check(&request, response);
+    }
+    server.abort();
+}

@@ -2158,3 +2158,15 @@ fn source_extension_unid_is_canonical_and_uid_warns() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+#[path = "common/reference_requests.rs"]
+mod reference_requests;
+
+#[test]
+fn versioned_tcp_preserves_adt_reference_diagnostics_and_atomic_effects() {
+    let server = Server::start(&[]);
+    for (request, expected) in reference_requests::steps() {
+        let response = cli::send_request(&server.addr, &request).unwrap();
+        expected.check(&request, response);
+    }
+}
