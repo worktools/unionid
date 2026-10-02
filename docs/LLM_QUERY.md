@@ -193,6 +193,11 @@ can nest as `lower (trim owner)`. Case conversion is Unicode and locale-independ
 (it can change length); trim removes Unicode whitespace only at the ends. These
 are not Unicode normalization or locale-specific case folding. They share query,
 prepared parameter, update and migration expression binding; no implicit casts.
+`starts_with source prefix`, `ends_with source suffix`, and `contains_text source fragment`
+take two text arguments and return bool. Matching is exact and case-sensitive, without
+regex/wildcards or automatic Unicode normalization; all three match an empty needle.
+Use explicit composition such as `starts_with (lower owner) "ada"` for normalized input;
+lower is not full case folding. Existing `contains` remains a list/bytes operation.
 
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,

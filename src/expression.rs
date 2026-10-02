@@ -455,19 +455,22 @@ pub(crate) fn bind_scalar(
                 }
                 return Ok(target);
             }
-            if arguments.len() != 1 {
+            let arity = builtin_scalar_arity(name).expect("known builtin");
+            if arguments.len() != arity {
                 return Err(Error::new(
                     "E_TYPE",
-                    format!("{name} expects 1 argument, got {}", arguments.len()),
+                    format!("{name} expects {arity} arguments, got {}", arguments.len()),
                 ));
             }
-            bind_scalar(
-                catalog,
-                scope,
-                &mut arguments[0],
-                Some(&ScalarType::Text),
-                reference_kind,
-            )?;
+            for argument in arguments {
+                bind_scalar(
+                    catalog,
+                    scope,
+                    argument,
+                    Some(&ScalarType::Text),
+                    reference_kind,
+                )?;
+            }
             builtin_scalar_result(name).expect("known builtin")
         }
         ScalarExpression::Call { name, .. } => {
@@ -657,16 +660,19 @@ pub(crate) fn infer_scalar(
                     &arguments[scale_index],
                 )?));
             }
-            if arguments.len() != 1 {
+            let arity = builtin_scalar_arity(name).expect("known builtin");
+            if arguments.len() != arity {
                 return Err(Error::new(
                     "E_TYPE",
-                    format!("{name} expects 1 argument, got {}", arguments.len()),
+                    format!("{name} expects {arity} arguments, got {}", arguments.len()),
                 ));
             }
-            if let Some(argument) = infer_scalar(catalog, scope, &arguments[0], reference_kind)?
-                && !same_type(&argument, &ScalarType::Text)
-            {
-                return Err(Error::new("E_TYPE", format!("{name} expects text")));
+            for argument in arguments {
+                if let Some(argument) = infer_scalar(catalog, scope, argument, reference_kind)?
+                    && !same_type(&argument, &ScalarType::Text)
+                {
+                    return Err(Error::new("E_TYPE", format!("{name} expects text")));
+                }
             }
             Ok(builtin_scalar_result(name))
         }
@@ -885,6 +891,7 @@ fn temporal_arithmetic_signature(
 
 pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
     is_map_scalar_function(name)
+        || is_text_predicate(name)
         || matches!(
             name,
             "lower"
@@ -907,8 +914,12 @@ fn is_map_scalar_function(name: &str) -> bool {
     matches!(name, "contains_key" | "get" | "keys" | "values" | "entries")
 }
 
+fn is_text_predicate(name: &str) -> bool {
+    matches!(name, "starts_with" | "ends_with" | "contains_text")
+}
+
 pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
-    if matches!(name, "contains_key" | "get") {
+    if matches!(name, "contains_key" | "get") || is_text_predicate(name) {
         Some(2)
     } else if matches!(name, "keys" | "values" | "entries") {
         Some(1)
@@ -946,6 +957,7 @@ fn map_scalar_result(name: &str, value_ty: ScalarType) -> Result<ScalarType> {
 
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
     match name {
+        "starts_with" | "ends_with" | "contains_text" => Some(ScalarType::Bool),
         "lower" | "upper" | "trim" => Some(ScalarType::Text),
         "uuid_parse" => Some(ScalarType::Uuid),
         "bytes_parse_hex" => Some(ScalarType::Bytes),
@@ -1503,6 +1515,21 @@ fn evaluate_scalar<'expression, 'values>(
             let Value::Text(source) = argument.as_value().unwrapped() else {
                 return Err(Error::new("E_TYPE", format!("{name} expects text")));
             };
+            if is_text_predicate(name) {
+                let Some(needle) = evaluate_scalar(catalog, &arguments[1], values, budget)? else {
+                    return Ok(None);
+                };
+                let Value::Text(needle) = needle.as_value().unwrapped() else {
+                    return Err(Error::new("E_TYPE", format!("{name} expects text")));
+                };
+                let matched = match name.as_str() {
+                    "starts_with" => source.starts_with(needle),
+                    "ends_with" => source.ends_with(needle),
+                    "contains_text" => source.contains(needle),
+                    _ => unreachable!("known text predicate"),
+                };
+                return Ok(Some(Evaluated::Owned(Value::Bool(matched))));
+            }
             let value = match name.as_str() {
                 "lower" => Value::Text(source.to_lowercase()),
                 "upper" => Value::Text(source.to_uppercase()),

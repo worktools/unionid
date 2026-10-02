@@ -324,7 +324,7 @@ from tasks | filter id > 1 | take 1
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
-## 文本规范化 / Text normalization (v0.15 development)
+## 文本规范化与匹配 / Text normalization and matching (v0.15 development)
 
 `lower text`、`upper text`、`trim text` 接受一个 text 参数并返回 text，支持嵌套调用：
 
@@ -337,6 +337,19 @@ select {id, normalized}
 大小写转换采用 Unicode 规则且不依赖本地 locale；例如 `upper "Straße"` 为 `"STRASSE"`，结果长度可能变化。`trim` 只移除两端 Unicode 空白，保留内部空格。这些函数不是 Unicode normalization 或语言地区相关的 case folding，也不隐式转换其他类型。filter、derive、match 分支、prepared 参数、update set 与 migration using 复用相同表达式绑定；`explain` 绑定但不求值。当前为未发布的 v0.15 开发能力。
 
 These unary text-to-text functions nest as shown above. Case conversion follows Unicode rules independently of locale and may change length. Trim removes Unicode whitespace only at the ends, preserving internal spaces. They do not perform Unicode normalization, locale-specific case folding or implicit casts. Query, match, prepared, update and migration expressions share binding; explain binds without evaluation. This is unreleased v0.15 development functionality.
+
+`starts_with source prefix`、`ends_with source suffix`、`contains_text source fragment` 接受两个 text 参数并返回 bool，可直接用于 filter 或派生值：
+
+```text
+from users
+filter starts_with (lower name) "ada"
+derive has_space = contains_text name " "
+select {id, has_space}
+```
+
+匹配采用 Rust 字符串的精确、区分大小写语义，没有 regex、通配符或隐式 Unicode normalization。空匹配串对三个函数均返回 true，包括空 source；预组合 `"é"` 与 `e` 加 U+0301 不相同。如需统一小写后比较，应显式组合 lower，但它不等于完整 Unicode case folding。prepared 参数仍须为 text；`contains` 的 list/bytes 语义不变。
+
+These binary text predicates return bool and follow exact, case-sensitive Rust string matching without regex, wildcard or implicit Unicode normalization. An empty needle matches every source, including an empty one. Precomposed `é` differs from `e` plus U+0301. Explicit lower composition is available but is not full Unicode case folding. Prepared arguments must be text; existing list/bytes contains semantics are unchanged.
 
 ## Explain、实际剖析与类型化索引计划
 
