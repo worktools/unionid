@@ -1,7 +1,7 @@
 //! Portable reference metadata and validation share the catalog's nominal rules.
 use super::*;
 
-pub(super) fn describe(database: &Database) -> BTreeMap<u64, Vec<ReferenceDescription>> {
+pub(crate) fn describe(database: &Database) -> BTreeMap<u64, Vec<ReferenceDescription>> {
     let mut result = BTreeMap::<_, Vec<_>>::new();
     for (definition, spec) in database.schema_references() {
         result

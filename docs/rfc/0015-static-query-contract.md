@@ -86,3 +86,13 @@ Generated functions retain the schema revision/hash, canonical query source, and
 Applications can use `--dir <queries>` to generate one bundle. The root module contains one schema model, while each `.unid` file (or compatible `.uid`) becomes a public submodule named from its normalized relative path and refers to the root's named types. Mutations and reads therefore share the same Rust domain types. Generation binds and checks the complete query set before constructing output; directory entries are stable-sorted, and an empty directory, a path that is neither `.unid` nor `.uid`, normalized-name collision, or binding error emits no partial artifact.
 
 Generated-drift CI and the two-version schema/query/client evolution matrix are recorded in the [static query binding evolution acceptance](../assessments/query-binding-evolution-2026-09-13.md). Server-side named queries, user generics, and a second executor are outside this RFC.
+
+## 引用约束预检 / Reference-check preflight (v0.14 development)
+
+version 1 描述可增加可选 `reference_checks` 数组；没有相关引用时省略，读取旧描述时默认为空。每项包含 `kind`（`target_exists` 或 `restrict`）、`source_table_id`、`source_table` 和已有 portable `ReferenceDescription` 的 `reference`，复用 stable ID、成对字段路径、Exact/Optional mode 与固定目标 key。schema/hash 和 query digest 的含义不变。
+
+insert/batch insert 列出源表的目标存在性检查；upsert/batch upsert 和 update 还列出指向被修改表的 restrict 检查；delete 只列出 incoming restrict。自引用 mutation 可同时出现两种检查。描述保守列出可能执行的义务，不根据尚未绑定的业务参数或实际受影响行省略检查，也不预测成功或失败。读取和 query explain 不列 mutation 检查。此入口不读取业务行或执行 mutation，不证明目标行已经存在；运行时仍以完整候选执行约束校验。它补齐现有 `query describe` 的 schema-aware 预检信息，不将独立 mutation explain 视为已完成。
+
+Version-1 descriptions may add an optional reference_checks array, omitted when empty and defaulting to empty for older descriptions. Each entry contains kind (target_exists/restrict), source table name/ID and the existing portable ReferenceDescription, reusing stable identity, paired paths, Exact/Optional modes and pinned target key. Schema identity and query digest meanings remain unchanged.
+
+Insert/batch insert list outgoing target-existence checks; upsert/batch upsert and update also list incoming restrict checks; delete lists only incoming restrict. Self-references can require both. This conservatively lists potential execution obligations without inspecting unbound business parameters or affected rows and does not predict success/failure. Reads and query explain have no mutation checks. Description generation does not read rows or execute writes and does not prove that target rows exist; runtime still validates the complete candidate. This enriches existing query describe preflight without claiming independent mutation explain completion.

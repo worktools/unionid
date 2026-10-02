@@ -3725,6 +3725,28 @@ impl Engine {
         crate::portable::PortableContract::from_database(self.committed.db.as_ref())
     }
 
+    /// Project only reference metadata, without cloning the full type catalog.
+    pub(crate) fn reference_descriptions(
+        &self,
+    ) -> Vec<(String, String, crate::portable::ReferenceDescription)> {
+        let mut references = crate::portable::describe_references(&self.committed.db);
+        if references.is_empty() {
+            return Vec::new();
+        }
+        self.committed
+            .db
+            .schema_tables()
+            .into_iter()
+            .flat_map(|table| {
+                references
+                    .remove(&table.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |reference| (table.id.to_string(), table.name.clone(), reference))
+            })
+            .collect()
+    }
+
     pub fn migration_history(&self) -> &[MigrationEntry] {
         self.committed.db.migration_history()
     }
