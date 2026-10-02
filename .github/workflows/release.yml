@@ -300,7 +300,10 @@ jobs:
           sha256sum --check --strict *.sha256
       - uses: softprops/action-gh-release@v3
         with:
-          body_path: docs/RELEASE-${{ github.ref_name }}.md
+          body: |
+            原生安装包与校验和见下方附件。中英双语用户指南发布于 [Announcements](https://github.com/worktools/unionid/discussions/categories/announcements)。
+
+            Native archives and checksums are attached below. Bilingual user guides are published in [Announcements](https://github.com/worktools/unionid/discussions/categories/announcements).
           files: |
             release-assets/*.tar.gz
             release-assets/*.sha256
