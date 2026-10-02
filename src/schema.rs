@@ -105,18 +105,13 @@ pub(crate) fn diff(
     parent: Option<&str>,
 ) -> Result<SchemaDiff> {
     let target = parse(target_source)?;
-    if current.has_references() || target.has_references() {
-        return Err(Error::new(
-            "E_SCHEMA",
-            "reference schema diff is not available yet",
-        ));
-    }
     let mut generated = Vec::new();
     let mut todos = Vec::new();
     let mut warnings = Vec::new();
 
     diff_types(current, &target, &mut generated, &mut todos, &mut warnings);
     diff_tables(current, &target, &mut generated, &mut todos);
+    diff_references(current, &target, &mut generated);
     generated.sort_by_key(|operation| operation_priority(&operation.description));
     let impacts = current
         .catalog
@@ -569,7 +564,9 @@ fn diff_tables(
         }
     }
 
-    for (name, table) in &target_tables {
+    let mut ordered_target_tables = target_tables.iter().collect::<Vec<_>>();
+    ordered_target_tables.sort_by_key(|(_, table)| table.id);
+    for (name, table) in ordered_target_tables {
         if renamed_to.contains(name) {
             continue;
         }
@@ -704,6 +701,67 @@ fn diff_tables(
     }
 }
 
+fn diff_references(
+    current: &Database,
+    target: &Database,
+    generated: &mut Vec<SchemaDiffOperation>,
+) {
+    fn shape(spec: &crate::query::ReferenceSpec) -> String {
+        format!(
+            "reference {} ({}) references {} ({})",
+            spec.table,
+            spec.fields.join(", "),
+            spec.target_table,
+            spec.target_fields.join(", ")
+        )
+    }
+    let old = current
+        .schema_references()
+        .into_iter()
+        .map(|(definition, spec)| (shape(&spec), (definition, spec)))
+        .collect::<BTreeMap<_, _>>();
+    let new = target
+        .schema_references()
+        .into_iter()
+        .map(|(_, spec)| shape(&spec))
+        .collect::<BTreeSet<_>>();
+    let mut replaced = BTreeSet::new();
+    for (shape, (definition, spec)) in &old {
+        // A declaration with unchanged paths must be rebound if its pinned key
+        // is explicitly replaced by this migration.
+        let key_drop = match definition.target {
+            crate::db::ReferenceTarget::PrimaryKey => format!("drop key {}", spec.target_table),
+            crate::db::ReferenceTarget::UniqueIndex { index_id } => {
+                let (table, index) = current
+                    .schema_indexes()
+                    .into_iter()
+                    .find(|(_, index)| index.id == index_id)
+                    .expect("bound target index exists");
+                let components = index
+                    .effective_components()
+                    .into_iter()
+                    .map(|part| crate::query::IndexComponent {
+                        column: part.column,
+                        descending: part.descending,
+                    })
+                    .collect::<Vec<_>>();
+                format_schema_index_operation("drop", table, &components, false, None)
+            }
+        };
+        if !new.contains(shape) || generated.iter().any(|op| op.description == key_drop) {
+            replaced.insert(shape.clone());
+        }
+    }
+    for shape in &replaced {
+        generated.push(operation(format!("drop {shape}"), true));
+    }
+    for shape in new {
+        if !old.contains_key(&shape) || replaced.contains(&shape) {
+            generated.push(operation(format!("add {shape}"), false));
+        }
+    }
+}
+
 fn format_schema_index_operation(
     verb: &str,
     table: &str,
@@ -819,7 +877,13 @@ fn todo(description: String) -> SchemaDiffOperation {
 }
 
 fn operation_priority(description: &str) -> u8 {
-    if description.starts_with("drop key ") {
+    if description.starts_with("drop reference ") {
+        return 0;
+    }
+    if description.starts_with("add reference ") {
+        return 10;
+    }
+    1 + if description.starts_with("drop key ") {
         0
     } else if description.starts_with("drop index ") {
         1

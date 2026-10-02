@@ -294,3 +294,177 @@ fn schema_diff_preserves_composite_order_and_direction() {
         Engine::check_schema(target).unwrap().normalized
     );
 }
+
+const REFERENCE_BASE: &str = r#"
+struct Parent {id: int, alternate: int}
+struct Child {id: int, parent: Option<int>}
+table parents: Parent {key id}
+table children: Child {key id}
+"#;
+
+#[test]
+fn reference_diff_add_drop_and_initial_schema_are_runnable() {
+    let target =
+        format!("{REFERENCE_BASE}\ncreate reference children (parent) references parents (id)");
+    let mut engine = Engine::memory();
+    let initial = engine.diff_schema(&target, "initial", None).unwrap();
+    assert!(initial.runnable);
+    assert!(
+        initial
+            .operations
+            .last()
+            .unwrap()
+            .description
+            .starts_with("add reference ")
+    );
+    let initial = MigrationFile::parse(initial.migration_source).unwrap();
+    engine
+        .apply_migrations(std::slice::from_ref(&initial))
+        .unwrap();
+    ok(
+        &mut engine,
+        "insert parents {id: 1, alternate: 10}\ninsert children {id: 2, parent: Some(1)}",
+    );
+    assert!(
+        engine
+            .diff_schema(&target, "unchanged", None)
+            .unwrap()
+            .operations
+            .is_empty()
+    );
+    let diff = engine
+        .diff_schema(REFERENCE_BASE, "remove_reference", Some("initial"))
+        .unwrap();
+    assert_eq!(diff.operations.len(), 1);
+    assert!(diff.operations[0].destructive);
+    engine
+        .apply_migrations(&[
+            initial,
+            MigrationFile::parse(diff.migration_source).unwrap(),
+        ])
+        .unwrap();
+    ok(&mut engine, "delete parents");
+    let error = engine.diff_schema(&target, "orphan", None).unwrap_err();
+    assert_eq!(error.code, "E_CONSTRAINT");
+    assert_eq!(
+        engine.schema(),
+        Engine::check_schema(REFERENCE_BASE).unwrap().normalized
+    );
+}
+
+#[test]
+fn reference_diff_rebinds_replaced_target_key_and_orders_table_removal() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        &format!("{REFERENCE_BASE}\ncreate reference children (parent) references parents (id)"),
+    );
+    ok(
+        &mut engine,
+        "insert parents {id: 1, alternate: 10}\ninsert children {id: 2, parent: Some(1)}",
+    );
+    let target = format!(
+        "{}\ncreate unique index parents (id)\ncreate reference children (parent) references parents (id)",
+        REFERENCE_BASE.replace(
+            "parents: Parent {key id}",
+            "parents: Parent {key alternate}"
+        )
+    );
+    let diff = engine.diff_schema(&target, "replace_key", None).unwrap();
+    assert!(
+        diff.operations
+            .first()
+            .unwrap()
+            .description
+            .starts_with("drop reference ")
+    );
+    assert!(
+        diff.operations
+            .last()
+            .unwrap()
+            .description
+            .starts_with("add reference ")
+    );
+    let initial = MigrationFile::parse(diff.migration_source).unwrap();
+    engine
+        .apply_migrations(std::slice::from_ref(&initial))
+        .unwrap();
+    assert_eq!(
+        engine.execute("delete parents").error.unwrap().code,
+        "E_CONSTRAINT"
+    );
+    let target = "struct Parent {id: int, alternate: int}\ntable parents: Parent {key alternate}\ncreate unique index parents (id)";
+    let diff = engine
+        .diff_schema(target, "remove_child", Some("replace_key"))
+        .unwrap();
+    assert!(
+        diff.operations
+            .first()
+            .unwrap()
+            .description
+            .starts_with("drop reference ")
+    );
+    engine
+        .apply_migrations(&[
+            initial,
+            MigrationFile::parse(diff.migration_source).unwrap(),
+        ])
+        .unwrap();
+    ok(&mut engine, "delete parents");
+}
+
+#[test]
+fn reference_schema_normalization_ignores_creation_order() {
+    let a = "create reference children (parent) references parents (id)";
+    let b = "create reference children (parent) references parents (alternate)";
+    let base = format!("{REFERENCE_BASE}\ncreate unique index parents (alternate)");
+    let left = format!("{base}\n{a}\n{b}");
+    let right = format!("{base}\n{b}\n{a}");
+    assert_eq!(
+        Engine::check_schema(&left).unwrap().normalized,
+        Engine::check_schema(&right).unwrap().normalized
+    );
+    let mut engine = Engine::memory();
+    ok(&mut engine, &left);
+    assert!(
+        engine
+            .diff_schema(&right, "same", None)
+            .unwrap()
+            .operations
+            .is_empty()
+    );
+}
+
+#[test]
+fn reference_diff_rebinds_a_replaced_unique_index() {
+    let base = format!(
+        "{REFERENCE_BASE}\ncreate unique index parents (alternate)\ncreate reference children (parent) references parents (alternate)"
+    );
+    let mut engine = Engine::memory();
+    ok(&mut engine, &base);
+    ok(
+        &mut engine,
+        "insert parents {id: 1, alternate: 10}\ninsert children {id: 2, parent: Some(10)}",
+    );
+    let target = base.replace("index parents (alternate)", "index parents (-alternate)");
+    let diff = engine.diff_schema(&target, "reverse_index", None).unwrap();
+    assert!(diff.runnable);
+    assert_eq!(diff.operations.len(), 4);
+    assert!(
+        diff.operations[0]
+            .description
+            .starts_with("drop reference ")
+    );
+    assert!(diff.operations[3].description.starts_with("add reference "));
+    engine
+        .apply_migrations(&[MigrationFile::parse(diff.migration_source).unwrap()])
+        .unwrap();
+    assert_eq!(
+        engine.schema(),
+        Engine::check_schema(&target).unwrap().normalized
+    );
+    assert_eq!(
+        engine.execute("delete parents").error.unwrap().code,
+        "E_CONSTRAINT"
+    );
+}

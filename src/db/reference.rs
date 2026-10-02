@@ -368,6 +368,40 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn schema_references(&self) -> Vec<(&ReferenceDefinition, ReferenceSpec)> {
+        let tables = self.schema_tables();
+        self.reference_definitions
+            .values()
+            .map(|reference| {
+                let source = tables
+                    .iter()
+                    .find(|table| table.id == reference.table_id)
+                    .expect("bound reference source exists");
+                let target = tables
+                    .iter()
+                    .find(|table| table.id == reference.target_table_id)
+                    .expect("bound reference target exists");
+                (
+                    reference,
+                    ReferenceSpec {
+                        table: source.name.clone(),
+                        fields: reference
+                            .components
+                            .iter()
+                            .map(|part| part.column.clone())
+                            .collect(),
+                        target_table: target.name.clone(),
+                        target_fields: reference
+                            .components
+                            .iter()
+                            .map(|part| part.target_column.clone())
+                            .collect(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn has_references(&self) -> bool {
         !self.reference_definitions.is_empty()
     }

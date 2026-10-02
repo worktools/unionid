@@ -7883,34 +7883,21 @@ impl Database {
             );
             lines.extend(source.lines().map(str::to_owned));
         }
-        for reference in self.reference_definitions.values() {
-            let tables = self.schema_tables();
-            let source = tables
-                .iter()
-                .find(|table| table.id == reference.table_id)
-                .expect("bound reference source exists");
-            let target = tables
-                .iter()
-                .find(|table| table.id == reference.target_table_id)
-                .expect("bound reference target exists");
-            lines.push(format!(
-                "create reference {} ({}) references {} ({})",
-                source.name,
-                reference
-                    .components
-                    .iter()
-                    .map(|component| component.column.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                target.name,
-                reference
-                    .components
-                    .iter()
-                    .map(|component| component.target_column.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ));
-        }
+        let mut references = self
+            .schema_references()
+            .into_iter()
+            .map(|(_, spec)| {
+                format!(
+                    "create reference {} ({}) references {} ({})",
+                    spec.table,
+                    spec.fields.join(", "),
+                    spec.target_table,
+                    spec.target_fields.join(", ")
+                )
+            })
+            .collect::<Vec<_>>();
+        references.sort();
+        lines.extend(references);
         lines.join("\n")
     }
 }

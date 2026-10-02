@@ -1,6 +1,6 @@
 # 声明式 Schema 与 Diff
 
-应用可以把期望结构保存在普通 `.unid` schema 文件中（兼容窗口内也接受 `.uid`）。文件只包含 `type`、`table`、`create index` 和 `create unique index` 声明，沿用数据库语言的无分号、缩进式语法；不能包含数据写入、查询或 migration。为保证规范输出能以相同身份顺序重建，声明依次放置 named types、tables、secondary indexes。示例见 [`examples/schema.unid`](../examples/schema.unid)。
+应用可以把期望结构保存在普通 `.unid` schema 文件中（兼容窗口内也接受 `.uid`）。文件只包含 类型、`table`、`create index`、`create unique index` 和 `create reference` 声明，沿用数据库语言的无分号、缩进式语法；不能包含数据写入、查询或 migration。为保证规范输出能以相同身份顺序重建，声明依次放置 named types、tables、secondary indexes、references。示例见 [`examples/schema.unid`](../examples/schema.unid)。
 
 ```text
 type State = Pending | Running | Complete
@@ -57,3 +57,19 @@ unionid migration apply --db app.redb
 ```
 
 plan 在数据库副本上验证最终数据、约束和目标结构；apply 才会原子提交。diff 文件只是期望状态，migration 文件仍是不可修改的执行历史。
+
+## 引用约束（v0.14 开发中） / References (v0.14 in development)
+
+引用声明放在表和目标唯一索引之后，例如：
+
+```text
+struct Parent {id: int}
+struct Child {id: int, parent: Option<int>}
+table parents: Parent {key id}
+table children: Child {key id}
+create reference children (parent) references parents (id)
+```
+
+diff 可生成 `add reference` 和 `drop reference`。删除表或替换引用依赖的主键／唯一索引时，先移除引用，再变更目标，最后按目标 schema 重建引用；仅调整引用声明的顺序不产生操作。保留的引用不因无关 schema 变更而重建。新增引用仍检查现有数据：若已有孤儿行，diff 的候选验证会拒绝生成可运行迁移，源库保持不变。疑似 rename 和类型转换继续要求显式业务决策。
+
+Declare references after tables and target unique indexes. Diff emits `add reference` and `drop reference`, removing dependencies before a table or pinned key is removed and adding the target declarations after keys/indexes exist. Reordering reference declarations alone produces no operations; unrelated schema changes preserve existing references. Adding a reference validates existing rows and rejects orphaned candidates without changing the source database. Renames and type conversions continue to require explicit decisions. This feature remains under development for v0.14.
