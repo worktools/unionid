@@ -113,6 +113,13 @@ pub(crate) fn diff(
     diff_tables(current, &target, &mut generated, &mut todos);
     diff_references(current, &target, &mut generated);
     generated.sort_by_key(|operation| operation_priority(&operation.description));
+    // Conversion TODOs need user input but must still precede reference adds:
+    // accepting a filled-in conversion should not require fixing its order.
+    let reference_adds = generated
+        .iter()
+        .position(|operation| operation.description.starts_with("add reference "))
+        .unwrap_or(generated.len());
+    generated.splice(reference_adds..reference_adds, todos);
     let impacts = current
         .catalog
         .types
@@ -148,12 +155,12 @@ pub(crate) fn diff(
     if let Some(parent) = parent {
         source.push_str(&format!("  parent {parent}\n"));
     }
-    for operation in generated.iter().chain(&todos) {
+    for operation in &generated {
         source.push_str("  ");
         source.push_str(&operation.description);
         source.push('\n');
     }
-    let operations = generated.into_iter().chain(todos).collect::<Vec<_>>();
+    let operations = generated;
     let runnable = operations.iter().all(|operation| !operation.requires_input);
     if runnable && !operations.is_empty() {
         source = crate::format_source(&source)?;
@@ -735,8 +742,8 @@ fn diff_references(
     let new = target
         .schema_references()
         .into_iter()
-        .map(|(_, spec)| shape(&spec))
-        .collect::<BTreeSet<_>>();
+        .map(|(definition, spec)| (shape(&spec), definition))
+        .collect::<BTreeMap<_, _>>();
     let mut replaced = BTreeSet::new();
     for (shape, (definition, spec)) in &old {
         // A declaration with unchanged paths must be rebound if its pinned key
@@ -760,14 +767,25 @@ fn diff_references(
                 format_schema_index_operation("drop", table, &components, false, None)
             }
         };
-        if !new.contains(shape) || generated.iter().any(|op| op.description == key_drop) {
+        let binding_changed = new.get(shape).is_none_or(|new| {
+            definition
+                .components
+                .iter()
+                .zip(&new.components)
+                .any(|(old, new)| {
+                    old.mode != new.mode
+                        || type_signature(&current.catalog, &old.target_type)
+                            != type_signature(&target.catalog, &new.target_type)
+                })
+        });
+        if binding_changed || generated.iter().any(|op| op.description == key_drop) {
             replaced.insert(shape.clone());
         }
     }
     for shape in &replaced {
         generated.push(operation(format!("drop {shape}"), true));
     }
-    for shape in new {
+    for shape in new.into_keys() {
         if !old.contains_key(&shape) || replaced.contains(&shape) {
             generated.push(operation(format!("add {shape}"), false));
         }

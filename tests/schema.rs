@@ -303,6 +303,78 @@ table children: Child {key id}
 "#;
 
 #[test]
+fn reference_diff_rebinds_changed_modes_and_target_types_around_conversion_todos() {
+    for (old_source, new_source, new_target, value, conversion) in [
+        ("Option<int>", "int", "int", "None", "7"),
+        ("int", "Option<int>", "int", "7", "Some(old)"),
+        ("Option<int>", "Option<text>", "text", "None", "Some(\"7\")"),
+    ] {
+        let base = format!(
+            "{}\ncreate reference children (parent) references parents (id)",
+            REFERENCE_BASE.replace("parent: Option<int>", &format!("parent: {old_source}"))
+        );
+        let target = base
+            .replace(
+                &format!("parent: {old_source}"),
+                &format!("parent: {new_source}"),
+            )
+            .replace("Parent {id: int", &format!("Parent {{id: {new_target}"));
+        let mut engine = Engine::memory();
+        ok(&mut engine, &base);
+        ok(
+            &mut engine,
+            &format!(
+                "insert parents {{id: 7, alternate: 70}}\ninsert children {{id: 1, parent: {value}}}"
+            ),
+        );
+        let before = engine.schema_info();
+        let diff = engine.diff_schema(&target, "convert_parent", None).unwrap();
+        assert!(!diff.runnable);
+        let conversion_count = if new_target == "int" { 1 } else { 2 };
+        assert_eq!(diff.operations.len(), conversion_count + 2);
+        assert!(
+            diff.operations[0]
+                .description
+                .starts_with("drop reference ")
+        );
+        assert!(
+            diff.operations[1..=conversion_count]
+                .iter()
+                .all(|op| op.requires_input)
+        );
+        assert!(
+            diff.operations
+                .last()
+                .unwrap()
+                .description
+                .starts_with("add reference ")
+        );
+        assert_eq!(engine.schema_info(), before);
+        let reviewed = diff
+            .migration_source
+            .replace(
+                &format!("todo change field Child.parent to {new_source} using old -> value"),
+                &format!("change field Child.parent to {new_source} using old -> {conversion}"),
+            )
+            .replace(
+                "todo change field Parent.id to text using old -> value",
+                "change field Parent.id to text using old -> \"7\"",
+            );
+        engine
+            .apply_migrations(&[MigrationFile::parse(reviewed).unwrap()])
+            .unwrap();
+        assert_eq!(
+            engine.schema(),
+            Engine::check_schema(&target).unwrap().normalized
+        );
+        assert_eq!(
+            engine.execute("delete parents").error.unwrap().constraint,
+            Some(unionid::error::ConstraintKind::ReferenceRestricted)
+        );
+    }
+}
+
+#[test]
 fn reference_diff_add_drop_and_initial_schema_are_runnable() {
     let target =
         format!("{REFERENCE_BASE}\ncreate reference children (parent) references parents (id)");

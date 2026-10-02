@@ -72,4 +72,8 @@ create reference children (parent) references parents (id)
 
 diff 可生成 `add reference` 和 `drop reference`。删除表或替换引用依赖的主键／唯一索引时，先移除引用，再变更目标，最后按目标 schema 重建引用；仅调整引用声明的顺序不产生操作。保留的引用不因无关 schema 变更而重建。新增引用仍检查现有数据：若已有孤儿行，diff 的候选验证会拒绝生成可运行迁移，源库保持不变。疑似 rename 和类型转换继续要求显式业务决策。
 
+引用路径不变，但目标类型或 Exact/Optional 模式改变时，草稿也会生成显式 drop/add，并将字段转换 TODO 放在两者之间。例如把 `Child.parent` 从 `Option<int>` 改为 `int`，填写原 `None` 值的实际目标后即可按生成顺序执行；无需另外猜测引用的重绑定步骤。未补全转换前仍为 `runnable: false`，补全后通过 plan 检查实际数据。
+
 Declare references after tables and target unique indexes. Diff emits `add reference` and `drop reference`, removing dependencies before a table or pinned key is removed and adding the target declarations after keys/indexes exist. Reordering reference declarations alone produces no operations; unrelated schema changes preserve existing references. Adding a reference validates existing rows and rejects orphaned candidates without changing the source database. Renames and type conversions continue to require explicit decisions. This feature remains under development for v0.14.
+
+Even when paths are unchanged, a changed target type or Exact/Optional mode generates explicit drop/add operations with conversion TODOs between them. For example, changing Child.parent from Option<int> to int requires supplying an existing target for former None values, but no additional rebinding steps or ordering fixes. The draft remains non-runnable until conversions are supplied; use plan to validate the resulting data.
