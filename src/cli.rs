@@ -1191,7 +1191,31 @@ pub fn migration_rehearse(
             (std::env::temp_dir().join(name), false)
         }
     };
-    std::fs::copy(&source, &copy_path).map_err(|error| format!("copy database: {error}"))?;
+    // Keep the source locked while copying so a concurrent writer cannot make
+    // the raw redb image inconsistent. Never truncate an existing destination.
+    let mut source_file = std::fs::File::open(&source)
+        .map_err(|error| format!("E_IO: open rehearsal source: {error}"))?;
+    source_file
+        .try_lock()
+        .map_err(|error| format!("E_BUSY: lock rehearsal source: {error}"))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut destination = options
+        .open(&copy_path)
+        .map_err(|error| format!("E_IO: create new rehearsal copy: {error}"))?;
+    let copied =
+        std::io::copy(&mut source_file, &mut destination).and_then(|_| destination.sync_all());
+    drop(destination);
+    drop(source_file);
+    if let Err(error) = copied {
+        let _ = std::fs::remove_file(&copy_path);
+        return Err(format!("E_IO: copy rehearsal database: {error}"));
+    }
     let started = std::time::Instant::now();
     let outcome = (|| -> Result<MigrationRehearsal, String> {
         let mut engine = Engine::open_redb(&copy_path).map_err(|error| error.to_string())?;
