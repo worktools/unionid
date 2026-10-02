@@ -45,7 +45,6 @@ pub struct ReferenceDefinition {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct ReferenceState {
-    targets: imbl::OrdMap<Vec<u8>, imbl::OrdSet<RowId>>,
     sources: imbl::OrdMap<Vec<u8>, imbl::OrdSet<RowId>>,
 }
 
@@ -432,15 +431,19 @@ impl Database {
         target: &str,
     ) -> Result<ReferenceState> {
         let mut state = ReferenceState::default();
-        for row in &self.table(target)?.rows {
-            let key = definition
-                .key(self, &row.fields, false)?
-                .expect("target keys are exact");
-            state.targets.entry(key).or_default().insert(row.id);
-        }
+        use crate::row_source::TypedRowSource;
+        use std::ops::Bound;
+
+        let (_, index) = self.reference_target_index(definition)?;
         for row in &self.table(source)?.rows {
             if let Some(key) = definition.key(self, &row.fields, true)? {
-                if !state.targets.contains_key(&key) {
+                let boundary = self
+                    .reference_target_boundary(definition, &row.fields)?
+                    .expect("present source key");
+                let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
+                let mut cursor =
+                    self.scan_index(target, &index.shape_key(), &bounds, false, None)?;
+                if cursor.next_batch(None)?.is_none_or(|hits| hits.is_empty()) {
                     return Err(missing_target());
                 }
                 state.sources.entry(key).or_default().insert(row.id);
@@ -623,57 +626,30 @@ impl Database {
         if changes.is_empty() || !self.has_references() {
             return Ok(states);
         }
+        // Share final-batch validation with bounded redb writes. The target's
+        // primary/unique index already answers existence; only reverse source
+        // postings need a reference-specific resident root.
+        self.validate_source_reference_changes(self, table, changes, None)?;
         let table_id = self.table(table)?.id;
         for definition in self.reference_definitions.values() {
-            let source_changed = definition.table_id == table_id;
-            let target_changed = definition.target_table_id == table_id;
-            if !source_changed && !target_changed {
+            if definition.table_id != table_id {
                 continue;
             }
             let state = states
                 .get_mut(&definition.id)
                 .ok_or_else(|| Error::new("E_STORAGE", "reference postings are missing"))?;
-            let mut source_keys = BTreeSet::new();
-            let mut removed_targets = BTreeSet::new();
-            // Apply every before/after image before checking. This is essential
-            // for batch self-references and simultaneous key changes.
             for change in changes {
-                if let Some(row) = &change.before {
-                    if source_changed && let Some(key) = definition.key(self, &row.fields, true)? {
-                        remove(&mut state.sources, &key, row.id);
-                    }
-                    if target_changed {
-                        let key = definition
-                            .key(self, &row.fields, false)?
-                            .expect("target key");
-                        remove(&mut state.targets, &key, row.id);
-                        removed_targets.insert(key);
-                    }
+                if let Some(row) = &change.before
+                    && let Some(key) = definition.key(self, &row.fields, true)?
+                {
+                    remove(&mut state.sources, &key, row.id);
                 }
             }
             for change in changes {
-                if let Some(row) = &change.after {
-                    if source_changed && let Some(key) = definition.key(self, &row.fields, true)? {
-                        state.sources.entry(key.clone()).or_default().insert(row.id);
-                        source_keys.insert(key);
-                    }
-                    if target_changed {
-                        let key = definition
-                            .key(self, &row.fields, false)?
-                            .expect("target key");
-                        state.targets.entry(key).or_default().insert(row.id);
-                    }
-                }
-            }
-            for key in removed_targets {
-                if !state.targets.contains_key(&key) && state.sources.contains_key(&key) {
-                    return Err(Error::new("E_CONSTRAINT", "target key is still referenced")
-                        .constraint(crate::error::ConstraintKind::ReferenceRestricted));
-                }
-            }
-            for key in source_keys {
-                if !state.targets.contains_key(&key) {
-                    return Err(missing_target());
+                if let Some(row) = &change.after
+                    && let Some(key) = definition.key(self, &row.fields, true)?
+                {
+                    state.sources.entry(key).or_default().insert(row.id);
                 }
             }
         }
