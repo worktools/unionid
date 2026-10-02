@@ -22,6 +22,12 @@ pub fn run(paths: Vec<PathBuf>, check: bool, write: bool) -> Result<(), String> 
                 path.display()
             ));
         }
+        if write && metadata.permissions().readonly() {
+            return Err(format!(
+                "E_CONFIG: refusing to replace read-only file '{}'",
+                path.display()
+            ));
+        }
         let canonical = std::fs::canonicalize(&path)
             .map_err(|error| format!("resolve '{}': {error}", path.display()))?;
         if !seen.insert(canonical) {
@@ -68,12 +74,6 @@ fn replace(
     formatted: &str,
     permissions: std::fs::Permissions,
 ) -> Result<(), String> {
-    if permissions.readonly() {
-        return Err(format!(
-            "refusing to replace read-only file '{}'",
-            path.display()
-        ));
-    }
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce)
         .map_err(|error| format!("create formatter temporary name: {error}"))?;
@@ -97,7 +97,8 @@ fn replace(
         output.sync_all()?;
         drop(output);
         let metadata = std::fs::symlink_metadata(path)?;
-        if !metadata.is_file()
+        if metadata.permissions().readonly()
+            || !metadata.is_file()
             || metadata.file_type().is_symlink()
             || std::fs::read_to_string(path)? != original
         {

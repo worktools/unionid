@@ -97,3 +97,26 @@ fn preserves_permissions_and_refuses_symlink_replacement() {
             .is_symlink()
     );
 }
+
+#[test]
+fn readonly_later_input_rejects_entire_batch_before_replacing_first_file() {
+    let dir = TempDir::new();
+    let source = "struct Task { id: int }";
+    let first = dir.0.join("first.unid");
+    let later = dir.0.join("readonly.unid");
+    std::fs::write(&first, source).unwrap();
+    for later_source in [source.to_owned(), unionid::format_source(source).unwrap()] {
+        std::fs::write(&later, &later_source).unwrap();
+        let original_permissions = std::fs::metadata(&later).unwrap().permissions();
+        let mut readonly = original_permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&later, readonly).unwrap();
+        let output = run(&dir.0, &["--write", "first.unid", "readonly.unid"]);
+        std::fs::set_permissions(&later, original_permissions).unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("read-only"));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(&later).unwrap(), later_source);
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 2);
+    }
+}
