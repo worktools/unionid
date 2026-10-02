@@ -2036,7 +2036,12 @@ impl Engine {
             None
         };
         let mut response = QueryResponse::ok_message("ok");
-        let mut summaries = Vec::with_capacity(statements.len());
+        let include_summaries = statements.len() > 1;
+        let mut summaries = if include_summaries {
+            Vec::with_capacity(statements.len())
+        } else {
+            Vec::new()
+        };
         for (offset, located) in statements.into_iter().enumerate() {
             let index = offset + 1;
             ensure_deadline(deadline)
@@ -2083,13 +2088,17 @@ impl Engine {
                 ),
             }
             .map_err(|e| e.at(located.span).at_statement(index))?;
-            summaries.push(crate::script::StatementSummary {
-                index,
-                kind,
-                affected_rows: response.affected_rows,
-            });
+            if include_summaries {
+                summaries.push(crate::script::StatementSummary {
+                    index,
+                    kind,
+                    affected_rows: response.affected_rows,
+                });
+            }
         }
-        crate::script::validate_summaries(&summaries)?;
+        if include_summaries {
+            crate::script::validate_summaries(&summaries)?;
+        }
         response.statements = summaries;
         ensure_deadline(deadline)?;
         if let Some(mut candidate) = candidate {

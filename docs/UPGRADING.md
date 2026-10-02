@@ -1,5 +1,11 @@
 # 升级与格式兼容
 
+## 开发版：单语句摘要精简 / Development: single-statement summaries
+
+#441：新执行的单语句响应省略 `statements`（Rust 中为空 Vec），多语句和守卫脚本保持摘要；rows、returning、affected_rows 和错误 statement_index 不变。使用者不要依赖单语句的 statements[0]，改读顶层 affected_rows。既有回执按保存的完整结果重放，可能仍有单项摘要；重开、backup/restore 不改写它。公开字段、协议与存储 codec 不变，不需要升级数据库。其他预算/轨迹评估仍未完成。
+
+#441: Fresh single-statement execution omits `statements` (an empty Rust Vec); multi-statement and guarded scripts retain summaries. Rows, returning, affected_rows and error statement_index are unchanged. Read top-level affected_rows rather than assuming statements[0] exists. Existing receipts replay their complete saved output and may retain one entry; restart and backup/restore do not rewrite it. Public fields, protocol and storage codecs remain unchanged, with no database upgrade required. Other budget/trace evaluations remain pending.
+
 ## v0.13.1 补丁兼容性 / Patch compatibility
 
 v0.13.1 修复启用增量备份时 migration 提交的行数据恢复问题（#433）。三个 crate 同步为 0.13.1；存储、备份、协议与公开 API 保持 v0.13.0 兼容，无需额外 storage upgrade 或应用 migration。修复不追溯改写旧 journal；仍保有完整源库时可用新版本建立 checkpoint，再验证恢复结果。
