@@ -270,8 +270,8 @@ const COMMANDS: &[AgentCommand] = &[
     },
     AgentCommand {
         name: "receipts",
-        summary: "Inspect idempotency count/byte capacity; preview explicit pruning before confirming deletion.",
-        usage: "unionid receipts status --db <path> --format json   # prune requires a retry-safe cutoff; preview before --confirm",
+        summary: "Inspect receipt capacity; preview cutoff-based prune or age-window retain before confirming deletion.",
+        usage: "unionid receipts status --db <path> --format json   # retain --min-age-seconds <seconds> or prune with a cutoff; preview before --confirm",
         json: true,
     },
     AgentCommand {

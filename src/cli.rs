@@ -381,6 +381,59 @@ pub fn receipt_prune(
     Ok(())
 }
 
+pub fn receipt_retain(
+    path: PathBuf,
+    policy: crate::ReceiptRetentionPolicy,
+    confirm: bool,
+    json: bool,
+) -> Result<(), String> {
+    policy.validate().map_err(|error| error.to_string())?;
+    if !path.is_file() {
+        return Err("E_CONFIG: receipt retention requires an existing database file".into());
+    }
+    let result = if confirm {
+        Engine::open_redb(&path)
+            .and_then(|mut engine| engine.apply_idempotency_retention(policy))
+            .map_err(|error| error.to_string())?
+    } else {
+        // Observational preview must not change redb recovery metadata either.
+        let copy = migration_queries::RehearsalCopy::create(&path, None)
+            .map_err(|error| error.to_string())?;
+        Engine::open_redb_read_only(&copy.path)
+            .and_then(|engine| engine.plan_idempotency_retention(policy))
+            .map_err(|error| error.to_string())?
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&result).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{} {} receipt(s), {} encoded bytes; {} remain",
+            if result.pruning.applied {
+                "pruned"
+            } else {
+                "would prune"
+            },
+            result.pruning.selected_count,
+            result.pruning.selected_encoded_bytes,
+            result.pruning.remaining_count
+        );
+        println!(
+            "minimum age {} seconds; evaluated at {} ms; cutoff {:?}",
+            policy.min_age_seconds, result.as_of_unix_ms, result.cutoff_unix_ms
+        );
+        println!("warning: {}", result.key_reuse_warning);
+        if !confirm {
+            println!(
+                "preview only; pass --confirm only after verifying the supported retry window"
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn backup_create(db: PathBuf, output: PathBuf, json: bool) -> Result<(), String> {
     let info = backup::create(db, output).map_err(|error| error.to_string())?;
     print_lifecycle(&info, "backup created", json)

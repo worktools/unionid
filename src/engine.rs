@@ -1249,6 +1249,62 @@ impl Engine {
         Ok(result)
     }
 
+    /// Preview one bounded retention pass without deleting receipts. No policy
+    /// is persisted. A later apply samples the time and selection again.
+    pub fn plan_idempotency_retention(
+        &self,
+        policy: crate::ReceiptRetentionPolicy,
+    ) -> Result<crate::ReceiptRetentionResult> {
+        policy.validate()?;
+        self.plan_idempotency_retention_at(policy, unix_time_ms()?)
+    }
+
+    /// Explicitly delete only receipts strictly older than the UTC window.
+    /// Deleted keys can execute again. This does not start background cleanup.
+    pub fn apply_idempotency_retention(
+        &mut self,
+        policy: crate::ReceiptRetentionPolicy,
+    ) -> Result<crate::ReceiptRetentionResult> {
+        policy.validate()?;
+        self.apply_idempotency_retention_at(policy, unix_time_ms()?)
+    }
+
+    pub(crate) fn plan_idempotency_retention_at(
+        &self,
+        policy: crate::ReceiptRetentionPolicy,
+        now_unix_ms: u64,
+    ) -> Result<crate::ReceiptRetentionResult> {
+        let (cutoff, options) = policy.selection_at(now_unix_ms)?;
+        if self.wal.is_some() {
+            return Err(Error::new(
+                "E_CONFIG",
+                "receipt retention requires redb or memory mode",
+            ));
+        }
+        let pruning = self.plan_idempotency_prune(options)?;
+        Ok(crate::ReceiptRetentionResult::new(
+            policy,
+            now_unix_ms,
+            cutoff,
+            pruning,
+        ))
+    }
+
+    pub(crate) fn apply_idempotency_retention_at(
+        &mut self,
+        policy: crate::ReceiptRetentionPolicy,
+        now_unix_ms: u64,
+    ) -> Result<crate::ReceiptRetentionResult> {
+        let (cutoff, options) = policy.selection_at(now_unix_ms)?;
+        let pruning = self.prune_idempotency_receipts(options)?;
+        Ok(crate::ReceiptRetentionResult::new(
+            policy,
+            now_unix_ms,
+            cutoff,
+            pruning,
+        ))
+    }
+
     fn idempotency_prune_selection(
         &self,
         options: &IdempotencyPruneOptions,
@@ -3847,6 +3903,9 @@ fn is_identifier_path(value: &str) -> bool {
 }
 
 #[cfg(test)]
+mod retention_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
@@ -4090,7 +4149,7 @@ mod tests {
         }
     }
 
-    fn engine_with_failure(uncertain: bool) -> Engine {
+    pub(super) fn engine_with_failure(uncertain: bool) -> Engine {
         Engine {
             durable: Some(Box::new(FailOnce {
                 uncertain: Some(uncertain),
