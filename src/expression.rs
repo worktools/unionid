@@ -897,6 +897,7 @@ pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
             "lower"
                 | "upper"
                 | "trim"
+                | "concat"
                 | "uuid_parse"
                 | "bytes_parse_hex"
                 | "date_parse"
@@ -919,7 +920,7 @@ fn is_text_predicate(name: &str) -> bool {
 }
 
 pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
-    if matches!(name, "contains_key" | "get") || is_text_predicate(name) {
+    if matches!(name, "contains_key" | "get" | "concat") || is_text_predicate(name) {
         Some(2)
     } else if matches!(name, "keys" | "values" | "entries") {
         Some(1)
@@ -958,7 +959,7 @@ fn map_scalar_result(name: &str, value_ty: ScalarType) -> Result<ScalarType> {
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
     match name {
         "starts_with" | "ends_with" | "contains_text" => Some(ScalarType::Bool),
-        "lower" | "upper" | "trim" => Some(ScalarType::Text),
+        "lower" | "upper" | "trim" | "concat" => Some(ScalarType::Text),
         "uuid_parse" => Some(ScalarType::Uuid),
         "bytes_parse_hex" => Some(ScalarType::Bytes),
         "date_parse" => Some(ScalarType::Date),
@@ -1515,13 +1516,29 @@ fn evaluate_scalar<'expression, 'values>(
             let Value::Text(source) = argument.as_value().unwrapped() else {
                 return Err(Error::new("E_TYPE", format!("{name} expects text")));
             };
-            if is_text_predicate(name) {
+            if is_text_predicate(name) || name == "concat" {
                 let Some(needle) = evaluate_scalar(catalog, &arguments[1], values, budget)? else {
                     return Ok(None);
                 };
                 let Value::Text(needle) = needle.as_value().unwrapped() else {
                     return Err(Error::new("E_TYPE", format!("{name} expects text")));
                 };
+                if name == "concat" {
+                    let length = source
+                        .len()
+                        .checked_add(needle.len())
+                        .filter(|length| *length <= crate::codec::MAX_VALUE_BYTES)
+                        .ok_or_else(|| {
+                            Error::new("E_LIMIT", "concat text result exceeds 16 MiB")
+                        })?;
+                    let mut result = String::new();
+                    result
+                        .try_reserve_exact(length)
+                        .map_err(|_| Error::new("E_LIMIT", "concat text allocation failed"))?;
+                    result.push_str(source);
+                    result.push_str(needle);
+                    return Ok(Some(Evaluated::Owned(Value::Text(result))));
+                }
                 let matched = match name.as_str() {
                     "starts_with" => source.starts_with(needle),
                     "ends_with" => source.ends_with(needle),

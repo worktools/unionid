@@ -103,11 +103,93 @@ fn text_functions_reject_bad_types_before_scanning_empty_inputs() {
         "starts_with raw 12",
         "ends_with 12 raw",
         "contains_text raw None",
+        "concat raw 12",
     ] {
         let response = engine.execute(&format!("from samples | derive label = {expression}"));
         assert!(!response.ok, "{expression}");
         assert_eq!(response.error.unwrap().code, "E_TYPE");
     }
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct Label {
+    label: String,
+}
+
+#[test]
+fn concatenation_is_explicit_typed_and_composes_across_interfaces() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(SCHEMA).ok);
+    assert!(
+        engine
+            .execute("insert samples {id: 1, raw: \"　Ada　\"}")
+            .ok
+    );
+    let source = "from samples | derive label = concat (lower (trim raw)) $suffix | select label";
+    let prepared = engine.prepare(source).unwrap();
+    let params = BTreeMap::from([("suffix".into(), Value::Text("さん".into()))]);
+    let response = engine.execute_prepared(&prepared, params);
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(
+        response.typed_rows::<Label>().unwrap(),
+        vec![Label {
+            label: "adaさん".into()
+        }]
+    );
+    let query =
+        "from samples | derive label = concat (concat \"\" (trim raw)) \"!\" | select label";
+    let canonical = unionid::format_source(query).unwrap();
+    assert_eq!(unionid::format_source(&canonical).unwrap(), canonical);
+    for version in [1, 2] {
+        let request = unionid::protocol::Request::query("concat", &canonical)
+            .with_version(version)
+            .unwrap();
+        let response = unionid::server::execute_protocol_request(&mut engine, request);
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(
+            response.typed_rows::<Label>().unwrap(),
+            vec![Label {
+                label: "Ada!".into()
+            }]
+        );
+    }
+    let explanation = engine.execute("explain from samples | derive label = concat raw \"!\"");
+    assert!(explanation.ok, "{}", explanation.message);
+    assert!(explanation.rows.is_empty());
+    let response = engine.execute(
+        "migration label {change field Sample.raw to text using old -> concat (trim old) \"!\"}",
+    );
+    assert!(response.ok, "{}", response.message);
+    let response = engine.execute("update samples | set raw = concat raw \"?\" | returning raw");
+    assert!(response.ok, "{}", response.message);
+    assert!(matches!(&response.rows[0]["raw"], Value::Text(value) if value == "Ada!?"));
+}
+
+#[test]
+fn concatenation_rejects_oversized_results_before_allocating_them() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(SCHEMA).ok);
+    assert!(engine.execute("insert samples {id: 1, raw: \"small\"}").ok);
+    let prepared = engine
+        .prepare("update samples | set raw = concat $large $large")
+        .unwrap();
+    let response = engine.execute_prepared(
+        &prepared,
+        BTreeMap::from([(
+            "large".into(),
+            Value::Text("x".repeat(unionid::codec::MAX_VALUE_BYTES / 2 + 1)),
+        )]),
+    );
+    assert!(!response.ok);
+    let error = response.error.unwrap();
+    assert_eq!(error.code, "E_LIMIT");
+    assert!(
+        error.message.contains("concat text result exceeds"),
+        "{}",
+        error.message
+    );
+    let unchanged = engine.execute("from samples");
+    assert!(matches!(&unchanged.rows[0]["raw"], Value::Text(value) if value == "small"));
 }
 
 #[derive(Debug, Deserialize, PartialEq)]

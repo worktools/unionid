@@ -351,6 +351,10 @@ select {id, has_space}
 
 These binary text predicates return bool and follow exact, case-sensitive Rust string matching without regex, wildcard or implicit Unicode normalization. An empty needle matches every source, including an empty one. Precomposed `é` differs from `e` plus U+0301. Explicit lower composition is available but is not full Unicode case folding. Prepared arguments must be text; existing list/bytes contains semantics are unchanged.
 
+`concat left right` 接受两个 text 参数并直接拼接，不添加分隔符，也不把数字或其他 ADT 隐式转成文本。例如 `concat (lower (trim name)) "!"`。空串是合法参数；可嵌套 concat 拼接多个片段。拼接前检查最终 UTF-8 长度，上限为 16 MiB，超限返回 `E_LIMIT`；实际存储/transport 还遵守各自的完整值或响应预算。text 的 `+` 不作为拼接运算符。
+
+Concat takes two text arguments and appends them without separators or implicit conversion, for example `concat (lower (trim name)) "!"`. Empty inputs are valid; nest concat for more fragments. It checks the resulting UTF-8 size before allocation, rejecting results over 16 MiB with E_LIMIT. Storage/transport also enforce their complete-value/response budgets. Text `+` remains unsupported.
+
 ## Explain、实际剖析与类型化索引计划
 
 `explain` 在相同的 schema、字段、pattern、局部函数和参数绑定规则下准备查询，但不读取、复制或执行数据行：

@@ -198,6 +198,10 @@ take two text arguments and return bool. Matching is exact and case-sensitive, w
 regex/wildcards or automatic Unicode normalization; all three match an empty needle.
 Use explicit composition such as `starts_with (lower owner) "ada"` for normalized input;
 lower is not full case folding. Existing `contains` remains a list/bytes operation.
+Use `concat left right` to join two text values explicitly without a separator;
+nest calls for more fragments. It accepts empty strings, has no implicit casts,
+and rejects a UTF-8 result above 16 MiB with E_LIMIT before allocation. Text `+`
+is not concatenation; complete storage/transport budgets still apply.
 
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,
