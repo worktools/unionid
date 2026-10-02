@@ -462,14 +462,13 @@ pub(crate) fn bind_scalar(
                     format!("{name} expects {arity} arguments, got {}", arguments.len()),
                 ));
             }
-            for argument in arguments {
-                bind_scalar(
-                    catalog,
-                    scope,
-                    argument,
-                    Some(&ScalarType::Text),
-                    reference_kind,
-                )?;
+            for (position, argument) in arguments.iter_mut().enumerate() {
+                let input_type = if name == "substring" && position > 0 {
+                    ScalarType::Int
+                } else {
+                    ScalarType::Text
+                };
+                bind_scalar(catalog, scope, argument, Some(&input_type), reference_kind)?;
             }
             builtin_scalar_result(name).expect("known builtin")
         }
@@ -667,11 +666,23 @@ pub(crate) fn infer_scalar(
                     format!("{name} expects {arity} arguments, got {}", arguments.len()),
                 ));
             }
-            for argument in arguments {
+            for (position, argument) in arguments.iter().enumerate() {
+                let input_type = if name == "substring" && position > 0 {
+                    ScalarType::Int
+                } else {
+                    ScalarType::Text
+                };
                 if let Some(argument) = infer_scalar(catalog, scope, argument, reference_kind)?
-                    && !same_type(&argument, &ScalarType::Text)
+                    && !same_type(&argument, &input_type)
                 {
-                    return Err(Error::new("E_TYPE", format!("{name} expects text")));
+                    return Err(Error::new(
+                        "E_TYPE",
+                        format!(
+                            "{name} argument {} expects {}",
+                            position + 1,
+                            catalog.describe(&input_type)
+                        ),
+                    ));
                 }
             }
             Ok(builtin_scalar_result(name))
@@ -898,6 +909,7 @@ pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
                 | "upper"
                 | "trim"
                 | "concat"
+                | "substring"
                 | "uuid_parse"
                 | "bytes_parse_hex"
                 | "date_parse"
@@ -924,7 +936,7 @@ pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
         Some(2)
     } else if matches!(name, "keys" | "values" | "entries") {
         Some(1)
-    } else if matches!(name, "decimal_parse" | "decimal_rescale") {
+    } else if matches!(name, "decimal_parse" | "decimal_rescale" | "substring") {
         Some(3)
     } else if name == "decimal_round" {
         Some(4)
@@ -959,7 +971,7 @@ fn map_scalar_result(name: &str, value_ty: ScalarType) -> Result<ScalarType> {
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
     match name {
         "starts_with" | "ends_with" | "contains_text" => Some(ScalarType::Bool),
-        "lower" | "upper" | "trim" | "concat" => Some(ScalarType::Text),
+        "lower" | "upper" | "trim" | "concat" | "substring" => Some(ScalarType::Text),
         "uuid_parse" => Some(ScalarType::Uuid),
         "bytes_parse_hex" => Some(ScalarType::Bytes),
         "date_parse" => Some(ScalarType::Date),
@@ -967,6 +979,47 @@ fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
         "duration_parse" => Some(ScalarType::Duration),
         _ => None,
     }
+}
+
+fn substring_text(source: &str, start: i64, end: i64) -> Result<String> {
+    let invalid_range = || {
+        Error::new(
+            "E_TEXT_RANGE",
+            "substring requires 0 <= start <= end <= length text",
+        )
+    };
+    let start = usize::try_from(start).map_err(|_| invalid_range())?;
+    let end = usize::try_from(end).map_err(|_| invalid_range())?;
+    if start > end {
+        return Err(invalid_range());
+    }
+    let mut start_byte = None;
+    for (position, byte) in source
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(source.len()))
+        .enumerate()
+    {
+        if position == start {
+            start_byte = Some(byte);
+        }
+        if position == end {
+            let selected = &source[start_byte.expect("ordered validated positions")..byte];
+            if selected.len() > crate::codec::MAX_VALUE_BYTES {
+                return Err(Error::new(
+                    "E_LIMIT",
+                    "substring text result exceeds 16 MiB",
+                ));
+            }
+            let mut result = String::new();
+            result
+                .try_reserve_exact(selected.len())
+                .map_err(|_| Error::new("E_LIMIT", "substring text allocation failed"))?;
+            result.push_str(selected);
+            return Ok(result);
+        }
+    }
+    Err(invalid_range())
 }
 
 fn decimal_target(precision: &ScalarExpression, scale: &ScalarExpression) -> Result<ScalarType> {
@@ -1516,6 +1569,25 @@ fn evaluate_scalar<'expression, 'values>(
             let Value::Text(source) = argument.as_value().unwrapped() else {
                 return Err(Error::new("E_TYPE", format!("{name} expects text")));
             };
+            if name == "substring" {
+                let mut positions = [0_i64; 2];
+                for (position, index) in positions.iter_mut().enumerate() {
+                    let Some(value) =
+                        evaluate_scalar(catalog, &arguments[position + 1], values, budget)?
+                    else {
+                        return Ok(None);
+                    };
+                    let Value::Int(value) = value.as_value().unwrapped() else {
+                        return Err(Error::new("E_TYPE", "substring expects int positions"));
+                    };
+                    *index = *value;
+                }
+                return Ok(Some(Evaluated::Owned(Value::Text(substring_text(
+                    source,
+                    positions[0],
+                    positions[1],
+                )?))));
+            }
             if is_text_predicate(name) || name == "concat" {
                 let Some(needle) = evaluate_scalar(catalog, &arguments[1], values, budget)? else {
                     return Ok(None);

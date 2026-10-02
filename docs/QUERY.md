@@ -355,6 +355,12 @@ These binary text predicates return bool and follow exact, case-sensitive Rust s
 
 Concat takes two text arguments and appends them without separators or implicit conversion, for example `concat (lower (trim name)) "!"`. Empty inputs are valid; nest concat for more fragments. It checks the resulting UTF-8 size before allocation, rejecting results over 16 MiB with E_LIMIT. Storage/transport also enforce their complete-value/response budgets. Text `+` remains unsupported.
 
+`substring source start end` 接受 text、int、int 并返回 text。位置从 0 开始，半开范围 `[start,end)` 按 Unicode scalar value 计数，与 `length text` 一致，不是 UTF-8 字节或 grapheme。例如 `substring "aé🦀z" 1 3` 得到 `"é🦀"`。要求 `0 <= start <= end <= length source`；空范围（含末尾）合法，负值、反向或越界在求值时返回 `E_TEXT_RANGE`，不静默截断。`explain` 只绑定类型，不验证具体行上的范围。
+
+组合字符可被切开：`substring "é" 0 1` 返回 `"e"`，不进行 normalization。结果 UTF-8 超过 16 MiB 返回 `E_LIMIT`。位置可由 typed 参数或表达式提供；失败的 update/migration 保留整请求旧状态。
+
+Substring takes text/int/int and returns text using zero-based, half-open Unicode scalar positions, matching length text rather than byte or grapheme positions. `substring "aé🦀z" 1 3` yields `"é🦀"`. Require `0 <= start <= end <= length source`; empty ranges including the end are valid. Negative, reversed or out-of-range positions return E_TEXT_RANGE during evaluation instead of clamping; explain only binds types. Combining sequences can be split, without normalization. Results over 16 MiB return E_LIMIT. Typed parameters/expressions provide positions; failed updates/migrations preserve the original request state.
+
 ## Explain、实际剖析与类型化索引计划
 
 `explain` 在相同的 schema、字段、pattern、局部函数和参数绑定规则下准备查询，但不读取、复制或执行数据行：

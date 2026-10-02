@@ -39,6 +39,43 @@ unionid_query::queries! {
         }
         select {id, state}
     }
+
+    query normalize_text {
+        from tasks
+        filter id == $id
+        derive label = concat (substring (lower (trim title)) 0 $end) "!"
+        derive matched = starts_with label $prefix
+        select {label, matched}
+    }
+}
+
+#[test]
+fn inline_text_functions_infer_typed_parameters_and_preserve_range_errors() {
+    let mut engine = unionid::Engine::memory();
+    assert!(engine.execute(include_str!("schema.unid")).ok);
+    assert!(engine.execute("insert tasks {id: 1, title: \"　Aé🦀　\", state: Pending, priority: 1, due_on: @2026-09-17}").ok);
+    let rows = normalize_text::normalize_text(
+        &mut engine,
+        normalize_text::NormalizeTextParams {
+            id: 1,
+            end: 2,
+            prefix: "a".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, "aé!");
+    assert!(rows[0].matched);
+    let error = normalize_text::normalize_text(
+        &mut engine,
+        normalize_text::NormalizeTextParams {
+            id: 1,
+            end: 4,
+            prefix: "a".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "E_TEXT_RANGE");
 }
 
 #[test]

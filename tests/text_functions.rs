@@ -104,11 +104,122 @@ fn text_functions_reject_bad_types_before_scanning_empty_inputs() {
         "ends_with 12 raw",
         "contains_text raw None",
         "concat raw 12",
+        "substring raw 0.5 1",
+        "substring raw 0 \"1\"",
     ] {
         let response = engine.execute(&format!("from samples | derive label = {expression}"));
         assert!(!response.ok, "{expression}");
         assert_eq!(response.error.unwrap().code, "E_TYPE");
     }
+}
+
+#[test]
+fn substring_uses_unicode_scalar_ranges_and_typed_positions() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(SCHEMA).ok);
+    assert!(engine.execute("insert samples {id: 1, raw: \"aé🦀z\"}").ok);
+    let query = "from samples | derive label = substring raw $start $end | select label";
+    let prepared = engine.prepare(query).unwrap();
+    for (start, end, expected) in [(0, 4, "aé🦀z"), (1, 3, "é🦀"), (4, 4, ""), (0, 0, "")] {
+        let response = engine.execute_prepared(
+            &prepared,
+            BTreeMap::from([
+                ("start".into(), Value::Int(start)),
+                ("end".into(), Value::Int(end)),
+            ]),
+        );
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(
+            response.typed_rows::<Label>().unwrap(),
+            vec![Label {
+                label: expected.into()
+            }]
+        );
+    }
+    let source = "from samples | derive label = substring raw 1 3 | select label";
+    let canonical = unionid::format_source(source).unwrap();
+    assert_eq!(unionid::format_source(&canonical).unwrap(), canonical);
+    for version in [1, 2] {
+        let request = unionid::protocol::Request::query("substring", &canonical)
+            .with_version(version)
+            .unwrap();
+        let response = unionid::server::execute_protocol_request(&mut engine, request);
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(
+            response.typed_rows::<Label>().unwrap(),
+            vec![Label {
+                label: "é🦀".into()
+            }]
+        );
+    }
+    let empty = engine.execute("from samples | derive label = substring \"\" 0 0 | select label");
+    assert!(empty.ok, "{}", empty.message);
+    assert_eq!(
+        empty.typed_rows::<Label>().unwrap(),
+        vec![Label { label: "".into() }]
+    );
+    // Ranges count scalars, so a combining sequence can be split deliberately.
+    let split = engine.execute("from samples | derive label = substring \"é\" 0 1 | select label");
+    assert!(split.ok, "{}", split.message);
+    assert_eq!(
+        split.typed_rows::<Label>().unwrap(),
+        vec![Label { label: "e".into() }]
+    );
+    let plan = engine.execute("explain from samples | derive label = substring raw 1 99");
+    assert!(plan.ok, "{}", plan.message);
+    assert!(plan.rows.is_empty());
+}
+
+#[test]
+fn invalid_substring_ranges_roll_back_updates_and_migrations() {
+    let dir = TempDir::new();
+    let path = dir.0.join("substring.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(engine.execute(SCHEMA).ok);
+        assert!(
+            engine
+                .execute("insert many samples [{id: 1, raw: \"aé🦀z\"}, {id: 2, raw: \"x\"}]")
+                .ok
+        );
+        let before = serde_json::to_value(engine.execute("from samples | sort id").rows).unwrap();
+        for (start, end) in [(-1, 1), (0, -1), (2, 1), (0, 5), (5, 5), (0, i64::MAX)] {
+            let response = engine.execute(&format!(
+                "update samples | filter id == 1 | set raw = substring raw ({start}) ({end})"
+            ));
+            assert!(!response.ok, "{start}..{end}");
+            assert_eq!(response.error.unwrap().code, "E_TEXT_RANGE");
+        }
+        let response = engine.execute(
+            "insert samples {id: 3, raw: \"new\"}\nupdate samples | set raw = substring raw 0 2",
+        );
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "E_TEXT_RANGE");
+        assert_eq!(
+            serde_json::to_value(engine.execute("from samples | sort id").rows).unwrap(),
+            before
+        );
+        let schema = engine.schema_info();
+        let response = engine.execute("migration invalid_slice {change field Sample.raw to text using old -> substring old 0 2}");
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "E_TEXT_RANGE");
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(
+            serde_json::to_value(engine.execute("from samples | sort id").rows).unwrap(),
+            before
+        );
+        let response = engine.execute("migration first_character {change field Sample.raw to text using old -> substring old 0 1}");
+        assert!(response.ok, "{}", response.message);
+        engine.check_integrity().unwrap();
+    }
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let response = engine.execute("from samples | sort id | derive label = raw | select label");
+    assert!(response.ok, "{}", response.message);
+    assert_eq!(
+        response.typed_rows::<Label>().unwrap(),
+        vec![Label { label: "a".into() }, Label { label: "x".into() }]
+    );
+    engine.check_integrity().unwrap();
 }
 
 #[derive(Debug, Deserialize, PartialEq)]

@@ -202,6 +202,12 @@ Use `concat left right` to join two text values explicitly without a separator;
 nest calls for more fragments. It accepts empty strings, has no implicit casts,
 and rejects a UTF-8 result above 16 MiB with E_LIMIT before allocation. Text `+`
 is not concatenation; complete storage/transport budgets still apply.
+`substring source start end` takes text/int/int and returns text. Use zero-based,
+half-open Unicode scalar positions (the same unit as length text), not UTF-8 bytes
+or grapheme positions: `substring "aé🦀z" 1 3` is `"é🦀"`. Empty ranges are valid.
+Negative/reversed/out-of-range positions fail at evaluation with E_TEXT_RANGE;
+there is no clamping or normalization, and combining sequences may be split.
+Results above 16 MiB fail with E_LIMIT; explain checks types without running ranges.
 
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,
