@@ -43,6 +43,10 @@ create reference reservations (tenant, sku) references inventory (tenant, sku)
 
 跨语句脚本仍要求先插入 parent 再 child，先删除 child 再 parent。后面的语句不能修复前面的引用错误。任一失败回滚整个请求，包括 RowId、index、schema、receipt 和 journal，不能留下之前语句的成功效果。自引用可支持；相互引用表的 bootstrap 可以先装载有效数据，再在同一 schema migration 中声明引用。不引入 deferred constraint 模式。
 
+并发写入的线性化边界沿用 Engine 的独占可变访问与 ConcurrentEngine 的同一个 writer mutex：从取得最新 committed root、构建候选、验证全部引用，到 durable commit 和发布新 root，必须保持同一次 writer 所有权。不得在读快照上验证后释放锁，再把旧候选直接提交；引用检查不依赖仅覆盖变化行的 expected-state write set 来证明被读取目标仍存在。若未来引入乐观候选，提交前必须核对其 committed generation 和引用依赖，过期候选明确失败或在最新状态上重新完整验证，不能把结果不确定的提交当作可自动重试。
+
+受控并发验收必须用 barrier 覆盖两个顺序：child 先提交，则删除 parent 返回 restrict；parent 先提交，则插入 child 返回 missing target。两者不能同时成功并留下孤儿。持锁期间取消/失败应按现有原子回滚规则释放候选，已经提交的其他请求不受影响；memory 与 redb、直接 API 与共享服务入口均覆盖。
+
 upsert 的完整替换必须同时检查出向引用和被替换 target key 的入向引用。仍存在另一个合法唯一目标时没有孤儿；不能把物理 RowId 变化误当作关系身份变化。重复幂等 key replay 不重放 DML，保持原 receipt 契约。
 
 ### Catalog、性能与迁移
@@ -71,7 +75,7 @@ Proposed binding resolves each component statically: identical source/target typ
 
 For example, an unassigned task with Option<UserId> needs no user; assigning Some(id) requires a user and subsequently restricts that user's deletion. In a tenant/optional-assignee key, an absent assignee does not independently validate tenant existence: declare a separate tenant reference if required. Matching Option keys on both sides keep ordinary typed None equality. Nested Option unwraps at most one layer; Some(None) is not an absent relationship. This proposal covers optional application relationships without adding conditional-source predicates. Partial unique indexes still cannot act as unconditional target keys.
 
-Validate the final candidate of each complete DML statement, including an entire batch, before publishing it. This supports order-independent batch self-references while requiring parent-before-child insertion and child-before-parent deletion across separate statements. Any failing statement rolls back the whole request. Upsert validates both outgoing relationships and incoming dependencies on replaced keys. Receipt replay preserves the existing exactly-once-effect contract.
+Validate the final candidate of each complete DML statement, including an entire batch, before publishing it. This supports order-independent batch self-references while requiring parent-before-child insertion and child-before-parent deletion across separate statements. Any failing statement rolls back the whole request. Upsert validates both outgoing relationships and incoming dependencies on replaced keys. Receipt replay preserves the existing exactly-once-effect contract. Keep the same exclusive writer ownership from acquiring the latest committed root through candidate construction, reference validation, durable commit and root publication. A stale read snapshot must not authorize a later write, and changed-row expected-state checks alone do not protect referenced targets. If optimistic candidates are introduced later, stale generation/reference dependencies must fail or be fully revalidated against current committed state; this is not permission to retry uncertain commits. Controlled barriers must cover both orders: child commits first and parent deletion is restricted, or parent deletion commits first and child insertion reports missing target. Both cannot succeed leaving an orphan. Cover memory/redb and direct/shared service APIs.
 
 Ordinary writes should use write-set changes and reverse postings rather than scan or rebuild all data. Full catalog changes and recovery may rebuild and validate. Persistent definitions, reverse indexes, storage/backup codecs and journal replay require an explicit versioned design, upgrade path and corruption checks; old software must never silently omit constraints. Restore must reject orphaned candidates without replacing a valid destination.
 
