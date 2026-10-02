@@ -67,6 +67,46 @@ fn require_valid(validation: &QueryValidation) -> Result<(), CommandError> {
     })
 }
 
+/// Resolve an explicit query set or discover the migrations directory's sibling.
+/// Return None for legacy execution when discovery finds no queries or is disabled.
+pub fn run_with_discovery(
+    action: Action,
+    db: &Path,
+    directory: &Path,
+    query_directory: Option<&Path>,
+    no_queries: bool,
+) -> Result<Option<Output>, CommandError> {
+    if no_queries {
+        eprintln!("warning: saved-query preflight explicitly disabled (--no-queries)");
+        return Ok(None);
+    }
+    let queries = if let Some(path) = query_directory {
+        load_query_directory(path)?
+    } else {
+        let migrations = std::fs::canonicalize(directory)
+            .map_err(|error| Error::new("E_IO", format!("resolve migration directory: {error}")))?;
+        let path = migrations
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("queries");
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(
+                    Error::new("E_IO", format!("inspect saved-query directory: {error}")).into(),
+                );
+            }
+            Ok(_) => {}
+        }
+        let queries = crate::migration::query_validation::load_optional_query_directory(&path)?;
+        if queries.is_empty() {
+            return Ok(None);
+        }
+        queries
+    };
+    run_loaded(action, db, directory, queries).map(Some)
+}
+
 pub fn run(
     action: Action,
     db: &Path,
@@ -75,6 +115,15 @@ pub fn run(
 ) -> Result<Output, CommandError> {
     // Load once, before opening a database, and reuse these exact immutable sources.
     let queries = load_query_directory(query_directory)?;
+    run_loaded(action, db, directory, queries)
+}
+
+fn run_loaded(
+    action: Action,
+    db: &Path,
+    directory: &Path,
+    queries: Vec<crate::migration::query_validation::MigrationQuery>,
+) -> Result<Output, CommandError> {
     for query in &queries {
         if let Some(warning) = crate::syntax::legacy_extension_warning(Path::new(&query.path)) {
             eprintln!("warning: {warning}");

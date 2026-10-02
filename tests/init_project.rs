@@ -49,6 +49,7 @@ fn init_project_runs_the_persistent_adt_journey() {
         "seed.unid",
         "migrations/0001_initial.unid",
         "queries/list_running.unid",
+        "scripts/check.sh",
     ] {
         assert!(project.join(relative).is_file(), "missing {relative}");
     }
@@ -365,5 +366,91 @@ fn init_accepts_an_empty_directory_and_refuses_a_nonempty_one() {
     assert_eq!(std::fs::read_dir(&occupied).unwrap().count(), 1);
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("is not empty; no files were changed")
+    );
+}
+
+#[test]
+fn project_check_reports_binding_failure_before_query_formatting() {
+    let temp = TempDir::new();
+    let project = temp.0.join("binding");
+    assert_success(&run(&temp.0, &["init", project.to_str().unwrap()]));
+    std::fs::write(
+        project.join("queries/list_running.unid"),
+        "from tasks | select {unknown}\n",
+    )
+    .unwrap();
+    let error = unionid::project::check(&project).error.unwrap();
+    assert_eq!(error.phase, ProjectCheckPhase::Queries);
+    assert_eq!(error.code, "E_FIELD");
+}
+
+#[test]
+fn starter_ci_and_default_apply_reject_a_new_uncovered_variant() {
+    let temp = TempDir::new();
+    let project = temp.0.join("preflight");
+    assert_success(&run(&temp.0, &["init", project.to_str().unwrap()]));
+    assert_success(&run(
+        &project,
+        &["migration", "apply", "--db", "data/tasks.redb"],
+    ));
+    std::fs::write(project.join("queries/list_running.unid"), "from tasks\nderive done = match state { Pending => false, Running {..} => false, Done {..} => true }\nselect {id, done}\n").unwrap();
+    let migration = unionid::format_source(
+        "migration m0002_cancel {parent m0001_initial\nadd variant State.Cancelled}",
+    )
+    .unwrap();
+    std::fs::write(project.join("migrations/0002_cancel.unid"), migration).unwrap();
+    let mut engine = unionid::Engine::memory();
+    let files = unionid::migration::load_directory(project.join("migrations")).unwrap();
+    engine.apply_migrations(&files).unwrap();
+    std::fs::write(
+        project.join("schema.unid"),
+        unionid::format_source(&engine.schema()).unwrap(),
+    )
+    .unwrap();
+    let blocked = run(
+        &project,
+        &[
+            "migration",
+            "apply",
+            "--db",
+            "data/tasks.redb",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(blocked.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(
+        report["query_validation"]["files"][0]["failures"][0]["error"]["code"],
+        "E_MATCH"
+    );
+    let check = unionid::project::check(&project);
+    assert_eq!(check.error.unwrap().code, "E_MATCH");
+    #[cfg(unix)]
+    {
+        let mut paths = vec![
+            std::path::PathBuf::from(env!("CARGO_BIN_EXE_unionid"))
+                .parent()
+                .unwrap()
+                .to_owned(),
+        ];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let output = Command::new("sh")
+            .arg("scripts/check.sh")
+            .current_dir(&project)
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("E_MATCH"));
+    }
+    assert_eq!(
+        unionid::Engine::open_redb(project.join("data/tasks.redb"))
+            .unwrap()
+            .migration_history()
+            .len(),
+        1
     );
 }

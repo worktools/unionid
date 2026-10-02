@@ -372,9 +372,12 @@ fn check_queries(
     }
     let bytes = sources.iter().map(|source| source.source.len()).sum();
     for source in &sources {
-        require_canonical(source, phase)?;
         crate::query_contract::describe(schema_source, &source.source)
             .map_err(|error| CheckFailure::new(phase, &source.relative, error))?;
+    }
+    // Bind all queries before reporting layout differences in a valid query.
+    for source in &sources {
+        require_canonical(source, phase)?;
     }
     Ok((sources.len(), bytes))
 }

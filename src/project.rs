@@ -73,6 +73,12 @@ select {id, title, state}
 sort id
 "#;
 
+const STARTER_CHECK_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+unionid project check --dir .
+unionid migration plan --db data/tasks.redb --dir migrations --queries queries
+"#;
+
 const STARTER_README: &str = r#"# Unionid starter / Unionid 入门项目
 
 这个项目展示 Unionid 的核心路径：用代数数据类型定义数据，执行 migration，然后直接按 enum variant 查询。
@@ -83,7 +89,8 @@ From this directory / 在当前目录运行：
 
 ```sh
 unionid project check --dir .
-unionid migration apply --db data/tasks.redb --dir migrations
+unionid migration plan --db data/tasks.redb --dir migrations --queries queries
+unionid migration apply --db data/tasks.redb --dir migrations --queries queries
 unionid run --db data/tasks.redb --file seed.unid
 unionid run --db data/tasks.redb --file queries/list_running.unid
 unionid doctor --db data/tasks.redb
@@ -99,6 +106,12 @@ Next steps / 继续探索：
 - `unionid docs` lists the bundled version-matched guide (language, queries, migrations, deployment).
 - Declare `Map<text, T>` for dynamic attributes with stable value types, or `create unique index t (c) if <predicate>` for conditional uniqueness, then run `unionid project check --dir .`.
 - Generate Rust bindings with `unionid query rust --schema schema.unid --dir queries --output generated/queries.rs`.
+
+## CI / 部署前检查
+
+在已安装项目所用版本 Unionid 的 CI runner 中，从项目根目录执行 `sh scripts/check.sh`。它先检查 schema/migrations/queries，再预检数据库目标，失败时停止；不会 apply migration。部署 apply 同样使用 `--queries queries`。仅在明确接受未检查的查询契约时使用 `--no-queries`，关闭提示写入 stderr。
+
+On a CI runner with the project's Unionid version installed, run `sh scripts/check.sh` from the project root. It checks schema/migrations/queries, then previews the database target and stops on failure without applying migrations. Deploy with `--queries queries` too. Use `--no-queries` only when accepting an unchecked query contract; the disable notice is written to stderr.
 "#;
 
 const STARTER_GITIGNORE: &str = "data/\n";
@@ -121,7 +134,8 @@ pub fn init(directory: impl AsRef<Path>) -> Result<(), String> {
     println!("initialized Unionid project at {}", directory.display());
     println!("run these commands from that directory:");
     println!("  unionid project check --dir .");
-    println!("  unionid migration apply --db data/tasks.redb --dir migrations");
+    println!("  unionid migration plan --db data/tasks.redb --dir migrations --queries queries");
+    println!("  unionid migration apply --db data/tasks.redb --dir migrations --queries queries");
     println!("  unionid run --db data/tasks.redb --file seed.unid");
     println!("  unionid run --db data/tasks.redb --file queries/list_running.unid");
     println!("  unionid doctor --db data/tasks.redb");
@@ -333,7 +347,7 @@ fn validate_starter_response(response: QueryResponse, part: &str) -> Result<(), 
 
 /// Populate a private staging directory before its single publication rename.
 fn write_starter_project(directory: &Path) -> Result<(), String> {
-    for child in ["migrations", "queries", "data"] {
+    for child in ["migrations", "queries", "data", "scripts"] {
         let path = directory.join(child);
         std::fs::create_dir(&path)
             .map_err(|error| format!("create '{}': {error}", path.display()))?;
@@ -344,6 +358,7 @@ fn write_starter_project(directory: &Path) -> Result<(), String> {
         ("seed.unid", STARTER_SEED),
         ("queries/list_running.unid", STARTER_QUERY),
         ("README.md", STARTER_README),
+        ("scripts/check.sh", STARTER_CHECK_SCRIPT),
         (".gitignore", STARTER_GITIGNORE),
     ] {
         let path = directory.join(relative);

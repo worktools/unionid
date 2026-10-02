@@ -13,6 +13,7 @@ use crate::portable::{CompatibilityLevel, TypeDescription, TypeShape};
 use crate::query_contract::QueryDescription;
 
 mod directory;
+pub(crate) use directory::load_optional_query_directory;
 pub use directory::{MAX_QUERY_DIRECTORY_DEPTH, MAX_QUERY_DIRECTORY_ENTRIES, load_query_directory};
 
 pub const MAX_QUERY_FILES: usize = 1_024;
