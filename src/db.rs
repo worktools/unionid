@@ -1618,6 +1618,15 @@ pub struct Database {
 }
 
 impl TypedRowSource for Database {
+    fn reference_source_exists(
+        &self,
+        reference_id: u64,
+        key: &[u8],
+        excluded: &BTreeSet<RowId>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<bool> {
+        self.memory_reference_source_exists(reference_id, key, excluded, control)
+    }
     fn snapshot_identity(&self) -> SourceIdentity {
         SourceIdentity {
             database_instance: *self.cursor_identity.instance_id(),
@@ -3266,7 +3275,7 @@ impl Database {
                 }
             }
         }
-        Ok(())
+        self.validate_source_reference_changes(source, table_name, changes, control)
     }
 
     fn bind_update_operation(
@@ -3400,6 +3409,7 @@ impl Database {
                 append_mutation_change(&mut changes, RowChange::deleted(before), change_bytes)?;
             execution.observe_working_bytes(change_bytes);
         }
+        self.validate_source_reference_changes(source, &target.from, &changes, control)?;
         let returned_fields = changes
             .iter()
             .filter_map(|change| change.before.as_ref().map(|row| &row.fields))
@@ -7501,6 +7511,7 @@ impl Database {
             table.rows = imbl::Vector::new();
         }
         metadata.rebuild_indexes()?;
+        metadata.reference_states.clear();
         metadata.pending_writes = LogicalWriteSet::default();
         Ok(metadata)
     }

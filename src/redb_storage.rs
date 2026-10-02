@@ -362,6 +362,36 @@ struct ReverseIndexGroup {
 }
 
 impl TypedRowSource for RedbReadSource {
+    fn reference_source_exists(
+        &self,
+        reference_id: u64,
+        key: &[u8],
+        excluded: &BTreeSet<u64>,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<bool> {
+        check_source_control(control)?;
+        let component_count = self.metadata.reference_component_count(reference_id)?;
+        let bounds = (Bound::Included(key.to_vec()), Bound::Included(key.to_vec()));
+        let (lower, upper) =
+            durable_index_bounds(reference_id, component_count, &bounds, self.index_version)?;
+        let mut cursor = RedbIndexCursor {
+            source: self,
+            index_id: reference_id,
+            component_count,
+            lower: self.physical_bound(lower)?,
+            upper: self.physical_bound(upper)?,
+            reverse: false,
+            reverse_group: None,
+            remaining: None,
+            done: false,
+        };
+        while let Some(hits) = cursor.next_batch(control)? {
+            if hits.iter().any(|hit| !excluded.contains(&hit.row_id)) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     fn snapshot_identity(&self) -> SourceIdentity {
         self.identity.clone()
     }

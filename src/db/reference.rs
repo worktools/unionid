@@ -133,6 +133,183 @@ fn remove(postings: &mut imbl::OrdMap<Vec<u8>, imbl::OrdSet<RowId>>, key: &[u8],
 }
 
 impl Database {
+    pub(super) fn validate_source_reference_changes(
+        &self,
+        source: &dyn crate::row_source::TypedRowSource,
+        table: &str,
+        changes: &[RowChange],
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<()> {
+        use std::ops::Bound;
+        super::check_deadline(control)?;
+        if changes.is_empty() || !self.has_references() {
+            return Ok(());
+        }
+        let table_id = self.table(table)?.id;
+        let changed_ids = changes
+            .iter()
+            .map(RowChange::row_id)
+            .collect::<BTreeSet<_>>();
+        let empty = BTreeSet::new();
+        for definition in self.reference_definitions.values() {
+            super::check_deadline(control)?;
+            let source_changed = definition.table_id == table_id;
+            let target_changed = definition.target_table_id == table_id;
+            if !source_changed && !target_changed {
+                continue;
+            }
+            let tables = self.schema_tables();
+            let target = tables
+                .iter()
+                .find(|table| table.id == definition.target_table_id)
+                .ok_or_else(|| Error::new("E_STORAGE", "reference target table is missing"))?;
+            let indexes = self
+                .index_definitions
+                .get(&target.name)
+                .ok_or_else(|| Error::new("E_STORAGE", "reference target index is missing"))?;
+            let index = indexes
+                .values()
+                .find(|index| match definition.target {
+                    ReferenceTarget::PrimaryKey => {
+                        index.is_primary_index(target.primary_key.as_deref())
+                    }
+                    ReferenceTarget::UniqueIndex { index_id } => index.id == index_id,
+                })
+                .ok_or_else(|| Error::new("E_STORAGE", "reference target index is missing"))?;
+            let components = index.effective_components();
+            let mut source_keys = BTreeMap::new();
+            let mut removed_targets = BTreeSet::new();
+            let mut new_targets = BTreeSet::new();
+            let mut bytes = 0_usize;
+            let mut account = |key: &[u8]| -> Result<()> {
+                bytes = bytes.saturating_add(key.len()).saturating_add(64);
+                if bytes > crate::row_source::GENERAL_WORKING_MAX_BYTES {
+                    return Err(Error::new(
+                        "E_LIMIT",
+                        "reference validation exceeds mutation working state limit; reduce the batch size",
+                    ));
+                }
+                Ok(())
+            };
+            for (position, change) in changes.iter().enumerate() {
+                super::check_deadline_periodically(control, position)?;
+                if target_changed {
+                    if let Some(row) = &change.before {
+                        let key = definition
+                            .key(self, &row.fields, false)?
+                            .expect("exact target");
+                        account(&key)?;
+                        removed_targets.insert(key);
+                    }
+                    if let Some(row) = &change.after {
+                        let key = definition
+                            .key(self, &row.fields, false)?
+                            .expect("exact target");
+                        account(&key)?;
+                        new_targets.insert(key);
+                    }
+                }
+                if source_changed
+                    && let Some(row) = &change.after
+                    && let Some(key) = definition.key(self, &row.fields, true)?
+                {
+                    let values = definition
+                        .values(&row.fields, true)?
+                        .expect("present source key");
+                    let bound = definition
+                        .components
+                        .iter()
+                        .zip(&components)
+                        .zip(values)
+                        .map(|((component, index_component), value)| {
+                            crate::ordered_key::Component {
+                                ty: &component.target_type,
+                                value,
+                                descending: index_component.descending,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let boundary = crate::ordered_key::encode_tuple(&self.catalog, &bound)?;
+                    account(&key)?;
+                    account(&boundary)?;
+                    source_keys.insert(key, boundary);
+                }
+            }
+            for key in removed_targets {
+                super::check_deadline(control)?;
+                if new_targets.contains(&key) {
+                    continue;
+                }
+                if source_keys.contains_key(&key)
+                    || source.reference_source_exists(
+                        definition.id,
+                        &key,
+                        if source_changed { &changed_ids } else { &empty },
+                        control,
+                    )?
+                {
+                    return Err(Error::new("E_CONSTRAINT", "target key is still referenced")
+                        .constraint(crate::error::ConstraintKind::ReferenceRestricted));
+                }
+            }
+            for (key, boundary) in source_keys {
+                super::check_deadline(control)?;
+                if new_targets.contains(&key) {
+                    continue;
+                }
+                let bounds = (Bound::Included(boundary.clone()), Bound::Included(boundary));
+                let mut cursor =
+                    source.scan_index(&target.name, &index.shape_key(), &bounds, false, None)?;
+                let mut found = false;
+                while let Some(hits) = cursor.next_batch(control)? {
+                    if hits
+                        .iter()
+                        .any(|hit| !target_changed || !changed_ids.contains(&hit.row_id))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return Err(missing_target());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn memory_reference_source_exists(
+        &self,
+        reference_id: u64,
+        key: &[u8],
+        excluded: &BTreeSet<RowId>,
+        control: Option<&crate::control::ExecutionControl>,
+    ) -> Result<bool> {
+        super::check_deadline(control)?;
+        let state = self
+            .reference_states
+            .get(&reference_id)
+            .ok_or_else(|| Error::new("E_STORAGE", "reference postings are missing"))?;
+        if let Some(rows) = state.sources.get(key) {
+            for (position, id) in rows.iter().enumerate() {
+                super::check_deadline_periodically(control, position)?;
+                if !excluded.contains(id) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn reference_component_count(&self, reference_id: u64) -> Result<u8> {
+        let definition = self
+            .reference_definitions
+            .get(&reference_id)
+            .ok_or_else(|| Error::new("E_STORAGE", "reference ID is not in the catalog"))?;
+        u8::try_from(definition.components.len())
+            .map_err(|_| Error::new("E_STORAGE", "reference has too many components"))
+    }
+
     pub(super) fn record_reference_changes(
         &mut self,
         table: &str,
@@ -549,6 +726,91 @@ mod tests {
         for located in crate::syntax::parse(source).unwrap() {
             db.execute(located.statement).unwrap();
         }
+    }
+
+    fn bounded(source: &Database, query: &str) -> Result<super::super::QueryResponse> {
+        let mut candidate = source.metadata_only()?;
+        assert!(candidate.reference_states.is_empty());
+        let statement = crate::syntax::parse(query).unwrap().remove(0).statement;
+        let result = candidate.execute_bounded_mutation_from(source, statement, None);
+        if result.is_err() {
+            assert!(candidate.take_write_set().rows.is_empty());
+        }
+        result
+    }
+
+    #[test]
+    fn bounded_mutations_enforce_references_without_resident_postings() {
+        let db = database(
+            "struct User {id: int}\nstruct Task {id: int, assignee: Option<int>}\ntable users: User {key id}\ntable tasks: Task {key id}\ncreate reference tasks (assignee) references users (id)\ninsert many users [{id: 7}, {id: 8}]\ninsert tasks {id: 1, assignee: Some(7)}",
+        );
+        for query in [
+            "insert tasks {id: 2, assignee: Some(9)}",
+            "upsert tasks {id: 1, assignee: Some(9)}",
+            "update tasks | set assignee = Some(9)",
+        ] {
+            assert_eq!(
+                bounded(&db, query).unwrap_err().constraint,
+                Some(crate::error::ConstraintKind::ReferenceMissing),
+                "{query}"
+            );
+        }
+        for query in [
+            "delete users | filter id == 7",
+            "update users | filter id == 7 | set id = 9",
+        ] {
+            assert_eq!(
+                bounded(&db, query).unwrap_err().constraint,
+                Some(crate::error::ConstraintKind::ReferenceRestricted),
+                "{query}"
+            );
+        }
+        for query in [
+            "insert tasks {id: 2, assignee: Some(8)}",
+            "insert tasks {id: 2, assignee: None}",
+            "upsert tasks {id: 1, assignee: Some(8)}",
+            "update tasks | set assignee = None",
+            "delete tasks",
+            "delete users | filter id == 8",
+        ] {
+            bounded(&db, query).unwrap_or_else(|error| panic!("{query}: {error}"));
+        }
+    }
+
+    #[test]
+    fn bounded_self_reference_uses_the_complete_batch_candidate() {
+        let mut db = database(
+            "struct Node {id: int, parent: int}\ntable nodes: Node {key id}\ncreate reference nodes (parent) references nodes (id)",
+        );
+        let cycle = "insert many nodes [{id: 1, parent: 2}, {id: 2, parent: 1}]";
+        bounded(&db, cycle).unwrap();
+        execute(&mut db, cycle);
+        bounded(&db, "delete nodes").unwrap();
+        assert_eq!(
+            bounded(&db, "delete nodes | filter id == 1")
+                .unwrap_err()
+                .constraint,
+            Some(crate::error::ConstraintKind::ReferenceRestricted)
+        );
+        bounded(
+            &db,
+            "update nodes | set {id = id + 10, parent = parent + 10}",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn bounded_target_lookup_respects_descending_composite_unique_keys() {
+        let db = database(
+            "struct Parent {tenant: int, alias: Option<int>}\nstruct Child {tenant: int, alias: Option<int>}\ntable parents: Parent {}\ntable children: Child {}\ncreate unique index parents (-tenant, alias)\ncreate reference children (tenant, alias) references parents (tenant, alias)\ninsert parents {tenant: 1, alias: None}",
+        );
+        bounded(&db, "insert children {tenant: 1, alias: None}").unwrap();
+        assert_eq!(
+            bounded(&db, "insert children {tenant: 2, alias: None}")
+                .unwrap_err()
+                .constraint,
+            Some(crate::error::ConstraintKind::ReferenceMissing)
+        );
     }
 
     #[test]
