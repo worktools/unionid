@@ -435,6 +435,9 @@ enum MigrationCommand {
         db: PathBuf,
         #[arg(long, default_value = "migrations")]
         dir: PathBuf,
+        /// Validate saved .unid queries against the migration target before committing.
+        #[arg(long, value_name = "DIR")]
+        queries: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -444,6 +447,9 @@ enum MigrationCommand {
         db: PathBuf,
         #[arg(long, default_value = "migrations")]
         dir: PathBuf,
+        /// Validate saved .unid queries against the migration target before committing.
+        #[arg(long, value_name = "DIR")]
+        queries: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -486,6 +492,9 @@ enum MigrationCommand {
         /// Keep the rehearsal copy at this path instead of a temporary file.
         #[arg(long)]
         copy: Option<PathBuf>,
+        /// Validate saved .unid queries against the migration target before committing.
+        #[arg(long, value_name = "DIR")]
+        queries: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -1111,12 +1120,12 @@ fn run(args: Args) -> Result<(), String> {
                 println!("{}", path.display());
                 Ok(())
             }
-            MigrationCommand::Plan { db, dir, format } => {
-                cli::migration_plan(db, dir, matches!(format, Format::Json))
-            }
-            MigrationCommand::Apply { db, dir, format } => {
-                cli::migration_apply(db, dir, matches!(format, Format::Json))
-            }
+            MigrationCommand::Plan {
+                db, dir, format, ..
+            } => cli::migration_plan(db, dir, matches!(format, Format::Json)),
+            MigrationCommand::Apply {
+                db, dir, format, ..
+            } => cli::migration_apply(db, dir, matches!(format, Format::Json)),
             MigrationCommand::Advance {
                 db,
                 dir,
@@ -1141,6 +1150,7 @@ fn run(args: Args) -> Result<(), String> {
                 dir,
                 copy,
                 format,
+                ..
             } => cli::migration_rehearse(db, dir, copy, matches!(format, Format::Json)),
             MigrationCommand::Diff {
                 db,
@@ -1331,6 +1341,90 @@ fn run(args: Args) -> Result<(), String> {
     }
 }
 
+fn run_migration_query_command(args: &Args) -> Option<i32> {
+    use cli::migration_queries::{self, Action};
+    let Command::Migration { command } = &args.command else {
+        return None;
+    };
+    let (action, db, dir, queries, format) = match command {
+        MigrationCommand::Plan {
+            db,
+            dir,
+            queries: Some(queries),
+            format,
+        } => (Action::Plan, db, dir, queries, format),
+        MigrationCommand::Apply {
+            db,
+            dir,
+            queries: Some(queries),
+            format,
+        } => (Action::Apply, db, dir, queries, format),
+        MigrationCommand::Rehearse {
+            db,
+            dir,
+            copy,
+            queries: Some(queries),
+            format,
+        } => (
+            Action::Rehearse { copy: copy.clone() },
+            db,
+            dir,
+            queries,
+            format,
+        ),
+        _ => return None,
+    };
+    let json = matches!(format, Format::Json);
+    match migration_queries::run(action, db, dir, queries) {
+        Ok(report) => match report.print(json) {
+            Ok(()) => Some(0),
+            Err(message) => exit_error(format!("E_IO: {message}"), args.error_output(), None),
+        },
+        Err(failure) => {
+            let exit_code = classify_exit(&failure.error.code, false);
+            if json {
+                #[derive(Serialize)]
+                struct Failure {
+                    #[serde(flatten)]
+                    envelope: ErrorEnvelope,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    query_validation:
+                        Option<Box<unionid::migration::query_validation::QueryValidation>>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    retained_copy: Option<PathBuf>,
+                }
+                // Preserve typed fields while applying the existing non-query
+                // JSON redaction policy to execution/I/O error messages.
+                let mut error = *failure.error;
+                error.message = structured_error(&error.to_string()).message;
+                println!(
+                    "{}",
+                    serde_json::to_string(&Failure {
+                        envelope: ErrorEnvelope {
+                            schema_version: 1,
+                            ok: false,
+                            exit_code,
+                            error
+                        },
+                        query_validation: failure.query_validation,
+                        retained_copy: failure.retained_copy,
+                    })
+                    .expect("migration preflight error serialization cannot fail")
+                );
+            } else {
+                eprintln!("{}", failure.error);
+                if let Some(report) = failure.query_validation {
+                    migration_queries::print_validation(&report);
+                }
+                if let Some(copy) = failure.retained_copy {
+                    eprintln!("retained copy: {} (inspect before reusing)", copy.display());
+                }
+            }
+            Some(exit_code)
+        }
+    }
+}
+
 fn run_project_command(args: &Args) -> Option<i32> {
     let Command::Project { command } = &args.command else {
         return None;
@@ -1413,7 +1507,9 @@ fn main() {
             std::process::exit(exit_code);
         }
     };
-    if let Some(exit_code) = run_project_command(&args) {
+    if let Some(exit_code) =
+        run_migration_query_command(&args).or_else(|| run_project_command(&args))
+    {
         if exit_code != 0 {
             std::process::exit(exit_code);
         }

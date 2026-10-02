@@ -222,8 +222,8 @@ const COMMANDS: &[AgentCommand] = &[
     },
     AgentCommand {
         name: "migration",
-        summary: "Create, plan, apply, resume, inspect, and abort migrations.",
-        usage: "unionid migration plan --db <path> --dir <dir> --format json   # also apply, status, advance, abort",
+        summary: "Create, plan, apply, rehearse, resume, inspect, and abort migrations; optionally preflight saved queries.",
+        usage: "unionid migration plan --db <path> --dir <dir> --queries <queries-dir> --format json   # --queries also supports apply and rehearse; other commands: status, advance, abort",
         json: true,
     },
     AgentCommand {

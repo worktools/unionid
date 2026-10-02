@@ -128,7 +128,7 @@ JSON 输出仍是 `MigrationProgress`，包含本次 `committed_steps`、`comple
 
 ## Rust 已保存查询预检 / Rust saved-query preflight
 
-开发中的 v0.13 提供 `Engine::plan_migrations_with_queries` 与 `apply_migrations_with_queries`。输入为现有 `MigrationFile` 列表和 `migration::query_validation::MigrationQuery { path, source }` 列表；源码在目标 catalog 上通过同一个静态 binder 检查，不执行查询或扫描业务数据。当前已发布 v0.12 没有这些 API，CLI `--queries` 接入仍在 #400 后续阶段。
+开发中的 v0.13 提供 `Engine::plan_migrations_with_queries` 与 `apply_migrations_with_queries`。输入为现有 `MigrationFile` 列表和 `migration::query_validation::MigrationQuery { path, source }` 列表；源码在目标 catalog 上通过同一个静态 binder 检查，不执行查询或扫描业务数据。当前已发布 v0.12 没有这些 API；开发分支 CLI 已通过 `--queries` 接入同一个预检。
 
 plan 返回原有 plan 与 `query_validation`：`valid` 表示全部文件在最终 schema 上可绑定，`files` 按路径排序，`failures` 保留 current/各 migration checkpoint 的原始错误和 span。新查询可以在当前 schema 失败、在最终 schema 成功；中间失效但最终修复的轨迹保留。`parameters_changed`/`result_changed` 包含递归命名 ADT 的可达定义变化；`conditional` 表示新查询无有效 baseline 或契约变化需要复核，不代表旧生成客户端已兼容。
 
@@ -136,8 +136,30 @@ apply 在第一次 migration/maintenance 提交前重新进行预检，失败返
 
 每次预检最多 1,024 个文件、每个文件沿用 1 MiB 源码限制、源码合计 16 MiB、65,536 次绑定、4,096 条诊断和 1 MiB 编码报告；超过预算明确返回 E_LIMIT。详见 [RFC 0024](rfc/0024-migration-query-preflight.md)。
 
-Development toward v0.13 adds the two query-aware Engine methods with existing MigrationFile inputs and immutable MigrationQuery path/source pairs. They are unavailable in released v0.12; CLI --queries and directory loading remain follow-up #400 work. The shared static binder checks metadata without executing business operations or scanning rows.
+Development toward v0.13 adds the two query-aware Engine methods with existing MigrationFile inputs and immutable MigrationQuery path/source pairs. They are unavailable in released v0.12; the development CLI exposes the same preflight through --queries. The shared static binder checks metadata without executing business operations or scanning rows.
 
 The plan includes a versioned query_validation report: final validity, path-sorted files, current/migration checkpoint errors with spans, and parameter/result changes including reachable recursive named definitions. New queries may lack a valid baseline; repaired intermediate failures remain visible. Conditional compatibility requires review and does not relax exact generated-client schema hashes.
 
-Apply repeats preflight under the same Engine's write ownership before any migration or maintenance commit, returning MigrationQueryError with its report on failure. Reports are not reusable approval tokens. Later data conversion retains per-file commits. No-pending calls still validate queries; active maintenance checks the actual source or cutover catalog identity and original migration checksum before proceeding. Source, bind, diagnostic, and encoded-report budgets fail explicitly; see the RFC for limits and remaining CLI/acceptance work.
+Apply repeats preflight under the same Engine's write ownership before any migration or maintenance commit, returning MigrationQueryError with its report on failure. Reports are not reusable approval tokens. Later data conversion retains per-file commits. No-pending calls still validate queries; active maintenance checks the actual source or cutover catalog identity and original migration checksum before proceeding. Source, bind, diagnostic, and encoded-report budgets fail explicitly; see the RFC for limits and the complete acceptance contract.
+
+### CLI 查询目录 / CLI query directory
+
+以下命令在开发中的 v0.13 使用；每个查询文件描述一个静态查询或 mutation（允许尾随 `expect`），不执行查询，也不需要提供运行参数：
+
+```sh
+unionid migration plan --db app.redb --dir migrations --queries queries --format json
+unionid migration rehearse --db app.redb --dir migrations --queries queries --format json
+unionid migration apply --db app.redb --dir migrations --queries queries --format json
+```
+
+`queries/` 必须存在且非空，递归加载 `.unid`（兼容 `.uid`，警告写入 stderr），按相对路径排序。拒绝符号链接、非源码条目和非 UTF-8 源码；目录深度最多 32，总条目最多 4,096（含空目录）。所有源码在预检前只加载一次。无待执行 migration 时仍检查。
+
+成功 JSON 为原有报告增加 `query_validation`。失败只输出一个 `ok: false` 对象：最终查询无效时顶层 `error.code` 为 `E_MIGRATION`、退出码 3；具体错误、文件路径和 checkpoint 在 `query_validation.files[].failures`。I/O 错误退出码 5，资源限制退出码 3。预检成功不保证数据转换成功，后续 migration 文件失败仍可能留下先前已提交的 migration；根据 `query_validation.valid` 区分查询预检失败与后续执行失败。
+
+`plan` 使用锁定源文件后创建的临时副本，避免 redb 打开时的恢复元数据写入源库。`rehearse` 同样保留源库字节；自动副本在成功或失败后清理。`--copy path` 只接受不存在的目标，失败或成功报告中的 `retained_copy` 表示本次创建并保留的副本，需检查其 schema/ledger 后再使用；已有文件及源库别名绝不覆盖。源库被占用时返回 `E_BUSY`（退出码 4）。`apply` 在同一个实际 Engine 中预检并提交；新库查询预检失败不会创建数据库文件。
+
+These commands are available in development toward v0.13. Each file contains one statically describable query or mutation, optionally followed by `expect`; preflight does not execute queries or require runtime parameter values. The nonempty directory is recursively loaded once in relative-path order. `.uid` remains accepted with stderr warnings. Reject symlinks, non-source entries, and invalid UTF-8; cap directory depth at 32 and total entries, including empty directories, at 4,096. Check queries even when no migrations are pending.
+
+Success adds `query_validation` to the existing report. Failure emits exactly one `ok: false` JSON envelope. Invalid final queries return `E_MIGRATION` and exit 3, with original file/checkpoint errors in `query_validation.files[].failures`; I/O returns exit 5 and resource limits exit 3. A valid preflight does not guarantee successful data conversion: later migration failures may retain earlier per-file commits. Use `query_validation.valid` to distinguish preflight rejection from later execution failure.
+
+Plan uses a locked temporary copy to avoid touching the source's redb recovery metadata. Rehearsal also preserves source bytes and removes automatic copies after success or failure. Explicit `--copy` destinations must not exist; `retained_copy` identifies a copy created and retained by this attempt, whose schema/ledger should be inspected before reuse. Existing files and source aliases are never overwritten. An active source owner returns `E_BUSY` with exit 4. Apply preflights and commits within the same actual Engine; rejected new-database queries create no database file.
