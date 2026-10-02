@@ -167,6 +167,25 @@ impl StorageLayout {
         }
     }
 
+    /// Released format <=11 archives retain their exact header bytes. Reference
+    /// formats are unreleased and can declare their already-required capabilities.
+    pub(super) fn archive_required_capabilities(self) -> Vec<String> {
+        if self.format <= PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION {
+            return Vec::new();
+        }
+        let mut capabilities = Vec::new();
+        if self.supports_partial_indexes() {
+            capabilities.push("partial_unique_index".into());
+        }
+        if self.supports_maps() {
+            capabilities.push("typed_map".into());
+        }
+        if self.supports_references() {
+            capabilities.push("typed_references".into());
+        }
+        capabilities
+    }
+
     pub(super) const fn backup_format(self) -> u32 {
         if self.supports_references() {
             crate::backup::REFERENCE_BACKUP_FORMAT_VERSION

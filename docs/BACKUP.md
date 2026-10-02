@@ -70,3 +70,14 @@ Journal-enabled migration cutover merges source and target generations by stable
 Logical backup preserves the complete `Database` state, stable catalog/type/field/variant/table/index IDs, ADT rows and RowId watermarks, schema identity, migration ledger, and idempotency receipts. It streams from one exclusively opened, fully checked committed redb view, publishes only a flushed and synced complete output, and never overwrites an existing backup or database. Restore validates format, checksum, schema, typed rows, RowIds, indexes, ledger, and receipts before creating a new redb target. Formats 1–4 remain readable according to their frozen compatibility rules.
 
 `import-legacy` is the explicit conversion path for supported prototype snapshot/WAL inputs. It preserves its inputs, requires a nonexistent redb target, and fails on unknown versions, ambiguous values, unsupported syntax, corruption, or noncontiguous sequence history rather than guessing a repair.
+
+
+## Archive 必需能力 / Required archive capabilities (development)
+
+#439 的 archive header 阶段增加可选的 `required_capabilities`，使用排序、去重的稳定名称：`partial_unique_index`、`typed_map`、`typed_references`。未知能力（包括尚未实现的 `generated_defaults`）在解压或读取数据帧前返回 `E_BACKUP_ARCHIVE`；声明必须与 catalog/value/receipt codec 相容。空列表省略，既有 format 1–11 archive 输出字节不变；未发布的 reference format 12/13 baseline 与 segment 明确声明已有能力。旧 reference archive 省略字段仍可读取。旧 reader 使用严格 header schema，不能忽略新要求。
+
+Archive framing、manifest 版本和数据库默认格式不变。这个保护不等于数据库 canonical header、capability 安装、显式升级或生成值持久化已经完成。Rust 手写 `ArchiveHeader` literal 需新增 `required_capabilities: Vec::new()`；一般 CLI 用户无需新增参数。
+
+The #439 archive-header stage adds optional `required_capabilities`, with sorted unique stable names: `partial_unique_index`, `typed_map`, `typed_references`. Unknown requirements (including unimplemented `generated_defaults`) return `E_BACKUP_ARCHIVE` before decompression or frame parsing; declarations must fit catalog/value/receipt codecs. Empty lists are omitted, preserving existing format 1–11 archive bytes. Unreleased reference format 12/13 baselines and segments declare existing capabilities; older reference archives without the field remain readable. Strict old header schemas cannot ignore new requirements.
+
+Archive framing, manifest versions and database defaults are unchanged. This guard does not complete database canonical headers, capability installation, explicit upgrades or durable generation. Handwritten Rust `ArchiveHeader` literals must add `required_capabilities: Vec::new()`; ordinary CLI usage needs no new option.

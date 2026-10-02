@@ -98,6 +98,18 @@ fn init_export_list_verify_and_retry_form_a_contiguous_chain() {
     assert_eq!(exported.created_segments, 3);
     let listed = backup::incremental::list(&repo).unwrap();
     assert_eq!(listed.segments.len(), 3);
+    let manifest =
+        backup::incremental::decode_manifest(&std::fs::read(repo.join("manifest.json")).unwrap())
+            .unwrap();
+    for artifact in std::iter::once(&manifest.baseline).chain(manifest.segments.iter()) {
+        let archive = backup::incremental::decode_archive(
+            &std::fs::read(repo.join(&artifact.path)).unwrap(),
+            &ArchiveLimits::default(),
+        )
+        .unwrap();
+        assert!(archive.header.required_capabilities.is_empty());
+    }
+
     assert_eq!(listed.recoverable_last_sequence, init.baseline_sequence + 5);
     let verified = backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap();
     assert_eq!(verified.segment_count, 3);

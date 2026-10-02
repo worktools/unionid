@@ -279,6 +279,21 @@ fn reference_journal_replays_only_complete_constraint_preserving_commits() {
     let exported =
         backup::incremental::export(&path, &repo, IncrementalExportOptions::default()).unwrap();
     assert_eq!(exported.exported_commits, 3);
+    let manifest =
+        backup::incremental::decode_manifest(&std::fs::read(repo.join("manifest.json")).unwrap())
+            .unwrap();
+    for artifact in std::iter::once(&manifest.baseline).chain(manifest.segments.iter()) {
+        let archive = backup::incremental::decode_archive(
+            &std::fs::read(repo.join(&artifact.path)).unwrap(),
+            &ArchiveLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            archive.header.required_capabilities,
+            ["partial_unique_index", "typed_map", "typed_references"]
+        );
+    }
+
     for (offset, restricted) in [(1, true), (3, false)] {
         let restored = dir.0.join(format!("restored-{offset}.redb"));
         backup::incremental::restore(
@@ -304,6 +319,32 @@ fn reference_journal_replays_only_complete_constraint_preserving_commits() {
             );
         }
     }
+    // A future requirement must fail before body/checksum parsing and before
+    // creating any destination database, even if the body is corrupt.
+    let baseline = repo.join(&manifest.baseline.path);
+    let bytes = std::fs::read(&baseline).unwrap();
+    let mut header = backup::incremental::decode_archive(&bytes, &ArchiveLimits::default())
+        .unwrap()
+        .header;
+    header.required_capabilities = vec!["generated_defaults".into()];
+    let json = serde_json::to_vec(&header).unwrap();
+    let mut forged = bytes[..16].to_vec();
+    forged[12..16].copy_from_slice(&(json.len() as u32).to_be_bytes());
+    forged.extend_from_slice(&json);
+    forged.extend_from_slice(b"invalid body");
+    std::fs::write(baseline, forged).unwrap();
+    let destination = dir.0.join("unsupported.redb");
+    let error = backup::incremental::restore(
+        &repo,
+        &destination,
+        initialized.baseline_sequence,
+        ArchiveLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "E_BACKUP_ARCHIVE");
+    assert_eq!(error.message, "unsupported required archive capability");
+    assert!(!destination.exists());
+    Engine::open_redb(&path).unwrap().check_integrity().unwrap();
 }
 
 #[test]
