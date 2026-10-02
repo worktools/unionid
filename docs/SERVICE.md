@@ -69,3 +69,24 @@ receipt 没有自动 TTL/LRU。容量运维必须先 status/preview，再用明�
 adapter 可先调用 `ConcurrentEngine::register_read(request, deadline)`，把返回 handle 的 server-issued `o1` capability 发送并 flush 给客户端后，再调用 `ReadOperation::start()`。`ConcurrentEngine::cancel` 只接受 canonical capability，并在线性化点返回 `accepted`、`already_terminal + outcome` 或 `unknown`；`register_read_with_shutdown` 额外把进程关闭信号接入同一检查顺序。operation registry 不保存 query/params，统计只暴露 registered/queued/executing/cancelling、累计 cancelled 和上限，capability 不得进入日志或持久化数据。
 
 服务限制是 v0.2 的明确支持边界，而非容量承诺。M7 的 [1 万/10 万行验收记录](benchmarks/m7-acceptance-2026-09-10.md)显示，普通 open、增量单行写入、有序复合访问和完整检查使用有界 resident state；100-row batch 与完整 shadow migration 在 100k 工作集仍有明显成本。部署前应使用真实 value 宽度、索引数量和 migration 复测。
+
+## 回执容量预警 / Receipt capacity warnings
+
+开发中的 v0.13 在 `receipts status --format json` 的 `capacity` 和 `doctor --db ... --format json` 的 `database.receipt_capacity` 提供 version 1 容量描述。count 或 encoded bytes 任一达到 80% 为 `warning`，达到硬上限为 `full`，否则 `normal`；同时给出剩余条数和编码字节。剩余字节非零仍可能装不下下一条回执。doctor 只读取私有副本，容量摘要不包含 key、digest 或业务数据。
+
+```sh
+unionid receipts status --db app.redb --format json
+# Replace the cutoff with a timestamp older than every supported retry window.
+unionid receipts prune --db app.redb --before-unix-ms 1700000000000 --max-receipts 1000 --format json
+# Inspect the preview before repeating with --confirm.
+```
+
+成功的新 key 提交在达到阈值时返回固定 warning，表示该次提交时的容量。告警计入回执大小检查并与业务数据原子保存。已有 key replay 保持原响应和原告警，即使后来 prune 使当前容量恢复正常；当前状态以 status/metrics 为准。单条超过 1 MiB 是 `E_IDEMPOTENCY_LIMIT`，不能通过清理别的回执解决。10,000 条或 64 MiB 总容量不足是 `E_IDEMPOTENCY_CAPACITY`，hint 指向 status 与显式预览/确认流程。
+
+默认不会清理任何回执。本阶段只增加容量信号；显式保留策略仍由 #402 后续阶段实现。清理之后，同一个 key 可以再次产生效果。容量规划使用“成功的新 key QPS × 最大重试窗口”，同时预留突发、清理延迟和编码字节余量。已有 key 重放不增加条数；不能为腾空间擅自缩短业务重试窗口。
+
+In development toward v0.13, status exposes version-1 `capacity`, while doctor exposes value-free `database.receipt_capacity` from its private copy. Either count or encoded bytes reaching 80% yields `warning`; reaching a limit yields `full`. Remaining bytes do not guarantee that the next receipt fits. Doctor reveals no receipt keys, digests, or business payloads.
+
+Successful new-key commits near capacity include a fixed warning describing that commit. It participates in size checks before atomic data/receipt commit and is preserved unchanged on replay, even after pruning reduces current usage. Use status/metrics for current capacity. `E_IDEMPOTENCY_LIMIT` denotes one oversized receipt; pruning cannot fix it. `E_IDEMPOTENCY_CAPACITY` denotes insufficient total capacity and provides status plus preview/confirm guidance.
+
+No receipts are automatically deleted. Explicit retention remains later #402 work. Review a cutoff older than every supported retry window before using --confirm; a deleted key may execute again. Plan for successful new-key rate × maximum retry window, bursts, cleanup lag, and byte headroom. Replays consume no new receipt, and pressure is not permission to shorten the retry window.

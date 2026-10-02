@@ -139,6 +139,8 @@ fn optional_prometheus_text_has_parseable_bounded_labels() {
     assert!(text.contains("# TYPE unionid_request_duration_seconds histogram"));
     assert!(text.contains("unionid_requests_total{operation=\"read\"} 2"));
     assert!(text.contains("unionid_errors_total{code=\"E_TABLE\"} 1"));
+    assert!(text.contains("unionid_receipts_capacity_warning 0\n"));
+    assert!(text.contains("unionid_receipts_capacity_full 0\n"));
     assert!(text.ends_with('\n'));
     for line in text.lines().filter(|line| !line.starts_with('#')) {
         let mut fields = line.split_ascii_whitespace();

@@ -177,6 +177,20 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
         "Configured encoded idempotency receipt byte capacity",
         snapshot.receipts.max_encoded_bytes,
     );
+    if let Some(capacity) = snapshot.receipts.capacity {
+        gauge(
+            &mut output,
+            "unionid_receipts_capacity_warning",
+            "One when either receipt budget is at least 80 percent used",
+            usize::from(capacity.state != crate::ReceiptCapacityState::Normal),
+        );
+        gauge(
+            &mut output,
+            "unionid_receipts_capacity_full",
+            "One when either receipt budget has reached its limit",
+            usize::from(capacity.state == crate::ReceiptCapacityState::Full),
+        );
+    }
     output
 }
 

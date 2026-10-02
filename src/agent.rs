@@ -269,6 +269,12 @@ const COMMANDS: &[AgentCommand] = &[
         json: true,
     },
     AgentCommand {
+        name: "receipts",
+        summary: "Inspect idempotency count/byte capacity; preview explicit pruning before confirming deletion.",
+        usage: "unionid receipts status --db <path> --format json   # prune requires a retry-safe cutoff; preview before --confirm",
+        json: true,
+    },
+    AgentCommand {
         name: "doctor",
         summary: "Diagnose the binary and optionally inspect a database copy.",
         usage: "unionid doctor [--db <path>] --format json",
