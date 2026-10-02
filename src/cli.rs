@@ -1,3 +1,4 @@
+pub mod format_files;
 pub mod migration_queries;
 
 use std::fs::OpenOptions;
@@ -721,6 +722,14 @@ pub fn schema_print(db: impl Into<PathBuf>, json: bool) -> Result<(), String> {
     print_schema_check(&checked, json)
 }
 
+/// Print only canonical source, suitable for saving as a declarative schema.
+pub fn schema_print_source(db: impl Into<PathBuf>) -> Result<(), String> {
+    let db = db.into();
+    require_existing_database(&db)?;
+    let engine = Engine::open_redb(db).map_err(|error| error.to_string())?;
+    format_source(&engine.schema(), false)
+}
+
 pub fn schema_rust(
     file: Option<&Path>,
     db: Option<PathBuf>,
@@ -1096,13 +1105,17 @@ fn next_migration(
 }
 
 fn print_schema_check(checked: &SchemaCheck, json: bool) -> Result<(), String> {
+    let checked = SchemaCheck {
+        schema: checked.schema.clone(),
+        normalized: crate::format_source(&checked.normalized).map_err(|error| error.to_string())?,
+    };
     if json {
         println!(
             "{}",
-            serde_json::to_string(checked).map_err(|error| error.to_string())?
+            serde_json::to_string(&checked).map_err(|error| error.to_string())?
         );
     } else {
-        println!("{}", checked.normalized);
+        print!("{}", checked.normalized);
         eprintln!(
             "schema revision {}\nschema hash {}",
             checked.schema.revision, checked.schema.hash

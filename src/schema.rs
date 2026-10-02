@@ -153,6 +153,7 @@ pub(crate) fn diff(
     let operations = generated.into_iter().chain(todos).collect::<Vec<_>>();
     let runnable = operations.iter().all(|operation| !operation.requires_input);
     if runnable && !operations.is_empty() {
+        source = crate::format_source(&source)?;
         let migration = crate::migration::MigrationFile::parse(source.clone())?;
         let mut candidate = current.clone();
         candidate.execute(Statement::Migration {

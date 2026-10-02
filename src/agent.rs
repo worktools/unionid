@@ -241,7 +241,7 @@ const COMMANDS: &[AgentCommand] = &[
     AgentCommand {
         name: "fmt",
         summary: "Canonicalize generated source, or check it with --check.",
-        usage: "unionid fmt --file <source.unid> [--check]",
+        usage: "unionid fmt --file <source.unid>   # or fmt --check/--write <file>...; never rewrite applied migrations",
         json: false,
     },
     AgentCommand {

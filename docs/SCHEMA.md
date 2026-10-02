@@ -128,3 +128,23 @@ apply 前必须验证：
 redb catalog 表持久化上述 ID、索引 kind、每表 RowId 分配游标、revision、hash manifest 版本和 migration head。catalog codec v2 显式编码 ordinary/unique，仍可读取没有 kind 的 v1 index 并将其解释为 ordinary；下一次成功提交会写回 v2。已实现的 row codec 使用 type/field/variant ID，按 field ID 排序 record，并严格拒绝未知身份或形状；名称不进入值的身份编码。row key 使用 table ID 与 RowId，secondary index key 使用 index identity 与 RowId。一个 Engine schema 脚本对应一个 redb 写事务，提交成功后响应中的 revision/hash 才可见。
 
 旧 WAL/snapshot 没有 revision 时，恢复过程把其中完整的非空 catalog 视作 revision 1 的导入基线；已有稳定 ID 保留，缺失的 table/index ID 按确定顺序补齐。#20 的正式导入工具还会校验行数、catalog、revision 和 hash，并保留原文件。
+
+## 生成源码与批量格式化 / Generated source and batch formatting
+
+开发中的 v0.13 将可执行 `migration diff` 输出直接规范化，生成后无需再手动 fmt 即可进入 `project check`。包含 `todo` 或 backfill 占位符的草稿仍明确不可执行，需要先补全业务决策；formatter 不会替你决定数据转换。
+
+```sh
+unionid schema print --db app.redb --format source > schema.unid
+unionid fmt --check schema.unid migrations/*.unid
+unionid fmt --write schema.unid migrations/*.unid
+```
+
+`schema print --format source` 仅输出规范源码，不打印 revision/hash 摘要；默认文本输出的摘要仍在 stderr，JSON 保持包含 schema 信息和规范化源码的对象。格式变化不改变 schema identity。
+
+`fmt` 保留 stdin 和 `-f file` 的单文件 stdout 用法，也支持重复 `-f` 和位置文件参数。多文件必须显式选择 `--check` 或 `--write`，两者不能合用。`--check` 报出需要格式化的路径且不写文件。`--write` 先解析全部输入，再逐个以同目录临时文件替换，保留普通文件权限；相同内容不重写，写入模式拒绝符号链接、目录和只读文件。语法错误不会使先前文件发生修改，但写入阶段的 I/O 失败不保证跨文件回滚。已应用的 migration 文件受 checksum 契约保护：不要用批量格式化修改其既有内容，只格式化新建、未应用的迁移。
+
+In development toward v0.13, runnable `migration diff` output is canonical immediately and can proceed directly to `project check`. Drafts with `todo` or backfill placeholders still require explicit business decisions before they become executable; formatting does not invent data conversions.
+
+Use `schema print --format source` to save only canonical declarations. Default text output keeps its revision/hash summary on stderr; JSON remains an object containing schema information and canonical source. Formatting does not change schema identity.
+
+`fmt` retains stdin and single-file stdout support and accepts repeated `-f` or positional files. Multiple files require either `--check` or `--write`, never both. Check reports noncanonical paths without writing. Write parses the complete batch first, then replaces each changed file via a same-directory temporary file while preserving ordinary permissions. It rejects symlinks, directories, and read-only files. Invalid syntax changes no file; later I/O failures do not provide cross-file rollback. Never reformat already-applied migrations: their immutable checksum remains authoritative. Restrict migration formatting to new, unapplied files.
