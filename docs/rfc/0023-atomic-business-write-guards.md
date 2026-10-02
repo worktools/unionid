@@ -5,6 +5,8 @@
 - 跟踪 / Tracking: [#399](https://github.com/worktools/unionid/issues/399), [v0.12 milestone](https://github.com/worktools/unionid/milestone/22)
 - 相关 / Related: [RFC 0002](0002-idempotent-write-receipts.md), [RFC 0015](0015-static-query-contract.md), [RFC 0020](0020-inline-rust-query-macros.md)
 
+Current development refinement (#441): single-statement execution omits redundant summaries. The fixed summary shape and 4,096-entry bound imply less than 512 KiB; structural validation replaces the original duplicate encoding pass, while the public byte bound and complete receipt-capacity checks remain. Historical receipts preserve their original output. 开发版调整：单语句省略摘要；固定结构与数量限制已蕴含字节上界，因此移除重复编码，保留结构、公开上界与回执容量检查，历史回执原样保留。
+
 ## 中文说明
 
 ### 1. 业务问题

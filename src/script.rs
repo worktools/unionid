@@ -7,6 +7,8 @@ use crate::{
 };
 
 pub const MAX_SCRIPT_STATEMENTS: usize = 4_096;
+/// Conservative JSON size bound implied by the statement count and fixed fields.
+/// Kept for Rust callers and the agent manifest; no separate encoding pass is needed.
 pub const MAX_STATEMENT_SUMMARY_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,20 +140,69 @@ pub(crate) fn validate_summaries(summaries: &[StatementSummary]) -> Result<(), E
             "invalid or excessive statement summaries",
         ));
     }
-    struct Budget(usize);
-    impl std::io::Write for Budget {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_add(bytes.len())
-                .filter(|total| *total <= MAX_STATEMENT_SUMMARY_BYTES)
-                .ok_or_else(|| std::io::Error::other("statement summary budget exceeded"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+    // With <=4096 entries, fixed kinds, indices and usize counts, the complete
+    // JSON stays below MAX_STATEMENT_SUMMARY_BYTES. Tests cover the largest
+    // valid shape; receipt encoding still checks its complete byte budget.
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_summary_shapes_imply_the_public_byte_bound() {
+        use StatementKind::*;
+        for kind in [
+            DefineType,
+            CreateTable,
+            Table,
+            CreateIndex,
+            CreateReference,
+            DropReference,
+            Insert,
+            InsertMany,
+            Upsert,
+            UpsertMany,
+            Update,
+            Delete,
+            Migration,
+            Explain,
+            ExplainAnalyze,
+            Query,
+            Expect,
+        ] {
+            let summaries: Vec<_> = (1..=MAX_SCRIPT_STATEMENTS)
+                .map(|index| {
+                    // An expect has a preceding mutation, including at maximum count.
+                    let kind = if kind == Expect && index % 2 == 1 {
+                        Update
+                    } else {
+                        kind
+                    };
+                    let affected_rows = match kind {
+                        Insert | InsertMany | Upsert | UpsertMany | Update | Delete => {
+                            Some(usize::MAX)
+                        }
+                        DefineType | CreateTable | Table | CreateIndex | CreateReference
+                        | DropReference | Migration | Explain | ExplainAnalyze | Query | Expect => {
+                            None
+                        }
+                    };
+                    StatementSummary {
+                        index,
+                        kind,
+                        affected_rows,
+                    }
+                })
+                .collect();
+            validate_summaries(&summaries).unwrap();
+            let encoded = serde_json::to_vec(&summaries).unwrap();
+            assert!(
+                encoded.len() < MAX_STATEMENT_SUMMARY_BYTES,
+                "{kind:?}: {} bytes",
+                encoded.len()
+            );
         }
     }
-    serde_json::to_writer(Budget(0), summaries)
-        .map_err(|_| Error::new("E_LIMIT", "statement summaries exceed the 512 KiB budget"))
 }

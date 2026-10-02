@@ -6,6 +6,10 @@
 
 #441: Fresh single-statement execution omits `statements` (an empty Rust Vec); multi-statement and guarded scripts retain summaries. Rows, returning, affected_rows and error statement_index are unchanged. Read top-level affected_rows rather than assuming statements[0] exists. Existing receipts replay their complete saved output and may retain one entry; restart and backup/restore do not rewrite it. Public fields, protocol and storage codecs remain unchanged, with no database upgrade required. Other budget/trace evaluations remain pending.
 
+摘要结构与 4,096 数量上限已蕴含小于 512 KiB 的 JSON 大小，因此开发版移除 validate_summaries 的重复编码遍历。保留结构校验、公开 MAX_STATEMENT_SUMMARY_BYTES、agent max_summary_bytes 和完整回执容量检查，不删除 API 或重写历史回执。迁移预检预算与轨迹仍待评估。
+
+Fixed summary fields and the 4,096-entry limit already imply JSON smaller than 512 KiB, so the development version removes duplicate encoding in validate_summaries. Structural validation, public MAX_STATEMENT_SUMMARY_BYTES, agent max_summary_bytes and complete receipt-capacity checks remain. No API removal or historical receipt rewrite occurs. Migration-preflight budgets/traces remain under evaluation.
+
 ## v0.13.1 补丁兼容性 / Patch compatibility
 
 v0.13.1 修复启用增量备份时 migration 提交的行数据恢复问题（#433）。三个 crate 同步为 0.13.1；存储、备份、协议与公开 API 保持 v0.13.0 兼容，无需额外 storage upgrade 或应用 migration。修复不追溯改写旧 journal；仍保有完整源库时可用新版本建立 checkpoint，再验证恢复结果。
