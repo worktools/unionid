@@ -18,6 +18,46 @@ fn rejected(engine: &mut Engine, source: &str, kind: ConstraintKind) {
 }
 
 #[test]
+fn upgraded_backup_without_references_restores_logical_state_without_storage_upgrade() {
+    for previously_declared in [false, true] {
+        let dir = TempDir::new();
+        let path = dir.0.join("upgraded.redb");
+        let archive = dir.0.join("upgraded.backup.json");
+        let restored = dir.0.join("restored.redb");
+        let schema;
+        {
+            let mut engine = Engine::open_redb(&path).unwrap();
+            engine.upgrade_storage(12).unwrap();
+            ok(&mut engine, SCHEMA);
+            ok(&mut engine, "insert parents {id: 7}");
+            ok(&mut engine, "insert children {id: 1, parent: Some(7)}");
+            if previously_declared {
+                ok(&mut engine, REFERENCE);
+                ok(
+                    &mut engine,
+                    "drop reference children (parent) references parents (id)",
+                );
+            }
+            schema = engine.schema_info();
+            engine.check_integrity().unwrap();
+        }
+        // An explicit storage upgrade selects the matching archive contract,
+        // including after dropping the final reference. Restore reconstructs
+        // logical state, not the source's unused physical capabilities.
+        assert_eq!(backup::create(&path, &archive).unwrap().format_version, 7);
+        backup::restore(&archive, &restored).unwrap();
+        let mut engine = Engine::open_redb(&restored).unwrap();
+        assert_eq!(engine.introspection().storage_versions.unwrap().format, 10);
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(engine.execute("from parents").rows.len(), 1);
+        assert_eq!(engine.execute("from children").rows.len(), 1);
+        // With no declared constraint, an orphan insert remains legal.
+        ok(&mut engine, "insert children {id: 2, parent: Some(99)}");
+        engine.check_integrity().unwrap();
+    }
+}
+
+#[test]
 fn explicit_upgrade_preserves_incremental_reference_writes_across_restart_and_restore() {
     let dir = TempDir::new();
     let path = dir.0.join("references.redb");
