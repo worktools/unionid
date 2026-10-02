@@ -319,12 +319,17 @@ enum Command {
     },
     /// Format a script using the canonical semicolon-free style.
     Fmt {
-        /// Read source from a file instead of stdin.
+        /// Read source from a file; may be repeated or combined with positional files.
         #[arg(short, long)]
-        file: Option<PathBuf>,
-        /// Exit nonzero when the input differs from canonical formatting.
-        #[arg(long)]
+        file: Vec<PathBuf>,
+        /// Files to check or rewrite; one file without flags prints to stdout.
+        files: Vec<PathBuf>,
+        /// Exit nonzero when any input differs from canonical formatting.
+        #[arg(long, conflicts_with = "write")]
         check: bool,
+        /// Replace files with canonical source after validating the whole batch.
+        #[arg(long)]
+        write: bool,
     },
     /// Verify redb and unionid logical storage integrity.
     Check {
@@ -537,6 +542,13 @@ enum MigrationCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SchemaPrintFormat {
+    Table,
+    Json,
+    Source,
+}
+
 #[derive(Debug, Subcommand)]
 enum SchemaCommand {
     /// Validate a schema file and print its normalized form.
@@ -551,7 +563,7 @@ enum SchemaCommand {
         #[arg(long)]
         db: PathBuf,
         #[arg(long, value_enum, default_value = "table")]
-        format: Format,
+        format: SchemaPrintFormat,
     },
     /// Generate Rust type bindings from a schema file or database.
     Rust {
@@ -767,6 +779,13 @@ impl Args {
                 query_response: false,
                 integrity: false,
             },
+            Command::Schema {
+                command: SchemaCommand::Print { format, .. },
+            } => ErrorOutput {
+                json: matches!(format, SchemaPrintFormat::Json),
+                query_response: false,
+                integrity: false,
+            },
             Command::Version { format }
             | Command::Parquet { format, .. }
             | Command::Doctor { format, .. }
@@ -782,7 +801,7 @@ impl Args {
                     | ReceiptCommand::Retain { format, .. },
             }
             | Command::Schema {
-                command: SchemaCommand::Check { format, .. } | SchemaCommand::Print { format, .. },
+                command: SchemaCommand::Check { format, .. },
             }
             | Command::Migration {
                 command:
@@ -1148,15 +1167,14 @@ fn run(args: Args) -> Result<(), String> {
                 cli::run_cli_with_options(&addr, source, matches!(format, Format::Json), history)
             }
         }
-        Command::Fmt { file, check } => {
-            let source = match file {
-                Some(path) => cli::read_source(
-                    std::fs::File::open(&path)
-                        .map_err(|error| format!("open '{}': {error}", path.display()))?,
-                )?,
-                None => cli::read_source(std::io::stdin().lock())?,
-            };
-            cli::format_source(&source, check)
+        Command::Fmt {
+            mut file,
+            files,
+            check,
+            write,
+        } => {
+            file.extend(files);
+            cli::format_files::run(file, check, write)
         }
         Command::Check { db, format } => cli::check_redb(db, matches!(format, Format::Json)),
         Command::Compact { db, format } => {
@@ -1252,9 +1270,11 @@ fn run(args: Args) -> Result<(), String> {
             SchemaCommand::Check { file, format } => {
                 cli::schema_check(file, matches!(format, Format::Json))
             }
-            SchemaCommand::Print { db, format } => {
-                cli::schema_print(db, matches!(format, Format::Json))
-            }
+            SchemaCommand::Print { db, format } => match format {
+                SchemaPrintFormat::Source => cli::schema_print_source(db),
+                SchemaPrintFormat::Table => cli::schema_print(db, false),
+                SchemaPrintFormat::Json => cli::schema_print(db, true),
+            },
             SchemaCommand::Rust { file, db, output } => {
                 cli::schema_rust(file.as_deref(), db, output.as_deref())
             }
