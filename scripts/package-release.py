@@ -90,9 +90,8 @@ def main():
         raise RuntimeError("release contract Rust version does not match Cargo.toml")
     if contract["redb_version"] != redb:
         raise RuntimeError("release contract redb version does not match Cargo.toml")
-    release_notes = ROOT / "docs" / f"RELEASE-v{version}.md"
-    if not release_notes.is_file():
-        raise RuntimeError(f"version-specific release notes not found: {release_notes}")
+    # Detailed user guides live only in Discussions, linked by the release page.
+    release_notes = f"https://github.com/worktools/unionid/releases/tag/v{version}"
     source_commit = command("git", "rev-parse", "HEAD").lower()
     source_dirty = bool(command("git", "status", "--short", "--untracked-files=normal"))
     if source_dirty and not args.allow_dirty:
@@ -146,6 +145,10 @@ def main():
             (ROOT / "scripts/validate-local-data.py").read_bytes(),
             0o755,
         ),
+        f"{package}/tutorial/validate-deployment-safety.py": (
+            (ROOT / "scripts/validate-deployment-safety.py").read_bytes(),
+            0o755,
+        ),
         f"{package}/tutorial/validate-atomic-writes.py": (
             (ROOT / "scripts/validate-atomic-writes.py").read_bytes(),
             0o755,
@@ -170,7 +173,7 @@ def main():
         "name": "unionid",
         "version": version,
         "release_contract_schema": contract["contract_schema"],
-        "release_notes": f"docs/{release_notes.name}",
+        "release_notes": release_notes,
         "minimum_rust_version": minimum_rust,
         "source_commit": source_commit,
         "source_dirty": source_dirty,

@@ -110,7 +110,7 @@ def main():
             raise RuntimeError("RELEASE.json source commit is not canonical")
         if release["source_dirty"] is not False:
             raise RuntimeError("release archive was built from a dirty worktree")
-        expected_release_notes = f"docs/RELEASE-v{release['version']}.md"
+        expected_release_notes = f"https://github.com/worktools/unionid/releases/tag/v{release['version']}"
         if release["release_notes"] != expected_release_notes:
             raise RuntimeError("RELEASE.json does not select version-specific release notes")
         release_capabilities = {key: release.get(key) for key in capabilities}
@@ -145,7 +145,6 @@ def main():
             root / "docs" / "MIGRATIONS.md",
             root / "docs" / "PROTOCOL.md",
             root / "docs" / "UPGRADING.md",
-            root / release["release_notes"],
             root / "release" / "contract.json",
             root / "examples" / "tasks.unid",
             root / "examples" / "people.parquet",
@@ -164,6 +163,7 @@ def main():
             root / "tutorial" / "validate.py",
             root / "tutorial" / "validate-local-data.py",
             root / "tutorial" / "validate-atomic-writes.py",
+            root / "tutorial" / "validate-deployment-safety.py",
             root / "tutorial" / "01_setup.unid",
             root / "tutorial" / "04_reopen.unid",
         ]
@@ -222,6 +222,12 @@ def main():
         )
         if atomic_writes.returncode:
             raise RuntimeError(atomic_writes.stderr)
+        deployment_safety = subprocess.run(
+            ["python3", root / "tutorial" / "validate-deployment-safety.py", "--binary", binary],
+            text=True, capture_output=True,
+        )
+        if deployment_safety.returncode:
+            raise RuntimeError(deployment_safety.stderr)
         print(
             json.dumps(
                 {
@@ -232,6 +238,7 @@ def main():
                     "tutorial": json.loads(tutorial.stdout),
                     "local_data": json.loads(local_data.stdout),
                     "atomic_writes": json.loads(atomic_writes.stdout),
+                    "deployment_safety": json.loads(deployment_safety.stdout),
                 }
             )
         )
