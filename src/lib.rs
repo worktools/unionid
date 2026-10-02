@@ -116,7 +116,8 @@ pub use query::SetOperator;
 pub use query::{PageDirection, PageSpec};
 pub use query_contract::{
     QUERY_DESCRIPTION_VERSION, QueryCardinality, QueryDescription, QueryFieldDescription,
-    QueryOperation, QueryParameterDescription, QueryResultDescription,
+    QueryOperation, QueryParameterDescription, QueryReferenceCheck, QueryReferenceCheckKind,
+    QueryResultDescription,
 };
 pub use schema::{
     SchemaBuilder, SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation,

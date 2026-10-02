@@ -28,6 +28,9 @@ pub struct QueryDescription {
     pub parameters: Vec<QueryParameterDescription>,
     /// Typed fields and successful-execution row guarantee.
     pub result: QueryResultDescription,
+    /// Potential reference checks performed at execution, never evaluated here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_checks: Vec<QueryReferenceCheck>,
 }
 
 /// Prepared operation families supported by static query files.
@@ -42,6 +45,24 @@ pub enum QueryOperation {
     UpsertMany,
     Update,
     Delete,
+}
+
+/// A schema-bound check that a mutation may require at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryReferenceCheck {
+    pub kind: QueryReferenceCheckKind,
+    pub source_table_id: String,
+    pub source_table: String,
+    /// Reuse portable reference identity, paths, modes and pinned target key.
+    pub reference: crate::portable::ReferenceDescription,
+}
+
+/// Checks describe potential obligations, not a prediction that a write fails.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryReferenceCheckKind {
+    TargetExists,
+    Restrict,
 }
 
 /// One inferred external parameter.
@@ -155,12 +176,49 @@ fn describe_prepared(engine: &Engine, prepared: &PreparedQuery) -> Result<QueryD
         operation,
         canonical_source,
         parameters,
+        reference_checks: reference_checks(engine, &located.statement),
         result: QueryResultDescription {
             cardinality: result_cardinality(&located.statement, !fields.is_empty()),
             fields,
             affected_rows: !matches!(operation, QueryOperation::Read | QueryOperation::Explain),
         },
     })
+}
+
+fn reference_checks(engine: &Engine, statement: &Statement) -> Vec<QueryReferenceCheck> {
+    let (table, outgoing, incoming) =
+        match statement {
+            Statement::InsertParameter { table, .. }
+            | Statement::InsertManyParameter { table, .. } => (table.as_str(), true, false),
+            Statement::UpsertParameter { table, .. }
+            | Statement::UpsertManyParameter { table, .. } => (table.as_str(), true, true),
+            Statement::Update { target, .. } => (target.from.as_str(), true, true),
+            Statement::Delete { target, .. } => (target.from.as_str(), false, true),
+            _ => return Vec::new(),
+        };
+    let mut checks = Vec::new();
+    for (source_table_id, source_table, reference) in engine.reference_descriptions() {
+        for (included, kind) in [
+            (
+                outgoing && source_table == table,
+                QueryReferenceCheckKind::TargetExists,
+            ),
+            (
+                incoming && reference.target_table == table,
+                QueryReferenceCheckKind::Restrict,
+            ),
+        ] {
+            if included {
+                checks.push(QueryReferenceCheck {
+                    kind,
+                    source_table_id: source_table_id.clone(),
+                    source_table: source_table.clone(),
+                    reference: reference.clone(),
+                });
+            }
+        }
+    }
+    checks
 }
 
 fn operation(statement: &Statement) -> QueryOperation {

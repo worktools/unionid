@@ -565,3 +565,90 @@ fn database_generation_preserves_the_live_migration_identity() {
         serde_json::from_slice(&std::fs::read(json_output).unwrap()).unwrap();
     assert_eq!(described.schema, expected.into());
 }
+
+#[test]
+fn mutation_descriptions_show_reference_checks_without_executing_them() {
+    use unionid::QueryReferenceCheckKind::{Restrict, TargetExists};
+    let mut engine = Engine::memory();
+    assert!(engine.execute("struct Node {id: int, parent: Option<int>}\ntable nodes: Node {key id}\ncreate reference nodes (parent) references nodes (id)\ninsert nodes {id: 1, parent: Some(1)}").ok);
+    let schema = engine.schema_info();
+    for (source, expected) in [
+        ("insert nodes $row", vec![TargetExists]),
+        ("insert many nodes $rows", vec![TargetExists]),
+        ("upsert nodes $row", vec![TargetExists, Restrict]),
+        ("upsert many nodes $rows", vec![TargetExists, Restrict]),
+        (
+            "update nodes | set parent = None",
+            vec![TargetExists, Restrict],
+        ),
+        ("delete nodes", vec![Restrict]),
+        ("from nodes", vec![]),
+        ("explain from nodes", vec![]),
+    ] {
+        let description = engine.describe_query(source).unwrap();
+        assert_eq!(
+            description
+                .reference_checks
+                .iter()
+                .map(|check| check.kind)
+                .collect::<Vec<_>>(),
+            expected,
+            "{source}"
+        );
+        for check in &description.reference_checks {
+            assert_eq!(check.source_table, "nodes");
+            assert_eq!(check.reference.target_table, "nodes");
+            assert_eq!(check.reference.components[0].source.field, "parent");
+            assert_eq!(check.reference.components[0].target.field, "id");
+            assert_eq!(
+                check.reference.components[0].mode,
+                unionid::portable::ReferenceMatchMode::Optional
+            );
+            assert_eq!(check.source_table_id, check.reference.target_table_id);
+        }
+        let json = serde_json::to_value(&description).unwrap();
+        assert_eq!(json.get("reference_checks").is_some(), !expected.is_empty());
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("reference_checks");
+        assert!(
+            serde_json::from_value::<QueryDescription>(legacy)
+                .unwrap()
+                .reference_checks
+                .is_empty()
+        );
+    }
+    assert_eq!(engine.schema_info(), schema);
+    assert_eq!(engine.execute("from nodes").rows.len(), 1);
+}
+
+#[test]
+fn reference_preflight_distinguishes_source_and_target_tables() {
+    use unionid::QueryReferenceCheckKind::{Restrict, TargetExists};
+    let schema = include_str!("../query-macro/tests/references.unid");
+    for (query, expected) in [
+        ("insert sessions $session", vec![TargetExists]),
+        ("delete accounts", vec![Restrict]),
+        ("update accounts | set id = $id", vec![Restrict]),
+        ("insert accounts $account", vec![]),
+        ("delete sessions", vec![]),
+    ] {
+        let description = unionid::query_contract::describe(schema, query).unwrap();
+        assert_eq!(
+            description
+                .reference_checks
+                .iter()
+                .map(|check| check.kind)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for check in description.reference_checks {
+            assert_eq!(check.source_table, "sessions");
+            assert_eq!(check.reference.target_table, "accounts");
+            assert_ne!(check.source_table_id, check.reference.target_table_id);
+            assert!(matches!(
+                check.reference.target,
+                unionid::portable::ReferenceKeyDescription::UniqueIndex { .. }
+            ));
+        }
+    }
+}

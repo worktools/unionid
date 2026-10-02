@@ -5,6 +5,7 @@
 //! validation delegates to the same catalog coercion used by query binding.
 
 mod references;
+pub(crate) use references::describe as describe_references;
 
 use std::collections::{BTreeMap, BTreeSet};
 
