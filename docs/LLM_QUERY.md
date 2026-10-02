@@ -100,6 +100,38 @@ renaming a referenced field keeps the index through its stable field path. `expl
 partial index only when the query filters mechanically imply its predicate and then reports
 `index_predicate` and `predicate_proven`.
 
+## Typed references (v0.14 development, not published v0.13)
+
+Declare existence constraints separately from indexes:
+
+```text
+create reference order_lines (order_id) references orders (id)
+create reference tasks (assignee) references users (id)
+```
+
+The target must be a primary key or unconditional unique index over the same ordered
+paths. Partial unique indexes cannot serve as targets. Paths may select nested records;
+components may be full ADTs. Types must match exactly, or the source may add one outer
+`Option<T>` around target `T`. In that Optional mode, `None` skips the relationship and
+`Some(value)` requires a target. If both sides are `Option<T>`, equality is Exact:
+`None` also needs a target `None`. Any absent Optional component skips an entire composite
+relationship; declare a separate tenant reference if tenant existence must always hold.
+
+Missing targets reject writes with `E_CONSTRAINT` / `reference_missing`. Referenced
+parents cannot be deleted or have their target key changed: `reference_restricted`.
+Remove or reassign children first. There is no cascade or automatic set-none. Checks
+use the complete batch candidate but run after each statement: insert parents before
+children in separate statements; one failing statement rolls back the whole request.
+`drop reference` repeats the complete declaration shape. Migrations use `add reference`
+and `drop reference`, and adding a constraint checks existing rows for orphans.
+
+Memory mode needs no upgrade. With the current development binary, existing/new redb
+files require explicit `unionid upgrade --db app.redb --target 12` before adding references
+(target 13 for an already journal-enabled format 11). Ordinary writes do not upgrade.
+Schema identity includes the constraints; regenerating Rust query bindings is required
+when reference declarations change. The bundled `typed-references` example runs in memory;
+see `unionid docs show language` and `unionid docs show upgrading` for the full contract.
+
 ## Query pipeline
 
 A query begins with `from table`. Stages execute in source order:

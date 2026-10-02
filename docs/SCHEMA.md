@@ -8,7 +8,7 @@
 
 ## 1. Catalog 身份
 
-每个数据库有一个单调递增、从 1 开始的 `u64` catalog ID 空间。类型、字段、sum 变体、表和索引都从同一空间分配 ID。ID 永不复用，且不是用户数据的 RowId。
+每个数据库有一个单调递增、从 1 开始的 `u64` catalog ID 空间。类型、字段、sum 变体、表、索引和引用约束都从同一空间分配 ID。ID 永不复用，且不是用户数据的 RowId。
 
 RowId 属于单张表的内部行身份，使用独立、从 0 开始的单调 `u64` 空间。它不出现在用户 record 中，也不等同于业务主键；移动内存位置或未来 migration 改写值时保留 RowId。删除 RowId 后不复用，索引始终引用该稳定身份。每表的下一分配值与 catalog definition 一同持久化，但不属于应用 schema hash。
 
@@ -19,6 +19,7 @@ RowId 属于单张表的内部行身份，使用独立、从 0 开始的单调 `
 | record 字段 | 所属 record | field ID 路径 |
 | sum 变体 | 所属 sum type | variant ID |
 | 索引 | 所属表 | index ID、table ID、field ID 路径、ordinary/unique kind 与可选 normalized partial predicate |
+| 引用约束（v0.14 开发中） | 源表 | reference ID、源/目标 table ID、成对 field ID 路径、固定目标 key 与 Exact/Optional mode |
 
 命名类型采用名义类型：形状相同但 type ID 不同的两个类型不能互换。字段与变体的运行时含义同样以 ID 为准；名称用于源码、诊断和显示。表引用命名 record 的 type ID，多个表可以安全共享同一个 row type。索引绑定 table ID 和逐层 field ID，不把点分隔名称当作长期身份。
 
@@ -32,9 +33,9 @@ Ordinary unique indexes compare complete typed values, including `None`; a singl
 
 ## 2. Revision 与 hash
 
-空数据库的 schema revision 是 0。一次成功的原子脚本只要包含 type、table 或 index 变更，就在提交时把 revision 增加 1；同一脚本包含多个 schema 语句仍只产生一个 revision。纯 insert 或查询不改变 revision，解析、类型检查、约束或持久化失败也不发布新 revision。
+空数据库的 schema revision 是 0。一次成功的原子脚本只要包含 type、table、index 或 reference 变更，就在提交时把 revision 增加 1；同一脚本包含多个 schema 语句仍只产生一个 revision。纯 insert 或查询不改变 revision，解析、类型检查、约束或持久化失败也不发布新 revision。
 
-`schema.hash` 是 `sha256:<hex>`。当前 hash manifest 的格式版本是 1，内容按稳定 ID 排序，包含类型及其完整结构、表定义和索引定义（包括 unique kind 与 partial predicate 的规范化 atom），不包含行、索引 posting、提交 sequence 或 schema revision。名称和对外可见的字段顺序属于 schema，因此会影响 hash；稳定 ID保证这种变化不会改变旧值的含义。partial predicate 引用 stable field path；drop/change 被引用字段前必须先 drop 索引，改变字段类型要求显式重建 predicate index。
+`schema.hash` 是 `sha256:<hex>`。hash manifest 无 partial index/reference 时使用版本 1，有 partial predicate 时使用版本 2，有引用约束时使用版本 3。内容按稳定 ID 排序，包含类型及其完整结构、表定义、索引定义（包括 unique kind 与 partial predicate 的规范化 atom）和引用定义（固定目标 key、路径与 mode），不包含行、索引 posting、提交 sequence 或 schema revision。名称和对外可见的字段顺序属于 schema，因此会影响 hash；稳定 ID保证这种变化不会改变旧值的含义。partial predicate 引用 stable field path；drop/change 被引用字段前必须先 drop 索引，改变字段类型要求显式重建 predicate index。
 
 revision 用于同一数据库内的快速失效检查；hash 用于备份、导入、migration plan 和不同进程之间的精确 schema 对照。两者都不是 migration ID。客户端不得假设两个独立创建但文本相同的数据库具有可互换的 catalog ID。
 
@@ -148,3 +149,5 @@ In development toward v0.13, runnable `migration diff` output is canonical immed
 Use `schema print --format source` to save only canonical declarations. Default text output keeps its revision/hash summary on stderr; JSON remains an object containing schema information and canonical source. Formatting does not change schema identity.
 
 `fmt` retains stdin and single-file stdout support and accepts repeated `-f` or positional files. Multiple files require either `--check` or `--write`, never both. Check reports noncanonical paths without writing. Write parses the complete batch first, then replaces each changed file via a same-directory temporary file while preserving ordinary permissions. It rejects symlinks, directories, and read-only files. Invalid syntax changes no file; later I/O failures do not provide cross-file rollback. Never reformat already-applied migrations: their immutable checksum remains authoritative. Restrict migration formatting to new, unapplied files.
+
+Reference constraints share the catalog stable-ID allocator and participate in schema revision/hash. The hash manifest uses version 1 without predicates/references, version 2 with partial predicates, and version 3 with references. Reference identity pins source/target tables, paired field-ID paths, target key and Exact/Optional modes; derived postings and business rows are excluded. This is separate from storage and portable-description versions.

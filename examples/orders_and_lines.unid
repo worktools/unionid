@@ -1,4 +1,4 @@
-# Bounded order/line lookup and correlated exists over an indexed child table.
+# v0.14 development: typed references with bounded order/line lookup and exists.
 struct Order {
   id: int
   customer: text
@@ -20,6 +20,8 @@ table order_lines: Line {
 }
 
 create index order_lines (order_id)
+
+create reference order_lines (order_id) references orders (id)
 
 insert orders {
   customer: "ada"

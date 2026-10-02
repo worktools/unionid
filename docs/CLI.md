@@ -68,9 +68,9 @@ The catalog includes user-facing material suitable for shipping with the binary.
 
 ## LLM 查询上下文 / Query context for LLMs
 
-`docs query` 把与当前二进制版本匹配的紧凑查询语言参考和四份可运行示例直接写到 stdout，不访问网络，也不打开数据库。它是面向生成工具的专用 bundle；人阅读完整语法时可用 `docs show query`。默认 Markdown 带稳定 front matter，可直接加入 LLM prompt；`--format json` 返回 version 1 object，将 `reference` 与 `examples` 分开：
+`docs query` 把与当前二进制版本匹配的紧凑查询语言参考和可运行示例直接写到 stdout，不访问网络，也不打开数据库。它是面向生成工具的专用 bundle；人阅读完整语法时可用 `docs show query`。默认 Markdown 带稳定 front matter，可直接加入 LLM prompt；`--format json` 返回 version 1 object，将 `reference` 与 `examples` 分开：
 
-`docs query` writes a compact query-language reference and four runnable examples matched to the current binary directly to stdout. It is the dedicated bundle for generation tools; human readers can use `docs show query` for the full syntax. It does not use the network or open a database. The default Markdown has stable front matter and can be placed directly in an LLM prompt. `--format json` emits a version-1 object with separate `reference` and `examples` fields:
+`docs query` writes a compact query-language reference and runnable examples matched to the current binary directly to stdout. It is the dedicated bundle for generation tools; human readers can use `docs show query` for the full syntax. It does not use the network or open a database. The default Markdown has stable front matter and can be placed directly in an LLM prompt. `--format json` emits a version-1 object with separate `reference` and `examples` fields:
 
 ```bash
 unionid docs query > unionid-query-context.md

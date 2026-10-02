@@ -297,6 +297,11 @@ pub struct LlmQueryDocs {
 
 const EXAMPLES: &[LlmQueryExample] = &[
     LlmQueryExample {
+        name: "typed-references",
+        description: "Enforce order/line target existence and query indexed related rows (v0.14 development).",
+        source: include_str!("../examples/orders_and_lines.unid"),
+    },
+    LlmQueryExample {
         name: "adt-query",
         description: "Define, write, match, derive, sort, and project an enum-backed row.",
         source: include_str!("../examples/llm/adt-query.unid"),
