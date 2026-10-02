@@ -40,11 +40,13 @@ use crate::row_source::{
 };
 use crate::{ExecutionObservation, RowId};
 
+mod layout;
+use layout::StorageLayout;
+
 mod posting;
 use posting::PostingDefinition;
 
 const LEGACY_STORAGE_FORMAT_VERSION: u32 = 1;
-const RECEIPT_STORAGE_FORMAT_VERSION: u32 = 2;
 const CURSOR_STORAGE_FORMAT_VERSION: u32 = 3;
 const SCALAR_STORAGE_FORMAT_VERSION: u32 = 4;
 const LEGACY_BOUNDED_STORAGE_FORMAT_VERSION: u32 = 5;
@@ -1185,230 +1187,6 @@ impl DurableHead {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StorageLayout {
-    format: u32,
-    catalog: u16,
-    value: u16,
-    index: u16,
-    migration: u16,
-    receipt: u16,
-    maintenance: u16,
-    journal: u16,
-}
-
-impl StorageLayout {
-    const fn legacy(format: u32) -> Self {
-        Self {
-            format,
-            catalog: CATALOG_CODEC_VERSION,
-            value: VALUE_CODEC_VERSION,
-            index: INDEX_KEY_VERSION,
-            migration: MIGRATION_CODEC_VERSION,
-            receipt: RECEIPT_CODEC_VERSION,
-            maintenance: 0,
-            journal: 0,
-        }
-    }
-
-    const fn production() -> Self {
-        Self {
-            format: PRODUCTION_STORAGE_FORMAT_VERSION,
-            catalog: PRODUCTION_CATALOG_CODEC_VERSION,
-            value: PRODUCTION_VALUE_CODEC_VERSION,
-            index: PRODUCTION_INDEX_KEY_VERSION,
-            migration: MIGRATION_CODEC_VERSION,
-            receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
-            maintenance: MAINTENANCE_CODEC_VERSION,
-            journal: 0,
-        }
-    }
-
-    const fn journal() -> Self {
-        Self {
-            format: JOURNAL_STORAGE_FORMAT_VERSION,
-            catalog: PRODUCTION_CATALOG_CODEC_VERSION,
-            value: PRODUCTION_VALUE_CODEC_VERSION,
-            index: PRODUCTION_INDEX_KEY_VERSION,
-            migration: MIGRATION_CODEC_VERSION,
-            receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
-            maintenance: MAINTENANCE_CODEC_VERSION,
-            journal: JOURNAL_CODEC_VERSION,
-        }
-    }
-
-    const fn map() -> Self {
-        Self {
-            format: MAP_STORAGE_FORMAT_VERSION,
-            catalog: MAP_CATALOG_CODEC_VERSION,
-            value: MAP_VALUE_CODEC_VERSION,
-            index: MAP_INDEX_KEY_VERSION,
-            migration: MIGRATION_CODEC_VERSION,
-            receipt: MAP_RECEIPT_CODEC_VERSION,
-            maintenance: MAINTENANCE_CODEC_VERSION,
-            journal: 0,
-        }
-    }
-
-    const fn map_journal() -> Self {
-        Self {
-            format: MAP_JOURNAL_STORAGE_FORMAT_VERSION,
-            journal: JOURNAL_CODEC_VERSION,
-            ..Self::map()
-        }
-    }
-
-    const fn partial() -> Self {
-        Self {
-            format: PARTIAL_STORAGE_FORMAT_VERSION,
-            catalog: PARTIAL_CATALOG_CODEC_VERSION,
-            value: MAP_VALUE_CODEC_VERSION,
-            index: MAP_INDEX_KEY_VERSION,
-            migration: MIGRATION_CODEC_VERSION,
-            receipt: MAP_RECEIPT_CODEC_VERSION,
-            maintenance: MAINTENANCE_CODEC_VERSION,
-            journal: 0,
-        }
-    }
-
-    const fn partial_journal() -> Self {
-        Self {
-            format: PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION,
-            journal: JOURNAL_CODEC_VERSION,
-            ..Self::partial()
-        }
-    }
-
-    const fn references() -> Self {
-        Self {
-            format: REFERENCE_STORAGE_FORMAT_VERSION,
-            catalog: REFERENCE_CATALOG_CODEC_VERSION,
-            ..Self::partial()
-        }
-    }
-
-    const fn references_journal() -> Self {
-        Self {
-            format: REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION,
-            journal: JOURNAL_CODEC_VERSION,
-            ..Self::references()
-        }
-    }
-
-    const fn supports_references(self) -> bool {
-        matches!(
-            self.format,
-            REFERENCE_STORAGE_FORMAT_VERSION | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
-        )
-    }
-
-    const fn scalar() -> Self {
-        Self {
-            format: SCALAR_STORAGE_FORMAT_VERSION,
-            catalog: SCALAR_CATALOG_CODEC_VERSION,
-            value: PRODUCTION_VALUE_CODEC_VERSION,
-            index: SCALAR_INDEX_KEY_VERSION,
-            migration: MIGRATION_CODEC_VERSION,
-            receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
-            maintenance: 0,
-            journal: 0,
-        }
-    }
-
-    const fn for_format(format: u32) -> Self {
-        if format == REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION {
-            Self::references_journal()
-        } else if format == REFERENCE_STORAGE_FORMAT_VERSION {
-            Self::references()
-        } else if format == PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION {
-            Self::partial_journal()
-        } else if format == PARTIAL_STORAGE_FORMAT_VERSION {
-            Self::partial()
-        } else if format == MAP_JOURNAL_STORAGE_FORMAT_VERSION {
-            Self::map_journal()
-        } else if format == MAP_STORAGE_FORMAT_VERSION {
-            Self::map()
-        } else if format == JOURNAL_STORAGE_FORMAT_VERSION {
-            Self::journal()
-        } else if format == PRODUCTION_STORAGE_FORMAT_VERSION {
-            Self::production()
-        } else if format == LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
-            Self {
-                format,
-                catalog: PRODUCTION_CATALOG_CODEC_VERSION,
-                value: PRODUCTION_VALUE_CODEC_VERSION,
-                index: PRODUCTION_INDEX_KEY_VERSION,
-                migration: MIGRATION_CODEC_VERSION,
-                receipt: PRODUCTION_RECEIPT_CODEC_VERSION,
-                maintenance: 0,
-                journal: 0,
-            }
-        } else if format == SCALAR_STORAGE_FORMAT_VERSION {
-            Self::scalar()
-        } else {
-            Self::legacy(format)
-        }
-    }
-
-    const fn supports_production_scalars(self) -> bool {
-        self.format >= SCALAR_STORAGE_FORMAT_VERSION
-    }
-
-    const fn supports_maps(self) -> bool {
-        matches!(
-            self.format,
-            MAP_STORAGE_FORMAT_VERSION
-                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
-                | REFERENCE_STORAGE_FORMAT_VERSION
-                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
-        )
-    }
-
-    const fn supports_partial_indexes(self) -> bool {
-        matches!(
-            self.format,
-            PARTIAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
-                | REFERENCE_STORAGE_FORMAT_VERSION
-                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
-        )
-    }
-
-    /// Formats that carry the generation envelope. Both backup journaling and
-    /// recoverable migrations require one of these exact layouts.
-    const fn supports_generation_envelope(self) -> bool {
-        matches!(
-            self.format,
-            PRODUCTION_STORAGE_FORMAT_VERSION
-                | JOURNAL_STORAGE_FORMAT_VERSION
-                | MAP_STORAGE_FORMAT_VERSION
-                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
-                | REFERENCE_STORAGE_FORMAT_VERSION
-                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
-        )
-    }
-
-    const fn backup_format(self) -> u32 {
-        if self.supports_references() {
-            crate::backup::REFERENCE_BACKUP_FORMAT_VERSION
-        } else if self.supports_partial_indexes() {
-            crate::backup::PARTIAL_BACKUP_FORMAT_VERSION
-        } else if self.supports_maps() {
-            crate::backup::MAP_BACKUP_FORMAT_VERSION
-        } else {
-            crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION
-        }
-    }
-
-    const fn supports_journal(self) -> bool {
-        self.journal != 0
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum CommitFailure {
     Definite(Error),
@@ -1493,9 +1271,9 @@ impl RedbStore {
         } else {
             0
         };
-        let format = store.current_layout()?.format;
+        let layout = store.current_layout()?;
         store.compaction_token = store.read_compaction_token()?;
-        if format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
+        if layout.supports_bounded_reads() {
             let (loaded, receipts, committed, source, mut profile) = store.load_bounded_view()?;
             store.committed = committed;
             profile.total_micros = elapsed_micros(total_started);
@@ -1505,7 +1283,7 @@ impl RedbStore {
             return Ok((store, loaded, receipts, source, profile));
         }
         let (loaded, receipts, committed, mut profile) = store.load()?;
-        let needs_cursor_upgrade = committed.layout.format < CURSOR_STORAGE_FORMAT_VERSION;
+        let needs_cursor_upgrade = !committed.layout.supports_cursor_identity();
         store.committed = DurableHead::from_prepared(&committed);
         if needs_cursor_upgrade {
             store.committed.layout = StorageLayout::legacy(CURSOR_STORAGE_FORMAT_VERSION);
@@ -1539,8 +1317,7 @@ impl RedbStore {
     }
 
     pub(crate) fn supports_bounded_row_mutation(&self) -> bool {
-        self.committed.layout.format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
-            && self.committed.catalog_canonical
+        self.committed.layout.supports_bounded_reads() && self.committed.catalog_canonical
     }
 
     pub(crate) fn compaction_fast_no_op(&self, database: &Database) -> Option<RedbCompaction> {
@@ -2215,15 +1992,12 @@ impl RedbStore {
         self.invalidate_compaction_proof()
             .map_err(CommitFailure::Definite)?;
         let previous_layout = self.committed.layout;
-        let layout = if previous_layout.supports_references() {
-            StorageLayout::references_journal()
-        } else if previous_layout.supports_partial_indexes() {
-            StorageLayout::partial_journal()
-        } else if previous_layout.supports_maps() {
-            StorageLayout::map_journal()
-        } else {
-            StorageLayout::journal()
-        };
+        let layout = previous_layout.with_journal().ok_or_else(|| {
+            CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "backup journaling requires storage format 6",
+            ))
+        })?;
         let state = JournalState {
             version: JOURNAL_CODEC_VERSION,
             chain_id: config.chain_id.clone(),
@@ -3439,7 +3213,12 @@ impl RedbStore {
                 changed: true,
             });
         }
-        self.committed.layout = StorageLayout::for_format(target);
+        self.committed.layout = StorageLayout::for_format(target).ok_or_else(|| {
+            CommitFailure::Definite(Error::new(
+                "E_STORAGE_UPGRADE",
+                format!("unsupported storage upgrade target {target}"),
+            ))
+        })?;
         if let Err(error) = self.commit(database, database, receipts) {
             self.committed.layout = previous;
             return Err(error);
@@ -3630,7 +3409,7 @@ impl RedbStore {
                 apply_set_delta(&mut indexes, &index_delta).map_err(CommitFailure::Definite)?;
             }
         }
-        if prepared.layout.format >= PRODUCTION_STORAGE_FORMAT_VERSION {
+        if prepared.layout.supports_generation_envelope() {
             transaction
                 .open_table(MAINTENANCE_GENERATION)
                 .map_err(|error| {
@@ -3710,7 +3489,7 @@ impl RedbStore {
             }
         })?;
         let backend_micros = elapsed_micros(backend_started);
-        if self.committed.layout.format >= LEGACY_BOUNDED_STORAGE_FORMAT_VERSION {
+        if self.committed.layout.supports_bounded_reads() {
             let logical_started = Instant::now();
             let (database, receipts, committed, source, _) = self.load_bounded_view()?;
             drop(source);
@@ -4051,18 +3830,7 @@ impl RedbStore {
             read_meta(&table)?
         };
         profile.meta_micros = elapsed_micros(meta_started);
-        if !matches!(
-            layout.format,
-            LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
-                | PRODUCTION_STORAGE_FORMAT_VERSION
-                | JOURNAL_STORAGE_FORMAT_VERSION
-                | MAP_STORAGE_FORMAT_VERSION
-                | MAP_JOURNAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_STORAGE_FORMAT_VERSION
-                | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
-                | REFERENCE_STORAGE_FORMAT_VERSION
-                | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
-        ) {
+        if !layout.supports_bounded_reads() {
             return Err(Error::new(
                 "E_STORAGE",
                 "bounded reads require storage format 5 through 13",
@@ -4447,7 +4215,7 @@ struct PreparedState {
 
 impl PreparedState {
     fn new(database: &Database, receipts: &ReceiptMap, layout: StorageLayout) -> Result<Self> {
-        let generation = if layout.format >= PRODUCTION_STORAGE_FORMAT_VERSION {
+        let generation = if layout.supports_generation_envelope() {
             GenerationState::initial()
         } else {
             GenerationState::legacy()
@@ -5320,7 +5088,7 @@ fn meta_entries(
         ),
         (CURSOR_SECRET_KEY, meta.cursor_secret.as_slice().to_vec()),
     ];
-    if layout.format >= PRODUCTION_STORAGE_FORMAT_VERSION {
+    if layout.supports_generation_envelope() {
         entries.extend([
             (
                 MAINTENANCE_CODEC_KEY,
@@ -5346,26 +5114,9 @@ fn read_meta(
     table: &impl ReadableTable<&'static str, &'static [u8]>,
 ) -> Result<(DurableMeta, StorageLayout, GenerationState)> {
     let format_version = u32::from_be_bytes(read_fixed::<4>(table, FORMAT_KEY)?);
-    if !matches!(
-        format_version,
-        LEGACY_STORAGE_FORMAT_VERSION
-            | RECEIPT_STORAGE_FORMAT_VERSION
-            | CURSOR_STORAGE_FORMAT_VERSION
-            | SCALAR_STORAGE_FORMAT_VERSION
-            | LEGACY_BOUNDED_STORAGE_FORMAT_VERSION
-            | PRODUCTION_STORAGE_FORMAT_VERSION
-            | JOURNAL_STORAGE_FORMAT_VERSION
-            | MAP_STORAGE_FORMAT_VERSION
-            | MAP_JOURNAL_STORAGE_FORMAT_VERSION
-            | PARTIAL_STORAGE_FORMAT_VERSION
-            | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
-            | REFERENCE_STORAGE_FORMAT_VERSION
-            | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
-    ) {
-        return Err(Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")));
-    }
+    let expected = StorageLayout::for_format(format_version)
+        .ok_or_else(|| Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")))?;
     let catalog_version = u16::from_be_bytes(read_fixed::<2>(table, CATALOG_CODEC_KEY)?);
-    let expected = StorageLayout::for_format(format_version);
     if !matches!(
         catalog_version,
         LEGACY_CATALOG_CODEC_VERSION
@@ -5375,7 +5126,7 @@ fn read_meta(
             | MAP_CATALOG_CODEC_VERSION
             | PARTIAL_CATALOG_CODEC_VERSION
             | REFERENCE_CATALOG_CODEC_VERSION
-    ) || (format_version >= SCALAR_STORAGE_FORMAT_VERSION && catalog_version != expected.catalog)
+    ) || (expected.supports_production_scalars() && catalog_version != expected.catalog)
     {
         return Err(Error::new(
             "E_STORAGE",
@@ -5399,7 +5150,7 @@ fn read_meta(
     let migration =
         read_optional_version(table, MIGRATION_CODEC_KEY)?.unwrap_or(MIGRATION_CODEC_VERSION);
     let receipt = read_optional_version(table, RECEIPT_CODEC_KEY)?.unwrap_or(RECEIPT_CODEC_VERSION);
-    let maintenance = if format_version >= PRODUCTION_STORAGE_FORMAT_VERSION {
+    let maintenance = if expected.supports_generation_envelope() {
         u16::from_be_bytes(read_fixed::<2>(table, MAINTENANCE_CODEC_KEY)?)
     } else {
         0
@@ -5442,6 +5193,7 @@ fn read_meta(
         receipt,
         maintenance,
         journal,
+        ..expected
     };
     let sequence = u64::from_be_bytes(read_fixed::<8>(table, SEQUENCE_KEY)?);
     let schema_revision = u64::from_be_bytes(read_fixed::<8>(table, SCHEMA_REVISION_KEY)?);
@@ -5449,7 +5201,7 @@ fn read_meta(
     let hash = read_bytes(table, SCHEMA_HASH_KEY)?;
     let schema_hash = String::from_utf8(hash)
         .map_err(|error| Error::new("E_STORAGE", format!("schema hash is not UTF-8: {error}")))?;
-    let identity = if format_version >= CURSOR_STORAGE_FORMAT_VERSION {
+    let identity = if expected.supports_cursor_identity() {
         crate::pagination::CursorIdentity::from_bytes(
             read_fixed::<16>(table, CURSOR_INSTANCE_ID_KEY)?,
             read_fixed::<32>(table, CURSOR_SECRET_KEY)?,
@@ -5457,7 +5209,7 @@ fn read_meta(
     } else {
         crate::pagination::CursorIdentity::generate()?
     };
-    let generation = if format_version >= PRODUCTION_STORAGE_FORMAT_VERSION {
+    let generation = if expected.supports_generation_envelope() {
         let active = GenerationRef::from_encoded(u64::from_be_bytes(read_fixed::<8>(
             table,
             ACTIVE_GENERATION_KEY,
@@ -7473,8 +7225,18 @@ mod tests {
             "update entries | filter id == 1 | set label = \"two\"",
         );
         let receipts = ReceiptMap::new();
-        let previous = PreparedState::new(&previous, &receipts, StorageLayout::journal()).unwrap();
-        let next = PreparedState::new(&next, &receipts, StorageLayout::journal()).unwrap();
+        let previous = PreparedState::new(
+            &previous,
+            &receipts,
+            StorageLayout::production().with_journal().unwrap(),
+        )
+        .unwrap();
+        let next = PreparedState::new(
+            &next,
+            &receipts,
+            StorageLayout::production().with_journal().unwrap(),
+        )
+        .unwrap();
         let delta = PreparedDelta::between(&previous, &next);
         let baseline = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         let state = JournalState {
