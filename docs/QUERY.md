@@ -448,11 +448,11 @@ group day {
 
 unit 是 `year`、`month`、`week`、`day`、`hour`、`minute`、`second`、`millisecond` 或 `microsecond` 的 text literal。年/月取当地 Gregorian 起点，周从周一零点开始；无季度、DST、时区名称或 calendar 加减。offset 必须为 text literal `Z`/`z` 或 `±HH:MM`，HH 为 00–23，MM 为 00–59，未知偏移 `-00:00` 拒绝；`+00:00` 是已知 UTC。动态/非法 unit 和 offset 分别返回 `E_TEMPORAL_UNIT` / `E_TEMPORAL_OFFSET`，在扫描前检查。
 
-当地时间和最终 UTC 时间都必须在 0001–9999 年内，否则 `E_ARITH`，整请求回滚。例如最小 UTC timestamp 用 +08:00 截断 day 会产生范围外 UTC 起点，因此失败；microsecond 也仍检查当地范围。formatter、prepared、explain、update、migration using 和 Rust 宏复用同一规则；explain 不执行值计算。date/timestamp 输出及 native 参数要求 protocol v2。能力尚未发布。
+当地时间和最终 UTC 时间都必须在 0001–9999 年内，否则 `E_ARITH`，整请求回滚。例如最小 UTC timestamp 用 +08:00 截断 day 会产生范围外 UTC 起点，因此失败；microsecond 也仍检查当地范围。formatter、prepared、explain、update、migration using 和 Rust 宏复用同一规则；explain 不执行值计算。新结果可在赋值或 migration 目标上下文初始化同底层类型的 nominal 字段（如 `Moment = timestamp`），但 date/timestamp 不匹配仍在空表扫描前拒绝。date/timestamp 输出及 native 参数要求 protocol v2。能力尚未发布。
 
 Date_of takes timestamp (including named scalars) plus a literal fixed offset and returns its civil date. Timestamp_trunc takes timestamp, a literal unit and a literal offset: shift to local time, floor to the period boundary, then shift back to UTC. This floors even before the epoch, never truncates toward zero, and is idempotent for the same unit/offset. At +08:00, 2026-10-02T18:00:00Z has date 2026-10-03 and day bucket 2026-10-02T16:00:00Z. The explicit offset neither recovers the original input spelling nor reads system time zones.
 
-Units are year/month/week/day/hour/minute/second/millisecond/microsecond; year/month use local Gregorian boundaries and weeks start Monday at midnight. No quarter, zone names, DST or calendar addition/subtraction. Offsets are literal Z/z or signed HH:MM (hours 00–23, minutes 00–59); reject unknown -00:00 while +00:00 means UTC. Invalid/dynamic units or offsets fail before scanning with E_TEMPORAL_UNIT/E_TEMPORAL_OFFSET. Both the shifted local time and final UTC result must stay in years 0001–9999 or return E_ARITH and roll back the entire request. This applies even to microsecond truncation. Formatter/prepared/explain/update/migration/macros share the contract; explain does not evaluate values. Native outputs/parameters require protocol v2. These are unreleased v0.15 functions.
+Units are year/month/week/day/hour/minute/second/millisecond/microsecond; year/month use local Gregorian boundaries and weeks start Monday at midnight. No quarter, zone names, DST or calendar addition/subtraction. Offsets are literal Z/z or signed HH:MM (hours 00–23, minutes 00–59); reject unknown -00:00 while +00:00 means UTC. Invalid/dynamic units or offsets fail before scanning with E_TEMPORAL_UNIT/E_TEMPORAL_OFFSET. Both the shifted local time and final UTC result must stay in years 0001–9999 or return E_ARITH and roll back the entire request. This applies even to microsecond truncation. Formatter/prepared/explain/update/migration/macros share the contract; explain does not evaluate values. Fresh results can contextually initialize nominal assignment/migration targets of the same underlying type (such as `Moment = timestamp`); date/timestamp mismatches still fail before empty scans. Native outputs/parameters require protocol v2. These are unreleased v0.15 functions.
 
 ## Explain、实际剖析与类型化索引计划
 
@@ -962,6 +962,7 @@ take 20
 | `E_CAST_RANGE` | float_to_int 舍入结果超出 int 范围 |
 | `E_TEMPORAL_OFFSET` | 时间投影偏移不是合法固定偏移 literal |
 | `E_TEMPORAL_UNIT` | timestamp_trunc 单位不是合法 literal |
+| `E_TEXT_RANGE` | substring 位置为负、反向或超出 Unicode scalar 长度 / negative, reversed or out-of-range substring positions |
 | `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |

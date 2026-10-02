@@ -393,7 +393,9 @@ pub(crate) fn bind_scalar(
                 Some(&input),
                 reference_kind,
             )?;
-            temporal_result_type(name)
+            let result = temporal_result_type(name);
+            require_fresh_scalar_result(catalog, &result, expected)?;
+            return Ok(result);
         }
         ScalarExpression::Call {
             name, arguments, ..

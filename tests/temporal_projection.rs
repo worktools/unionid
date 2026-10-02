@@ -241,6 +241,73 @@ fn temporal_metadata_is_static_and_checked_before_empty_scans() {
 }
 
 #[test]
+fn fresh_temporal_projections_initialize_nominal_targets_without_erasing_type_checks() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute("type Moment = timestamp\ntype Day = date\nstruct NamedEvent {id: int, at: Moment, day: Day}\ntable events: NamedEvent {key id}").ok);
+    let update = "update events | set {at = timestamp_trunc at \"day\" \"+08:00\", day = date_of at \"+08:00\"}";
+    let prepared = engine
+        .prepare(update)
+        .expect("fresh temporal results initialize matching nominal fields");
+    assert!(engine.execute(&format!("explain {update}")).ok);
+    assert!(engine.execute_prepared(&prepared, BTreeMap::new()).ok);
+    for expression in [
+        "set at = date_of at \"Z\"",
+        "set day = timestamp_trunc at \"day\" \"Z\"",
+    ] {
+        let response = engine.execute(&format!("update events | {expression}"));
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "E_TYPE");
+    }
+    assert!(
+        engine
+            .execute("insert events {id: 1, at: @2026-10-02T18:00:00Z, day: @1970-01-01}")
+            .ok
+    );
+    let response = engine.execute_prepared(&prepared, BTreeMap::new());
+    assert!(response.ok, "{}", response.message);
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Moment(Timestamp);
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Day(Date);
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct NamedRow {
+        at: Moment,
+        day: Day,
+    }
+    assert_eq!(
+        engine
+            .execute("from events | select {at, day}")
+            .typed_rows::<NamedRow>()
+            .unwrap(),
+        vec![NamedRow {
+            at: Moment("2026-10-02T16:00:00Z".parse().unwrap()),
+            day: Day("2026-10-03".parse().unwrap()),
+        }]
+    );
+    assert!(engine.execute("struct Raw {id: int, at: timestamp}\ntable raw: Raw {key id}\ninsert raw {id: 1, at: @2026-10-02T18:00:00Z}").ok);
+    for source in [
+        "migration wrap_moment {change field Raw.at to Moment using old -> timestamp_trunc old \"day\" \"+08:00\"}",
+        "migration wrap_day {change field Raw.at to Day using old -> date_of old \"+08:00\"}",
+    ] {
+        let response = engine.execute(source);
+        assert!(response.ok, "{}", response.message);
+    }
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct FinalRow {
+        at: Day,
+    }
+    assert_eq!(
+        engine
+            .execute("from raw | select at")
+            .typed_rows::<FinalRow>()
+            .unwrap(),
+        vec![FinalRow {
+            at: Day("2026-10-03".parse().unwrap())
+        }]
+    );
+}
+
+#[test]
 fn nominal_timestamps_share_formatter_and_native_wire_contracts() {
     let mut engine = Engine::memory();
     assert!(engine.execute("type Moment = timestamp\nstruct NamedEvent {id: int, at: Moment}\ntable events: NamedEvent {key id}\ninsert events {id: 1, at: @2026-10-02T18:00:00Z}").ok);
