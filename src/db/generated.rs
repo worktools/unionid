@@ -32,6 +32,8 @@ impl Sequence {
 #[derive(Debug, Default, Clone)]
 pub(super) struct GenerationContext {
     sample: Option<Timestamp>,
+    #[cfg(test)]
+    sources: Option<std::sync::Arc<TestGenerationSources>>,
 }
 
 impl GenerationContext {
@@ -39,7 +41,18 @@ impl GenerationContext {
         if let Some(sample) = self.sample {
             return Ok(sample);
         }
-        let sample = timestamp_from_system_time(SystemTime::now())?;
+        #[cfg(test)]
+        let now = if let Some(sources) = &self.sources {
+            sources
+                .clock_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            sources.clock
+        } else {
+            SystemTime::now()
+        };
+        #[cfg(not(test))]
+        let now = SystemTime::now();
+        let sample = timestamp_from_system_time(now)?;
         self.sample = Some(sample);
         Ok(sample)
     }
@@ -47,9 +60,46 @@ impl GenerationContext {
     fn uuid(&mut self) -> Result<Uuid> {
         let timestamp = self.timestamp()?;
         let mut random = [0_u8; 10];
+        #[cfg(test)]
+        if let Some(sources) = &self.sources {
+            let call = sources
+                .entropy_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if sources.fail_entropy_at == Some(call) {
+                return Err(Error::new("E_GENERATION", "UUID entropy source failed"));
+            }
+            random.fill(call as u8);
+        } else {
+            getrandom::fill(&mut random)
+                .map_err(|_| Error::new("E_GENERATION", "UUID entropy source failed"))?;
+        }
+        #[cfg(not(test))]
         getrandom::fill(&mut random)
             .map_err(|_| Error::new("E_GENERATION", "UUID entropy source failed"))?;
         uuid_v7(timestamp, random)
+    }
+}
+
+/// Private fault injection; never compiled into the public/runtime API.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct TestGenerationSources {
+    pub clock: SystemTime,
+    pub clock_reads: std::sync::atomic::AtomicUsize,
+    pub entropy_reads: std::sync::atomic::AtomicUsize,
+    pub fail_entropy_at: Option<usize>,
+}
+
+#[cfg(test)]
+impl TestGenerationSources {
+    pub fn new(clock: SystemTime, fail_entropy_at: Option<usize>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            clock,
+            fail_entropy_at,
+            clock_reads: std::sync::atomic::AtomicUsize::new(0),
+            entropy_reads: std::sync::atomic::AtomicUsize::new(0),
+        })
     }
 }
 
@@ -94,6 +144,15 @@ fn uuid_v7(timestamp: Timestamp, random: [u8; 10]) -> Result<Uuid> {
 }
 
 impl Database {
+    #[cfg(test)]
+    pub(crate) fn set_generation_test_sources(
+        &mut self,
+        sources: std::sync::Arc<TestGenerationSources>,
+    ) {
+        self.generation_context.sources = Some(sources);
+        self.generation_context.sample = None;
+    }
+
     pub(super) fn create_sequence(&mut self, name: String, start: i64) -> Result<QueryResponse> {
         if self.objects.contains_key(&name)
             || self.catalog.types.contains_key(&name)
@@ -257,7 +316,7 @@ impl Database {
     }
 
     pub(crate) fn begin_generation_request(&mut self) {
-        self.generation_context = GenerationContext::default();
+        self.generation_context.sample = None;
     }
 
     pub(crate) fn generated_input_shape(

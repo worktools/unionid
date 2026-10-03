@@ -512,3 +512,105 @@ fn shadow_abort_and_reopen_resume_preserve_source_and_target_sequences() {
     assert!(next.rows[0]["public_id"].cmp_eq(&Value::Int(51)));
     engine.check_integrity().unwrap();
 }
+
+#[test]
+fn counter_only_effects_receipt_pruning_compaction_and_journal_restore_do_not_rewind() {
+    use unionid::IdempotencyPruneOptions;
+    use unionid::backup::incremental::{export, init, restore, verify};
+    let temp = common::TempDir::new();
+    let path = temp.0.join("counter-only.redb");
+    let archive = temp.0.join("archive");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    engine
+        .install_storage_capabilities(&["generated_defaults".into()], None)
+        .unwrap();
+    ok(&mut engine, SETUP);
+    drop(engine);
+    init(&path, &archive, Default::default()).unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let baseline = engine.backup_journal_status().unwrap().head_sequence;
+    let source = "insert items {owner: \"transient\"}\ndelete items | filter owner == \"transient\" | returning id";
+    let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let first = engine
+        .execute_idempotent_with_params("net-empty", digest, source, BTreeMap::new(), None)
+        .unwrap();
+    assert_eq!(id(&first.response, 0), 1);
+    let durable = engine.last_mutation_profile().unwrap().durable.unwrap();
+    assert_eq!(
+        durable.mode,
+        unionid::profile::DurableCommitMode::Incremental
+    );
+    assert_eq!(durable.row_changes, 0);
+    assert!(durable.catalog_changes > 0);
+    assert_eq!(durable.receipt_changes, 1);
+    assert!(ok(&mut engine, "from items").rows.is_empty());
+    let boundary = engine.backup_journal_status().unwrap().head_sequence;
+    drop(engine);
+    export(&path, &archive, Default::default()).unwrap();
+    verify(&archive, Default::default()).unwrap();
+    for (sequence, expected_id) in [(baseline, 1), (boundary, 2)] {
+        let target = temp.0.join(format!("restore-{sequence}.redb"));
+        restore(&archive, &target, sequence, Default::default()).unwrap();
+        let mut restored = Engine::open_redb(&target).unwrap();
+        assert!(ok(&mut restored, "from items").rows.is_empty());
+        if sequence == boundary {
+            let replay = restored
+                .execute_idempotent_with_params("net-empty", digest, source, BTreeMap::new(), None)
+                .unwrap();
+            assert!(replay.replayed);
+            assert_eq!(id(&replay.response, 0), 1);
+        }
+        assert_eq!(
+            id(
+                &ok(
+                    &mut restored,
+                    "insert items {owner: \"continued\"} | returning id"
+                ),
+                0
+            ),
+            expected_id
+        );
+        restored.check_integrity().unwrap();
+    }
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert_eq!(
+        id(
+            &ok(&mut engine, "insert items {owner: \"kept\"} | returning id"),
+            0
+        ),
+        2
+    );
+    let pruned = engine
+        .prune_idempotency_receipts(IdempotencyPruneOptions {
+            completed_before_unix_ms: None,
+            committed_through_sequence: Some(boundary),
+            max_receipts: 1,
+        })
+        .unwrap();
+    assert_eq!(pruned.selected_count, 1);
+    let reused = engine
+        .execute_idempotent_with_params("net-empty", digest, source, BTreeMap::new(), None)
+        .unwrap();
+    assert!(!reused.replayed);
+    assert_eq!(id(&reused.response, 0), 3);
+    engine.compact_storage().unwrap();
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.check_integrity().unwrap();
+    let replay = engine
+        .execute_idempotent_with_params("net-empty", digest, source, BTreeMap::new(), None)
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(id(&replay.response, 0), 3);
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                "insert items {owner: \"after compact\"} | returning id"
+            ),
+            0
+        ),
+        4
+    );
+}

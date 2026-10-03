@@ -5594,3 +5594,6 @@ mod tests {
         assert!(replay.replayed);
     }
 }
+
+#[cfg(test)]
+mod generation_tests;
