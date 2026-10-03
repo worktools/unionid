@@ -381,10 +381,46 @@ pub(crate) fn bind_scalar(
         }
         ScalarExpression::Call {
             name, arguments, ..
+        } if is_temporal_projection(name) => {
+            temporal_function_arguments(name, arguments)?;
+            let input = infer_scalar(catalog, scope, &arguments[0], reference_kind)?
+                .unwrap_or(ScalarType::Timestamp);
+            require_timestamp_input(catalog, &input)?;
+            bind_scalar(
+                catalog,
+                scope,
+                &mut arguments[0],
+                Some(&input),
+                reference_kind,
+            )?;
+            let result = temporal_result_type(name);
+            require_fresh_scalar_result(catalog, &result, expected)?;
+            return Ok(result);
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
+        } if name == "to_text" => {
+            let [argument] = arguments.as_mut_slice() else {
+                return Err(Error::new("E_TYPE", "to_text expects 1 argument"));
+            };
+            let input =
+                infer_scalar(catalog, scope, argument, reference_kind)?.ok_or_else(|| {
+                    Error::new(
+                        "E_TYPE",
+                        "cannot infer to_text input; use a typed field or typed local function",
+                    )
+                })?;
+            require_text_convertible(catalog, &input)?;
+            bind_scalar(catalog, scope, argument, Some(&input), reference_kind)?;
+            ScalarType::Text
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
-                "decimal_parse"
+                "int_to_decimal"
+                    | "decimal_parse"
                     | "decimal_rescale"
                     | "decimal_round"
                     | "decimal_mul"
@@ -413,13 +449,15 @@ pub(crate) fn bind_scalar(
                 ) {
                     decimal_rounding(&arguments[scale_index + 1])?;
                 }
-                let input = if name == "decimal_parse" {
+                let input = if name == "int_to_decimal" {
+                    ScalarType::Int
+                } else if name == "decimal_parse" {
                     ScalarType::Text
                 } else {
                     infer_scalar(catalog, scope, &arguments[0], reference_kind)?
                         .ok_or_else(|| Error::new("E_TYPE", format!("cannot infer {name} input")))?
                 };
-                if name != "decimal_parse"
+                if !matches!(name.as_str(), "decimal_parse" | "int_to_decimal")
                     && !matches!(catalog.underlying(&input)?, ScalarType::Decimal { .. })
                 {
                     return Err(Error::new(
@@ -453,21 +491,23 @@ pub(crate) fn bind_scalar(
                         reference_kind,
                     )?;
                 }
+                require_fresh_scalar_result(catalog, &target, expected)?;
                 return Ok(target);
             }
-            if arguments.len() != 1 {
+            let arity = builtin_scalar_arity(name).expect("known builtin");
+            if arguments.len() != arity {
                 return Err(Error::new(
                     "E_TYPE",
-                    format!("{name} expects 1 argument, got {}", arguments.len()),
+                    format!("{name} expects {arity} arguments, got {}", arguments.len()),
                 ));
             }
-            bind_scalar(
-                catalog,
-                scope,
-                &mut arguments[0],
-                Some(&ScalarType::Text),
-                reference_kind,
-            )?;
+            if name == "float_to_int" {
+                float_rounding(&arguments[1])?;
+            }
+            for (position, argument) in arguments.iter_mut().enumerate() {
+                let input_type = builtin_scalar_input_type(name, position);
+                bind_scalar(catalog, scope, argument, Some(&input_type), reference_kind)?;
+            }
             builtin_scalar_result(name).expect("known builtin")
         }
         ScalarExpression::Call { name, .. } => {
@@ -522,6 +562,7 @@ pub(crate) fn bind_scalar(
             )? {
                 bind_scalar(catalog, scope, left, Some(&left_ty), reference_kind)?;
                 bind_scalar(catalog, scope, right, Some(&right_ty), reference_kind)?;
+                require_fresh_scalar_result(catalog, &result, expected)?;
                 *ty = Some(result.clone());
                 return Ok(result);
             }
@@ -552,6 +593,28 @@ pub(crate) fn bind_scalar(
         ));
     }
     Ok(ty)
+}
+
+// Preserve contextual initialization of nominal decimal/temporal values, while
+// checking the computed primitive result before their binding paths return early.
+fn require_fresh_scalar_result(
+    catalog: &Catalog,
+    actual: &ScalarType,
+    expected: Option<&ScalarType>,
+) -> Result<()> {
+    if let Some(expected) = expected
+        && !same_type(actual, catalog.underlying(expected)?)
+    {
+        return Err(Error::new(
+            "E_TYPE",
+            format!(
+                "expression has type {}, expected {}",
+                catalog.describe(actual),
+                catalog.describe(expected)
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn infer_scalar(
@@ -603,10 +666,31 @@ pub(crate) fn infer_scalar(
         }
         ScalarExpression::Call {
             name, arguments, ..
+        } if is_temporal_projection(name) => {
+            temporal_function_arguments(name, arguments)?;
+            if let Some(input) = infer_scalar(catalog, scope, &arguments[0], reference_kind)? {
+                require_timestamp_input(catalog, &input)?;
+            }
+            Ok(Some(temporal_result_type(name)))
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
+        } if name == "to_text" => {
+            let [argument] = arguments.as_slice() else {
+                return Err(Error::new("E_TYPE", "to_text expects 1 argument"));
+            };
+            if let Some(input) = infer_scalar(catalog, scope, argument, reference_kind)? {
+                require_text_convertible(catalog, &input)?;
+            }
+            Ok(Some(ScalarType::Text))
+        }
+        ScalarExpression::Call {
+            name, arguments, ..
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
-                "decimal_parse"
+                "int_to_decimal"
+                    | "decimal_parse"
                     | "decimal_rescale"
                     | "decimal_round"
                     | "decimal_mul"
@@ -628,7 +712,14 @@ pub(crate) fn infer_scalar(
                     } else {
                         (1, 2)
                     };
-                if name != "decimal_parse" {
+                if name == "int_to_decimal" {
+                    if let Some(input) =
+                        infer_scalar(catalog, scope, &arguments[0], reference_kind)?
+                        && !same_type(&input, &ScalarType::Int)
+                    {
+                        return Err(Error::new("E_TYPE", "int_to_decimal expects int input"));
+                    }
+                } else if name != "decimal_parse" {
                     for argument in
                         &arguments[..if matches!(name.as_str(), "decimal_mul" | "decimal_div") {
                             2
@@ -657,16 +748,30 @@ pub(crate) fn infer_scalar(
                     &arguments[scale_index],
                 )?));
             }
-            if arguments.len() != 1 {
+            let arity = builtin_scalar_arity(name).expect("known builtin");
+            if arguments.len() != arity {
                 return Err(Error::new(
                     "E_TYPE",
-                    format!("{name} expects 1 argument, got {}", arguments.len()),
+                    format!("{name} expects {arity} arguments, got {}", arguments.len()),
                 ));
             }
-            if let Some(argument) = infer_scalar(catalog, scope, &arguments[0], reference_kind)?
-                && !same_type(&argument, &ScalarType::Text)
-            {
-                return Err(Error::new("E_TYPE", format!("{name} expects text")));
+            if name == "float_to_int" {
+                float_rounding(&arguments[1])?;
+            }
+            for (position, argument) in arguments.iter().enumerate() {
+                let input_type = builtin_scalar_input_type(name, position);
+                if let Some(argument) = infer_scalar(catalog, scope, argument, reference_kind)?
+                    && !same_type(&argument, &input_type)
+                {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        format!(
+                            "{name} argument {} expects {}",
+                            position + 1,
+                            catalog.describe(&input_type)
+                        ),
+                    ));
+                }
             }
             Ok(builtin_scalar_result(name))
         }
@@ -885,9 +990,20 @@ fn temporal_arithmetic_signature(
 
 pub(crate) fn is_builtin_scalar_function(name: &str) -> bool {
     is_map_scalar_function(name)
+        || is_text_predicate(name)
+        || is_temporal_projection(name)
         || matches!(
             name,
-            "uuid_parse"
+            "lower"
+                | "upper"
+                | "trim"
+                | "concat"
+                | "substring"
+                | "int_to_float"
+                | "float_to_int"
+                | "int_to_decimal"
+                | "to_text"
+                | "uuid_parse"
                 | "bytes_parse_hex"
                 | "date_parse"
                 | "timestamp_parse"
@@ -904,12 +1020,83 @@ fn is_map_scalar_function(name: &str) -> bool {
     matches!(name, "contains_key" | "get" | "keys" | "values" | "entries")
 }
 
+fn is_text_predicate(name: &str) -> bool {
+    matches!(name, "starts_with" | "ends_with" | "contains_text")
+}
+
+fn is_temporal_projection(name: &str) -> bool {
+    matches!(name, "date_of" | "timestamp_trunc")
+}
+
+fn temporal_result_type(name: &str) -> ScalarType {
+    if name == "date_of" {
+        ScalarType::Date
+    } else {
+        ScalarType::Timestamp
+    }
+}
+
+fn require_timestamp_input(catalog: &Catalog, ty: &ScalarType) -> Result<()> {
+    if matches!(catalog.underlying(ty)?, ScalarType::Timestamp) {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "E_TYPE",
+            "temporal projection expects timestamp input",
+        ))
+    }
+}
+
+fn temporal_function_arguments(
+    name: &str,
+    arguments: &[ScalarExpression],
+) -> Result<(i32, Option<crate::scalars::TimestampUnit>)> {
+    let arity = if name == "date_of" { 2 } else { 3 };
+    if arguments.len() != arity {
+        return Err(Error::new(
+            "E_TYPE",
+            format!("{name} expects {arity} arguments"),
+        ));
+    }
+    let unit = if name == "timestamp_trunc" {
+        let ScalarExpression::Literal(Value::Text(unit)) = &arguments[1] else {
+            return Err(Error::new(
+                "E_TEMPORAL_UNIT",
+                "timestamp_trunc unit must be a text literal",
+            ));
+        };
+        Some(crate::scalars::TimestampUnit::parse(unit).ok_or_else(|| Error::new("E_TEMPORAL_UNIT", "timestamp_trunc expects year, month, week, day, hour, minute, second, millisecond, or microsecond"))?)
+    } else {
+        None
+    };
+    let ScalarExpression::Literal(Value::Text(offset)) = &arguments[arity - 1] else {
+        return Err(Error::new(
+            "E_TEMPORAL_OFFSET",
+            "temporal offset must be a text literal",
+        ));
+    };
+    let offset = crate::scalars::fixed_offset_seconds(offset).map_err(|_| {
+        Error::new(
+            "E_TEMPORAL_OFFSET",
+            "temporal offset requires Z or signed HH:MM; unknown -00:00 is rejected",
+        )
+    })?;
+    Ok((offset, unit))
+}
+
 pub(crate) fn builtin_scalar_arity(name: &str) -> Option<usize> {
-    if matches!(name, "contains_key" | "get") {
+    if matches!(
+        name,
+        "contains_key" | "get" | "concat" | "float_to_int" | "date_of"
+    ) || is_text_predicate(name)
+    {
         Some(2)
     } else if matches!(name, "keys" | "values" | "entries") {
         Some(1)
-    } else if matches!(name, "decimal_parse" | "decimal_rescale") {
+    } else if matches!(
+        name,
+        "int_to_decimal" | "decimal_parse" | "decimal_rescale" | "substring" | "timestamp_trunc"
+    ) {
         Some(3)
     } else if name == "decimal_round" {
         Some(4)
@@ -943,6 +1130,10 @@ fn map_scalar_result(name: &str, value_ty: ScalarType) -> Result<ScalarType> {
 
 fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
     match name {
+        "int_to_float" => Some(ScalarType::Float),
+        "float_to_int" => Some(ScalarType::Int),
+        "starts_with" | "ends_with" | "contains_text" => Some(ScalarType::Bool),
+        "lower" | "upper" | "trim" | "concat" | "substring" | "to_text" => Some(ScalarType::Text),
         "uuid_parse" => Some(ScalarType::Uuid),
         "bytes_parse_hex" => Some(ScalarType::Bytes),
         "date_parse" => Some(ScalarType::Date),
@@ -950,6 +1141,164 @@ fn builtin_scalar_result(name: &str) -> Option<ScalarType> {
         "duration_parse" => Some(ScalarType::Duration),
         _ => None,
     }
+}
+
+fn require_text_convertible(catalog: &Catalog, ty: &ScalarType) -> Result<()> {
+    match catalog.underlying(ty)? {
+        ScalarType::Int
+        | ScalarType::Float
+        | ScalarType::Bool
+        | ScalarType::Text
+        | ScalarType::Uuid
+        | ScalarType::Date
+        | ScalarType::Timestamp
+        | ScalarType::Duration
+        | ScalarType::Decimal { .. }
+        | ScalarType::Bytes => Ok(()),
+        _ => Err(Error::new(
+            "E_TYPE",
+            "to_text expects a scalar; project or match compound ADTs explicitly",
+        )),
+    }
+}
+
+fn scalar_to_text(value: &Value) -> Result<String> {
+    let value = value.unwrapped();
+    let length = match value {
+        Value::Text(text) => Some(text.len()),
+        Value::Bytes(bytes) => bytes.as_slice().len().checked_mul(2),
+        _ => None,
+    };
+    let mut result = String::new();
+    if matches!(value, Value::Text(_) | Value::Bytes(_)) {
+        let length = length
+            .filter(|length| *length <= crate::codec::MAX_VALUE_BYTES)
+            .ok_or_else(|| Error::new("E_LIMIT", "to_text result exceeds 16 MiB"))?;
+        result
+            .try_reserve_exact(length)
+            .map_err(|_| Error::new("E_LIMIT", "to_text allocation failed"))?;
+    }
+    use std::fmt::Write;
+    match value {
+        Value::Text(text) => {
+            result.push_str(text);
+            Ok(())
+        }
+        Value::Int(value) => write!(result, "{value}"),
+        Value::Bool(value) => write!(result, "{value}"),
+        Value::Float(value) if value.is_finite() => {
+            let value = if *value == 0.0 { 0.0 } else { *value };
+            write!(result, "{value:?}")
+        }
+        Value::Float(_) => return Err(Error::new("E_ARITH", "to_text requires a finite float")),
+        Value::Uuid(value) => write!(result, "{value}"),
+        Value::Date(value) => write!(result, "{value}"),
+        Value::Timestamp(value) => write!(result, "{value}"),
+        Value::Duration(value) => write!(result, "{value}"),
+        Value::Decimal(value) => write!(result, "{value}"),
+        Value::Bytes(value) => write!(result, "{value}"),
+        _ => return Err(Error::new("E_TYPE", "to_text expects a scalar")),
+    }
+    .map_err(|_| Error::new("E_LIMIT", "to_text formatting failed"))?;
+    Ok(result)
+}
+
+fn builtin_scalar_input_type(name: &str, position: usize) -> ScalarType {
+    if name == "float_to_int" && position == 0 {
+        ScalarType::Float
+    } else if (name == "substring" && position > 0) || name == "int_to_float" {
+        ScalarType::Int
+    } else {
+        ScalarType::Text
+    }
+}
+
+fn float_rounding(expression: &ScalarExpression) -> Result<crate::scalars::DecimalRounding> {
+    let ScalarExpression::Literal(Value::Text(value)) = expression else {
+        return Err(Error::new(
+            "E_CAST_MODE",
+            "float_to_int rounding mode must be a text literal",
+        ));
+    };
+    value.parse().map_err(|_| Error::new("E_CAST_MODE", "float_to_int expects exact, toward_zero, away_from_zero, floor, ceil, half_up, or half_even"))
+}
+
+fn float_to_integer(value: f64, rounding: crate::scalars::DecimalRounding) -> Result<i64> {
+    use crate::scalars::DecimalRounding;
+    if !value.is_finite() {
+        return Err(Error::new(
+            "E_CAST_RANGE",
+            "float_to_int requires a finite value",
+        ));
+    }
+    let rounded = match rounding {
+        DecimalRounding::Exact => {
+            if value.fract() != 0.0 {
+                return Err(Error::new(
+                    "E_CAST_PRECISION",
+                    "float_to_int exact would discard a fractional part",
+                ));
+            }
+            value
+        }
+        DecimalRounding::TowardZero => value.trunc(),
+        DecimalRounding::AwayFromZero if value < 0.0 => value.floor(),
+        DecimalRounding::AwayFromZero => value.ceil(),
+        DecimalRounding::Floor => value.floor(),
+        DecimalRounding::Ceil => value.ceil(),
+        DecimalRounding::HalfUp => value.round(),
+        DecimalRounding::HalfEven => value.round_ties_even(),
+    };
+    // i64::MAX as f64 is +2^63, which must be excluded before a saturating cast.
+    const UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if !(-UPPER_EXCLUSIVE..UPPER_EXCLUSIVE).contains(&rounded) {
+        return Err(Error::new(
+            "E_CAST_RANGE",
+            "float_to_int result is outside the int range",
+        ));
+    }
+    Ok(rounded as i64)
+}
+
+fn substring_text(source: &str, start: i64, end: i64) -> Result<String> {
+    let invalid_range = || {
+        Error::new(
+            "E_TEXT_RANGE",
+            "substring requires 0 <= start <= end <= length text",
+        )
+    };
+    let start = usize::try_from(start).map_err(|_| invalid_range())?;
+    let end = usize::try_from(end).map_err(|_| invalid_range())?;
+    if start > end {
+        return Err(invalid_range());
+    }
+    let mut start_byte = None;
+    for (position, byte) in source
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(source.len()))
+        .enumerate()
+    {
+        if position == start {
+            start_byte = Some(byte);
+        }
+        if position == end {
+            let selected = &source[start_byte.expect("ordered validated positions")..byte];
+            if selected.len() > crate::codec::MAX_VALUE_BYTES {
+                return Err(Error::new(
+                    "E_LIMIT",
+                    "substring text result exceeds 16 MiB",
+                ));
+            }
+            let mut result = String::new();
+            result
+                .try_reserve_exact(selected.len())
+                .map_err(|_| Error::new("E_LIMIT", "substring text allocation failed"))?;
+            result.push_str(selected);
+            return Ok(result);
+        }
+    }
+    Err(invalid_range())
 }
 
 fn decimal_target(precision: &ScalarExpression, scale: &ScalarExpression) -> Result<ScalarType> {
@@ -1409,7 +1758,8 @@ fn evaluate_scalar<'expression, 'values>(
         } if is_builtin_scalar_function(name) => {
             if matches!(
                 name.as_str(),
-                "decimal_parse"
+                "int_to_decimal"
+                    | "decimal_parse"
                     | "decimal_rescale"
                     | "decimal_round"
                     | "decimal_mul"
@@ -1445,6 +1795,10 @@ fn evaluate_scalar<'expression, 'values>(
                     None
                 };
                 let decimal = match (name.as_str(), left) {
+                    ("int_to_decimal", Value::Int(value)) => {
+                        crate::scalars::Decimal::new(i128::from(*value), 38, 0)?
+                            .rescale(precision, scale)?
+                    }
                     ("decimal_parse", Value::Text(source)) => {
                         crate::scalars::Decimal::parse(source, precision, scale)?
                     }
@@ -1481,6 +1835,9 @@ fn evaluate_scalar<'expression, 'values>(
                     ("decimal_parse", _) => {
                         return Err(Error::new("E_TYPE", "decimal_parse expects text"));
                     }
+                    ("int_to_decimal", _) => {
+                        return Err(Error::new("E_TYPE", "int_to_decimal expects int"));
+                    }
                     _ => {
                         return Err(Error::new(
                             "E_TYPE",
@@ -1496,10 +1853,106 @@ fn evaluate_scalar<'expression, 'values>(
             let Some(argument) = evaluate_scalar(catalog, argument, values, budget)? else {
                 return Ok(None);
             };
+            if name == "to_text" {
+                return Ok(Some(Evaluated::Owned(Value::Text(scalar_to_text(
+                    argument.as_value(),
+                )?))));
+            }
+            if is_temporal_projection(name) {
+                let Value::Timestamp(value) = argument.as_value().unwrapped() else {
+                    return Err(Error::new(
+                        "E_TYPE",
+                        "temporal projection expects timestamp input",
+                    ));
+                };
+                let (offset, unit) = temporal_function_arguments(name, arguments)?;
+                let result = match unit {
+                    Some(unit) => Value::Timestamp(value.truncate_at_offset(unit, offset)?),
+                    None => Value::Date(value.date_at_offset(offset)?),
+                };
+                return Ok(Some(Evaluated::Owned(result)));
+            }
+            if name == "float_to_int" {
+                let Value::Float(value) = argument.as_value().unwrapped() else {
+                    return Err(Error::new("E_TYPE", "float_to_int expects float"));
+                };
+                return Ok(Some(Evaluated::Owned(Value::Int(float_to_integer(
+                    *value,
+                    float_rounding(&arguments[1])?,
+                )?))));
+            }
+            if name == "int_to_float" {
+                let Value::Int(value) = argument.as_value().unwrapped() else {
+                    return Err(Error::new("E_TYPE", "int_to_float expects int"));
+                };
+                let converted = *value as f64;
+                // i128 keeps +2^63 distinct from i64::MAX, unlike a saturating
+                // f64-to-i64 round trip at the positive endpoint.
+                if converted as i128 != i128::from(*value) {
+                    return Err(Error::new(
+                        "E_CAST_PRECISION",
+                        "int_to_float would lose integer precision",
+                    ));
+                }
+                return Ok(Some(Evaluated::Owned(Value::Float(converted))));
+            }
             let Value::Text(source) = argument.as_value().unwrapped() else {
                 return Err(Error::new("E_TYPE", format!("{name} expects text")));
             };
+            if name == "substring" {
+                let mut positions = [0_i64; 2];
+                for (position, index) in positions.iter_mut().enumerate() {
+                    let Some(value) =
+                        evaluate_scalar(catalog, &arguments[position + 1], values, budget)?
+                    else {
+                        return Ok(None);
+                    };
+                    let Value::Int(value) = value.as_value().unwrapped() else {
+                        return Err(Error::new("E_TYPE", "substring expects int positions"));
+                    };
+                    *index = *value;
+                }
+                return Ok(Some(Evaluated::Owned(Value::Text(substring_text(
+                    source,
+                    positions[0],
+                    positions[1],
+                )?))));
+            }
+            if is_text_predicate(name) || name == "concat" {
+                let Some(needle) = evaluate_scalar(catalog, &arguments[1], values, budget)? else {
+                    return Ok(None);
+                };
+                let Value::Text(needle) = needle.as_value().unwrapped() else {
+                    return Err(Error::new("E_TYPE", format!("{name} expects text")));
+                };
+                if name == "concat" {
+                    let length = source
+                        .len()
+                        .checked_add(needle.len())
+                        .filter(|length| *length <= crate::codec::MAX_VALUE_BYTES)
+                        .ok_or_else(|| {
+                            Error::new("E_LIMIT", "concat text result exceeds 16 MiB")
+                        })?;
+                    let mut result = String::new();
+                    result
+                        .try_reserve_exact(length)
+                        .map_err(|_| Error::new("E_LIMIT", "concat text allocation failed"))?;
+                    result.push_str(source);
+                    result.push_str(needle);
+                    return Ok(Some(Evaluated::Owned(Value::Text(result))));
+                }
+                let matched = match name.as_str() {
+                    "starts_with" => source.starts_with(needle),
+                    "ends_with" => source.ends_with(needle),
+                    "contains_text" => source.contains(needle),
+                    _ => unreachable!("known text predicate"),
+                };
+                return Ok(Some(Evaluated::Owned(Value::Bool(matched))));
+            }
             let value = match name.as_str() {
+                "lower" => Value::Text(source.to_lowercase()),
+                "upper" => Value::Text(source.to_uppercase()),
+                "trim" => Value::Text(source.trim().to_owned()),
                 "uuid_parse" => Value::Uuid(source.parse()?),
                 "bytes_parse_hex" => Value::Bytes(source.parse()?),
                 "date_parse" => Value::Date(source.parse()?),
@@ -1507,6 +1960,14 @@ fn evaluate_scalar<'expression, 'values>(
                 "duration_parse" => Value::Duration(source.parse()?),
                 _ => unreachable!("known builtin scalar function"),
             };
+            if let Value::Text(result) = &value
+                && result.len() > crate::codec::MAX_VALUE_BYTES
+            {
+                return Err(Error::new(
+                    "E_LIMIT",
+                    format!("{name} result exceeds the text value size limit"),
+                ));
+            }
             Ok(Some(Evaluated::Owned(value)))
         }
         ScalarExpression::Call { name, .. } => Err(Error::new(

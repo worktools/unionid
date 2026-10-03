@@ -188,6 +188,77 @@ derive label = match state {
 Patterns recursively support enum payloads, records, tuples, `Some(value)`, `None`, and
 lists. `_` is a catch-all. `{field, ..}` binds one record field and ignores the rest.
 
+In v0.15 development, `lower text`, `upper text`, and `trim text` return text and
+can nest as `lower (trim owner)`. Case conversion is Unicode and locale-independent
+(it can change length); mapped UTF-8 output above 16 MiB fails with E_LIMIT and rolls
+back the request. Trim removes Unicode whitespace only at the ends. These
+are not Unicode normalization or locale-specific case folding. They share query,
+prepared parameter, update and migration expression binding; no implicit casts.
+`starts_with source prefix`, `ends_with source suffix`, and `contains_text source fragment`
+take two text arguments and return bool. Matching is exact and case-sensitive, without
+regex/wildcards or automatic Unicode normalization; all three match an empty needle.
+Use explicit composition such as `starts_with (lower owner) "ada"` for normalized input;
+lower is not full case folding. Existing `contains` remains a list/bytes operation.
+Use `concat left right` to join two text values explicitly without a separator;
+nest calls for more fragments. It accepts empty strings, has no implicit casts,
+and rejects a UTF-8 result above 16 MiB with E_LIMIT before allocation. Text `+`
+is not concatenation; complete storage/transport budgets still apply.
+`substring source start end` takes text/int/int and returns text. Use zero-based,
+half-open Unicode scalar positions (the same unit as length text), not UTF-8 bytes
+or grapheme positions: `substring "aé🦀z" 1 3` is `"é🦀"`. Empty ranges are valid.
+Negative/reversed/out-of-range positions fail at evaluation with E_TEXT_RANGE;
+there is no clamping or normalization, and combining sequences may be split.
+Results above 16 MiB fail with E_LIMIT; explain checks types without running ranges.
+
+In unreleased v0.15 development, `int_to_float value` explicitly converts int to
+float only when exactly representable by f64. Precision loss returns
+E_CAST_PRECISION, including 9007199254740993 and i64::MAX; i64::MIN is exact.
+For mixed arithmetic write `(int_to_float qty) * price` when price is float.
+No implicit casts or silent rounding are added. Prepared parameters, filters,
+derives and migration using share this contract; failed mutations/migrations
+roll back the whole request. Explain checks types without evaluating precision.
+`float_to_int value "mode"` explicitly converts float to int. Require a literal
+mode: exact, toward_zero, away_from_zero, floor, ceil, half_up, or half_even.
+Invalid/dynamic modes fail binding with E_CAST_MODE. Exact rejects fractions with
+E_CAST_PRECISION; all modes reject results outside i64 with E_CAST_RANGE rather
+than saturating. Half_up rounds ties away from zero; half_even rounds ties to even.
+Rounding uses the actual binary f64, not its original decimal spelling; negative
+zero becomes integer zero. Example: `float_to_int price "half_even"`. It shares
+the same prepared/query/migration rollback and nonexecuting explain contracts.
+`int_to_decimal value P S` converts int to Decimal<P, S> exactly, preserving
+numeric units: `int_to_decimal 12 8 2` produces 12.00, not 0.12. P/S must be integer
+literals with 1 <= P <= 38 and 0 <= S <= P; dynamic/invalid targets fail binding
+with E_DECIMAL_TYPE. Precision/scaling overflow returns E_DECIMAL_RANGE, without
+rounding or partial mutations. Use this with decimal_mul/div for mixed int/decimal
+arithmetic. Decimal output requires protocol v2; v1 rejects unsupported output
+types before mutation. Explain binds the full target type without evaluating it.
+For assignment/migration, the explicit decimal result P/S must match the target's
+underlying decimal type, even on empty tables; use decimal_rescale/round with the
+actual target P/S when needed. Mismatches return E_TYPE before scanning.
+`to_text value` explicitly formats primitive or named scalars as unquoted text;
+reject enum/record/tuple/Option/list/map (project or match first). Text is unchanged;
+int/bool use decimal/true-false; float is concise and round-trippable with negative
+zero normalized; uuid uses lowercase hyphens, date YYYY-MM-DD, timestamp UTC/Z,
+duration the largest exactly divisible unit (zero is 0microseconds), decimal its declared scale, bytes
+lowercase hex. No source tags or @ prefix. Example: `concat "item-" (to_text id)`.
+Input needs a static type: use `let show = (value: int) -> to_text value` for
+prepared `show $id`; bare `to_text $unknown` does not infer a type. Hex expansion
+over 16 MiB returns E_LIMIT before allocation and rolls back the whole request;
+full response budgets still apply. Text output supports protocols 1/2, but native
+parameters require v2. Query/update/migration using/explain/macros share the rule.
+`date_of timestamp "offset"` returns the local civil date at an explicit fixed
+offset. `timestamp_trunc timestamp "unit" "offset"` shifts to local time, floors
+to a period boundary and shifts back to UTC. Require literal units:
+year/month/week/day/hour/minute/second/millisecond/microsecond; weeks start Monday.
+Require literal offset Z/z or signed HH:MM (00–23 hours, 00–59 minutes); reject
+unknown -00:00. No system timezone, named zones or DST. Invalid/dynamic metadata
+fails binding with E_TEMPORAL_UNIT/E_TEMPORAL_OFFSET. Local and final UTC times
+must stay in years 0001–9999 or E_ARITH rolls back the whole request, even for
+microsecond truncation. Before-epoch values floor, not truncate toward zero.
+At +08:00, @2026-10-02T18:00:00Z gives date @2026-10-03 and day bucket
+@2026-10-02T16:00:00Z. Prepared/update/migration/macros share this contract;
+explain does not evaluate ranges. Native output/parameters require protocol v2.
+
 Arithmetic supports checked `+`, `-`, `*`, `/`, and unary `-`. Comparisons use `==`,
 `!=`, `<`, `<=`, `>`, and `>=`. Collection helpers include `contains`, `length`,
 `is_some`, `is_none`, `any`, and `all`. For `Map<text, T>`, use `contains_key map key`,

@@ -324,6 +324,136 @@ from tasks | filter id > 1 | take 1
 
 最终响应的 `columns` 来自最后一个 stage 的 schema，并保持 `select` 的字段顺序。嵌套字段的结果列名保留完整路径，例如 `owner.email`。
 
+## 文本规范化与匹配 / Text normalization and matching (v0.15 development)
+
+`lower text`、`upper text`、`trim text` 接受一个 text 参数并返回 text，支持嵌套调用：
+
+```text
+from users
+derive normalized = lower (trim name)
+select {id, normalized}
+```
+
+大小写转换采用 Unicode 规则且不依赖本地 locale；例如 `upper "Straße"` 为 `"STRASSE"`，结果长度可能变化；映射后的 UTF-8 结果超过 16 MiB 时返回 `E_LIMIT` 并回滚整个请求。`trim` 只移除两端 Unicode 空白，保留内部空格。这些函数不是 Unicode normalization 或语言地区相关的 case folding，也不隐式转换其他类型。filter、derive、match 分支、prepared 参数、update set 与 migration using 复用相同表达式绑定；`explain` 绑定但不求值。当前为未发布的 v0.15 开发能力。
+
+These unary text-to-text functions nest as shown above. Case conversion follows Unicode rules independently of locale and may change length. A mapped UTF-8 result above 16 MiB returns `E_LIMIT` and rolls back the request. Trim removes Unicode whitespace only at the ends, preserving internal spaces. They do not perform Unicode normalization, locale-specific case folding or implicit casts. Query, match, prepared, update and migration expressions share binding; explain binds without evaluation. This is unreleased v0.15 development functionality.
+
+`starts_with source prefix`、`ends_with source suffix`、`contains_text source fragment` 接受两个 text 参数并返回 bool，可直接用于 filter 或派生值：
+
+```text
+from users
+filter starts_with (lower name) "ada"
+derive has_space = contains_text name " "
+select {id, has_space}
+```
+
+匹配采用 Rust 字符串的精确、区分大小写语义，没有 regex、通配符或隐式 Unicode normalization。空匹配串对三个函数均返回 true，包括空 source；预组合 `"é"` 与 `e` 加 U+0301 不相同。如需统一小写后比较，应显式组合 lower，但它不等于完整 Unicode case folding。prepared 参数仍须为 text；`contains` 的 list/bytes 语义不变。
+
+These binary text predicates return bool and follow exact, case-sensitive Rust string matching without regex, wildcard or implicit Unicode normalization. An empty needle matches every source, including an empty one. Precomposed `é` differs from `e` plus U+0301. Explicit lower composition is available but is not full Unicode case folding. Prepared arguments must be text; existing list/bytes contains semantics are unchanged.
+
+`concat left right` 接受两个 text 参数并直接拼接，不添加分隔符，也不把数字或其他 ADT 隐式转成文本。例如 `concat (lower (trim name)) "!"`。空串是合法参数；可嵌套 concat 拼接多个片段。拼接前检查最终 UTF-8 长度，上限为 16 MiB，超限返回 `E_LIMIT`；实际存储/transport 还遵守各自的完整值或响应预算。text 的 `+` 不作为拼接运算符。
+
+Concat takes two text arguments and appends them without separators or implicit conversion, for example `concat (lower (trim name)) "!"`. Empty inputs are valid; nest concat for more fragments. It checks the resulting UTF-8 size before allocation, rejecting results over 16 MiB with E_LIMIT. Storage/transport also enforce their complete-value/response budgets. Text `+` remains unsupported.
+
+`substring source start end` 接受 text、int、int 并返回 text。位置从 0 开始，半开范围 `[start,end)` 按 Unicode scalar value 计数，与 `length text` 一致，不是 UTF-8 字节或 grapheme。例如 `substring "aé🦀z" 1 3` 得到 `"é🦀"`。要求 `0 <= start <= end <= length source`；空范围（含末尾）合法，负值、反向或越界在求值时返回 `E_TEXT_RANGE`，不静默截断。`explain` 只绑定类型，不验证具体行上的范围。
+
+组合字符可被切开：`substring "é" 0 1` 返回 `"e"`，不进行 normalization。结果 UTF-8 超过 16 MiB 返回 `E_LIMIT`。位置可由 typed 参数或表达式提供；失败的 update/migration 保留整请求旧状态。
+
+Substring takes text/int/int and returns text using zero-based, half-open Unicode scalar positions, matching length text rather than byte or grapheme positions. `substring "aé🦀z" 1 3` yields `"é🦀"`. Require `0 <= start <= end <= length source`; empty ranges including the end are valid. Negative, reversed or out-of-range positions return E_TEXT_RANGE during evaluation instead of clamping; explain only binds types. Combining sequences can be split, without normalization. Results over 16 MiB return E_LIMIT. Typed parameters/expressions provide positions; failed updates/migrations preserve the original request state.
+
+## 显式数值转换 / Explicit numeric conversion (v0.15 development)
+
+`int_to_float value` 接受 int 并返回 float；只允许能被 f64 精确表示的整数。它不是隐式 cast，也不会静默舍入；失去精度时返回 `E_CAST_PRECISION`，并回滚整个 mutation/migration 请求。`explain` 仅检查类型，不求值。该函数可用于 prepared 参数、过滤、派生和 migration `using`。
+
+```text
+from items
+derive total = (int_to_float qty) * price
+select {id, total}
+```
+
+这里 `qty` 是 int，`price` 是 float。例如 9007199254740992 和 9007199254740994 可精确转换，9007199254740993 不可；i64 最小值可精确转换，最大值不可。这与 `avg int` 允许 IEEE-754 精度损失的既有契约不同。
+
+`int_to_float value` takes int and returns float only when the integer is exactly representable by f64. It performs no implicit coercion or silent rounding: precision loss returns E_CAST_PRECISION and rolls back the complete mutation/migration request. Explain checks types without evaluating values. Prepared parameters, filters, derives and migration using share this function. In the example, qty is int and price is float. 9007199254740992 and 9007199254740994 convert exactly, while 9007199254740993 does not; i64::MIN converts exactly but i64::MAX does not. This differs from the existing avg-int contract, which permits IEEE-754 precision loss. This is an unreleased v0.15 capability.
+
+`float_to_int value "mode"` 接受 float，返回 int。mode 必须在绑定时为下表中的 text literal，不能由字段或参数提供；无效模式返回 `E_CAST_MODE`。舍入针对实际保存的二进制 f64，不重新解释原始十进制文字。`exact` 遇到小数部分返回 `E_CAST_PRECISION`；舍入后超出 i64 范围返回 `E_CAST_RANGE`，不饱和或回绕。负零变为整数 0。
+
+| mode | 规则 / Rule | 2.5 | -2.5 |
+|---|---|---:|---:|
+| `exact` | 必须已是整数 / Require integral input | error | error |
+| `toward_zero` | 向零 / Toward zero | 2 | -2 |
+| `away_from_zero` | 离零 / Away from zero | 3 | -3 |
+| `floor` | 向负无穷 / Toward negative infinity | 2 | -3 |
+| `ceil` | 向正无穷 / Toward positive infinity | 3 | -2 |
+| `half_up` | 最近整数，半值离零 / Nearest, ties away from zero | 3 | -3 |
+| `half_even` | 最近整数，半值取偶 / Nearest, ties to even | 2 | -2 |
+
+```text
+from items
+derive rounded = float_to_int price "half_even"
+select {id, rounded}
+```
+
+`float_to_int value "mode"` takes float and returns int. The mode must be a known text literal at binding time, never a field or parameter; invalid modes return E_CAST_MODE. Rounding operates on the stored binary f64, not the original decimal spelling. Exact rejects fractional parts with E_CAST_PRECISION; a rounded result outside i64 returns E_CAST_RANGE instead of saturation or wrapping. Negative zero becomes integer zero. Query/prepared parameters/migration share this contract; failures roll back the entire request, while explain binds without evaluating values. Both conversions remain unreleased v0.15 development functions.
+
+`int_to_decimal value P S` 接受 int，返回 `Decimal<P, S>`，保持整数的数值单位并精确补齐 scale：`int_to_decimal 12 8 2` 是 `12.00`，不是 `0.12`。P/S 必须是整数 literal，满足 `1 <= P <= 38`、`0 <= S <= P`，绑定时检查并确定完整结果类型；动态或无效目标返回 `E_DECIMAL_TYPE`。放不进 P 位精度或缩放溢出时返回 `E_DECIMAL_RANGE`，不舍入、不绕过请求回滚。
+
+```text
+from items
+derive quantity = int_to_decimal qty 18 0
+derive total = decimal_mul quantity price 18 2 "exact"
+select {id, total}
+```
+
+这里 `qty` 为 int，`price` 为 decimal。若整数实际代表最小货币单位，应先转换再显式除以倍率，不要把 S 当作分币解释。`int_to_decimal` 与 query、prepared、migration `using`、formatter 和 explain 共用类型与错误契约。赋值或 migration 时，显式结果 P/S 必须匹配目标字段的底层 decimal 类型，空表也在扫描前以 `E_TYPE` 拒绝不匹配；相同 P/S 的新结果可按字段上下文初始化命名 decimal。输出 decimal 使用 protocol v2；v1 在执行 mutation 前拒绝不支持的结果类型。以上转换属于未发布的 v0.15 开发能力。
+
+`int_to_decimal value P S` takes int and returns Decimal<P, S>, preserving numeric units and exactly padding the scale: 12 at P=8/S=2 becomes 12.00, never 0.12. P/S must be integer literals satisfying 1 <= P <= 38 and 0 <= S <= P. Binding fixes the full result type; dynamic/invalid targets return E_DECIMAL_TYPE. Precision or scaling overflow returns E_DECIMAL_RANGE without rounding, and failed mutations/migrations roll back the whole request. In the example qty is int and price is decimal. Integers representing minor currency units require explicit division after conversion. Query, prepared, migration using, formatter and explain share this contract. Decimal output requires protocol v2; v1 rejects unsupported result types before mutation. This remains an unreleased v0.15 capability.
+
+For assignment/migration, explicit result precision/scale must match the target's underlying decimal type; mismatches return E_TYPE before scanning even on empty tables. Fresh results with matching P/S can initialize a nominal decimal in the declared field context.
+
+## 标量文本转换 / Scalar text conversion (v0.15 development)
+
+`to_text value` 显式转换 int/float/bool/text/uuid/date/timestamp/duration/decimal/bytes（包括命名标量）为 text。它不添加引号、类型标签或 `@`；不是 ADT 的源码序列化。text 原样保留，int 为十进制，bool 为 true/false；有限 float 使用可往返的简洁表示（如 1.0、5e-324），负零归一为 0.0。UUID 为小写连字符形式，date 为 YYYY-MM-DD，timestamp 为 UTC 且以 Z 结尾，duration 使用可精确整除的最大单位（0 为 0microseconds），decimal 保留 scale，bytes 为小写 hex。
+
+```text
+from items
+derive label = concat "item-" (to_text id)
+derive price_text = to_text price
+select {label, price_text}
+```
+
+enum/record/tuple/Option/list/map 返回 `E_TYPE`；应先投影或 match，再转换标量，不隐式展开或把 None 变为空串。输入须有静态类型。prepared 参数可经 typed 局部函数声明，例如 `let show = (value: int) -> to_text value` 后调用 `show $id`；单独 `to_text $unknown` 不猜测类型。
+
+bytes 转 hex 会翻倍。结果 UTF-8 超过 16 MiB 时，在分配前返回 `E_LIMIT`，整请求旧状态保留；完整 codec/transport 预算仍适用。query、prepared、update、migration using、formatter/explain 和 Rust 内联宏共用此契约。text 输出可用 protocol v1/v2，但 native 参数仍要求 v2。上述能力尚未发布。
+
+`to_text value` explicitly converts primitive and named scalars to unquoted text without type tags or an @ prefix; it is not ADT source serialization. Text is unchanged; integers use decimal and bool uses true/false. Finite floats use concise round-trippable forms such as 1.0 and 5e-324, normalizing negative zero to 0.0. UUID uses lowercase hyphens, date uses YYYY-MM-DD, timestamp uses UTC/Z, duration uses the largest exactly divisible unit (zero is 0microseconds), decimal retains scale, and bytes use lowercase hex. Reject compound ADTs with E_TYPE; project or match first, without implicit unwrapping of Option or conversion of None to empty text. Input needs a static type; typed local functions can declare prepared parameters, while to_text $unknown does not guess. Hex expansion is checked against 16 MiB before allocation; E_LIMIT rolls back the entire request and full codec/transport budgets still apply. Query/prepared/update/migration/formatter/explain/macros share this contract. Text output works with protocols 1/2, but native parameters still require v2. This remains unreleased v0.15 development functionality.
+
+## 显式偏移的时间投影 / Temporal projection with explicit offsets (v0.15 development)
+
+`date_of value "offset"` 接受 timestamp（含命名标量），返回该固定偏移下的 date。`timestamp_trunc value "unit" "offset"` 返回 timestamp：先加 offset，在当地时间向下取单位起点，再减 offset 转回 UTC。即使 epoch 前的时间也向下取整，不向零截断；结果不晚于原值，同一单位/偏移下重复截断不变。
+
+```text
+from events
+derive day = date_of occurred_at "+08:00"
+derive bucket = timestamp_trunc occurred_at "day" "+08:00"
+select {day, bucket}
+
+from events
+derive day = date_of occurred_at "+08:00"
+group day {
+  aggregate {events = count}
+}
+```
+
+例如 `@2026-10-02T18:00:00Z` 在 +08:00 下的 day 为 `@2026-10-03`，day bucket 为 UTC 的 `@2026-10-02T16:00:00Z`。偏移是调用的显式规则，不恢复输入字面量原有偏移，也不读取系统时区。
+
+unit 是 `year`、`month`、`week`、`day`、`hour`、`minute`、`second`、`millisecond` 或 `microsecond` 的 text literal。年/月取当地 Gregorian 起点，周从周一零点开始；无季度、DST、时区名称或 calendar 加减。offset 必须为 text literal `Z`/`z` 或 `±HH:MM`，HH 为 00–23，MM 为 00–59，未知偏移 `-00:00` 拒绝；`+00:00` 是已知 UTC。动态/非法 unit 和 offset 分别返回 `E_TEMPORAL_UNIT` / `E_TEMPORAL_OFFSET`，在扫描前检查。
+
+当地时间和最终 UTC 时间都必须在 0001–9999 年内，否则 `E_ARITH`，整请求回滚。例如最小 UTC timestamp 用 +08:00 截断 day 会产生范围外 UTC 起点，因此失败；microsecond 也仍检查当地范围。formatter、prepared、explain、update、migration using 和 Rust 宏复用同一规则；explain 不执行值计算。新结果可在赋值或 migration 目标上下文初始化同底层类型的 nominal 字段（如 `Moment = timestamp`），但 date/timestamp 不匹配仍在空表扫描前拒绝。date/timestamp 输出及 native 参数要求 protocol v2。能力尚未发布。
+
+Date_of takes timestamp (including named scalars) plus a literal fixed offset and returns its civil date. Timestamp_trunc takes timestamp, a literal unit and a literal offset: shift to local time, floor to the period boundary, then shift back to UTC. This floors even before the epoch, never truncates toward zero, and is idempotent for the same unit/offset. At +08:00, 2026-10-02T18:00:00Z has date 2026-10-03 and day bucket 2026-10-02T16:00:00Z. The explicit offset neither recovers the original input spelling nor reads system time zones.
+
+Units are year/month/week/day/hour/minute/second/millisecond/microsecond; year/month use local Gregorian boundaries and weeks start Monday at midnight. No quarter, zone names, DST or calendar addition/subtraction. Offsets are literal Z/z or signed HH:MM (hours 00–23, minutes 00–59); reject unknown -00:00 while +00:00 means UTC. Invalid/dynamic units or offsets fail before scanning with E_TEMPORAL_UNIT/E_TEMPORAL_OFFSET. Both the shifted local time and final UTC result must stay in years 0001–9999 or return E_ARITH and roll back the entire request. This applies even to microsecond truncation. Formatter/prepared/explain/update/migration/macros share the contract; explain does not evaluate values. Fresh results can contextually initialize nominal assignment/migration targets of the same underlying type (such as `Moment = timestamp`); date/timestamp mismatches still fail before empty scans. Native outputs/parameters require protocol v2. These are unreleased v0.15 functions.
+
 ## Explain、实际剖析与类型化索引计划
 
 `explain` 在相同的 schema、字段、pattern、局部函数和参数绑定规则下准备查询，但不读取、复制或执行数据行：
@@ -827,6 +957,12 @@ take 20
 | `E_QUERY` | 局部函数前向引用／递归／参数数量错误，或 pipeline stage 的作用域冲突 |
 | `E_MATCH` | 未知/重复构造器、非穷尽 match、错误负载字段或分支绑定 |
 | `E_ARITH` | 整数溢出、除零或产生非有限 float |
+| `E_CAST_PRECISION` | int_to_float 失去整数精度，或 float_to_int exact 丢弃小数 |
+| `E_CAST_MODE` | float_to_int 舍入模式不是合法 text literal |
+| `E_CAST_RANGE` | float_to_int 舍入结果超出 int 范围 |
+| `E_TEMPORAL_OFFSET` | 时间投影偏移不是合法固定偏移 literal |
+| `E_TEMPORAL_UNIT` | timestamp_trunc 单位不是合法 literal |
+| `E_TEXT_RANGE` | substring 位置为负、反向或超出 Unicode scalar 长度 / negative, reversed or out-of-range substring positions |
 | `E_CONSTRAINT` | insert/update 后出现重复主键，或 upsert 的表未声明主键；整个请求回滚 |
 | `E_SYNTAX` | 缺少操作符、错误缩进、未闭合结构或尾部多余 token |
 | `E_LIMIT` | 源码、token、嵌套、局部定义/展开、集合谓词或聚合资源超过限制 |
