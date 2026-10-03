@@ -11,7 +11,8 @@ use crate::query::{GeneratedDefault, TableDefault};
 use crate::scalars::{Timestamp, Uuid};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct Sequence {
+#[serde(deny_unknown_fields)]
+pub(crate) struct Sequence {
     pub id: u64,
     pub name: String,
     pub start: i64,
@@ -38,15 +39,7 @@ impl GenerationContext {
         if let Some(sample) = self.sample {
             return Ok(sample);
         }
-        let now = SystemTime::now();
-        let micros = match now.duration_since(UNIX_EPOCH) {
-            Ok(duration) => i128::try_from(duration.as_micros()).map_err(|_| generation_error())?,
-            Err(error) => {
-                -i128::try_from(error.duration().as_micros()).map_err(|_| generation_error())?
-            }
-        };
-        let micros = i64::try_from(micros).map_err(|_| generation_error())?;
-        let sample = Timestamp::from_epoch_microseconds(micros).map_err(|_| generation_error())?;
+        let sample = timestamp_from_system_time(SystemTime::now())?;
         self.sample = Some(sample);
         Ok(sample)
     }
@@ -58,6 +51,17 @@ impl GenerationContext {
             .map_err(|_| Error::new("E_GENERATION", "UUID entropy source failed"))?;
         uuid_v7(timestamp, random)
     }
+}
+
+fn timestamp_from_system_time(now: SystemTime) -> Result<Timestamp> {
+    let nanos = match now.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::try_from(duration.as_nanos()).map_err(|_| generation_error())?,
+        Err(error) => {
+            -i128::try_from(error.duration().as_nanos()).map_err(|_| generation_error())?
+        }
+    };
+    let micros = i64::try_from(nanos.div_euclid(1_000)).map_err(|_| generation_error())?;
+    Timestamp::from_epoch_microseconds(micros).map_err(|_| generation_error())
 }
 
 fn generation_error() -> Error {
@@ -193,6 +197,65 @@ impl Database {
         Ok(fields)
     }
 
+    pub(crate) fn validate_generated_state(&self) -> Result<()> {
+        for (name, sequence) in &self.sequences {
+            if name != &sequence.name
+                || self.objects.contains_key(name)
+                || self.catalog.types.contains_key(name)
+            {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "sequence name conflicts with its catalog binding",
+                ));
+            }
+            if sequence.next.is_some_and(|next| next < sequence.start) {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "sequence counter precedes its declared start",
+                ));
+            }
+        }
+        for table in self.schema_tables() {
+            for (field_id, generator) in &table.generated_defaults {
+                let column = table
+                    .schema
+                    .iter()
+                    .find(|column| column.id == *field_id)
+                    .ok_or_else(|| {
+                        Error::new(
+                            "E_STORAGE",
+                            "generated default references an unknown table field",
+                        )
+                    })?;
+                let expected = match generator {
+                    BoundGeneratedDefault::Next(id) => {
+                        if !self.sequences.values().any(|sequence| sequence.id == *id) {
+                            return Err(Error::new(
+                                "E_STORAGE",
+                                "generated default references an unknown sequence",
+                            ));
+                        }
+                        ScalarType::Int
+                    }
+                    BoundGeneratedDefault::UuidV7 => ScalarType::Uuid,
+                    BoundGeneratedDefault::Now => ScalarType::Timestamp,
+                };
+                if !matches!(
+                    (self.catalog.underlying(&column.ty)?, expected),
+                    (ScalarType::Int, ScalarType::Int)
+                        | (ScalarType::Uuid, ScalarType::Uuid)
+                        | (ScalarType::Timestamp, ScalarType::Timestamp)
+                ) {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "generated default result type disagrees with its field",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn begin_generation_request(&mut self) {
         self.generation_context = GenerationContext::default();
     }
@@ -203,6 +266,16 @@ impl Database {
                 .schema_tables()
                 .iter()
                 .any(|table| !table.generated_defaults.is_empty())
+    }
+
+    pub(crate) fn ensure_legacy_generation(&self) -> Result<()> {
+        if self.has_generated_defaults() {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated defaults require native redb storage; legacy WAL and snapshots cannot preserve the capability contract",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn generate_default(&mut self, generator: &BoundGeneratedDefault) -> Result<Value> {
@@ -218,7 +291,15 @@ impl Database {
                             "generated default references an unknown sequence",
                         )
                     })?;
-                sequence.allocate().map(Value::Int)
+                let before = sequence.next;
+                let value = sequence.allocate()?;
+                let after = sequence.next;
+                self.pending_writes
+                    .sequence_counters
+                    .entry(*id)
+                    .and_modify(|change| change.1 = after)
+                    .or_insert((before, after));
+                Ok(Value::Int(value))
             }
             BoundGeneratedDefault::UuidV7 => self.generation_context.uuid().map(Value::Uuid),
             BoundGeneratedDefault::Now => self.generation_context.timestamp().map(Value::Timestamp),
@@ -229,6 +310,92 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_rounds_toward_the_previous_microsecond_across_the_epoch() {
+        use std::time::Duration;
+        for (nanos, expected) in [(1, -1), (999, -1), (1_000, -1), (1_001, -2)] {
+            assert_eq!(
+                timestamp_from_system_time(UNIX_EPOCH - Duration::from_nanos(nanos))
+                    .unwrap()
+                    .epoch_microseconds(),
+                expected
+            );
+        }
+        assert_eq!(
+            timestamp_from_system_time(UNIX_EPOCH + Duration::from_nanos(999))
+                .unwrap()
+                .epoch_microseconds(),
+            0
+        );
+        assert_eq!(
+            timestamp_from_system_time(UNIX_EPOCH + Duration::from_secs(u64::MAX / 2))
+                .unwrap_err()
+                .code,
+            "E_GENERATION"
+        );
+    }
+
+    #[test]
+    fn durable_catalog_round_trip_preserves_counters_and_default_bindings() {
+        let mut engine = crate::Engine::memory();
+        assert!(engine.execute("sequence ids {start 1}\nstruct Item {id: int, owner: text}\ntable items: Item {key id, default id = next(ids)}\ninsert items {owner: \"first\"}").ok);
+        let before = engine.database_snapshot().unwrap();
+        let mut candidate = before.clone();
+        let statement = crate::syntax::parse("insert items {owner: \"second\"} | returning id")
+            .unwrap()
+            .remove(0)
+            .statement;
+        let response = candidate.execute(statement).unwrap();
+        assert!(response.rows[0]["id"].cmp_eq(&Value::Int(2)));
+        let writes = candidate.take_write_set();
+        let sequence = candidate.sequences.get("ids").unwrap();
+        assert_eq!(
+            writes.sequence_counters.get(&sequence.id),
+            Some(&(Some(2), Some(3)))
+        );
+        let entries = candidate.durable_catalog_entries();
+        let rows = candidate
+            .durable_rows_with_codec(crate::codec::MAP_VALUE_CODEC_VERSION)
+            .unwrap();
+        let mut restored = Database::from_durable(
+            candidate.durable_meta(),
+            entries.clone(),
+            rows.clone(),
+            candidate.migration_history.clone(),
+        )
+        .unwrap();
+        assert_eq!(restored.schema_info(), candidate.schema_info());
+        assert_eq!(restored.sequences["ids"].next, Some(3));
+        let statement = crate::syntax::parse("insert items {owner: \"third\"} | returning id")
+            .unwrap()
+            .remove(0)
+            .statement;
+        let response = restored.execute(statement).unwrap();
+        assert!(response.rows[0]["id"].cmp_eq(&Value::Int(3)));
+        let mut corrupt = entries.clone();
+        for entry in &mut corrupt {
+            if let super::super::DurableCatalogEntry::Sequence(sequence) = entry {
+                sequence.next = Some(0);
+            }
+        }
+        assert_eq!(
+            Database::from_durable(candidate.durable_meta(), corrupt, rows.clone(), vec![])
+                .unwrap_err()
+                .code,
+            "E_STORAGE"
+        );
+        let no_sequences = entries
+            .into_iter()
+            .filter(|entry| !matches!(entry, super::super::DurableCatalogEntry::Sequence(_)))
+            .collect();
+        assert_eq!(
+            Database::from_durable(candidate.durable_meta(), no_sequences, rows, vec![])
+                .unwrap_err()
+                .code,
+            "E_STORAGE"
+        );
+    }
 
     #[test]
     fn sequence_allocates_maximum_once_without_wrap_or_reset() {

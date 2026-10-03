@@ -1,3 +1,4 @@
+mod common;
 use std::collections::BTreeMap;
 use unionid::{Engine, QueryResponse, Value};
 
@@ -197,4 +198,166 @@ fn prepared_omitted_fields_explain_and_read_only_do_not_consume_sequences() {
         ),
         2
     );
+}
+
+#[test]
+fn native_storage_requires_explicit_install_and_preserves_counters_through_restart_and_backup() {
+    let temp = common::TempDir::new();
+    let path = temp.0.join("source.redb");
+    let backup = temp.0.join("logical.json");
+    let target = temp.0.join("restored.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert_eq!(
+        engine.execute(SETUP).error.unwrap().code,
+        "E_STORAGE_UPGRADE_REQUIRED"
+    );
+    engine.upgrade_storage(14).unwrap();
+    assert_eq!(
+        engine.execute(SETUP).error.unwrap().code,
+        "E_STORAGE_UPGRADE_REQUIRED"
+    );
+    engine
+        .install_storage_capabilities(&["generated_defaults".into()], None)
+        .unwrap();
+    ok(&mut engine, SETUP);
+    let first = ok(
+        &mut engine,
+        r#"insert items {owner: "first"} | returning {id, public_id, created_at}"#,
+    );
+    assert_eq!(id(&first, 0), 1);
+    let schema = engine.schema_info();
+    let profile = engine.last_mutation_profile().unwrap();
+    assert_eq!(
+        profile.durable.unwrap().mode,
+        unionid::profile::DurableCommitMode::Incremental
+    );
+    engine.check_integrity().unwrap();
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                r#"insert items {owner: "second"} | returning id"#
+            ),
+            0
+        ),
+        2
+    );
+    assert_eq!(engine.schema_info(), schema);
+    let expected = serde_json::to_value(ok(&mut engine, "from items | sort id").rows).unwrap();
+    drop(engine);
+    let info = unionid::backup::create(&path, &backup).unwrap();
+    assert_eq!(info.format_version, 8);
+    unionid::backup::restore(&backup, &target).unwrap();
+    let mut restored = Engine::open_redb(&target).unwrap();
+    restored.check_integrity().unwrap();
+    assert_eq!(restored.schema_info(), schema);
+    assert_eq!(
+        serde_json::to_value(ok(&mut restored, "from items | sort id").rows).unwrap(),
+        expected
+    );
+    assert_eq!(
+        id(
+            &ok(
+                &mut restored,
+                r#"insert items {owner: "third"} | returning id"#
+            ),
+            0
+        ),
+        3
+    );
+}
+
+#[test]
+fn journal_restore_uses_materialized_values_and_the_selected_counter_boundary() {
+    use unionid::backup::incremental::{export, init, restore, verify};
+    let temp = common::TempDir::new();
+    let path = temp.0.join("journal-source.redb");
+    let repo = temp.0.join("archive");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    engine
+        .install_storage_capabilities(&["generated_defaults".into()], None)
+        .unwrap();
+    ok(&mut engine, SETUP);
+    drop(engine);
+    init(&path, &repo, Default::default()).unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let baseline = engine.backup_journal_status().unwrap().head_sequence;
+    let mut boundaries = vec![(baseline, serde_json::json!([]), 1)];
+    for (owner, next_id) in [("first", 2), ("second", 3)] {
+        ok(
+            &mut engine,
+            &format!(
+                "insert items {{owner: \"{owner}\"}} | returning {{id, public_id, created_at}}"
+            ),
+        );
+        let sequence = engine.backup_journal_status().unwrap().head_sequence;
+        let rows = serde_json::to_value(ok(&mut engine, "from items | sort id").rows).unwrap();
+        boundaries.push((sequence, rows, next_id));
+    }
+    drop(engine);
+    export(&path, &repo, Default::default()).unwrap();
+    verify(&repo, Default::default()).unwrap();
+    for (sequence, expected, next_id) in boundaries {
+        let target = temp.0.join(format!("at-{sequence}.redb"));
+        restore(&repo, &target, sequence, Default::default()).unwrap();
+        let mut engine = Engine::open_redb(&target).unwrap();
+        engine.check_integrity().unwrap();
+        assert_eq!(
+            serde_json::to_value(ok(&mut engine, "from items | sort id").rows).unwrap(),
+            expected
+        );
+        assert_eq!(
+            id(
+                &ok(
+                    &mut engine,
+                    r#"insert items {owner: "continued"} | returning id"#
+                ),
+                0
+            ),
+            next_id
+        );
+    }
+}
+
+#[test]
+fn legacy_recovery_rejects_generators_without_publishing_or_replaying_them() {
+    use unionid::{db::Database, snapshot::SnapshotStore, wal::Wal};
+    let temp = common::TempDir::new();
+    let wal = Wal::new(temp.0.join("legacy.wal")).unwrap();
+    wal.append(1, "sequence ids {start 1}").unwrap();
+    let mut db = Database::default();
+    let before = serde_json::to_value(&db).unwrap();
+    let error = wal.replay_into(&mut db).unwrap_err();
+    assert!(error.contains("generated defaults"), "{error}");
+    assert_eq!(serde_json::to_value(&db).unwrap(), before);
+
+    for statement in unionid::syntax::parse("sequence ids {start 1}").unwrap() {
+        db.execute(statement.statement).unwrap();
+    }
+    let snapshot_path = temp.0.join("legacy.snapshot");
+    let snapshot = SnapshotStore::new(&snapshot_path).unwrap();
+    assert!(
+        snapshot
+            .save(&db)
+            .unwrap_err()
+            .contains("E_STORAGE_UPGRADE_REQUIRED")
+    );
+    assert!(!snapshot_path.exists());
+    std::fs::write(&snapshot_path, serde_json::to_vec(&db).unwrap()).unwrap();
+    assert!(
+        snapshot
+            .load()
+            .unwrap_err()
+            .contains("E_STORAGE_UPGRADE_REQUIRED")
+    );
+    let before = serde_json::to_value(&db).unwrap();
+    assert!(
+        wal.replay_into(&mut db)
+            .unwrap_err()
+            .contains("E_STORAGE_UPGRADE_REQUIRED")
+    );
+    assert_eq!(serde_json::to_value(&db).unwrap(), before);
 }

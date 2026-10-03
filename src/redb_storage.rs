@@ -67,6 +67,7 @@ const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
 const MAP_CATALOG_CODEC_VERSION: u16 = 5;
 const PARTIAL_CATALOG_CODEC_VERSION: u16 = 6;
 const REFERENCE_CATALOG_CODEC_VERSION: u16 = 7;
+const GENERATED_DEFAULT_CATALOG_CODEC_VERSION: u16 = 8;
 const LEGACY_CATALOG_CODEC_VERSION: u16 = 1;
 const INDEX_KEY_VERSION: u16 = 1;
 const SCALAR_INDEX_KEY_VERSION: u16 = 2;
@@ -1619,6 +1620,10 @@ impl RedbStore {
 
     pub(crate) fn supports_maps(&self) -> bool {
         self.write_layout().supports_maps()
+    }
+
+    pub(crate) fn supports_generated_defaults(&self) -> bool {
+        self.write_layout().supports_generated_defaults()
     }
 
     pub(crate) fn supports_references(&self) -> bool {
@@ -4506,6 +4511,38 @@ impl PreparedDelta {
             }
         }
 
+        for (id, (expected_before, expected_after)) in &write_set.sequence_counters {
+            let before = previous.durable_sequence_catalog_entry(*id)?;
+            let after = database.durable_sequence_catalog_entry(*id)?;
+            let (
+                DurableCatalogEntry::Sequence(before_sequence),
+                DurableCatalogEntry::Sequence(after_sequence),
+            ) = (&before, &after)
+            else {
+                unreachable!()
+            };
+            if before_sequence.id != after_sequence.id
+                || before_sequence.name != after_sequence.name
+                || before_sequence.start != after_sequence.start
+                || before_sequence.next != *expected_before
+                || after_sequence.next != *expected_after
+            {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "sequence counter does not match its incremental write set",
+                ));
+            }
+            let expected = encode_catalog_entry(&before, layout.catalog)?;
+            let value = encode_catalog_entry(&after, layout.catalog)?;
+            if expected != value {
+                catalog.writes.push(BytesWrite {
+                    key: encode_catalog_key(after.kind_tag(), after.stable_id()),
+                    expected: Some(expected),
+                    value,
+                });
+            }
+        }
+
         let mut rows = BytesDelta::default();
         for ((table, row_id), change) in &write_set.rows {
             let before = change
@@ -6627,10 +6664,20 @@ fn encode_catalog_entry(entry: &DurableCatalogEntry, version: u16) -> Result<Vec
             | MAP_CATALOG_CODEC_VERSION
             | PARTIAL_CATALOG_CODEC_VERSION
             | REFERENCE_CATALOG_CODEC_VERSION
+            | GENERATED_DEFAULT_CATALOG_CODEC_VERSION
     ) {
         return Err(Error::new(
             "E_STORAGE",
             format!("unsupported catalog codec version {version}"),
+        ));
+    }
+    if version < GENERATED_DEFAULT_CATALOG_CODEC_VERSION
+        && (matches!(entry, DurableCatalogEntry::Sequence(_))
+            || matches!(&entry, DurableCatalogEntry::Table(table) if !table.generated_defaults.is_empty()))
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "generated defaults require catalog codec 8",
         ));
     }
     if matches!(entry, DurableCatalogEntry::Reference(_))
@@ -6727,7 +6774,7 @@ pub(crate) fn decode_catalog_entry(
             version,
             LEGACY_CATALOG_CODEC_VERSION | CATALOG_CODEC_VERSION
         );
-    if !(LEGACY_CATALOG_CODEC_VERSION..=REFERENCE_CATALOG_CODEC_VERSION).contains(&version)
+    if !(LEGACY_CATALOG_CODEC_VERSION..=GENERATED_DEFAULT_CATALOG_CODEC_VERSION).contains(&version)
         || (!supported_legacy_entry && version != expected_version)
     {
         return Err(Error::new(
@@ -6737,6 +6784,15 @@ pub(crate) fn decode_catalog_entry(
     }
     let entry: DurableCatalogEntry = serde_json::from_slice(&value[6..])
         .map_err(|error| Error::new("E_STORAGE", format!("decode catalog entry: {error}")))?;
+    if version < GENERATED_DEFAULT_CATALOG_CODEC_VERSION
+        && (matches!(entry, DurableCatalogEntry::Sequence(_))
+            || matches!(&entry, DurableCatalogEntry::Table(table) if !table.generated_defaults.is_empty()))
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "generated defaults require catalog codec 8",
+        ));
+    }
     if matches!(entry, DurableCatalogEntry::Reference(_))
         && version < REFERENCE_CATALOG_CODEC_VERSION
     {
@@ -8376,16 +8432,21 @@ insert many children [
                 .code,
             "E_STORAGE_UPGRADE_REQUIRED"
         );
+        for version in [
+            REFERENCE_CATALOG_CODEC_VERSION,
+            GENERATED_DEFAULT_CATALOG_CODEC_VERSION,
+        ] {
+            let encoded = encode_catalog_entry(&entry, version).unwrap();
+            let decoded = decode_catalog_entry(&key, &encoded, version).unwrap();
+            assert_eq!(
+                serde_json::to_value(&decoded).unwrap(),
+                serde_json::to_value(&entry).unwrap()
+            );
+        }
         let encoded = encode_catalog_entry(&entry, REFERENCE_CATALOG_CODEC_VERSION).unwrap();
-        let decoded =
-            decode_catalog_entry(&key, &encoded, REFERENCE_CATALOG_CODEC_VERSION).unwrap();
-        assert_eq!(
-            serde_json::to_value(&decoded).unwrap(),
-            serde_json::to_value(&entry).unwrap()
-        );
         for version in [
             PARTIAL_CATALOG_CODEC_VERSION,
-            REFERENCE_CATALOG_CODEC_VERSION + 1,
+            GENERATED_DEFAULT_CATALOG_CODEC_VERSION + 1,
         ] {
             let mut forged = encoded.clone();
             forged[4..6].copy_from_slice(&version.to_be_bytes());

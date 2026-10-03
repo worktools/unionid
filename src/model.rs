@@ -269,6 +269,29 @@ pub struct Row {
     pub fields: BTreeMap<String, Value>,
 }
 
+// Internally tagged catalog/table envelopes buffer JSON keys as strings. Parse
+// stable-ID keys explicitly instead of relying on serde_json's map-key adapter.
+pub(crate) fn deserialize_generated_defaults<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<u64, BoundGeneratedDefault>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = BTreeMap::<String, BoundGeneratedDefault>::deserialize(deserializer)?;
+    values
+        .into_iter()
+        .map(|(key, value)| {
+            let id = key.parse::<u64>().map_err(serde::de::Error::custom)?;
+            if id == 0 || key != id.to_string() {
+                return Err(serde::de::Error::custom(
+                    "generated-default field ID must be canonical and nonzero",
+                ));
+            }
+            Ok((id, value))
+        })
+        .collect()
+}
+
 /// A table-level generator bound to stable catalog identities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BoundGeneratedDefault {
@@ -294,6 +317,7 @@ pub struct Table {
     #[serde(default)]
     pub primary_key: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(deserialize_with = "deserialize_generated_defaults")]
     pub generated_defaults: BTreeMap<u64, BoundGeneratedDefault>,
 }
 

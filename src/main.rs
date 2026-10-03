@@ -674,7 +674,7 @@ struct VersionReport {
     stream_protocol_versions: [u32; 1],
     readable_storage_formats: [u32; 14],
     readable_backup_formats: [u32; 8],
-    supported_storage_capabilities: [&'static str; 3],
+    supported_storage_capabilities: [&'static str; 4],
     current_storage: unionid::StorageVersions,
 }
 
@@ -918,7 +918,12 @@ fn version_report() -> VersionReport {
         stream_protocol_versions: [unionid::stream::VERSION],
         readable_storage_formats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         readable_backup_formats: [1, 2, 3, 4, 5, 6, 7, 8],
-        supported_storage_capabilities: ["partial_unique_index", "typed_map", "typed_references"],
+        supported_storage_capabilities: [
+            "generated_defaults",
+            "partial_unique_index",
+            "typed_map",
+            "typed_references",
+        ],
         current_storage: unionid::Engine::current_storage_versions(),
     }
 }

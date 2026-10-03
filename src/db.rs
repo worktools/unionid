@@ -26,7 +26,7 @@ use crate::row_source::{
     TableStats, TypedRowSource,
 };
 
-mod generated;
+pub(crate) mod generated;
 mod index_predicate;
 mod migration;
 mod mutation_plan;
@@ -209,6 +209,7 @@ pub(crate) struct LogicalWriteSet {
     pub(crate) table_watermarks: BTreeMap<String, (RowId, RowId)>,
     pub(crate) index_entries: BTreeMap<(u64, String, RowId), IndexEntryChange>,
     pub(crate) receipt_keys: BTreeSet<String>,
+    pub(crate) sequence_counters: BTreeMap<u64, (Option<i64>, Option<i64>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1165,11 +1166,15 @@ pub(crate) struct DurableTable {
     pub primary_key: Option<String>,
     #[serde(default)]
     pub next_row_id: RowId,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(deserialize_with = "crate::model::deserialize_generated_defaults")]
+    pub generated_defaults: BTreeMap<u64, crate::model::BoundGeneratedDefault>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
 pub(crate) enum DurableCatalogEntry {
+    Sequence(generated::Sequence),
     Reference(ReferenceDefinition),
     Type(TypeDefinition),
     Table(DurableTable),
@@ -1182,6 +1187,7 @@ pub(crate) enum DurableCatalogEntry {
 impl DurableCatalogEntry {
     pub(crate) fn kind_tag(&self) -> u8 {
         match self {
+            Self::Sequence(_) => 5,
             Self::Reference(_) => 4,
             Self::Type(_) => 1,
             Self::Table(_) => 2,
@@ -1191,6 +1197,7 @@ impl DurableCatalogEntry {
 
     pub(crate) fn stable_id(&self) -> u64 {
         match self {
+            Self::Sequence(sequence) => sequence.id,
             Self::Reference(definition) => definition.id,
             Self::Type(definition) => definition.id,
             Self::Table(table) => table.id,
@@ -7029,7 +7036,9 @@ impl Database {
             })
             .collect();
         let manifest = SchemaManifest {
-            format_version: if self.has_references() {
+            format_version: if self.has_generated_defaults() {
+                4
+            } else if self.has_references() {
                 3
             } else if indexes.iter().any(|index| match index {
                 SchemaIndex::Legacy { predicate, .. }
@@ -7228,6 +7237,7 @@ impl Database {
                 row_type: table.row_type,
                 primary_key: table.primary_key.clone(),
                 next_row_id: table.next_row_id,
+                generated_defaults: table.generated_defaults.clone(),
             }),
         }));
         entries.extend(
@@ -7249,8 +7259,23 @@ impl Database {
                 .cloned()
                 .map(DurableCatalogEntry::Reference),
         );
+        entries.extend(
+            self.sequences
+                .values()
+                .cloned()
+                .map(DurableCatalogEntry::Sequence),
+        );
         entries.sort_by_key(DurableCatalogEntry::stable_id);
         entries
+    }
+
+    pub(crate) fn durable_sequence_catalog_entry(&self, id: u64) -> Result<DurableCatalogEntry> {
+        let sequence = self
+            .sequences
+            .values()
+            .find(|sequence| sequence.id == id)
+            .ok_or_else(|| Error::new("E_STORAGE", "unknown sequence catalog identity"))?;
+        Ok(DurableCatalogEntry::Sequence(sequence.clone()))
     }
 
     pub(crate) fn durable_table_catalog_entry(&self, name: &str) -> Result<DurableCatalogEntry> {
@@ -7262,6 +7287,7 @@ impl Database {
             row_type: table.row_type,
             primary_key: table.primary_key.clone(),
             next_row_id: table.next_row_id,
+            generated_defaults: table.generated_defaults.clone(),
         }))
     }
 
@@ -7690,12 +7716,6 @@ impl Database {
     }
 
     pub(crate) fn validate_logical_backup(mut self) -> Result<Self> {
-        if self.has_generated_defaults() {
-            return Err(Error::new(
-                "E_BACKUP",
-                "generated-default backup codecs are not enabled in this development candidate",
-            ));
-        }
         self.rebuild_indexes()?;
         let codec = if self.requires_map_storage() {
             crate::codec::MAP_VALUE_CODEC_VERSION
@@ -7722,6 +7742,7 @@ impl Database {
         let mut index_definitions: BTreeMap<String, BTreeMap<String, IndexDefinition>> =
             BTreeMap::new();
         let mut reference_definitions = BTreeMap::new();
+        let mut sequences = BTreeMap::new();
         let mut max_id = 0;
         for entry in entries {
             let id = entry.stable_id();
@@ -7733,6 +7754,11 @@ impl Database {
             }
             max_id = max_id.max(id);
             match entry {
+                DurableCatalogEntry::Sequence(sequence) => {
+                    if sequences.insert(sequence.name.clone(), sequence).is_some() {
+                        return Err(Error::new("E_STORAGE", "duplicate durable sequence name"));
+                    }
+                }
                 DurableCatalogEntry::Reference(definition) => {
                     reference_definitions.insert(definition.id, definition);
                 }
@@ -7763,7 +7789,7 @@ impl Database {
                             next_row_id: table.next_row_id,
                             row_type: table.row_type,
                             primary_key: table.primary_key,
-                            generated_defaults: BTreeMap::new(),
+                            generated_defaults: table.generated_defaults,
                         }),
                     );
                 }
@@ -7880,7 +7906,7 @@ impl Database {
             }
         }
         let mut database = Self {
-            sequences: BTreeMap::new(),
+            sequences,
             generation_context: generated::GenerationContext::default(),
             reference_definitions,
             reference_states: BTreeMap::new(),
@@ -7897,6 +7923,7 @@ impl Database {
             ),
             pending_writes: LogicalWriteSet::default(),
         };
+        database.validate_generated_state()?;
         crate::migration::validate_history(&database.migration_history)?;
         if let Some(head) = database.migration_history.last()
             && (head.schema_revision != database.schema_revision

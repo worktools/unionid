@@ -334,6 +334,9 @@ trait DurableBackend: Send {
     fn supports_references(&self) -> bool {
         false
     }
+    fn supports_generated_defaults(&self) -> bool {
+        false
+    }
     fn supports_bounded_row_mutation(&self) -> bool {
         false
     }
@@ -549,6 +552,10 @@ impl DurableBackend for RedbStore {
     }
     fn supports_references(&self) -> bool {
         RedbStore::supports_references(self)
+    }
+
+    fn supports_generated_defaults(&self) -> bool {
+        RedbStore::supports_generated_defaults(self)
     }
 
     fn supports_bounded_row_mutation(&self) -> bool {
@@ -1455,13 +1462,17 @@ impl Engine {
     pub fn prepare(&self, source: &str) -> Result<PreparedQuery> {
         let mut statements = syntax::parse(source)?;
         if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
             && statements
                 .iter()
                 .any(|located| located.statement.declares_generated_defaults())
         {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "generated-default persistence is not enabled in this development candidate",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
             ));
         }
         crate::script::preflight(&statements)?;
@@ -1666,13 +1677,17 @@ impl Engine {
     ) -> Result<()> {
         let mut statements = syntax::parse(source)?;
         if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
             && statements
                 .iter()
                 .any(|located| located.statement.declares_generated_defaults())
         {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "generated-default persistence is not enabled in this development candidate",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
             ));
         }
         if let Some(page) = page {
@@ -1984,13 +1999,17 @@ impl Engine {
         }
         let mut statements = syntax::parse(source)?;
         if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
             && statements
                 .iter()
                 .any(|located| located.statement.declares_generated_defaults())
         {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "generated-default persistence is not enabled in this development candidate",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
             ));
         }
         if let Some(page) = page {
@@ -3119,10 +3138,16 @@ impl Engine {
         receipt_state: Option<ReceiptMap>,
         write_set: Option<LogicalWriteSet>,
     ) -> Result<(u64, Option<DurableCommitProfile>)> {
-        if self.storage_mode != StorageMode::Memory && candidate.has_generated_defaults() {
+        if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
+            && candidate.has_generated_defaults()
+        {
             return Err(Error::new(
                 "E_STORAGE_UPGRADE_REQUIRED",
-                "generated-default persistence is not enabled in this development candidate",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
             ));
         }
 

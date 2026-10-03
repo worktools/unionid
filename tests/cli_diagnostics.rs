@@ -44,7 +44,12 @@ fn version_and_doctor_have_stable_machine_readable_shapes() {
     assert_eq!(version["current_storage"]["format"], 10);
     assert_eq!(
         version["supported_storage_capabilities"],
-        serde_json::json!(["partial_unique_index", "typed_map", "typed_references"])
+        serde_json::json!([
+            "generated_defaults",
+            "partial_unique_index",
+            "typed_map",
+            "typed_references"
+        ])
     );
     assert_eq!(version["current_storage"]["maintenance_codec"], 1);
     assert_eq!(version["current_storage"]["journal_codec"], 0);

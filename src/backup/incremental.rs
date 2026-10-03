@@ -819,6 +819,7 @@ fn validate_header(kind: ArchiveKind, header: &ArchiveHeader) -> Result<()> {
             "typed_map" => 5,
             "partial_unique_index" => 6,
             "typed_references" => 7,
+            "generated_defaults" if header.storage_header.is_some() => 8,
             _ => return Err(archive_error("unsupported required archive capability")),
         };
         if header.catalog_codec < minimum_catalog

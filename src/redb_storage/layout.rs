@@ -9,6 +9,7 @@ const REFERENCES: u8 = 1 << 3;
 const BOUNDED: u8 = 1 << 4;
 const GENERATIONS: u8 = 1 << 5;
 const CURSOR: u8 = 1 << 6;
+const DEFAULTS: u8 = 1 << 7;
 
 // Catalog, value, index-key and receipt codecs; migration codec stays version 1.
 const LEGACY_CODECS: [u16; 4] = [
@@ -150,8 +151,26 @@ impl StorageLayout {
         })
     }
 
+    pub(crate) const fn supports_generated_defaults(self) -> bool {
+        self.capabilities & DEFAULTS != 0
+    }
+
+    pub(crate) fn with_generated_defaults(self) -> Self {
+        Self {
+            catalog: GENERATED_DEFAULT_CATALOG_CODEC_VERSION,
+            value: MAP_VALUE_CODEC_VERSION,
+            index: MAP_INDEX_KEY_VERSION,
+            receipt: MAP_RECEIPT_CODEC_VERSION,
+            capabilities: self.capabilities | DEFAULTS,
+            ..self
+        }
+    }
+
     pub(crate) fn required_capabilities(self) -> Vec<String> {
         let mut result = Vec::new();
+        if self.supports_generated_defaults() {
+            result.push("generated_defaults".into());
+        }
         if self.supports_partial_indexes() {
             result.push("partial_unique_index".into());
         }
@@ -174,8 +193,10 @@ impl StorageLayout {
         let mut maps = self.supports_maps();
         let mut partial = self.supports_partial_indexes();
         let mut references = self.supports_references();
+        let mut defaults = self.supports_generated_defaults();
         for capability in requested {
             match capability.as_str() {
+                "generated_defaults" => defaults = true,
                 "typed_map" => maps = true,
                 "partial_unique_index" => {
                     maps = true;
@@ -194,12 +215,12 @@ impl StorageLayout {
                 }
             }
         }
-        Ok(Self::from_header_profile(
-            maps,
-            partial,
-            references,
-            self.supports_journal(),
-        ))
+        let profile = Self::from_header_profile(maps, partial, references, self.supports_journal());
+        Ok(if defaults {
+            profile.with_generated_defaults()
+        } else {
+            profile
+        })
     }
 
     pub(crate) fn validate_required_state(
@@ -207,10 +228,10 @@ impl StorageLayout {
         database: &Database,
         receipts: &ReceiptMap,
     ) -> Result<()> {
-        if database.has_generated_defaults() {
+        if database.has_generated_defaults() && !self.supports_generated_defaults() {
             return Err(Error::new(
                 "E_STORAGE",
-                "generated-default codecs are not enabled in this development candidate",
+                "storage header omits the required generated_defaults capability",
             ));
         }
         if !self.has_header() {

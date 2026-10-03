@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{CAPABILITY_STORAGE_FORMAT_VERSION, StorageLayout};
 use super::{
-    JOURNAL_CODEC_VERSION, MAINTENANCE_CODEC_VERSION, MAP_CATALOG_CODEC_VERSION,
-    MAP_INDEX_KEY_VERSION, MAP_RECEIPT_CODEC_VERSION, MAP_VALUE_CODEC_VERSION,
-    MIGRATION_CODEC_VERSION, PARTIAL_CATALOG_CODEC_VERSION, PRODUCTION_CATALOG_CODEC_VERSION,
-    PRODUCTION_INDEX_KEY_VERSION, PRODUCTION_RECEIPT_CODEC_VERSION,
-    REFERENCE_CATALOG_CODEC_VERSION,
+    GENERATED_DEFAULT_CATALOG_CODEC_VERSION, JOURNAL_CODEC_VERSION, MAINTENANCE_CODEC_VERSION,
+    MAP_CATALOG_CODEC_VERSION, MAP_INDEX_KEY_VERSION, MAP_RECEIPT_CODEC_VERSION,
+    MAP_VALUE_CODEC_VERSION, MIGRATION_CODEC_VERSION, PARTIAL_CATALOG_CODEC_VERSION,
+    PRODUCTION_CATALOG_CODEC_VERSION, PRODUCTION_INDEX_KEY_VERSION,
+    PRODUCTION_RECEIPT_CODEC_VERSION, REFERENCE_CATALOG_CODEC_VERSION,
 };
 use crate::error::{Error, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -20,7 +20,7 @@ const PREFIX_BYTES: usize = 6;
 // the largest representable integer fields, rather than a new resource budget.
 const MAX_JSON: &str = concat!(
     "{\"physical_format\":4294967295,\"required_capabilities\":[",
-    "\"partial_unique_index\",\"typed_map\",\"typed_references\"],",
+    "\"generated_defaults\",\"partial_unique_index\",\"typed_map\",\"typed_references\"],",
     "\"codecs\":{\"catalog\":65535,\"value\":65535,\"index_key\":65535,",
     "\"migration\":65535,\"receipt\":65535,\"maintenance\":65535,\"journal\":65535}}"
 );
@@ -95,12 +95,15 @@ impl StorageHeader {
     pub(crate) fn layout(&self) -> Result<StorageLayout> {
         self.validate_profile()?;
         let has = |name: &str| self.required_capabilities.iter().any(|value| value == name);
-        let native = StorageLayout::from_header_profile(
+        let mut native = StorageLayout::from_header_profile(
             has("typed_map"),
             has("partial_unique_index"),
             has("typed_references"),
             self.codecs.journal != 0,
         );
+        if has("generated_defaults") {
+            native = native.with_generated_defaults();
+        }
         if self.physical_format == CAPABILITY_STORAGE_FORMAT_VERSION {
             Ok(native)
         } else {
@@ -150,8 +153,10 @@ impl StorageHeader {
         let mut map = false;
         let mut partial = false;
         let mut references = false;
+        let mut defaults = false;
         for capability in &self.required_capabilities {
             match capability.as_str() {
+                "generated_defaults" => defaults = true,
                 "typed_map" => map = true,
                 "partial_unique_index" => partial = true,
                 "typed_references" => references = true,
@@ -168,7 +173,19 @@ impl StorageHeader {
         if (references && !partial) || (partial && !map) {
             return Err(invalid("missing capability dependency"));
         }
-        let expected = if references {
+        if defaults && self.physical_format != CAPABILITY_STORAGE_FORMAT_VERSION {
+            return Err(invalid(
+                "generated defaults require the native physical format",
+            ));
+        }
+        let expected = if defaults {
+            (
+                GENERATED_DEFAULT_CATALOG_CODEC_VERSION,
+                MAP_VALUE_CODEC_VERSION,
+                MAP_INDEX_KEY_VERSION,
+                MAP_RECEIPT_CODEC_VERSION,
+            )
+        } else if references {
             (
                 REFERENCE_CATALOG_CODEC_VERSION,
                 MAP_VALUE_CODEC_VERSION,
@@ -251,6 +268,41 @@ mod tests {
                 let bytes = frame(&json);
                 assert!(bytes.len() <= MAX_HEADER_BYTES);
                 assert!(StorageHeader::decode(&bytes, u32::MAX).is_ok(), "{json}");
+            }
+        }
+    }
+
+    #[test]
+    fn generated_default_profiles_round_trip_with_each_business_capability_and_journal() {
+        for format in 10..=13 {
+            let Some(legacy) = StorageLayout::for_format(format) else {
+                continue;
+            };
+            for journal in [false, true] {
+                let layout = legacy.to_header_layout().unwrap().with_generated_defaults();
+                let layout = if journal {
+                    layout.with_journal().unwrap()
+                } else {
+                    layout
+                };
+                let encoded = StorageHeader::encode_layout(layout).unwrap();
+                assert!(encoded.len() <= MAX_HEADER_BYTES);
+                assert_eq!(
+                    StorageHeader::decode_any(&encoded)
+                        .unwrap()
+                        .layout()
+                        .unwrap(),
+                    layout
+                );
+                assert_eq!(layout.catalog, GENERATED_DEFAULT_CATALOG_CODEC_VERSION);
+                assert!(
+                    layout
+                        .required_capabilities()
+                        .iter()
+                        .any(|value| value == "generated_defaults")
+                );
+                let transport = StorageHeader::encode_transport(layout).unwrap();
+                assert_eq!(StorageHeader::decode_transport(&transport).unwrap(), layout);
             }
         }
     }
