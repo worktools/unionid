@@ -178,3 +178,25 @@ Project plan/apply/rehearse automatically discover queries/ beside the resolved 
 init 的 README 和 scripts/check.sh 提供 project check → migration plan --queries queries 的 CI 顺序，部署 apply 也带显式目录；runner 需先安装项目使用的 CLI 版本。project check 先绑定全部 query，再报告格式差异，避免必要的 ADT/match 错误被排版提示遮住。
 
 The starter README and scripts/check.sh provide project check → migration plan --queries queries for CI, with explicit directories for deployment apply. Install the project's CLI version on the runner first. Project check binds all queries before reporting layout differences, so ADT/match errors remain visible.
+
+## Rust 精简预检报告 v2 / Compact Rust preflight reports v2 (development)
+
+开发版新增 `Engine::plan_migrations_with_queries_v2` 和 `apply_migrations_with_queries_v2`；现有方法与 CLI 的 v1 输出保持原契约。v2 把每个检查点的 migration ID、schema revision/hash 放在共享 `checkpoints` 数组中；每个文件的 `failures` 使用 inclusive 的 `first_checkpoint`/`last_checkpoint` 索引区间。只有相邻且完整错误相同的失败才合并；一次成功会断开区间，原始 code/message/span/hint 等仍保留。每个检查点都实际绑定，`valid` 始终表示最终目标的实际结果。
+
+```rust
+let planned = engine.plan_migrations_with_queries_v2(&migrations, &queries)?;
+for file in &planned.query_validation.files {
+    for failure in &file.failures {
+        let first = &planned.query_validation.checkpoints[failure.first_checkpoint];
+        let last = &planned.query_validation.checkpoints[failure.last_checkpoint];
+        println!("{}: {:?} .. {:?}: {}", file.path,
+            first.migration_id, last.migration_id, failure.error);
+    }
+}
+```
+
+v2 最多保留 4,096 个错误区间与 1 MiB 编码报告；1,024 文件、16 MiB 总源码、单源及 65,536 次绑定限制不变。重复错误不再按跨度消耗诊断预算，但不同错误、长路径或检查点元数据仍可能返回 `E_LIMIT`，没有隐式截断。无效最终查询以 `MigrationQueryErrorV2` 携带报告，在首次 migration/maintenance 提交前拒绝；后续数据转换仍按文件提交。此阶段尚未提供 CLI compact/full 开关，也未修改发布默认值或数据库格式。
+
+Development adds explicit version-2 Rust plan/apply methods; existing methods and CLI reports retain v1. A shared ordered checkpoint array stores migration IDs and schema identities. Each file records inclusive failure intervals using zero-based checkpoint indices. Only consecutive identical complete errors merge; success splits intervals. Every checkpoint is still bound, and final validity comes from the final actual bind.
+
+V2 limits retained error intervals to 4,096 and encoded reports to 1 MiB, while preserving existing file/source/bind limits. Repeated failures consume one interval; distinct errors or large metadata can still fail with E_LIMIT without truncation. MigrationQueryErrorV2 preserves the compact report after final-query rejection or later conversion failure. Apply rejects invalid final schemas before any maintenance/migration commit; successful preflight retains per-file conversion commits. This stage does not add a CLI compact/full switch or change release defaults or storage formats.
