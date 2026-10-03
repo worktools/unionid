@@ -740,3 +740,210 @@ fn real_disk_failure_recovers_generated_rows_counters_and_receipts_together() {
     assert_eq!(id(&next, 0), if committed { 3 } else { 2 });
     engine.check_integrity().unwrap();
 }
+
+const EXIT_SOURCE: &str = r#"insert many items [{owner: "lost-a"}, {owner: "lost-b"}] | returning {id, public_id, created_at}"#;
+const EXIT_DIGEST: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[test]
+#[ignore = "invoked by parent to exit immediately after a durable commit"]
+fn generated_defaults_committed_exit_child() {
+    let path = std::env::var("UNIONID_GENERATED_EXIT_DB").unwrap();
+    let mut engine = Engine::open_redb(path).unwrap();
+    let committed = engine
+        .execute_idempotent_with_params(
+            "lost-generated",
+            EXIT_DIGEST,
+            EXIT_SOURCE,
+            BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert!(!committed.replayed);
+    assert_eq!(
+        (id(&committed.response, 0), id(&committed.response, 1)),
+        (1, 2)
+    );
+    // No response is delivered and no Engine destructor runs.
+    std::process::exit(95);
+}
+
+#[test]
+fn committed_exit_replays_exact_generated_values_after_restart_and_both_restores() {
+    use unionid::backup::incremental::{export, init, restore, verify};
+    let dir = common::TempDir::new();
+    let path = dir.0.join("committed.redb");
+    let archive = dir.0.join("archive");
+    let logical = dir.0.join("logical.json");
+    let schema;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(14).unwrap();
+        engine
+            .install_storage_capabilities(&["generated_defaults".into()], None)
+            .unwrap();
+        ok(&mut engine, SETUP);
+        schema = engine.schema_info();
+    }
+    init(&path, &archive, Default::default()).unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "generated_defaults_committed_exit_child",
+            "--nocapture",
+        ])
+        .env("UNIONID_GENERATED_EXIT_DB", &path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        child.status.code() == Some(95) && stdout.contains("running 1 test"),
+        "status={}, stdout={stdout}, stderr={stderr}",
+        child.status
+    );
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.check_integrity().unwrap();
+    assert_eq!(engine.schema_info(), schema);
+    let rows = ok(&mut engine, "from items | sort id");
+    assert_eq!(rows.rows.len(), 2);
+    assert!(rows.rows[0]["created_at"].cmp_eq(&rows.rows[1]["created_at"]));
+    assert!(!rows.rows[0]["public_id"].cmp_eq(&rows.rows[1]["public_id"]));
+    let boundary = engine.backup_journal_status().unwrap().head_sequence;
+    drop(engine);
+    unionid::backup::create(&path, &logical).unwrap();
+    let logical_target = dir.0.join("logical.redb");
+    unionid::backup::restore(&logical, &logical_target).unwrap();
+    export(&path, &archive, Default::default()).unwrap();
+    verify(&archive, Default::default()).unwrap();
+    let journal_target = dir.0.join("journal.redb");
+    restore(&archive, &journal_target, boundary, Default::default()).unwrap();
+    for target in [&path, &logical_target, &journal_target] {
+        let mut engine = Engine::open_redb(target).unwrap();
+        engine.check_integrity().unwrap();
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(engine.idempotency_status().unwrap().count, 1);
+        let sequence = engine.backup_journal_status().unwrap().head_sequence;
+        let replay = engine
+            .execute_idempotent_with_params(
+                "lost-generated",
+                EXIT_DIGEST,
+                EXIT_SOURCE,
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        for row in 0..2 {
+            for field in ["id", "public_id", "created_at"] {
+                assert!(replay.response.rows[row][field].cmp_eq(&rows.rows[row][field]));
+            }
+        }
+        assert_eq!(
+            engine.backup_journal_status().unwrap().head_sequence,
+            sequence
+        );
+        let next = ok(
+            &mut engine,
+            r#"insert items {owner: "next"} | returning id"#,
+        );
+        assert_eq!(id(&next, 0), 3);
+        engine.check_integrity().unwrap();
+    }
+}
+
+#[test]
+fn cli_and_tcp_omit_generated_fields_and_preserve_receipts_across_restart() {
+    use unionid::{ProtocolRequest, TcpClient};
+    let dir = common::TempDir::new();
+    let path = dir.0.join("client.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(14).unwrap();
+        engine
+            .install_storage_capabilities(&["generated_defaults".into()], None)
+            .unwrap();
+    }
+    let schema_file = dir.0.join("schema.unid");
+    std::fs::write(&schema_file, SETUP).unwrap();
+    let run = |args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<QueryResponse>(&output.stdout).unwrap()
+    };
+    let path_str = path.to_str().unwrap();
+    let setup = run(&[
+        "run",
+        "--db",
+        path_str,
+        "--file",
+        schema_file.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    assert!(setup.ok, "{:?}", setup.error);
+    let inserted = run(&[
+        "run",
+        "--db",
+        path_str,
+        "--query",
+        r#"insert items {owner: "cli"} | returning {id, public_id, created_at}"#,
+        "--format",
+        "json",
+    ]);
+    assert!(inserted.ok, "{:?}", inserted.error);
+    assert_eq!(id(&inserted, 0), 1);
+    let request = ProtocolRequest::query("network-first", EXIT_SOURCE)
+        .with_version(2)
+        .unwrap()
+        .with_idempotency_key("network-generated")
+        .unwrap();
+    let mut server = common::Server::start(&["--db", path_str]);
+    let mut client = TcpClient::connect(&server.addr).unwrap();
+    // A v1 boundary cannot represent the generated UUID/time outputs and must
+    // reject before allocation, even though all omitted inputs look primitive.
+    let old = client
+        .request(&ProtocolRequest::query("old", EXIT_SOURCE))
+        .unwrap();
+    assert!(!old.ok);
+    assert_eq!(old.error.unwrap().code, "E_PROTOCOL_TYPE");
+    let first = client.request(&request).unwrap();
+    assert!(first.ok, "{:?}", first.error);
+    assert!(!first.idempotency.as_ref().unwrap().replayed);
+    let expected = serde_json::to_value(&first.rows).unwrap();
+    drop(client);
+    server.shutdown();
+    let mut server = common::Server::start(&["--db", path_str]);
+    let mut client = TcpClient::connect(&server.addr).unwrap();
+    let mut retry = request;
+    retry.request_id = "network-retry".into();
+    let replay = client.request(&retry).unwrap();
+    assert!(replay.ok, "{:?}", replay.error);
+    assert!(replay.idempotency.as_ref().unwrap().replayed);
+    assert_eq!(serde_json::to_value(replay.rows).unwrap(), expected);
+    drop(client);
+    server.shutdown();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let rows = ok(&mut engine, "from items | sort id");
+    assert_eq!(rows.rows.len(), 3);
+    assert_eq!((id(&rows, 1), id(&rows, 2)), (2, 3));
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                r#"insert items {owner: "after-network"} | returning id"#
+            ),
+            0
+        ),
+        4
+    );
+    engine.check_integrity().unwrap();
+}
