@@ -12,7 +12,13 @@ use crate::error::{Error, Result};
 use crate::portable::{CompatibilityLevel, TypeDescription, TypeShape};
 use crate::query_contract::QueryDescription;
 
+mod compact;
 mod directory;
+use compact::CompactDiagnostics;
+pub use compact::{
+    MigrationQueryApplyV2, MigrationQueryErrorV2, MigrationQueryPlanV2, QueryCheckpoint,
+    QueryFailureInterval, QueryFileValidationV2, QueryValidationV2,
+};
 pub(crate) use directory::load_optional_query_directory;
 pub use directory::{MAX_QUERY_DIRECTORY_DEPTH, MAX_QUERY_DIRECTORY_ENTRIES, load_query_directory};
 
@@ -103,6 +109,7 @@ pub(crate) struct QueryValidator<'a> {
     diagnostics: usize,
     diagnostic_bytes: usize,
     first: bool,
+    compact: Option<CompactDiagnostics>,
 }
 
 #[derive(Clone)]
@@ -112,6 +119,12 @@ struct Signature {
 }
 
 impl<'a> QueryValidator<'a> {
+    pub(crate) fn new_compact(queries: &'a [MigrationQuery], checkpoints: usize) -> Result<Self> {
+        let mut validator = Self::new(queries, checkpoints)?;
+        validator.compact = Some(CompactDiagnostics::new(queries.len()));
+        Ok(validator)
+    }
+
     pub(crate) fn new(queries: &'a [MigrationQuery], checkpoints: usize) -> Result<Self> {
         if queries.is_empty() {
             return Err(Error::new(
@@ -169,6 +182,7 @@ impl<'a> QueryValidator<'a> {
             diagnostics: 0,
             diagnostic_bytes: 0,
             first: true,
+            compact: None,
         };
         // Reject excessive path metadata before any binding.
         check_report_size(&validator.files)?;
@@ -177,6 +191,10 @@ impl<'a> QueryValidator<'a> {
 
     pub(crate) fn inspect(&mut self, migration: Option<&str>, database: &Database) -> Result<()> {
         let engine = Engine::from_database(database.clone());
+        let schema = engine.schema_info();
+        if let Some(compact) = &mut self.compact {
+            compact.checkpoint(migration, schema.clone())?;
+        }
         let contract = engine.portable_contract()?;
         let types = contract
             .description()
@@ -212,6 +230,13 @@ impl<'a> QueryValidator<'a> {
                     };
                 }
                 Err(error) => {
+                    file.parameters_changed = None;
+                    file.result_changed = None;
+                    file.compatibility = CompatibilityLevel::Incompatible;
+                    if let Some(compact) = &mut self.compact {
+                        compact.failure(index, error)?;
+                        continue;
+                    }
                     self.diagnostics += 1;
                     if self.diagnostics > MAX_QUERY_DIAGNOSTICS {
                         return Err(Error::new(
@@ -219,12 +244,9 @@ impl<'a> QueryValidator<'a> {
                             "saved-query diagnostic budget exceeded",
                         ));
                     }
-                    file.parameters_changed = None;
-                    file.result_changed = None;
-                    file.compatibility = CompatibilityLevel::Incompatible;
                     let failure = QueryCheckpointFailure {
                         migration_id: migration.map(str::to_owned),
-                        schema: engine.schema_info(),
+                        schema: schema.clone(),
                         error,
                     };
                     self.diagnostic_bytes = self
@@ -241,7 +263,43 @@ impl<'a> QueryValidator<'a> {
         Ok(())
     }
 
+    pub(crate) fn finish_compact(self, plan: &MigrationPlan) -> Result<QueryValidationV2> {
+        let compact = self
+            .compact
+            .ok_or_else(|| Error::new("E_MIGRATION", "compact query report collector missing"))?;
+        let report = QueryValidationV2 {
+            version: 2,
+            current_schema: plan.current_schema.clone(),
+            target_schema: plan.target_schema.clone(),
+            checked_files: self.files.len(),
+            valid: self.files.iter().all(|file| file.valid),
+            checkpoints: compact.checkpoints,
+            files: self
+                .files
+                .into_iter()
+                .zip(compact.failures)
+                .map(|(file, failures)| QueryFileValidationV2 {
+                    path: file.path,
+                    valid: file.valid,
+                    current_valid: file.current_valid,
+                    compatibility: file.compatibility,
+                    parameters_changed: file.parameters_changed,
+                    result_changed: file.result_changed,
+                    failures,
+                })
+                .collect(),
+        };
+        check_report_size(&report)?;
+        Ok(report)
+    }
+
     pub(crate) fn finish(self, plan: &MigrationPlan) -> Result<QueryValidation> {
+        if self.compact.is_some() {
+            return Err(Error::new(
+                "E_MIGRATION",
+                "full query report collector missing",
+            ));
+        }
         let report = QueryValidation {
             version: 1,
             current_schema: plan.current_schema.clone(),

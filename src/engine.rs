@@ -2375,7 +2375,41 @@ impl Engine {
         files: &[MigrationFile],
         queries: &[crate::migration::query_validation::MigrationQuery],
     ) -> Result<crate::migration::query_validation::MigrationQueryPlan> {
-        use crate::migration::query_validation::{MigrationQueryPlan, QueryValidator};
+        use crate::migration::query_validation::MigrationQueryPlan;
+        let (plan, validator) = self.preflight_migration_queries(files, queries, false)?;
+        let query_validation = validator.finish(&plan)?;
+        Ok(MigrationQueryPlan {
+            plan,
+            query_validation,
+        })
+    }
+
+    /// Bind every checkpoint while retaining identical consecutive failures as intervals.
+    /// Existing version-1 report APIs remain unchanged.
+    pub fn plan_migrations_with_queries_v2(
+        &self,
+        files: &[MigrationFile],
+        queries: &[crate::migration::query_validation::MigrationQuery],
+    ) -> Result<crate::migration::query_validation::MigrationQueryPlanV2> {
+        use crate::migration::query_validation::MigrationQueryPlanV2;
+        let (plan, validator) = self.preflight_migration_queries(files, queries, true)?;
+        let query_validation = validator.finish_compact(&plan)?;
+        Ok(MigrationQueryPlanV2 {
+            plan,
+            query_validation,
+        })
+    }
+
+    fn preflight_migration_queries<'a>(
+        &self,
+        files: &[MigrationFile],
+        queries: &'a [crate::migration::query_validation::MigrationQuery],
+        compact: bool,
+    ) -> Result<(
+        MigrationPlan,
+        crate::migration::query_validation::QueryValidator<'a>,
+    )> {
+        use crate::migration::query_validation::QueryValidator;
         let applied = validate_files_against_history(files, self.committed.db.migration_history())?;
         if let Some(info) = self
             .durable
@@ -2398,14 +2432,15 @@ impl Engine {
                     .with_hint("inspect migration status and use the original files to advance or explicitly abort maintenance"));
             }
         }
-        let mut validator = QueryValidator::new(queries, files.len() - applied + 1)?;
+        let checkpoints = files.len() - applied + 1;
+        let mut validator = if compact {
+            QueryValidator::new_compact(queries, checkpoints)?
+        } else {
+            QueryValidator::new(queries, checkpoints)?
+        };
         let plan =
             self.plan_migrations_observed(files, true, |id, db| validator.inspect(id, db))?;
-        let query_validation = validator.finish(&plan)?;
-        Ok(MigrationQueryPlan {
-            plan,
-            query_validation,
-        })
+        Ok((plan, validator))
     }
 
     /// Validate all final queries before the first migration or maintenance commit.
@@ -2435,6 +2470,39 @@ impl Engine {
                 query_validation: validation,
             }),
             Err(error) => Err(MigrationQueryError {
+                error: Box::new(error),
+                query_validation: Some(Box::new(validation)),
+            }),
+        }
+    }
+
+    /// Apply only after all final queries bind, returning a version-2 compact report.
+    /// Preflight shares the v1 ownership/maintenance boundary; conversions commit per file.
+    pub fn apply_migrations_with_queries_v2(
+        &mut self,
+        files: &[MigrationFile],
+        queries: &[crate::migration::query_validation::MigrationQuery],
+    ) -> std::result::Result<
+        crate::migration::query_validation::MigrationQueryApplyV2,
+        crate::migration::query_validation::MigrationQueryErrorV2,
+    > {
+        use crate::migration::query_validation::{MigrationQueryApplyV2, MigrationQueryErrorV2};
+        let validation = self
+            .plan_migrations_with_queries_v2(files, queries)?
+            .query_validation;
+        if !validation.valid {
+            return Err(MigrationQueryErrorV2 {
+                error: Error::new("E_MIGRATION", "saved queries are invalid for the target schema")
+                    .with_hint("inspect query_validation and update the failing saved queries before applying migrations").into(),
+                query_validation: Some(Box::new(validation)),
+            });
+        }
+        match self.apply_migrations(files) {
+            Ok(applied) => Ok(MigrationQueryApplyV2 {
+                applied,
+                query_validation: validation,
+            }),
+            Err(error) => Err(MigrationQueryErrorV2 {
                 error: Box::new(error),
                 query_validation: Some(Box::new(validation)),
             }),

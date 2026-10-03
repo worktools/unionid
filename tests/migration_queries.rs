@@ -283,6 +283,11 @@ fn building_maintenance_is_unchanged_on_failure_and_can_resume_after_valid_prefl
     engine.advance_migrations(&files, 1).unwrap();
     let before = engine.migration_status(&files).unwrap();
     assert!(before.maintenance.is_some());
+    let compact = engine
+        .apply_migrations_with_queries_v2(&files, &[exhaustive()])
+        .unwrap_err();
+    assert_eq!(compact.error.code, "E_MIGRATION");
+    assert_eq!(engine.migration_status(&files).unwrap(), before);
     assert!(
         engine
             .apply_migrations_with_queries(&files, &[exhaustive()])
@@ -354,6 +359,29 @@ fn source_and_binding_budgets_reject_before_planning_or_applying() {
     let before = engine.schema_info();
     assert_eq!(
         engine
+            .apply_migrations_with_queries_v2(&files, &queries)
+            .unwrap_err()
+            .error
+            .code,
+        "E_LIMIT"
+    );
+    assert_eq!(
+        engine
+            .plan_migrations_with_queries_v2(&[initial()], &large)
+            .unwrap_err()
+            .code,
+        "E_LIMIT"
+    );
+    let long_path = [query(&"x".repeat(MAX_QUERY_REPORT_BYTES), "from jobs")];
+    assert_eq!(
+        engine
+            .plan_migrations_with_queries_v2(&[initial()], &long_path)
+            .unwrap_err()
+            .code,
+        "E_LIMIT"
+    );
+    assert_eq!(
+        engine
             .apply_migrations_with_queries(&files, &queries)
             .unwrap_err()
             .error
@@ -366,38 +394,47 @@ fn source_and_binding_budgets_reject_before_planning_or_applying() {
 
 #[test]
 fn valid_queries_do_not_promise_directory_wide_atomic_data_conversion() {
-    let mut engine = Engine::memory();
-    setup(&mut engine);
-    assert!(
-        engine
-            .execute("insert jobs {id: 2, state: Pending, score: 5}")
-            .ok
-    );
-    let files = [
-        initial(),
-        next("note", "initial", "add field Job.note: text = \"\""),
-        next("unique", "note", "add unique index jobs.score"),
-    ];
-    let queries = [query("ids.unid", "from jobs | select {id}")];
-    assert!(
-        engine
-            .plan_migrations_with_queries(&files, &queries)
-            .unwrap()
-            .query_validation
-            .valid
-    );
-    let error = engine
-        .apply_migrations_with_queries(&files, &queries)
-        .unwrap_err();
-    assert!(error.query_validation.unwrap().valid);
-    assert!(
-        error
-            .error
-            .message
-            .contains("earlier migration(s) were committed")
-    );
-    assert_eq!(engine.migration_history().len(), 2);
-    assert!(engine.schema().contains("note: text"));
+    for compact in [false, true] {
+        let mut engine = Engine::memory();
+        setup(&mut engine);
+        assert!(
+            engine
+                .execute("insert jobs {id: 2, state: Pending, score: 5}")
+                .ok
+        );
+        let files = [
+            initial(),
+            next("note", "initial", "add field Job.note: text = \"\""),
+            next("unique", "note", "add unique index jobs.score"),
+        ];
+        let queries = [query("ids.unid", "from jobs | select {id}")];
+        assert!(
+            engine
+                .plan_migrations_with_queries(&files, &queries)
+                .unwrap()
+                .query_validation
+                .valid
+        );
+        let (valid, error) = if compact {
+            let failure = engine
+                .apply_migrations_with_queries_v2(&files, &queries)
+                .unwrap_err();
+            (failure.query_validation.unwrap().valid, failure.error)
+        } else {
+            let failure = engine
+                .apply_migrations_with_queries(&files, &queries)
+                .unwrap_err();
+            (failure.query_validation.unwrap().valid, failure.error)
+        };
+        assert!(valid);
+        assert!(
+            error
+                .message
+                .contains("earlier migration(s) were committed")
+        );
+        assert_eq!(engine.migration_history().len(), 2);
+        assert!(engine.schema().contains("note: text"));
+    }
 }
 
 #[test]
@@ -431,6 +468,14 @@ fn cutover_catalog_is_checked_before_reclaim_cleanup() {
         .apply_migrations_with_queries(&files, &[exhaustive()])
         .unwrap_err();
     let report = error.query_validation.unwrap();
+    let compact = engine
+        .apply_migrations_with_queries_v2(&files, &[exhaustive()])
+        .unwrap_err();
+    assert_eq!(compact.error.code, "E_MIGRATION");
+    assert_eq!(
+        expand_compact(compact.query_validation.as_deref().unwrap()),
+        *report
+    );
     assert!(!report.files[0].current_valid);
     assert_eq!(report.current_schema, report.target_schema);
     assert_eq!(engine.migration_status(&files).unwrap(), before);
@@ -532,6 +577,11 @@ fn ready_candidate_cannot_cut_over_or_resume_with_different_migration_sources() 
         before.maintenance.as_ref().unwrap().phase,
         MigrationMaintenancePhase::Ready
     );
+    let compact = engine
+        .apply_migrations_with_queries_v2(&files, &[exhaustive()])
+        .unwrap_err();
+    assert_eq!(compact.error.code, "E_MIGRATION");
+    assert_eq!(engine.migration_status(&files).unwrap(), before);
     assert!(
         engine
             .apply_migrations_with_queries(&files, &[exhaustive()])
@@ -555,6 +605,10 @@ fn ready_candidate_cannot_cut_over_or_resume_with_different_migration_sources() 
             .unwrap()
             .contains("original files")
     );
+    let compact_error = engine
+        .apply_migrations_with_queries_v2(&changed, std::slice::from_ref(&valid_query))
+        .unwrap_err();
+    assert_eq!(compact_error.error, error.error);
     assert_eq!(engine.migration_status(&files).unwrap(), before);
     drop(engine);
     let mut reopened = Engine::open_redb(&db).unwrap();
@@ -614,4 +668,234 @@ fn aborting_candidate_is_not_cleaned_by_rejected_query_preflight() {
     assert_eq!(engine.migration_history().len(), 1);
     assert_eq!(engine.execute("from jobs").rows.len(), 2);
     engine.check_integrity().unwrap();
+}
+
+/// Expand only trusted, budget-sized reports to compare the public v1 semantics.
+fn expand_compact(
+    report: &unionid::migration::query_validation::QueryValidationV2,
+) -> unionid::migration::query_validation::QueryValidation {
+    use unionid::migration::query_validation::{
+        QueryCheckpointFailure, QueryFileValidation, QueryValidation,
+    };
+    QueryValidation {
+        version: 1,
+        current_schema: report.current_schema.clone(),
+        target_schema: report.target_schema.clone(),
+        checked_files: report.checked_files,
+        valid: report.valid,
+        files: report
+            .files
+            .iter()
+            .map(|file| QueryFileValidation {
+                path: file.path.clone(),
+                valid: file.valid,
+                current_valid: file.current_valid,
+                compatibility: file.compatibility,
+                parameters_changed: file.parameters_changed,
+                result_changed: file.result_changed,
+                failures: file
+                    .failures
+                    .iter()
+                    .flat_map(|interval| {
+                        (interval.first_checkpoint..=interval.last_checkpoint).map(|index| {
+                            let checkpoint = &report.checkpoints[index];
+                            QueryCheckpointFailure {
+                                migration_id: checkpoint.migration_id.clone(),
+                                schema: checkpoint.schema.clone(),
+                                error: interval.error.clone(),
+                            }
+                        })
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn compact_reports_preserve_full_checkpoint_errors_and_shape_warnings() {
+    let mut engine = Engine::memory();
+    setup(&mut engine);
+    let files = [
+        initial(),
+        next("cancel", "initial", "add variant State.Cancelled"),
+        next("default", "cancel", "change default Job.score to 0"),
+        next(
+            "repair",
+            "default",
+            "drop variant State.Cancelled using old -> State.Done",
+        ),
+        next("again", "repair", "add variant State.Cancelled"),
+    ];
+    let queries = [
+        query("missing.unid", "from missing"),
+        query(
+            "shape.unid",
+            "from jobs | filter state == $state | select {state}",
+        ),
+        exhaustive(),
+        query("new.unid", "from jobs | filter state == Cancelled"),
+    ];
+    for migrations in [&files[..1], &files[..3], &files[..4], &files[..]] {
+        let full = engine
+            .plan_migrations_with_queries(migrations, &queries)
+            .unwrap();
+        let compact = engine
+            .plan_migrations_with_queries_v2(migrations, &queries)
+            .unwrap();
+        assert_eq!(compact.plan, full.plan);
+        assert_eq!(
+            expand_compact(&compact.query_validation),
+            full.query_validation
+        );
+        let json = serde_json::to_vec(&compact.query_validation).unwrap();
+        let decoded: unionid::migration::query_validation::QueryValidationV2 =
+            serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded, compact.query_validation);
+    }
+    let compact = engine
+        .plan_migrations_with_queries_v2(&files, &queries)
+        .unwrap()
+        .query_validation;
+    let matches = compact
+        .files
+        .iter()
+        .find(|file| file.path == "states/check.unid")
+        .unwrap();
+    assert_eq!(matches.failures.len(), 2);
+    assert_eq!(
+        (
+            matches.failures[0].first_checkpoint,
+            matches.failures[0].last_checkpoint
+        ),
+        (1, 2)
+    );
+    assert_eq!(
+        (
+            matches.failures[1].first_checkpoint,
+            matches.failures[1].last_checkpoint
+        ),
+        (4, 4)
+    );
+    assert!(!matches.valid);
+}
+
+fn repeated_preflight_files() -> Vec<MigrationFile> {
+    let mut files = vec![initial()];
+    let mut parent = "initial".to_owned();
+    for i in 0..64 {
+        let name = format!("step_{i:03}");
+        files.push(next(&name, &parent, "change default Job.score to 0"));
+        parent = name;
+    }
+    files
+}
+
+#[test]
+fn compact_64_by_64_preflight_returns_final_errors_without_durable_effects() {
+    let temp = TempDir::new();
+    let db = temp.0.join("compact.redb");
+    let archive = temp.0.join("archive");
+    {
+        let mut engine = Engine::open_redb(&db).unwrap();
+        setup(&mut engine);
+        let source = "update jobs | set score = score + 1";
+        let digest = ProtocolRequest::query("attempt", source)
+            .canonical_digest()
+            .unwrap();
+        engine
+            .execute_idempotent_with_params("once", &digest, source, BTreeMap::new(), None)
+            .unwrap();
+    }
+    backup::incremental::init(&db, &archive, Default::default()).unwrap();
+    let before = temp.0.join("before.json");
+    backup::create(&db, &before).unwrap();
+    let files = repeated_preflight_files();
+    let queries = (0..64)
+        .map(|i| query(&format!("query_{i:03}.unid"), "from missing"))
+        .collect::<Vec<_>>();
+    {
+        let mut engine = Engine::open_redb(&db).unwrap();
+        let introspection = serde_json::to_value(engine.introspection()).unwrap();
+        let status = serde_json::to_value(engine.backup_journal_status().unwrap()).unwrap();
+        let maintenance = engine.migration_status(&files).unwrap();
+        assert_eq!(
+            engine
+                .plan_migrations_with_queries(&files, &queries)
+                .unwrap_err()
+                .code,
+            "E_LIMIT"
+        );
+        let planned = engine
+            .plan_migrations_with_queries_v2(&files, &queries)
+            .unwrap();
+        let report = planned.query_validation;
+        assert!(!report.valid);
+        assert_eq!(report.version, 2);
+        assert_eq!(report.checkpoints.len(), 65);
+        assert_eq!(
+            report.checkpoints.last().unwrap().schema,
+            planned.plan.target_schema
+        );
+        for file in &report.files {
+            assert!(!file.valid);
+            assert_eq!(file.failures.len(), 1);
+            assert_eq!(file.failures[0].first_checkpoint, 0);
+            assert_eq!(file.failures[0].last_checkpoint, 64);
+        }
+        let bytes = serde_json::to_vec(&report).unwrap().len();
+        assert!(bytes < MAX_QUERY_REPORT_BYTES);
+        eprintln!("compact 64x65: checkpoints=65 intervals=64 encoded_bytes={bytes}");
+        let rejected = engine
+            .apply_migrations_with_queries_v2(&files, &queries)
+            .unwrap_err();
+        assert_eq!(rejected.error.code, "E_MIGRATION");
+        assert_eq!(rejected.query_validation.as_deref(), Some(&report));
+        assert_eq!(
+            serde_json::to_value(engine.introspection()).unwrap(),
+            introspection
+        );
+        assert_eq!(
+            serde_json::to_value(engine.backup_journal_status().unwrap()).unwrap(),
+            status
+        );
+        assert_eq!(engine.migration_status(&files).unwrap(), maintenance);
+        engine.check_integrity().unwrap();
+    }
+    let after = temp.0.join("after.json");
+    backup::create(&db, &after).unwrap();
+    let load =
+        |path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(load(before), load(after));
+    let mut reopened = Engine::open_redb(&db).unwrap();
+    reopened.check_integrity().unwrap();
+    assert_eq!(reopened.migration_history().len(), 1);
+    assert_eq!(reopened.idempotency_status().unwrap().count, 1);
+    assert_eq!(reopened.execute("from jobs").rows.len(), 1);
+}
+
+#[test]
+fn compact_large_preflight_can_repair_final_queries_then_apply_normally() {
+    let mut engine = Engine::memory();
+    setup(&mut engine);
+    let mut files = repeated_preflight_files();
+    files.push(next("repair", "step_063", "add table missing Job key id"));
+    let queries = (0..64)
+        .map(|i| query(&format!("query_{i:03}.unid"), "from missing"))
+        .collect::<Vec<_>>();
+    let plan = engine
+        .plan_migrations_with_queries_v2(&files, &queries)
+        .unwrap();
+    assert!(plan.query_validation.valid);
+    assert!(plan.query_validation.files.iter().all(|file| {
+        !file.current_valid && file.valid && file.failures[0].last_checkpoint == 64
+    }));
+    let result = engine
+        .apply_migrations_with_queries_v2(&files, &queries)
+        .unwrap();
+    assert_eq!(result.query_validation, plan.query_validation);
+    assert_eq!(result.applied.applied.len(), 65);
+    assert_eq!(engine.schema_info(), plan.plan.target_schema);
+    assert!(engine.execute("from missing").ok);
+    assert_eq!(engine.execute("from jobs").rows.len(), 1);
 }
