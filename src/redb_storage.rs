@@ -42,6 +42,7 @@ use crate::{ExecutionObservation, RowId};
 
 mod layout;
 use layout::StorageLayout;
+mod header;
 
 mod posting;
 use posting::PostingDefinition;
@@ -121,6 +122,7 @@ const BACKUP_CHAIN_STATE: TableDefinition<u8, &[u8]> = TableDefinition::new("bac
 const BACKUP_JOURNAL: TableDefinition<&[u8], &[u8]> = TableDefinition::new("backup_journal");
 
 const FORMAT_KEY: &str = "storage_format_version";
+const STORAGE_HEADER_KEY: &str = "storage_header";
 const CATALOG_CODEC_KEY: &str = "catalog_codec_version";
 const VALUE_CODEC_KEY: &str = "value_codec_version";
 const INDEX_KEY_CODEC_KEY: &str = "index_key_version";
@@ -5116,6 +5118,19 @@ fn read_meta(
     table: &impl ReadableTable<&'static str, &'static [u8]>,
 ) -> Result<(DurableMeta, StorageLayout, GenerationState)> {
     let format_version = u32::from_be_bytes(read_fixed::<4>(table, FORMAT_KEY)?);
+    // A header cannot be a silently ignored extension of a legacy format:
+    // earlier readers would ignore its mandatory semantics. Validate directly
+    // from the redb guard, before allocating or reading any business tables.
+    if let Some(bytes) = table
+        .get(STORAGE_HEADER_KEY)
+        .map_err(|error| storage_error("read storage header", error))?
+    {
+        header::StorageHeader::decode(bytes.value(), format_version)?;
+        return Err(Error::new(
+            "E_STORAGE",
+            "storage_header requires an explicitly upgraded physical format; this version does not support header installation",
+        ));
+    }
     let expected = StorageLayout::for_format(format_version)
         .ok_or_else(|| Error::new("E_STORAGE", format!("unsupported {FORMAT_KEY}")))?;
     let catalog_version = u16::from_be_bytes(read_fixed::<2>(table, CATALOG_CODEC_KEY)?);

@@ -131,6 +131,6 @@ M7 的早期 profile 定位到 full-resident open 与 full-rebuild migration 的
 
 `src/redb_storage/layout.rs` centralizes existing format 1–13 codec/capability definitions. Runtime gates use scalar/map/partial/reference, cursor, bounded-read, generation and journal capabilities instead of repeatedly listing format numbers; the legacy adapter still translates existing journal pairs. Capabilities here are internal interpretations, not new persisted metadata. Existing formats, new-database defaults and upgrade routes retain their contracts. This preparatory step neither completes #439 nor provides durable generated defaults for #404.
 
-持久 header、显式能力安装与跨升级增量链的具体提案见 [RFC 0028](rfc/0028-capability-storage-header.md)。它仍是设计提案，尚未增加数据库格式或命令；当前可执行契约以上文为准。
+持久 header、显式能力安装与跨升级增量链的具体提案见 [RFC 0028](rfc/0028-capability-storage-header.md)。完整持久模型仍是设计提案，尚未增加数据库格式或命令。内部 header 解码已严格校验 framing、规范 JSON、能力依赖与 codec；现有格式若出现保留的 `storage_header` 会在业务数据读取前明确拒绝，不能借未知 meta key 静默安装能力。
 
-See [RFC 0028](rfc/0028-capability-storage-header.md) for the proposed persistent header, explicit capability installation and incremental chains across upgrades. It is not implemented and introduces no supported database format or command; the executable contract remains as documented above.
+See [RFC 0028](rfc/0028-capability-storage-header.md) for the proposed persistent header, explicit capability installation and incremental chains across upgrades. The complete persistent model remains proposed, with no new supported database format or command. Internal header decoding validates framing, canonical JSON, capability dependencies and codecs. Existing formats reject the reserved `storage_header` before business reads; unknown metadata cannot silently install required capabilities.
