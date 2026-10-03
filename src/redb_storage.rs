@@ -7391,8 +7391,15 @@ mod tests {
                 let path = root.join(format!("{format}-{after}.redb"));
                 let archive = root.join(format!("archive-{format}-{after}"));
                 let mut engine = crate::Engine::open_redb(&path).unwrap();
-                let reply = engine.execute("struct Item {id: int, label: text}\ntable items: Item {key id}\ncreate unique index items (label)\ninsert many items [{id: 1, label: \"one\"}, {id: 2, label: \"two\"}]\ndelete items | filter id == 1\ninsert items {id: 3, label: \"three\"}\nmigration add_note {add field Item.note text = \"kept\"}");
+                let reply = engine.execute("struct Item {id: int, label: text}\ntable items: Item {key id}\ncreate unique index items (label)\ninsert many items [{id: 1, label: \"one\"}, {id: 2, label: \"two\"}]\ndelete items | filter id == 1\ninsert items {id: 3, label: \"three\"}");
                 assert!(reply.ok, "{:?}", reply.error);
+                engine
+                    .apply_migrations(&[MigrationFile::parse(
+                        "migration add_note {add field Item.note text = \"kept\"}",
+                    )
+                    .unwrap()])
+                    .unwrap();
+                assert_eq!(engine.migration_history().len(), 1);
                 let request = crate::protocol::Request::query(
                     "header-upgrade-attempt",
                     "update items | filter id == 2 | set note = \"receipt\" | returning {id, note}",
