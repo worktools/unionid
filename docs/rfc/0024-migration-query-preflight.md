@@ -94,3 +94,74 @@ JSON emits exactly one object. Validation failure uses the existing ok=false/err
 ### Delivery and acceptance
 
 First deliver shared Engine candidates, checkpoint checks, reports, and budgets with enum/field/type-change, unchanged/new queries, no-pending, multiple-file and duplicate-basename tests. Then wire CLI plan/apply/rehearse and prove failure-before-effects with real redb state comparisons and successful migration/copy journeys. Finally cover Rust integration, parameterized mutation guards, defaults, recursive/nested ADTs, parameter/result changes, active maintenance, docs/agent discovery, and a real project journey. Close #400 only after all stages pass. #402/#407 remain subsequent v0.13 tasks; do not absorb foreign keys, scalar functions, or rolling deployments. Publish the eventual user guide only in Discussions and keep macOS CI release-only.
+
+
+## #441 设计修订：精简报告 v2 / Design amendment: compact reports v2
+
+状态 / Status: proposed, not implemented. 跟踪 / Tracking: [#441](https://github.com/worktools/unionid/issues/441). 本节不改变上方已实现的 v1 契约。
+
+### 中文说明
+
+实际 CLI 验证（2026-10-04，main b7eb7c3 对应开发二进制）：32 个查询在当前和 32 个迁移检查点均因 `from missing` 失败，返回 1,056 条诊断、374,585 字节 JSON 和 `E_MIGRATION`。64 个查询 × 65 个检查点只有 4,160 次 bind，远低于 65,536 上限，却在返回完整报告前得到 `E_LIMIT: saved-query report exceeds 1 MiB`。两次运行都不改变数据库；这说明重复诊断的表示阻碍了最终目标诊断，不能靠精简文本解决。
+
+**选择：共享检查点表 + 连续相同错误区间，不跳过任何绑定。**
+
+- `QueryValidationV2.version = 2`；保留 current/target schema、checked_files、valid 和每个文件的最终状态、current_valid、compatibility、parameters_changed、result_changed。
+- 顶层 `checkpoints` 按校验顺序保存 `{migration_id, schema}`。索引从 0 开始，0 是当前 committed schema；最后一项是目标，无 pending 时两者都是 0。每个实际检查点只保存一次 schema identity。
+- 每个文件的 `failures` 保存 `{first_checkpoint, last_checkpoint, error}`，两个索引均 inclusive。相邻检查点上的完整 `Error` 相同才合并；比较 code、message、span、constraint、hint、statement_index，不能只比较 code 或 hash。任何成功绑定都会结束区间；A→成功→A 必须保留两个区间。不同错误即使同一 code 也不合并。
+- 每个文件的最终 valid 来自最后一次实际 bind，不能从区间数量、抽样、已保存诊断或报告是否有空间推断。所有文件的最终结果均须计算；无效最终 schema 在首次 maintenance/migration commit 前以 `E_MIGRATION` 拒绝，并携带完整 v2 报告。
+- 64×65 个相同失败仍执行 4,160 次 bind，但只保留 65 个 checkpoint 和 64 个错误区间。交替不同错误仍可能产生 4,160 个区间；这一最坏情况保持有界且可明确返回 `E_LIMIT`，不静默丢弃诊断。
+
+示意结构（字段省略只为展示，不是完整 JSON 实例）：
+
+```text
+version: 2
+checkpoints: [current, migration_a, migration_b, migration_c]
+files:
+  - path: queries/state.unid
+    current_valid: true
+    valid: false
+    failures:
+      - first_checkpoint: 1
+        last_checkpoint: 3
+        error: {code: E_MATCH, ...}
+```
+
+**兼容与入口。** Rust 现有 `QueryValidation`、`QueryFileValidation`、`QueryCheckpointFailure` 和 query-aware plan/apply 方法保留 v1 类型及完整轨迹，不能给旧 struct literal 增加必填字段或悄悄改写 failures。新增显式 v2 类型与 plan/apply 方法，共用同一 validator 和提交前关卡；不能先生成受 v1 预算限制的报告再转换为 v2。v2 可按 checkpoint 重建 v1 语义，但不自动展开无界报告；旧 API 和显式 full 模式继续遵守既有 v1 预算。
+
+CLI plan/apply/rehearse 增加 `--query-report compact|full`：compact 输出 v2，full 输出现有 v1。计划在带升级说明的小版本把默认设为 compact；消费 JSON 的用户依据 query_validation.version 分派，需旧形态时显式 full。`--verbose` 只控制文本展开，不能暗中改变 JSON 版本；v2 的详细文本可迭代区间和共享 checkpoint，无需构造完整 v1 副本。未启用预检的输出、错误 envelope、退出码及查询/TCP/HTTP 数据协议不变。这个提案无需 storage/backup 升级，也不改变 migration 每文件提交边界。
+
+**预算取舍。** 不增加第五套存储/协议机制；保留输入与执行预算，将重复诊断预算改为实际保留的区间与编码字节：
+
+| 预算 | 防止的具体故障 | 修订 |
+| --- | --- | --- |
+| 1,024 文件 | 目录元数据与每文件状态无限增长 | 保留，明确报错；不截断文件列表 |
+| 16 MiB 总源码、现有单源限制 | 不可变源码集合与解析器内存过大 | 保留 |
+| 65,536 binds | 文件数乘迁移数造成长时间预检 | 保留，绑定前 checked multiplication；不跳过中间 schema |
+| 4,096 diagnostics | 每文件每检查点保留完整错误的最坏增长 | v1 不变；v2 计数为连续错误区间，每次创建区间计数，不按其跨度计数 |
+| 1 MiB report | 超长路径/错误/检查点列表使 JSON 和回执式报告占用失控 | v1 不变；v2 只计一次共享 checkpoint、文件元数据与区间，完整报告提交前复核 |
+
+目录深度/条目以及输入读取规则保持原契约。预算拒绝仍在任何数据提交前，明确为资源限制，不作为“查询有效”的证据。全部 checkpoint 元数据本身超过预算时也必须拒绝；不能为了 fit 省略目标检查点。参数/结果形状提醒继续用于 typed Rust client 重建；此修订不改变精确 schema-hash 客户端绑定或承诺 rolling deployment。
+
+**实施验收。**
+
+1. validator 以明确 report mode 收集 v1 失败列表或 v2 区间；共享绑定、shape 比较、maintenance 校验和最终目标 gate。对预算内输入展开 v2 后与 v1 逐字段相等，覆盖相同错误、错误变更、成功断开区间、新增查询、无 pending、嵌套 ADT 与 shape 提醒。
+2. 真实 64×64 CLI plan/apply/rehearse 在 v2 返回完整最终失败和 `E_MIGRATION`；v1 full 保持 `E_LIMIT`。比较源数据库 schema/ledger/rows/receipts/sequence/index/maintenance 并重开 check，证明三个入口拒绝无副作用。64×64 最终修复的项目在 v2 可通过预检，随后执行原有按文件提交与真实数据转换。
+3. 交替错误区间、超长路径/错误、checkpoint 元数据、source/files/binds 超限各自保持有界拒绝；验证区间边界与确定顺序。测量编码字节和峰值内存，不以输出变小宣称 binder 加速。
+4. 同步 CLI help、agent/docs discovery、JSON/Rust 升级说明，明确默认切换与 full 兼容入口；正式用户指南仍只发 Discussions。运行当前必需检查与组合测试，不因设计提案或文本优化关闭 #441。
+
+### English Description
+
+A real CLI probe on the main b7eb7c3 development binary returned 1,056 failures and 374,585 JSON bytes for 32 queries checked at current plus 32 migration checkpoints. With 64 queries and 64 pending migrations, only 4,160 binds were needed, but the 1 MiB report limit returned E_LIMIT before final diagnostics could be delivered. Both runs preserved database state. Compact text alone cannot fix this representation cost.
+
+Propose a separate version-2 report with one ordered checkpoint table and per-file inclusive error intervals. Checkpoint 0 is the committed schema; the last is the target, including the no-pending case. Merge only consecutive failures whose complete Error values match. A successful bind splits intervals; different messages, spans, constraints, hints or statement positions must not merge merely because codes match. Preserve final/current validity and parameter/result compatibility fields. Execute every bind and derive final validity from its actual result, never from stored diagnostics or sampling.
+
+The repetitive 64×65 case retains 65 checkpoint identities and 64 error intervals while still executing 4,160 binds. Alternating failures can still produce 4,160 intervals and exceed the resource budget. Such exhaustion must remain explicit and precede all maintenance or migration commits; no truncation can masquerade as validation success.
+
+Keep existing Rust report structs and plan/apply APIs on v1 without new required literal fields or altered failures. Add explicit v2 report types and methods sharing the binder and final gate. Collect compact state directly rather than first building the bounded v1 report. Expansion preserves v1 semantics but is never performed implicitly without a budget. Existing APIs and full mode retain their old limits.
+
+Propose CLI --query-report compact|full for plan/apply/rehearse, with compact producing v2 and full retaining v1. A documented small-version change can select compact by default; JSON consumers dispatch on query_validation.version or request full. --verbose affects text detail only. Detailed v2 text iterates intervals/checkpoints without materializing v1. Query protocols, storage/backup formats, error envelopes, exit classes and per-migration commit boundaries do not change.
+
+Retain the 1,024-file, 16 MiB aggregate-source, per-source and 65,536-bind protections. V1 keeps 4,096 diagnostics and 1 MiB encoded reports. V2 counts actual retained error intervals toward the diagnostic limit and charges shared checkpoints, file metadata and intervals once toward the encoded limit. Directory/input rules stay unchanged. Huge metadata or alternating distinct errors still fail explicitly; neither final checkpoints nor files may be omitted to fit. Shape-change warnings continue to inform typed-client regeneration without promising rolling deployment.
+
+Delivery must prove v2 expansion equals v1 field-for-field within old budgets, including errors separated by success, changed errors, new queries, no pending migrations, nested ADTs and shape warnings. Real 64×64 CLI plan/apply/rehearse must return complete final failures with E_MIGRATION in v2 while full mode retains E_LIMIT, with source state unchanged and checked after reopening. A repaired final schema must pass v2 and retain normal per-file conversion semantics. Cover all input/report budgets and interval boundaries, measure encoded size and peak memory, and update help, agent/docs discovery and upgrade guidance. Formal user guides remain Discussions-only; #441 stays open until implementation and release acceptance pass.
