@@ -614,3 +614,129 @@ fn counter_only_effects_receipt_pruning_compaction_and_journal_restore_do_not_re
         4
     );
 }
+
+#[cfg(unix)]
+#[test]
+#[ignore = "invoked by the parent with an isolated database and OS file-size limit"]
+fn generated_defaults_disk_limit_child() {
+    let path = std::env::var("UNIONID_GENERATED_LIMIT_DB").unwrap();
+    let report = std::env::var("UNIONID_GENERATED_LIMIT_REPORT").unwrap();
+    let mut engine = Engine::open_redb(path).unwrap();
+    let source = format!(
+        "insert items {{owner: {}}} | returning {{id, public_id, created_at}}",
+        serde_json::to_string(&"x".repeat(900_000)).unwrap()
+    );
+    let failure = engine
+        .execute_idempotent_with_params(
+            "limited-generated",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &source,
+            BTreeMap::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(failure.code, "E_STORAGE");
+    std::fs::write(report, failure.message).unwrap();
+    // Exit without dropping Engine, exercising redb repair on the next open.
+    std::process::exit(94);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_disk_failure_recovers_generated_rows_counters_and_receipts_together() {
+    let dir = common::TempDir::new();
+    let path = dir.0.join("generated-limit.redb");
+    let report = dir.0.join("failure.txt");
+    let schema;
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(14).unwrap();
+        engine
+            .install_storage_capabilities(&["generated_defaults".into()], None)
+            .unwrap();
+        ok(
+            &mut engine,
+            &SETUP.replace("create unique index items (owner)", ""),
+        );
+        assert_eq!(
+            id(
+                &ok(
+                    &mut engine,
+                    r#"insert items {owner: "baseline"} | returning id"#
+                ),
+                0
+            ),
+            1
+        );
+        schema = engine.schema_info();
+    }
+    let blocks = std::fs::metadata(&path).unwrap().len().div_ceil(512);
+    let child = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "trap '' XFSZ; ulimit -f \"$1\"; exec \"$2\" --ignored --exact generated_defaults_disk_limit_child --nocapture",
+            "unionid-generated-limit",
+            &blocks.to_string(),
+            std::env::current_exe().unwrap().to_str().unwrap(),
+        ])
+        .env("UNIONID_GENERATED_LIMIT_DB", &path)
+        .env("UNIONID_GENERATED_LIMIT_REPORT", &report)
+        .output().unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        child.status.code() == Some(94) && stdout.contains("running 1 test"),
+        "status={}, stdout={stdout}, stderr={stderr}",
+        child.status
+    );
+    let failure = std::fs::read_to_string(report).unwrap();
+    assert!(
+        failure.contains("aborted before commit") || failure.contains("result is uncertain"),
+        "{failure}"
+    );
+
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(engine.check_integrity().unwrap().backend_clean);
+    assert_eq!(engine.schema_info(), schema);
+    let rows = ok(&mut engine, "from items | sort id");
+    assert!(matches!(rows.rows.len(), 1 | 2));
+    assert_eq!(id(&rows, 0), 1);
+    let committed = rows.rows.len() == 2;
+    if failure.contains("aborted before commit") {
+        assert!(
+            !committed,
+            "a definite rollback must preserve the old state"
+        );
+    }
+    assert_eq!(
+        engine.idempotency_status().unwrap().count,
+        usize::from(committed)
+    );
+    if committed {
+        assert_eq!(id(&rows, 1), 2);
+        assert!(rows.rows[1]["owner"].cmp_eq(&Value::Text("x".repeat(900_000))));
+        let source = format!(
+            "insert items {{owner: {}}} | returning {{id, public_id, created_at}}",
+            serde_json::to_string(&"x".repeat(900_000)).unwrap()
+        );
+        let replay = engine
+            .execute_idempotent_with_params(
+                "limited-generated",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &source,
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        for field in ["id", "public_id", "created_at"] {
+            assert!(replay.response.rows[0][field].cmp_eq(&rows.rows[1][field]));
+        }
+    }
+    let next = ok(
+        &mut engine,
+        r#"insert items {owner: "after-recovery"} | returning id"#,
+    );
+    assert_eq!(id(&next, 0), if committed { 3 } else { 2 });
+    engine.check_integrity().unwrap();
+}
