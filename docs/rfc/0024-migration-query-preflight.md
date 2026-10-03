@@ -98,7 +98,7 @@ First deliver shared Engine candidates, checkpoint checks, reports, and budgets 
 
 ## #441 设计修订：精简报告 v2 / Design amendment: compact reports v2
 
-状态 / Status: proposed, not implemented. 跟踪 / Tracking: [#441](https://github.com/worktools/unionid/issues/441). 本节不改变上方已实现的 v1 契约。
+状态 / Status: v2 Rust core implemented (#478); explicit CLI selection in development, default switch and formal release pending. 跟踪 / Tracking: [#441](https://github.com/worktools/unionid/issues/441). 本节不改变上方已实现的 v1 契约。
 
 ### 中文说明
 

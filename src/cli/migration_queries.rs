@@ -10,6 +10,11 @@ use crate::migration::query_validation::{
 };
 use crate::{Engine, Error};
 
+mod reports;
+pub use reports::{
+    CompactOutput, CompactRehearsal, ReportCommandError, ReportMode, ReportOutput, Validation,
+};
+
 pub enum Action {
     Plan,
     Apply,
@@ -55,15 +60,14 @@ impl From<MigrationQueryError> for CommandError {
     }
 }
 
-fn require_valid(validation: &QueryValidation) -> Result<(), CommandError> {
-    if validation.valid {
-        return Ok(());
+fn require_valid(validation: Validation) -> Result<Validation, ReportCommandError> {
+    if validation.valid() {
+        return Ok(validation);
     }
-    Err(CommandError {
+    Err(ReportCommandError {
         error: Box::new(Error::new("E_MIGRATION", "saved queries are invalid for the target schema")
             .with_hint("inspect query_validation and update the failing saved queries before applying migrations")),
-        query_validation: Some(Box::new(validation.clone())),
-        retained_copy: None,
+        query_validation: Some(validation), retained_copy: None,
     })
 }
 
@@ -76,6 +80,27 @@ pub fn run_with_discovery(
     query_directory: Option<&Path>,
     no_queries: bool,
 ) -> Result<Option<Output>, CommandError> {
+    run_with_report(
+        action,
+        db,
+        directory,
+        query_directory,
+        no_queries,
+        ReportMode::Full,
+    )
+    .map(|output| output.map(ReportOutput::into_full))
+    .map_err(ReportCommandError::into_full)
+}
+
+/// Explicit report selection preserves the existing version-1 helper API.
+pub fn run_with_report(
+    action: Action,
+    db: &Path,
+    directory: &Path,
+    query_directory: Option<&Path>,
+    no_queries: bool,
+    mode: ReportMode,
+) -> Result<Option<ReportOutput>, ReportCommandError> {
     if no_queries {
         eprintln!("warning: saved-query preflight explicitly disabled (--no-queries)");
         return Ok(None);
@@ -104,7 +129,7 @@ pub fn run_with_discovery(
         }
         queries
     };
-    run_loaded(action, db, directory, queries).map(Some)
+    run_loaded_report(action, db, directory, queries, mode).map(Some)
 }
 
 pub fn run(
@@ -124,6 +149,18 @@ fn run_loaded(
     directory: &Path,
     queries: Vec<crate::migration::query_validation::MigrationQuery>,
 ) -> Result<Output, CommandError> {
+    run_loaded_report(action, db, directory, queries, ReportMode::Full)
+        .map(ReportOutput::into_full)
+        .map_err(ReportCommandError::into_full)
+}
+
+fn run_loaded_report(
+    action: Action,
+    db: &Path,
+    directory: &Path,
+    queries: Vec<crate::migration::query_validation::MigrationQuery>,
+    mode: ReportMode,
+) -> Result<ReportOutput, ReportCommandError> {
     for query in &queries {
         if let Some(warning) = crate::syntax::legacy_extension_warning(Path::new(&query.path)) {
             eprintln!("warning: {warning}");
@@ -144,60 +181,59 @@ fn run_loaded(
                 Some(copy) => Engine::open_redb(&copy.path)?,
                 None => Engine::memory(),
             };
-            let plan = engine.plan_migrations_with_queries(&files, &queries)?;
-            require_valid(&plan.query_validation)?;
-            Ok(Output::Plan(Box::new(plan)))
+            let (plan, validation) = mode.plan(&engine, &files, &queries)?;
+            Ok(ReportOutput::plan(plan, require_valid(validation)?))
         }
         Action::Apply => {
             if !db.try_exists().map_err(io_error)? {
-                let plan = Engine::memory().plan_migrations_with_queries(&files, &queries)?;
-                require_valid(&plan.query_validation)?;
+                let (_, validation) = mode.plan(&Engine::memory(), &files, &queries)?;
+                require_valid(validation)?;
             }
             // Preflight again under this actual Engine's write ownership. The
             // memory check above only avoids creating a file for invalid new DBs.
             let mut engine = Engine::open_redb(db)?;
-            Ok(Output::Apply(Box::new(
-                engine.apply_migrations_with_queries(&files, &queries)?,
-            )))
+            let (applied, validation) = mode.apply(&mut engine, &files, &queries)?;
+            Ok(ReportOutput::apply(applied, validation))
         }
         Action::Rehearse { copy } => {
             let copy = RehearsalCopy::create(db, copy)?;
             let retained_copy = copy.keep.then(|| copy.path.clone());
             let started = std::time::Instant::now();
-            let outcome = (|| -> Result<Output, CommandError> {
+            let outcome = (|| -> Result<ReportOutput, ReportCommandError> {
                 let mut engine = Engine::open_redb(&copy.path)?;
                 let source_schema = engine.schema_info();
-                let applied = engine.apply_migrations_with_queries(&files, &queries)?;
-                let validation = applied.query_validation;
-                let integrity = engine.check_integrity().map_err(|error| CommandError {
-                    error: Box::new(error),
-                    query_validation: Some(Box::new(validation.clone())),
-                    retained_copy: None,
-                })?;
+                let (applied, validation) = mode.apply(&mut engine, &files, &queries)?;
+                let integrity = engine
+                    .check_integrity()
+                    .map_err(|error| ReportCommandError {
+                        error: Box::new(error),
+                        query_validation: Some(validation.clone()),
+                        retained_copy: None,
+                    })?;
                 let copy_bytes = std::fs::metadata(&copy.path)
-                    .map_err(|error| CommandError {
+                    .map_err(|error| ReportCommandError {
                         error: Box::new(io_error(error)),
-                        query_validation: Some(Box::new(validation.clone())),
+                        query_validation: Some(validation.clone()),
                         retained_copy: None,
                     })?
                     .len();
-                Ok(Output::Rehearse(Box::new(QueryRehearsal {
-                    rehearsal: super::MigrationRehearsal {
+                Ok(ReportOutput::rehearse(
+                    super::MigrationRehearsal {
                         schema_version: 2,
                         source_bytes: copy.source_bytes,
                         copy_bytes,
                         source_schema,
-                        schema: applied.applied.schema,
-                        applied: applied.applied.applied,
-                        skipped: applied.applied.skipped,
+                        schema: applied.schema,
+                        applied: applied.applied,
+                        skipped: applied.skipped,
                         elapsed_micros: started.elapsed().as_micros(),
                         migration_profile: engine.last_migration_profile(),
                         check_profile: integrity.profile,
                         checked: integrity.backend_clean,
                     },
-                    query_validation: validation,
-                    retained_copy: retained_copy.clone(),
-                })))
+                    validation,
+                    retained_copy.clone(),
+                ))
             })();
             outcome.map_err(|mut error| {
                 error.retained_copy = retained_copy;
