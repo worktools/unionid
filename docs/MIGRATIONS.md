@@ -181,7 +181,7 @@ The starter README and scripts/check.sh provide project check → migration plan
 
 ## Rust 精简预检报告 v2 / Compact Rust preflight reports v2 (development)
 
-开发版新增 `Engine::plan_migrations_with_queries_v2` 和 `apply_migrations_with_queries_v2`；现有方法与 CLI 的 v1 输出保持原契约。v2 把每个检查点的 migration ID、schema revision/hash 放在共享 `checkpoints` 数组中；每个文件的 `failures` 使用 inclusive 的 `first_checkpoint`/`last_checkpoint` 索引区间。只有相邻且完整错误相同的失败才合并；一次成功会断开区间，原始 code/message/span/hint 等仍保留。每个检查点都实际绑定，`valid` 始终表示最终目标的实际结果。
+开发版新增 `Engine::plan_migrations_with_queries_v2` 和 `apply_migrations_with_queries_v2`；现有方法与 CLI 默认的 v1 输出保持原契约；plan/apply/rehearse 可加 `--query-report compact` 选择 v2，`--query-report full` 显式选择 v1。v2 把每个检查点的 migration ID、schema revision/hash 放在共享 `checkpoints` 数组中；每个文件的 `failures` 使用 inclusive 的 `first_checkpoint`/`last_checkpoint` 索引区间。只有相邻且完整错误相同的失败才合并；一次成功会断开区间，原始 code/message/span/hint 等仍保留。每个检查点都实际绑定，`valid` 始终表示最终目标的实际结果。
 
 ```rust
 let planned = engine.plan_migrations_with_queries_v2(&migrations, &queries)?;
@@ -195,8 +195,19 @@ for file in &planned.query_validation.files {
 }
 ```
 
-v2 最多保留 4,096 个错误区间与 1 MiB 编码报告；1,024 文件、16 MiB 总源码、单源及 65,536 次绑定限制不变。重复错误不再按跨度消耗诊断预算，但不同错误、长路径或检查点元数据仍可能返回 `E_LIMIT`，没有隐式截断。无效最终查询以 `MigrationQueryErrorV2` 携带报告，在首次 migration/maintenance 提交前拒绝；后续数据转换仍按文件提交。此阶段尚未提供 CLI compact/full 开关，也未修改发布默认值或数据库格式。
+v2 最多保留 4,096 个错误区间与 1 MiB 编码报告；1,024 文件、16 MiB 总源码、单源及 65,536 次绑定限制不变。重复错误不再按跨度消耗诊断预算，但不同错误、长路径或检查点元数据仍可能返回 `E_LIMIT`，没有隐式截断。无效最终查询以 `MigrationQueryErrorV2` 携带报告，在首次 migration/maintenance 提交前拒绝；后续数据转换仍按文件提交。CLI 默认仍为 full（v1），没有修改发布默认值或数据库格式；compact（v2）直接收集报告，不先构造 v1。`--verbose` 只影响文本展示，不改变 JSON 版本。
 
-Development adds explicit version-2 Rust plan/apply methods; existing methods and CLI reports retain v1. A shared ordered checkpoint array stores migration IDs and schema identities. Each file records inclusive failure intervals using zero-based checkpoint indices. Only consecutive identical complete errors merge; success splits intervals. Every checkpoint is still bound, and final validity comes from the final actual bind.
+Development adds explicit version-2 Rust plan/apply methods; existing methods and default CLI reports retain v1. Plan/apply/rehearse accept --query-report compact for v2 or --query-report full for v1. A shared ordered checkpoint array stores migration IDs and schema identities. Each file records inclusive failure intervals using zero-based checkpoint indices. Only consecutive identical complete errors merge; success splits intervals. Every checkpoint is still bound, and final validity comes from the final actual bind.
 
-V2 limits retained error intervals to 4,096 and encoded reports to 1 MiB, while preserving existing file/source/bind limits. Repeated failures consume one interval; distinct errors or large metadata can still fail with E_LIMIT without truncation. MigrationQueryErrorV2 preserves the compact report after final-query rejection or later conversion failure. Apply rejects invalid final schemas before any maintenance/migration commit; successful preflight retains per-file conversion commits. This stage does not add a CLI compact/full switch or change release defaults or storage formats.
+V2 limits retained error intervals to 4,096 and encoded reports to 1 MiB, while preserving existing file/source/bind limits. Repeated failures consume one interval; distinct errors or large metadata can still fail with E_LIMIT without truncation. MigrationQueryErrorV2 preserves the compact report after final-query rejection or later conversion failure. Apply rejects invalid final schemas before any maintenance/migration commit; successful preflight retains per-file conversion commits. CLI still defaults to full/v1; compact/v2 collects directly without building v1 first. --verbose affects text only, leaving the selected JSON version unchanged. Release defaults and storage formats are unchanged.
+
+
+```sh
+unionid migration plan --db app.redb --dir migrations --query-report compact --format json
+unionid migration rehearse --db app.redb --dir migrations --query-report compact
+unionid migration apply --db app.redb --dir migrations --query-report compact
+```
+
+如果大量相同失败使 full 模式报告返回 `E_LIMIT`，可用 compact 保留完整的 checkpoint 语义并查看最终错误；不同错误或长元数据仍有预算保护。显式 `--no-queries` 与 `--query-report` 不能一起使用；没有已保存查询时选择报告模式不会创建查询或改变原有迁移行为。
+
+When repetitive failures exhaust full-mode reports, compact retains every failed checkpoint through intervals and can return the final query errors. Distinct failures and large metadata remain bounded. Explicit --no-queries conflicts with --query-report. Selecting a report mode does not create queries or change legacy migration behavior when none are discovered.

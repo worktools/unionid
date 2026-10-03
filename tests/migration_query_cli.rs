@@ -528,3 +528,141 @@ fn missing_or_empty_discovered_queries_keep_legacy_execution() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn compact_large_preflight_preserves_final_errors_and_all_three_command_boundaries() {
+    let dir = fixture();
+    fs::remove_file(dir.0.join("migrations/002.unid")).unwrap();
+    let mut parent = "initial".to_owned();
+    for index in 0..64 {
+        let name = format!("step_{index:03}");
+        fs::write(
+            dir.0.join(format!("migrations/{:03}.unid", index + 2)),
+            format!("migration {name}\n  parent {parent}\n  change default Job.id to 0\n"),
+        )
+        .unwrap();
+        parent = name;
+    }
+    fs::remove_file(dir.0.join("queries/nested/jobs.unid")).unwrap();
+    for index in 0..64 {
+        fs::write(
+            dir.0.join(format!("queries/query_{index:03}.unid")),
+            "from missing",
+        )
+        .unwrap();
+    }
+    let db = dir.0.join("db.redb");
+    let archive = dir.0.join("archive");
+    backup::incremental::init(&db, &archive, Default::default()).unwrap();
+    let before = dir.0.join("before-compact.json");
+    backup::create(&db, &before).unwrap();
+    let bytes = fs::read(&db).unwrap();
+    for action in ["plan", "rehearse", "apply"] {
+        let mut full = command(&dir.0, action);
+        full.args(["--query-report", "full"]);
+        let report = run(full, 3);
+        assert_eq!(report["error"]["code"], "E_LIMIT");
+        let mut compact = command(&dir.0, action);
+        compact.args(["--query-report", "compact"]);
+        let report = run(compact, 3);
+        assert_eq!(report["error"]["code"], "E_MIGRATION");
+        let validation = &report["query_validation"];
+        assert_eq!(validation["version"], 2);
+        assert_eq!(validation["valid"], false);
+        assert_eq!(validation["checkpoints"].as_array().unwrap().len(), 65);
+        for file in validation["files"].as_array().unwrap() {
+            assert_eq!(file["failures"].as_array().unwrap().len(), 1);
+            assert_eq!(file["failures"][0]["first_checkpoint"], 0);
+            assert_eq!(file["failures"][0]["last_checkpoint"], 64);
+        }
+        if action != "apply" {
+            assert_eq!(fs::read(&db).unwrap(), bytes);
+        }
+    }
+    for verbose in [false, true] {
+        let mut text = Command::new(env!("CARGO_BIN_EXE_unionid"));
+        text.args(["migration", "plan", "--db"])
+            .arg(&db)
+            .arg("--dir")
+            .arg(dir.0.join("migrations"))
+            .args(["--query-report", "compact"]);
+        if verbose {
+            text.arg("--verbose");
+        }
+        let output = text.output().unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("query_000.unid: invalid"));
+        assert!(stdout.contains("current (schema"));
+        assert!(stdout.contains("step_063 (schema"));
+        assert_eq!(stdout.contains("step_001 (schema"), verbose);
+        assert_eq!(
+            stdout.contains("63 intermediate checkpoint failures omitted"),
+            !verbose
+        );
+    }
+    let kept = dir.0.join("retained-compact.redb");
+    let mut rehearse = command(&dir.0, "rehearse");
+    rehearse
+        .args(["--query-report", "compact", "--copy"])
+        .arg(&kept);
+    let report = run(rehearse, 3);
+    assert_eq!(report["retained_copy"], kept.to_str().unwrap());
+    assert_eq!(
+        Engine::open_redb(&kept).unwrap().schema_info(),
+        Engine::open_redb(&db).unwrap().schema_info()
+    );
+    let after = dir.0.join("after-compact.json");
+    backup::create(&db, &after).unwrap();
+    let load = |path| serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(load(before), load(after));
+    Engine::open_redb(&db).unwrap().check_integrity().unwrap();
+
+    fs::write(
+        dir.0.join("migrations/066.unid"),
+        format!("migration repair\n  parent {parent}\n  add table missing Job key id\n"),
+    )
+    .unwrap();
+    let source = fs::read(&db).unwrap();
+    for action in ["plan", "rehearse"] {
+        let mut compact = command(&dir.0, action);
+        compact.args(["--query-report", "compact"]);
+        let report = run(compact, 0);
+        assert_eq!(report["query_validation"]["valid"], true);
+        assert_eq!(report["query_validation"]["version"], 2);
+        assert_eq!(fs::read(&db).unwrap(), source);
+    }
+    let mut apply = command(&dir.0, "apply");
+    apply.args(["--query-report", "compact"]);
+    let report = run(apply, 0);
+    assert_eq!(report["query_validation"]["valid"], true);
+    let mut engine = Engine::open_redb(&db).unwrap();
+    assert!(engine.execute("from missing").ok);
+    assert_eq!(engine.execute("from jobs").rows.len(), 1);
+    engine.check_integrity().unwrap();
+}
+
+#[test]
+fn compact_json_version_does_not_depend_on_text_verbosity() {
+    let dir = fixture();
+    let mut normal = command(&dir.0, "plan");
+    normal.args(["--query-report", "compact"]);
+    let normal = run(normal, 3);
+    let mut verbose = command(&dir.0, "plan");
+    verbose.args(["--query-report", "compact", "--verbose"]);
+    assert_eq!(run(verbose, 3), normal);
+    assert_eq!(normal["query_validation"]["version"], 2);
+    let default = run(command(&dir.0, "plan"), 3);
+    assert_eq!(default["query_validation"]["version"], 1);
+    for action in ["plan", "apply", "rehearse"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args(["migration", action, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("--query-report"));
+        assert!(help.contains("compact"));
+        assert!(help.contains("full"));
+    }
+}

@@ -456,6 +456,12 @@ enum ReceiptCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum QueryReportFormat {
+    Full,
+    Compact,
+}
+
 #[derive(Debug, Subcommand)]
 enum MigrationCommand {
     /// Create the next migration file.
@@ -476,6 +482,14 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
+        /// Report representation: full (v1) or compact (v2, lossless error intervals).
+        #[arg(
+            long,
+            value_enum,
+            default_value = "full",
+            conflicts_with = "no_queries"
+        )]
+        query_report: QueryReportFormat,
         /// Show every saved-query checkpoint failure in text output.
         #[arg(long)]
         verbose: bool,
@@ -494,6 +508,14 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
+        /// Report representation: full (v1) or compact (v2, lossless error intervals).
+        #[arg(
+            long,
+            value_enum,
+            default_value = "full",
+            conflicts_with = "no_queries"
+        )]
+        query_report: QueryReportFormat,
         /// Show every saved-query checkpoint failure in text output.
         #[arg(long)]
         verbose: bool,
@@ -545,6 +567,14 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
+        /// Report representation: full (v1) or compact (v2, lossless error intervals).
+        #[arg(
+            long,
+            value_enum,
+            default_value = "full",
+            conflicts_with = "no_queries"
+        )]
+        query_report: QueryReportFormat,
         /// Show every saved-query checkpoint failure in text output.
         #[arg(long)]
         verbose: bool,
@@ -1485,12 +1515,13 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
     let Command::Migration { command } = &args.command else {
         return None;
     };
-    let (action, db, dir, queries, no_queries, verbose, format) = match command {
+    let (action, db, dir, queries, no_queries, query_report, verbose, format) = match command {
         MigrationCommand::Plan {
             db,
             dir,
             queries,
             no_queries,
+            query_report,
             verbose,
             format,
         } => (
@@ -1499,6 +1530,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
             dir,
             queries,
             *no_queries,
+            *query_report,
             *verbose,
             format,
         ),
@@ -1507,6 +1539,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
             dir,
             queries,
             no_queries,
+            query_report,
             verbose,
             format,
         } => (
@@ -1515,6 +1548,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
             dir,
             queries,
             *no_queries,
+            *query_report,
             *verbose,
             format,
         ),
@@ -1524,6 +1558,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
             copy,
             queries,
             no_queries,
+            query_report,
             verbose,
             format,
         } => (
@@ -1532,13 +1567,19 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
             dir,
             queries,
             *no_queries,
+            *query_report,
             *verbose,
             format,
         ),
         _ => return None,
     };
     let json = matches!(format, Format::Json);
-    match migration_queries::run_with_discovery(action, db, dir, queries.as_deref(), no_queries) {
+    let mode = match query_report {
+        QueryReportFormat::Full => migration_queries::ReportMode::Full,
+        QueryReportFormat::Compact => migration_queries::ReportMode::Compact,
+    };
+    match migration_queries::run_with_report(action, db, dir, queries.as_deref(), no_queries, mode)
+    {
         Ok(None) => None,
         Ok(Some(report)) => match report.print_with_details(json, verbose) {
             Ok(()) => Some(0),
@@ -1552,8 +1593,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
                     #[serde(flatten)]
                     envelope: ErrorEnvelope,
                     #[serde(skip_serializing_if = "Option::is_none")]
-                    query_validation:
-                        Option<Box<unionid::migration::query_validation::QueryValidation>>,
+                    query_validation: Option<migration_queries::Validation>,
                     #[serde(skip_serializing_if = "Option::is_none")]
                     retained_copy: Option<PathBuf>,
                 }
@@ -1578,7 +1618,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
             } else {
                 eprintln!("{}", failure.error);
                 if let Some(report) = failure.query_validation {
-                    migration_queries::print_validation_with_details(&report, verbose);
+                    report.print_with_details(verbose);
                 }
                 if let Some(copy) = failure.retained_copy {
                     eprintln!("retained copy: {} (inspect before reusing)", copy.display());
