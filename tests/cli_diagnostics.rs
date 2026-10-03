@@ -35,13 +35,17 @@ fn version_and_doctor_have_stable_machine_readable_shapes() {
     assert_eq!(version["stream_protocol_versions"], serde_json::json!([1]));
     assert_eq!(
         version["readable_storage_formats"],
-        serde_json::json!([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+        serde_json::json!([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
     );
     assert_eq!(
         version["readable_backup_formats"],
-        serde_json::json!([1, 2, 3, 4, 5, 6, 7])
+        serde_json::json!([1, 2, 3, 4, 5, 6, 7, 8])
     );
     assert_eq!(version["current_storage"]["format"], 10);
+    assert_eq!(
+        version["supported_storage_capabilities"],
+        serde_json::json!(["partial_unique_index", "typed_map", "typed_references"])
+    );
     assert_eq!(version["current_storage"]["maintenance_codec"], 1);
     assert_eq!(version["current_storage"]["journal_codec"], 0);
     assert!(version["target"].as_str().unwrap().contains('-'));

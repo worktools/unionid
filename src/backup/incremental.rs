@@ -6,6 +6,8 @@
 mod journal;
 mod workflow;
 
+pub(crate) use workflow::verify_header_upgrade;
+
 pub use journal::{
     BACKUP_JOURNAL_STATUS_VERSION, BackupJournalConfig, BackupJournalState, BackupJournalStatus,
     DEFAULT_JOURNAL_MAX_BYTES, DEFAULT_JOURNAL_MAX_COMMITS, HARD_JOURNAL_MAX_BYTES,
@@ -193,6 +195,9 @@ pub struct ArchiveHeader {
     /// Unknown requirements are rejected before decompressing or reading frames.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
+    /// Canonical capability storage header, authenticated by the archive digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_header: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +208,7 @@ pub struct ArchiveFrame {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BaselineSource {
+    pub record_codec: u16,
     pub previous_storage_format: u32,
     pub header: ArchiveHeader,
     pub frames: Vec<ArchiveFrame>,
@@ -210,6 +216,7 @@ pub(crate) struct BaselineSource {
 
 #[derive(Debug, Clone)]
 pub(crate) struct JournalSource {
+    pub record_codec: u16,
     pub header: ArchiveHeader,
     pub frames: Vec<ArchiveFrame>,
     pub last_commit_checksum: String,
@@ -296,7 +303,11 @@ pub fn encode_archive(
         return Err(archive_error("record codec must be nonzero"));
     }
     validate_header(kind, header)?;
-    validate_frames(kind, frames, limits)?;
+    validate_header_record_codec(record_codec, header)?;
+    validate_frames(kind, record_codec, frames, limits)?;
+    if record_codec == 2 && kind == ArchiveKind::Segment {
+        validate_commit_storage_headers(header, frames)?;
+    }
     let header_bytes = canonical_header(header)?;
     if header_bytes.len() > limits.max_header_bytes {
         return Err(limit_error("archive header exceeds its byte limit"));
@@ -389,6 +400,7 @@ pub fn decode_archive(bytes: &[u8], limits: &ArchiveLimits) -> Result<DecodedArc
         return Err(archive_error("archive header is not canonical"));
     }
     validate_header(kind, &header)?;
+    validate_header_record_codec(record_codec, &header)?;
 
     let compressed = &bytes[header_end..];
     let stream = match compression {
@@ -411,7 +423,10 @@ pub fn decode_archive(bytes: &[u8], limits: &ArchiveLimits) -> Result<DecodedArc
 
     let (frames, expected_count, expected_expanded, expected_digest) =
         parse_frames(&stream, limits)?;
-    validate_frames(kind, &frames, limits)?;
+    validate_frames(kind, record_codec, &frames, limits)?;
+    if record_codec == 2 && kind == ArchiveKind::Segment {
+        validate_commit_storage_headers(&header, &frames)?;
+    }
     if expected_count != frames.len() as u64 {
         return Err(archive_error(
             "archive end frame has the wrong record count",
@@ -776,6 +791,20 @@ fn valid_checksum(value: &str) -> bool {
 }
 
 fn validate_header(kind: ArchiveKind, header: &ArchiveHeader) -> Result<()> {
+    if let Some(encoded) = &header.storage_header {
+        let layout = crate::redb_storage::StorageHeader::decode_transport(encoded)
+            .map_err(|error| archive_error(error.message))?;
+        if !layout.has_header()
+            || header.required_capabilities != layout.required_capabilities()
+            || header.catalog_codec != u32::from(layout.catalog)
+            || header.value_codec != u32::from(layout.value)
+            || header.receipt_codec != u32::from(layout.receipt)
+        {
+            return Err(archive_error(
+                "archive storage header contradicts content codecs or capabilities",
+            ));
+        }
+    }
     if header
         .required_capabilities
         .windows(2)
@@ -812,6 +841,15 @@ fn validate_header(kind: ArchiveKind, header: &ArchiveHeader) -> Result<()> {
     }
     if header.catalog_codec == 0 || header.value_codec == 0 || header.receipt_codec == 0 {
         return Err(archive_error("content codec versions must be nonzero"));
+    }
+    Ok(())
+}
+
+fn validate_header_record_codec(record_codec: u16, header: &ArchiveHeader) -> Result<()> {
+    if (record_codec == 2) != header.storage_header.is_some() {
+        return Err(archive_error(
+            "capability storage header requires record codec 2",
+        ));
     }
     Ok(())
 }
@@ -868,6 +906,7 @@ fn parse_frames(
 
 fn validate_frames(
     kind: ArchiveKind,
+    record_codec: u16,
     frames: &[ArchiveFrame],
     limits: &ArchiveLimits,
 ) -> Result<()> {
@@ -876,7 +915,7 @@ fn validate_frames(
     }
     match kind {
         ArchiveKind::Baseline => validate_baseline_frames(frames, limits),
-        ArchiveKind::Segment => validate_segment_frames(frames, limits),
+        ArchiveKind::Segment => validate_segment_frames(record_codec, frames, limits),
     }
 }
 
@@ -920,11 +959,58 @@ fn validate_baseline_frames(frames: &[ArchiveFrame], limits: &ArchiveLimits) -> 
     Ok(())
 }
 
-fn validate_segment_frames(frames: &[ArchiveFrame], limits: &ArchiveLimits) -> Result<()> {
+fn validate_commit_storage_headers(header: &ArchiveHeader, frames: &[ArchiveFrame]) -> Result<()> {
+    let mut current = None;
+    for frame in frames {
+        match frame.kind {
+            16 => {
+                let before = crate::redb_storage::journal_begin_storage_layout(&frame.payload)
+                    .map_err(|error| archive_error(error.message))?
+                    .ok_or_else(|| {
+                        archive_error("record codec 2 requires a storage header on every commit")
+                    })?;
+                if current.is_some_and(|layout| layout != before) {
+                    return Err(archive_error("commit storage headers are not contiguous"));
+                }
+                current = Some(before);
+            }
+            26 => {
+                let (before, after) = crate::redb_storage::decode_header_transition(&frame.payload)
+                    .map_err(|error| archive_error(error.message))?;
+                if current != Some(before) {
+                    return Err(archive_error(
+                        "storage transition differs from its commit header",
+                    ));
+                }
+                current = Some(after);
+            }
+            _ => {}
+        }
+    }
+    let encoded = header
+        .storage_header
+        .as_deref()
+        .ok_or_else(|| archive_error("native segment has no storage header"))?;
+    let expected = crate::redb_storage::StorageHeader::decode_transport(encoded)
+        .map_err(|error| archive_error(error.message))?;
+    if current != Some(expected) {
+        return Err(archive_error(
+            "segment header differs from its committed storage headers",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_segment_frames(
+    record_codec: u16,
+    frames: &[ArchiveFrame],
+    limits: &ArchiveLimits,
+) -> Result<()> {
     let mut in_commit = false;
     let mut commits = 0u64;
     let mut previous_kind = 0;
     let mut previous_key = Vec::new();
+    let mut header_seen = false;
     for frame in frames {
         check_payload(frame, limits)?;
         match frame.kind {
@@ -933,6 +1019,12 @@ fn validate_segment_frames(frames: &[ArchiveFrame], limits: &ArchiveLimits) -> R
                 commits += 1;
                 previous_kind = 16;
                 previous_key.clear();
+                header_seen = false;
+            }
+            26 if record_codec == 2 && in_commit && previous_kind == 16 && !header_seen => {
+                crate::redb_storage::decode_header_transition(&frame.payload)
+                    .map_err(|error| archive_error(error.message))?;
+                header_seen = true;
             }
             17..=24 if in_commit => {
                 if frame.kind < previous_kind {
@@ -1076,6 +1168,7 @@ mod tests {
             value_codec: 3,
             receipt_codec: 2,
             required_capabilities: Vec::new(),
+            storage_header: None,
         }
     }
 

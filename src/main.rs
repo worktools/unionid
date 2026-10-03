@@ -351,6 +351,12 @@ enum Command {
         db: PathBuf,
         #[arg(long)]
         target: u32,
+        /// Verify the active incremental archive before upgrading its storage header.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Install capabilities in an already upgraded database, including required dependencies.
+        #[arg(long = "require")]
+        capabilities: Vec<String>,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -666,8 +672,9 @@ struct VersionReport {
     target: &'static str,
     protocol_versions: [u32; 2],
     stream_protocol_versions: [u32; 1],
-    readable_storage_formats: [u32; 13],
-    readable_backup_formats: [u32; 7],
+    readable_storage_formats: [u32; 14],
+    readable_backup_formats: [u32; 8],
+    supported_storage_capabilities: [&'static str; 3],
     current_storage: unionid::StorageVersions,
 }
 
@@ -685,6 +692,8 @@ struct DatabaseDiagnostics {
     receipt_capacity: unionid::ReceiptCapacity,
     storage: unionid::StorageMode,
     storage_versions: Option<unionid::StorageVersions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_storage_capabilities: Option<Vec<String>>,
     read_only: bool,
     schema: unionid::SchemaInfo,
     migration_count: usize,
@@ -907,8 +916,9 @@ fn version_report() -> VersionReport {
             unionid::protocol::PRODUCTION_VERSION,
         ],
         stream_protocol_versions: [unionid::stream::VERSION],
-        readable_storage_formats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
-        readable_backup_formats: [1, 2, 3, 4, 5, 6, 7],
+        readable_storage_formats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        readable_backup_formats: [1, 2, 3, 4, 5, 6, 7, 8],
+        supported_storage_capabilities: ["partial_unique_index", "typed_map", "typed_references"],
         current_storage: unionid::Engine::current_storage_versions(),
     }
 }
@@ -921,8 +931,17 @@ fn print_version(json: bool) -> Result<(), String> {
             serde_json::to_string(&report).map_err(|e| e.to_string())?
         );
     } else {
+        let storage_read = report
+            .readable_storage_formats
+            .map(|format| format.to_string())
+            .join(",");
+        let backup_read = report
+            .readable_backup_formats
+            .map(|format| format.to_string())
+            .join(",");
+        let capabilities = report.supported_storage_capabilities.join(",");
         println!(
-            "unionid {}\ntarget {}\nprotocols 1,2; streams 1\nstorage read 1,2,3,4,5,6,7,8,9,10,11,12,13; write {}\ncodecs catalog/value/index/migration/receipt/maintenance/journal/backup {}/{}/{}/{}/{}/{}/{}/{}",
+            "unionid {}\ntarget {}\nprotocols 1,2; streams 1\nstorage read {storage_read}; write {}\nbackup read {backup_read}\nsupported storage capabilities {capabilities}\ncodecs catalog/value/index/migration/receipt/maintenance/journal/backup {}/{}/{}/{}/{}/{}/{}/{}",
             report.software_version,
             report.target,
             report.current_storage.format,
@@ -1028,6 +1047,7 @@ fn doctor(db: Option<PathBuf>, json: bool) -> Result<(), String> {
                 receipt_capacity,
                 storage: introspection.storage,
                 storage_versions: introspection.storage_versions,
+                required_storage_capabilities: introspection.required_storage_capabilities,
                 read_only: introspection.read_only,
                 schema: introspection.schema,
                 migration_count: introspection.migration_count,
@@ -1198,9 +1218,19 @@ fn run(args: Args) -> Result<(), String> {
         Command::Compact { db, format } => {
             cli::compact_redb(db, matches!(format, CompactFormat::Json))
         }
-        Command::Upgrade { db, target, format } => {
-            cli::upgrade_redb(db, target, matches!(format, Format::Json))
-        }
+        Command::Upgrade {
+            db,
+            target,
+            repo,
+            capabilities,
+            format,
+        } => cli::upgrade_redb_with_capabilities(
+            db,
+            target,
+            repo.as_deref(),
+            &capabilities,
+            matches!(format, Format::Json),
+        ),
         Command::Migration { command } => match command {
             MigrationCommand::New { name, dir } => {
                 let path = cli::migration_new(dir, &name)?;

@@ -38,11 +38,13 @@ struct BaselineMeta {
 }
 
 struct SchemaTransition {
+    storage_layout: Option<crate::redb_storage::StorageLayout>,
     revision: u64,
     hash: String,
 }
 
 struct ReplayState {
+    storage_layout: Option<crate::redb_storage::StorageLayout>,
     sequence: u64,
     schema_revision: u64,
     next_catalog_id: u64,
@@ -54,6 +56,7 @@ struct ReplayState {
 }
 
 struct CommitMeta {
+    storage_layout: Option<crate::redb_storage::StorageLayout>,
     sequence: u64,
     schema_revision: u64,
     next_catalog_id: u64,
@@ -264,7 +267,7 @@ pub fn init(
     let source = engine.incremental_baseline_source(&chain_id)?;
     let encoded = encode_archive(
         ArchiveKind::Baseline,
-        RECORD_CODEC_VERSION,
+        source.record_codec,
         options.compression,
         &source.header,
         &source.frames,
@@ -277,7 +280,7 @@ pub fn init(
     );
     write_new_archive_entry(&repo, Path::new(&relative), &encoded.bytes)?;
     let artifact = ManifestArtifact {
-        record_codec: None,
+        record_codec: (source.record_codec == 2).then_some(source.record_codec),
         path: relative,
         first_sequence: source.header.first_sequence,
         last_sequence: source.header.last_sequence,
@@ -289,9 +292,17 @@ pub fn init(
         expanded_bytes: encoded.expanded_bytes,
     };
     let prepared = ArchiveManifest {
-        format_version: MANIFEST_FORMAT_VERSION,
+        format_version: if source.record_codec == 2 {
+            ARTIFACT_MANIFEST_FORMAT_VERSION
+        } else {
+            MANIFEST_FORMAT_VERSION
+        },
         archive_codec: ARCHIVE_CODEC_VERSION,
-        record_codec: RECORD_CODEC_VERSION,
+        record_codec: if source.record_codec == 2 {
+            0
+        } else {
+            RECORD_CODEC_VERSION
+        },
         chain_id: chain_id.clone(),
         database_digest: source.header.database_digest,
         state: ManifestState::Prepared,
@@ -383,7 +394,7 @@ pub fn export(
                 .clone_from(&manifest.database_digest);
             let encoded = encode_archive(
                 ArchiveKind::Segment,
-                RECORD_CODEC_VERSION,
+                source.record_codec,
                 options.compression,
                 &source.header,
                 &source.frames,
@@ -405,6 +416,9 @@ pub fn export(
         );
         write_new_archive_entry(&repo, Path::new(&relative), &encoded.bytes)?;
         let previous_manifest = encode_manifest(manifest.clone())?;
+        if source.record_codec == 2 {
+            promote_record_codecs(&mut manifest);
+        }
         let parent = manifest
             .segments
             .last()
@@ -414,7 +428,7 @@ pub fn export(
             .clone();
         manifest.segments.push(ManifestArtifact {
             record_codec: (manifest.format_version == ARTIFACT_MANIFEST_FORMAT_VERSION)
-                .then_some(RECORD_CODEC_VERSION),
+                .then_some(source.record_codec),
             path: relative,
             first_sequence: first,
             last_sequence: through,
@@ -472,6 +486,40 @@ pub fn verify(repo: impl AsRef<Path>, limits: ArchiveLimits) -> Result<Increment
     })
 }
 
+/// Authenticate the complete exported chain before its storage header changes.
+pub(crate) fn verify_header_upgrade(engine: &Engine, repo: &Path) -> Result<()> {
+    let status = engine.backup_journal_status()?;
+    if status.state != BackupJournalState::Active
+        || status.exported_sequence != Some(status.head_sequence)
+        || status.commit_count != 0
+    {
+        return Err(chain_error(
+            "header upgrade requires an active archive exported through the current database head",
+        ));
+    }
+    let repo = existing_repo(repo)?;
+    let manifest = read_manifest(&repo)?;
+    if manifest.state != ManifestState::Active
+        || manifest.recoverable_last_sequence != status.head_sequence
+    {
+        return Err(chain_error(
+            "header upgrade requires an active archive manifest at the current database head",
+        ));
+    }
+    reconcile_identity(&manifest, &status)?;
+    let limits = ArchiveLimits::default();
+    verify_manifest_artifacts(&repo, &manifest, &limits)?;
+    verify_export_head(&repo, &manifest, &status, &limits)?;
+    let tail = manifest.segments.last().unwrap_or(&manifest.baseline);
+    let decoded = read_artifact(&repo, tail, manifest.record_codec_for(tail)?, &limits)?;
+    if decoded.header.storage_header != engine.stored_header()? {
+        return Err(chain_error(
+            "archive head storage header differs from the database",
+        ));
+    }
+    Ok(())
+}
+
 /// Restore one declared archive sequence to a new durable database.
 ///
 /// The database is first materialized at a sibling temporary path, checked in
@@ -501,10 +549,19 @@ pub fn restore(
     let replay = replay_to_sequence(&repo, &manifest, at_sequence, &limits)?;
     let row_count = u64::try_from(replay.rows.len())
         .map_err(|_| Error::new("E_LIMIT", "restored row count exceeds u64"))?;
+    let storage_header = replay
+        .storage_layout
+        .map(crate::redb_storage::StorageHeader::encode_transport)
+        .transpose()?;
     let (database, receipts) = replay_database(replay, &manifest)?;
     let temporary = restore_temp_path(&destination)?;
     let result = (|| {
-        let mut engine = Engine::restore_redb(temporary.clone(), database, receipts.clone())?;
+        let mut engine = Engine::restore_redb_with_header(
+            temporary.clone(),
+            database,
+            receipts.clone(),
+            storage_header,
+        )?;
         engine.check_integrity()?;
         drop(engine);
         // A rename can replace a destination created after the initial check.
@@ -547,7 +604,8 @@ pub fn checkpoint(
     let mut engine = Engine::open_redb(db.clone())?;
     engine.check_integrity()?;
     let status = engine.backup_journal_status()?;
-    let old = read_manifest(&repo)?;
+    let mut old = read_manifest(&repo)?;
+    let previous_bytes = encode_manifest(old.clone())?;
     reconcile_identity(&old, &status)?;
     if status.commit_count != 0 || status.exported_sequence != Some(status.head_sequence) {
         return Err(chain_error(
@@ -557,7 +615,7 @@ pub fn checkpoint(
     let source = engine.incremental_baseline_source(&old.chain_id)?;
     let encoded = encode_archive(
         ArchiveKind::Baseline,
-        RECORD_CODEC_VERSION,
+        source.record_codec,
         options.compression,
         &source.header,
         &source.frames,
@@ -569,9 +627,12 @@ pub fn checkpoint(
         checksum_suffix(&encoded.payload_checksum)
     );
     write_or_reuse_archive(&repo, Path::new(&relative), &encoded.bytes)?;
+    if source.record_codec == 2 {
+        promote_record_codecs(&mut old);
+    }
     let baseline = ManifestArtifact {
         record_codec: (old.format_version == ARTIFACT_MANIFEST_FORMAT_VERSION)
-            .then_some(RECORD_CODEC_VERSION),
+            .then_some(source.record_codec),
         path: relative,
         first_sequence: source.header.first_sequence,
         last_sequence: source.header.last_sequence,
@@ -582,7 +643,6 @@ pub fn checkpoint(
         stored_bytes: encoded.bytes.len() as u64,
         expanded_bytes: encoded.expanded_bytes,
     };
-    let previous_bytes = encode_manifest(old.clone())?;
     let mut prepared = old.clone();
     prepared.state = ManifestState::Prepared;
     prepared.baseline = baseline;
@@ -631,6 +691,9 @@ pub fn prune(
         }
         let bytes = fs::read(artifact_path)
             .map_err(|error| archive_error(format!("read retired archive artifact: {error}")))?;
+        if bytes.len() < 8 || !matches!(u16::from_be_bytes([bytes[6], bytes[7]]), 1 | 2) {
+            return Err(chain_error("unsupported retired artifact record codec"));
+        }
         let decoded = decode_archive(&bytes, &limits)?;
         if decoded.header.chain_id == manifest.chain_id
             && decoded.header.database_digest == manifest.database_digest
@@ -820,6 +883,98 @@ fn disable_report(
     })
 }
 
+fn initial_storage_layout(
+    repo: &Path,
+    manifest: &ArchiveManifest,
+    baseline: &super::ArchiveHeader,
+    limits: &ArchiveLimits,
+) -> Result<Option<crate::redb_storage::StorageLayout>> {
+    if let Some(encoded) = &baseline.storage_header {
+        return crate::redb_storage::StorageHeader::decode_transport(encoded).map(Some);
+    }
+    // A mixed chain authenticates its legacy starting layout through the first
+    // explicit before/after transition; ordinary legacy chains retain their contract.
+    for artifact in &manifest.segments {
+        if manifest.record_codec_for(artifact)? != 2 {
+            continue;
+        }
+        let decoded = read_artifact(repo, artifact, 2, limits)?;
+        validate_decoded(
+            &decoded,
+            ArchiveKind::Segment,
+            manifest,
+            artifact,
+            Some(baseline),
+        )?;
+        let frame = decoded
+            .frames
+            .iter()
+            .find(|frame| frame.kind == 26)
+            .ok_or_else(|| {
+                chain_error("mixed chain is missing its initial storage header transition")
+            })?;
+        let (before, _) = crate::redb_storage::decode_header_transition(&frame.payload)?;
+        let initial = legacy_archive_layout(baseline)?;
+        if before.has_header()
+            || !catalog_codec_continues(u32::from(initial.catalog), u32::from(before.catalog))
+            || u32::from(before.value) != baseline.value_codec
+            || u32::from(before.receipt) != baseline.receipt_codec
+        {
+            return Err(chain_error(
+                "legacy baseline contradicts the initial storage header transition",
+            ));
+        }
+        return Ok(Some(initial));
+    }
+    Ok(None)
+}
+
+fn legacy_archive_layout(
+    header: &super::ArchiveHeader,
+) -> Result<crate::redb_storage::StorageLayout> {
+    let format = match (
+        header.catalog_codec,
+        header.value_codec,
+        header.receipt_codec,
+    ) {
+        (6, 3, 3) => 11,
+        (7, 3, 3) => 13,
+        _ => {
+            return Err(chain_error(
+                "legacy archive has no supported native-upgrade profile",
+            ));
+        }
+    };
+    crate::redb_storage::StorageLayout::for_format(format)
+        .ok_or_else(|| chain_error("legacy archive storage profile is unavailable"))
+}
+
+fn advance_legacy_catalog_layout(
+    current: &mut Option<crate::redb_storage::StorageLayout>,
+    value: &[u8],
+) -> Result<()> {
+    let Some(layout) = *current else {
+        return Ok(());
+    };
+    if layout.has_header() {
+        return Ok(());
+    }
+    if value.len() < 6 || &value[..4] != b"UIDC" {
+        return Err(chain_error("legacy catalog record is invalid"));
+    }
+    let catalog = u16::from_be_bytes(value[4..6].try_into().expect("fixed slice"));
+    if catalog == layout.catalog {
+        return Ok(());
+    }
+    if layout.format == 11 && catalog == 7 {
+        *current = crate::redb_storage::StorageLayout::for_format(13);
+        return Ok(());
+    }
+    Err(chain_error(
+        "legacy catalog codec does not continue its storage profile",
+    ))
+}
+
 fn replay_to_sequence(
     repo: &Path,
     manifest: &ArchiveManifest,
@@ -845,6 +1000,7 @@ fn replay_to_sequence(
         return Err(chain_error("baseline sequence does not match the manifest"));
     }
     let mut state = ReplayState {
+        storage_layout: initial_storage_layout(repo, manifest, &baseline.header, limits)?,
         sequence: meta.sequence,
         schema_revision: meta.schema_revision,
         next_catalog_id: meta.next_catalog_id,
@@ -924,6 +1080,7 @@ fn replay_segment(
     for frame in frames {
         if frame.kind == 16 {
             let meta = decode_commit_meta(&frame.payload)?;
+            validate_commit_layout(state.storage_layout, meta.storage_layout)?;
             if active.is_some() || meta.sequence != state.sequence.saturating_add(1) {
                 return Err(chain_error("segment commit sequence is not contiguous"));
             }
@@ -992,6 +1149,20 @@ fn apply_delta_frame(
     frame: &super::ArchiveFrame,
     limits: &ArchiveLimits,
 ) -> Result<()> {
+    if frame.kind == 26 {
+        let (before, after) = crate::redb_storage::decode_header_transition(&frame.payload)?;
+        if state.storage_layout != Some(before) {
+            return Err(chain_error(
+                "storage header transition does not match replay state",
+            ));
+        }
+        state.storage_layout = Some(after);
+        return Ok(());
+    }
+    if frame.kind == 18 {
+        let (_, value) = split_write_frame(&frame.payload, limits)?;
+        advance_legacy_catalog_layout(&mut state.storage_layout, value)?;
+    }
     let (destination, delete) = match frame.kind {
         17 => (&mut state.catalog, true),
         18 => (&mut state.catalog, false),
@@ -1028,6 +1199,14 @@ fn replay_database(
         return Err(chain_error("stored catalog entry is truncated"));
     }
     let catalog_codec = u16::from_be_bytes(catalog_value[4..6].try_into().expect("fixed slice"));
+    if state
+        .storage_layout
+        .is_some_and(|layout| layout.catalog != catalog_codec)
+    {
+        return Err(chain_error(
+            "catalog codec contradicts restored storage header",
+        ));
+    }
     let receipt_codec = state
         .receipts
         .values()
@@ -1042,7 +1221,15 @@ fn replay_database(
             }
         })
         .transpose()?
-        .unwrap_or(2);
+        .unwrap_or(state.storage_layout.map_or(2, |layout| layout.receipt));
+    if state
+        .storage_layout
+        .is_some_and(|layout| layout.receipt != receipt_codec)
+    {
+        return Err(chain_error(
+            "receipt codec contradicts restored storage header",
+        ));
+    }
     let entries = state
         .catalog
         .iter()
@@ -1105,7 +1292,7 @@ fn decode_commit_meta(payload: &[u8]) -> Result<CommitMeta> {
     let schema_revision = u64::from_be_bytes(remaining[..8].try_into().expect("fixed slice"));
     let next_catalog_id = u64::from_be_bytes(remaining[8..16].try_into().expect("fixed slice"));
     let (schema_hash, tail) = take_prefixed(&remaining[16..], 1024 * 1024)?;
-    if tail.len() != 32 || next_catalog_id == 0 {
+    if tail.len() < 32 || next_catalog_id == 0 {
         return Err(chain_error("segment commit metadata is invalid"));
     }
     let schema_hash = std::str::from_utf8(schema_hash)
@@ -1115,6 +1302,7 @@ fn decode_commit_meta(payload: &[u8]) -> Result<CommitMeta> {
         return Err(chain_error("segment schema hash is invalid"));
     }
     Ok(CommitMeta {
+        storage_layout: crate::redb_storage::journal_begin_storage_layout(payload)?,
         sequence,
         schema_revision,
         next_catalog_id,
@@ -1255,6 +1443,7 @@ fn verify_manifest_artifacts(
         return Err(chain_error("baseline meta does not match the manifest"));
     }
     let mut schema = SchemaTransition {
+        storage_layout: initial_storage_layout(repo, manifest, &baseline.header, limits)?,
         revision: meta.schema_revision,
         hash: meta.schema_hash,
     };
@@ -1274,6 +1463,17 @@ fn verify_manifest_artifacts(
             &commit_parent,
             Some(&mut schema),
         )?;
+        if decoded.record_codec == 2
+            && schema
+                .storage_layout
+                .map(crate::redb_storage::StorageHeader::encode_transport)
+                .transpose()?
+                != decoded.header.storage_header
+        {
+            return Err(chain_error(
+                "segment header differs from its committed storage transition",
+            ));
+        }
     }
     let _ = commit_parent;
     Ok(())
@@ -1400,21 +1600,44 @@ fn validate_decoded(
     artifact: &ManifestArtifact,
     content_codecs: Option<&super::ArchiveHeader>,
 ) -> Result<()> {
+    if decoded.record_codec == 1 {
+        for frame in decoded.frames.iter().filter(|frame| frame.kind == 16) {
+            if crate::redb_storage::journal_begin_storage_layout(&frame.payload)?.is_some() {
+                return Err(chain_error(
+                    "record codec 1 cannot carry commit storage headers",
+                ));
+            }
+        }
+    }
     if decoded.kind != kind
         || decoded.record_codec != manifest.record_codec_for(artifact)?
         || decoded.header.chain_id != manifest.chain_id
         || decoded.header.database_digest != manifest.database_digest
         || decoded.header.first_sequence != artifact.first_sequence
         || decoded.header.last_sequence != artifact.last_sequence
-        || content_codecs.is_some_and(|expected| {
-            !catalog_codec_continues(expected.catalog_codec, decoded.header.catalog_codec)
-                || decoded.header.value_codec != expected.value_codec
-                || decoded.header.receipt_codec != expected.receipt_codec
-                || (decoded.header.catalog_codec != expected.catalog_codec
-                    && (expected.value_codec != 3 || expected.receipt_codec != 3))
-        })
+        || content_codecs
+            .filter(|_| decoded.record_codec != 2)
+            .is_some_and(|expected| {
+                !catalog_codec_continues(expected.catalog_codec, decoded.header.catalog_codec)
+                    || decoded.header.value_codec != expected.value_codec
+                    || decoded.header.receipt_codec != expected.receipt_codec
+                    || (decoded.header.catalog_codec != expected.catalog_codec
+                        && (expected.value_codec != 3 || expected.receipt_codec != 3))
+            })
     {
         return Err(chain_error("archive header does not match the manifest"));
+    }
+    if decoded.record_codec == 2
+        && let Some(transition) = decoded.frames.iter().rev().find(|frame| frame.kind == 26)
+    {
+        let (_, after) = crate::redb_storage::decode_header_transition(&transition.payload)?;
+        if decoded.header.storage_header.as_deref()
+            != Some(crate::redb_storage::StorageHeader::encode_transport(after)?.as_str())
+        {
+            return Err(chain_error(
+                "archive header differs from its final storage transition",
+            ));
+        }
     }
     Ok(())
 }
@@ -1448,6 +1671,9 @@ fn verify_segment_commits(
                 ));
             }
             if let Some(current) = schema.as_deref_mut() {
+                let commit_layout =
+                    crate::redb_storage::journal_begin_storage_layout(&frame.payload)?;
+                validate_commit_layout(current.storage_layout, commit_layout)?;
                 if revision < current.revision
                     || (revision == current.revision && schema_hash != current.hash)
                 {
@@ -1482,6 +1708,25 @@ fn verify_segment_commits(
                 .ok_or_else(|| Error::new("E_LIMIT", "archive sequence overflow"))?;
             ordinal = 0;
         } else {
+            if frame.kind == 18
+                && let Some(current) = schema.as_deref_mut()
+            {
+                let (_, tail) = take_prefixed(&frame.payload, usize::MAX)?;
+                let (value, _) = take_prefixed(tail, usize::MAX)?;
+                advance_legacy_catalog_layout(&mut current.storage_layout, value)?;
+            }
+            if frame.kind == 26 {
+                let (before, after) =
+                    crate::redb_storage::decode_header_transition(&frame.payload)?;
+                if let Some(current) = schema.as_deref_mut() {
+                    if current.storage_layout != Some(before) {
+                        return Err(chain_error(
+                            "storage header transition does not match verified chain",
+                        ));
+                    }
+                    current.storage_layout = Some(after);
+                }
+            }
             let hash = digest
                 .as_mut()
                 .ok_or_else(|| chain_error("segment change is outside a commit"))?;
@@ -1493,6 +1738,20 @@ fn verify_segment_commits(
         }
     }
     Ok(expected_parent)
+}
+
+fn validate_commit_layout(
+    current: Option<crate::redb_storage::StorageLayout>,
+    declared: Option<crate::redb_storage::StorageLayout>,
+) -> Result<()> {
+    if declared.is_some() && declared != current
+        || declared.is_none() && current.is_some_and(|layout| layout.has_header())
+    {
+        return Err(chain_error(
+            "commit storage header differs from its replay state",
+        ));
+    }
+    Ok(())
 }
 
 fn reconcile_exported_prefix(
@@ -1655,6 +1914,20 @@ fn existing_repo(path: &Path) -> Result<PathBuf> {
         .map_err(|error| archive_error(format!("resolve archive repository: {error}")))
 }
 
+fn promote_record_codecs(manifest: &mut ArchiveManifest) {
+    if manifest.format_version == ARTIFACT_MANIFEST_FORMAT_VERSION {
+        return;
+    }
+    for artifact in std::iter::once(&mut manifest.baseline)
+        .chain(&mut manifest.segments)
+        .chain(&mut manifest.checkpoint_retired_artifacts)
+    {
+        artifact.record_codec = Some(manifest.record_codec);
+    }
+    manifest.format_version = ARTIFACT_MANIFEST_FORMAT_VERSION;
+    manifest.record_codec = 0;
+}
+
 fn read_manifest(repo: &Path) -> Result<ArchiveManifest> {
     let path = repo.join(MANIFEST_NAME);
     let metadata = fs::symlink_metadata(&path)
@@ -1674,7 +1947,10 @@ fn read_manifest(repo: &Path) -> Result<ArchiveManifest> {
         .chain(&manifest.segments)
         .chain(&manifest.checkpoint_retired_artifacts)
     {
-        if manifest.record_codec_for(artifact)? != RECORD_CODEC_VERSION {
+        let codec = manifest.record_codec_for(artifact)?;
+        if !matches!(codec, 1 | 2)
+            || (codec == 2 && manifest.format_version != ARTIFACT_MANIFEST_FORMAT_VERSION)
+        {
             return Err(chain_error("unsupported artifact record codec"));
         }
     }
@@ -1875,6 +2151,299 @@ mod tests {
         engine
     }
 
+    #[test]
+    fn legacy_reference_codec_transition_continues_into_native_header_recovery() {
+        let temp = Temp::new();
+        let path = temp.0.join("source.redb");
+        let repo = temp.0.join("archive");
+        drop(database(&path));
+        let baseline = init(&path, &repo, Default::default())
+            .unwrap()
+            .baseline_sequence;
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let schema = engine.schema_info();
+        engine.upgrade_storage(13).unwrap();
+        drop(engine);
+        export(&path, &repo, Default::default()).unwrap();
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage_with_archive(14, &repo).unwrap();
+        drop(engine);
+        export(&path, &repo, Default::default()).unwrap();
+        verify(&repo, Default::default()).unwrap();
+        for (offset, format) in [(0, 11), (1, 13), (2, 14)] {
+            let restored = temp.0.join(format!("restored-{offset}.redb"));
+            restore(&repo, &restored, baseline + offset, Default::default()).unwrap();
+            let mut engine = Engine::open_redb(&restored).unwrap();
+            engine.check_integrity().unwrap();
+            assert_eq!(
+                engine.backup_journal_status().unwrap().storage_format,
+                format
+            );
+            assert_eq!(engine.schema_info(), schema);
+            assert_eq!(engine.execute("from items").rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn native_capability_installation_rewrites_codecs_atomically_and_restores_each_boundary() {
+        let temp = Temp::new();
+        let legacy = temp.0.join("legacy.redb");
+        let path = temp.0.join("native.redb");
+        let repo = temp.0.join("archive");
+        let source = database(&legacy);
+        let database = source.database_snapshot().unwrap();
+        let schema = source.schema_info();
+        drop(source);
+        let header = crate::redb_storage::StorageHeader::encode_transport(
+            crate::redb_storage::StorageLayout::from_header_profile(false, false, false, false),
+        )
+        .unwrap();
+        drop(
+            Engine::restore_redb_with_header(
+                path.clone(),
+                database,
+                ReceiptMap::new(),
+                Some(header),
+            )
+            .unwrap(),
+        );
+        init(&path, &repo, Default::default()).unwrap();
+        for (capability, expected_catalog) in [
+            ("typed_map", 5),
+            ("partial_unique_index", 6),
+            ("typed_references", 7),
+        ] {
+            let mut engine = Engine::open_redb(&path).unwrap();
+            let before_header = engine.stored_header().unwrap();
+            let before = engine.backup_journal_status().unwrap();
+            let requested = [capability.to_owned()];
+            assert_eq!(
+                engine
+                    .install_storage_capabilities(&requested, None)
+                    .unwrap_err()
+                    .code,
+                "E_BACKUP_CHAIN_ACTIVE"
+            );
+            assert_eq!(engine.backup_journal_status().unwrap(), before);
+            let result = engine
+                .install_storage_capabilities(&requested, Some(&repo))
+                .unwrap();
+            assert!(result.changed);
+            assert_eq!(result.format, 14);
+            assert_eq!(engine.schema_info(), schema);
+            assert_eq!(
+                engine.backup_journal_status().unwrap().head_sequence,
+                before.head_sequence + 1
+            );
+            let after_header = engine.stored_header().unwrap();
+            assert_eq!(
+                engine
+                    .read_snapshot()
+                    .introspection()
+                    .required_storage_capabilities,
+                engine.introspection().required_storage_capabilities
+            );
+            assert_eq!(
+                crate::redb_storage::StorageHeader::decode_transport(
+                    after_header.as_deref().unwrap()
+                )
+                .unwrap()
+                .catalog,
+                expected_catalog
+            );
+            assert!(
+                !engine
+                    .install_storage_capabilities(&requested, None)
+                    .unwrap()
+                    .changed
+            );
+            assert_eq!(
+                engine.backup_journal_status().unwrap().head_sequence,
+                before.head_sequence + 1
+            );
+            drop(engine);
+            export(&path, &repo, Default::default()).unwrap();
+            verify(&repo, Default::default()).unwrap();
+            for (sequence, header) in [
+                (before.head_sequence, before_header),
+                (before.head_sequence + 1, after_header),
+            ] {
+                let restored = temp
+                    .0
+                    .join(format!("restored-{capability}-{sequence}.redb"));
+                restore(&repo, &restored, sequence, Default::default()).unwrap();
+                let mut restored = Engine::open_redb(&restored).unwrap();
+                restored.check_integrity().unwrap();
+                assert_eq!(restored.stored_header().unwrap(), header);
+                assert_eq!(restored.schema_info(), schema);
+                assert_eq!(restored.execute("from items").rows.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn capability_upgrade_rejects_unexported_or_corrupt_archives_without_changing_database() {
+        let temp = Temp::new();
+        let path = temp.0.join("source.redb");
+        let repo = temp.0.join("archive");
+        drop(database(&path));
+        init(&path, &repo, Default::default()).unwrap();
+        let mut engine = Engine::open_redb(&path).unwrap();
+        assert!(engine.execute("insert items {id = 2, label = \"two\"}").ok);
+        let before = engine.backup_journal_status().unwrap();
+        assert_eq!(
+            engine
+                .upgrade_storage_with_archive(14, &repo)
+                .unwrap_err()
+                .code,
+            "E_BACKUP_CHAIN"
+        );
+        assert_eq!(engine.backup_journal_status().unwrap(), before);
+        drop(engine);
+        export(&path, &repo, Default::default()).unwrap();
+        let manifest = read_manifest(&repo).unwrap();
+        let artifact = repo.join(&manifest.baseline.path);
+        let mut bytes = fs::read(&artifact).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&artifact, bytes).unwrap();
+        let mut engine = Engine::open_redb(&path).unwrap();
+        let before = engine.backup_journal_status().unwrap();
+        assert!(engine.upgrade_storage_with_archive(14, &repo).is_err());
+        assert_eq!(engine.backup_journal_status().unwrap(), before);
+        engine.check_integrity().unwrap();
+        assert_eq!(engine.execute("from items").rows.len(), 2);
+        drop(engine);
+        let mut read_only = Engine::open_redb_read_only(&path).unwrap();
+        assert_eq!(
+            read_only
+                .upgrade_storage_with_archive(14, temp.0.join("missing"))
+                .unwrap_err()
+                .code,
+            "E_READ_ONLY"
+        );
+    }
+
+    #[test]
+    fn capability_header_keeps_physical_format_across_init_checkpoint_and_disable() {
+        for references in [false, true] {
+            let temp = Temp::new();
+            let path = temp.0.join("source.redb");
+            let repo = temp.0.join("archive");
+            let mut engine = database(&path);
+            if references {
+                engine.upgrade_storage(12).unwrap();
+            }
+            let schema = engine.schema_info();
+            engine.upgrade_storage(14).unwrap();
+            drop(engine);
+            let report = init(&path, &repo, Default::default()).unwrap();
+            assert_eq!(report.previous_storage_format, 14);
+            assert_eq!(report.current_storage_format, 14);
+            assert_eq!(read_manifest(&repo).unwrap().baseline.record_codec, Some(2));
+            let mut engine = Engine::open_redb(&path).unwrap();
+            assert!(engine.execute("insert items {id = 2, label = \"two\"}").ok);
+            let sequence = engine.backup_journal_status().unwrap().head_sequence;
+            drop(engine);
+            export(&path, &repo, Default::default()).unwrap();
+            checkpoint(&path, &repo, Default::default()).unwrap();
+            verify(&repo, Default::default()).unwrap();
+            let restored = temp.0.join("restored.redb");
+            restore(&repo, &restored, sequence, Default::default()).unwrap();
+            let mut restored = Engine::open_redb(&restored).unwrap();
+            restored.check_integrity().unwrap();
+            assert_eq!(restored.schema_info(), schema);
+            assert_eq!(restored.execute("from items").rows.len(), 2);
+            assert_eq!(restored.backup_journal_status().unwrap().storage_format, 14);
+            drop(restored);
+            disable(&path, &repo, false, true).unwrap();
+            let mut engine = Engine::open_redb(&path).unwrap();
+            engine.check_integrity().unwrap();
+            let status = engine.backup_journal_status().unwrap();
+            assert_eq!(status.storage_format, 14);
+            assert_eq!(status.state, BackupJournalState::Disabled);
+            let encoded = engine.stored_header().unwrap().unwrap();
+            assert_eq!(
+                crate::redb_storage::StorageHeader::decode_transport(&encoded)
+                    .unwrap()
+                    .journal,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn capability_header_upgrade_preserves_each_side_of_the_archive_transition() {
+        for references in [false, true] {
+            let temp = Temp::new();
+            let path = temp.0.join("source.redb");
+            let repo = temp.0.join("archive");
+            let mut engine = database(&path);
+            if references {
+                engine.upgrade_storage(12).unwrap();
+            }
+            let schema = engine.schema_info();
+            drop(engine);
+            init(&path, &repo, Default::default()).unwrap();
+            let before = Engine::open_redb(&path)
+                .unwrap()
+                .backup_journal_status()
+                .unwrap();
+            let old_manifest = read_manifest(&repo).unwrap();
+            let old_baseline = fs::read(repo.join(&old_manifest.baseline.path)).unwrap();
+            let mut engine = Engine::open_redb(&path).unwrap();
+            assert_eq!(
+                engine.upgrade_storage(14).unwrap_err().code,
+                "E_BACKUP_CHAIN_ACTIVE"
+            );
+            engine.upgrade_storage_with_archive(14, &repo).unwrap();
+            assert_eq!(engine.schema_info(), schema);
+            assert!(engine.stored_header().unwrap().is_some());
+            assert_eq!(
+                engine.backup_journal_status().unwrap().head_sequence,
+                before.head_sequence + 1
+            );
+            assert!(!engine.upgrade_storage(14).unwrap().changed);
+            drop(engine);
+            // Reopen after the DB commit but before manifest publication.
+            let mut engine = Engine::open_redb(&path).unwrap();
+            engine.check_integrity().unwrap();
+            assert!(engine.execute("insert items {id = 2, label = \"two\"}").ok);
+            drop(engine);
+            export(&path, &repo, Default::default()).unwrap();
+            verify(&repo, Default::default()).unwrap();
+            let manifest = read_manifest(&repo).unwrap();
+            assert_eq!(manifest.format_version, ARTIFACT_MANIFEST_FORMAT_VERSION);
+            assert_eq!(manifest.baseline.record_codec, Some(1));
+            assert_eq!(manifest.segments[0].record_codec, Some(2));
+            assert_eq!(
+                fs::read(repo.join(&manifest.baseline.path)).unwrap(),
+                old_baseline
+            );
+            for (offset, expected_format, rows) in
+                [(0, before.storage_format, 1), (1, 14, 1), (2, 14, 2)]
+            {
+                let restored = temp.0.join(format!("restored-{offset}.redb"));
+                restore(
+                    &repo,
+                    &restored,
+                    before.head_sequence + offset,
+                    Default::default(),
+                )
+                .unwrap();
+                let mut restored = Engine::open_redb(&restored).unwrap();
+                restored.check_integrity().unwrap();
+                assert_eq!(
+                    restored.backup_journal_status().unwrap().storage_format,
+                    expected_format
+                );
+                assert_eq!(restored.schema_info(), schema);
+                let response = restored.execute("from items");
+                assert!(response.ok, "{:?}", response.error);
+                assert_eq!(response.rows.len(), rows);
+            }
+        }
+    }
+
     fn prepare_only(engine: &Engine, repo: &Path, chain_id: &str) -> ArchiveManifest {
         let repo = prepare_repo(repo).unwrap();
         let source = engine.incremental_baseline_source(chain_id).unwrap();
@@ -2027,15 +2596,20 @@ mod tests {
 
     #[test]
     fn checkpoint_resumes_after_prepared_manifest_publication() {
-        checkpoint_resume(false);
+        checkpoint_resume(false, false);
     }
 
     #[test]
     fn artifact_codec_checkpoint_resumes_after_prepared_manifest_publication() {
-        checkpoint_resume(true);
+        checkpoint_resume(true, false);
     }
 
-    fn checkpoint_resume(explicit_codecs: bool) {
+    #[test]
+    fn mixed_native_checkpoint_resumes_after_prepared_manifest_publication() {
+        checkpoint_resume(true, true);
+    }
+
+    fn checkpoint_resume(explicit_codecs: bool, native_header: bool) {
         let temp = Temp::new();
         let db = temp.0.join("checkpoint.redb");
         let repo = temp.0.join("archive");
@@ -2046,7 +2620,17 @@ mod tests {
         drop(engine);
         export(&db, &repo, Default::default()).unwrap();
 
-        if explicit_codecs {
+        if native_header {
+            let mut engine = Engine::open_redb(&db).unwrap();
+            engine.upgrade_storage_with_archive(14, &repo).unwrap();
+            drop(engine);
+            export(&db, &repo, Default::default()).unwrap();
+            let manifest = read_manifest(&repo).unwrap();
+            assert_eq!(manifest.baseline.record_codec, Some(1));
+            assert_eq!(manifest.segments.last().unwrap().record_codec, Some(2));
+        }
+
+        if explicit_codecs && !native_header {
             let old = read_manifest(&repo).unwrap();
             let mut explicit = old.clone();
             explicit.format_version = ARTIFACT_MANIFEST_FORMAT_VERSION;
@@ -2063,7 +2647,7 @@ mod tests {
         let source = engine.incremental_baseline_source(&old.chain_id).unwrap();
         let encoded = encode_archive(
             ArchiveKind::Baseline,
-            RECORD_CODEC_VERSION,
+            source.record_codec,
             Compression::Zstd,
             &source.header,
             &source.frames,
@@ -2079,7 +2663,7 @@ mod tests {
         let mut prepared = old.clone();
         prepared.state = ManifestState::Prepared;
         prepared.baseline = ManifestArtifact {
-            record_codec: explicit_codecs.then_some(RECORD_CODEC_VERSION),
+            record_codec: explicit_codecs.then_some(source.record_codec),
             path: relative,
             first_sequence: source.header.first_sequence,
             last_sequence: source.header.last_sequence,
@@ -2126,5 +2710,80 @@ mod tests {
             Some(report.recoverable_first_sequence)
         );
         assert_eq!(status.commit_count, 0);
+        if native_header {
+            let manifest = read_manifest(&repo).unwrap();
+            assert_eq!(manifest.baseline.record_codec, Some(2));
+            verify(&repo, Default::default()).unwrap();
+            // An unknown orphan must abort confirmed pruning before removing
+            // any supported retired artifact from the mixed codec chain.
+            let unknown_path = repo.join("segments/unknown-codec.uij");
+            let mut unknown = encoded.bytes.clone();
+            unknown[6..8].copy_from_slice(&99u16.to_be_bytes());
+            fs::write(&unknown_path, &unknown).unwrap();
+            let retained_bytes = retired
+                .iter()
+                .map(|artifact| {
+                    (
+                        artifact.path.clone(),
+                        fs::read(repo.join(&artifact.path)).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let manifest_bytes = fs::read(repo.join(MANIFEST_NAME)).unwrap();
+            let error = prune(
+                &repo,
+                report.recoverable_first_sequence,
+                true,
+                Default::default(),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("unsupported retired artifact record codec")
+            );
+            for (relative, bytes) in &retained_bytes {
+                assert_eq!(fs::read(repo.join(relative)).unwrap(), *bytes);
+            }
+            assert_eq!(fs::read(&unknown_path).unwrap(), unknown);
+            assert_eq!(fs::read(repo.join(MANIFEST_NAME)).unwrap(), manifest_bytes);
+            fs::remove_file(unknown_path).unwrap();
+            let preview = prune(
+                &repo,
+                report.recoverable_first_sequence,
+                false,
+                Default::default(),
+            )
+            .unwrap();
+            let mut expected_files = retired
+                .iter()
+                .map(|artifact| artifact.path.clone())
+                .collect::<Vec<_>>();
+            expected_files.sort();
+            assert_eq!(preview.selected_files, expected_files);
+            let applied = prune(
+                &repo,
+                report.recoverable_first_sequence,
+                true,
+                Default::default(),
+            )
+            .unwrap();
+            assert_eq!(applied.selected_files, preview.selected_files);
+            assert!(applied.applied);
+            assert_eq!(fs::read(repo.join(MANIFEST_NAME)).unwrap(), manifest_bytes);
+            verify(&repo, Default::default()).unwrap();
+            let restored = temp.0.join("native-checkpoint-restore.redb");
+            restore(
+                &repo,
+                &restored,
+                report.recoverable_first_sequence,
+                Default::default(),
+            )
+            .unwrap();
+            let mut engine = Engine::open_redb(restored).unwrap();
+            engine.check_integrity().unwrap();
+            assert_eq!(engine.introspection().storage_versions.unwrap().format, 14);
+            assert_eq!(engine.execute("from items").rows.len(), 1);
+        }
     }
 }

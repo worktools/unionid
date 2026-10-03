@@ -282,15 +282,46 @@ pub fn upgrade_redb(
     target: u32,
     json: bool,
 ) -> Result<(), String> {
+    upgrade_redb_with_archive(path, target, None, json)
+}
+
+pub fn upgrade_redb_with_archive(
+    path: impl Into<std::path::PathBuf>,
+    target: u32,
+    archive: Option<&std::path::Path>,
+    json: bool,
+) -> Result<(), String> {
+    upgrade_redb_with_capabilities(path, target, archive, &[], json)
+}
+
+pub fn upgrade_redb_with_capabilities(
+    path: impl Into<std::path::PathBuf>,
+    target: u32,
+    archive: Option<&std::path::Path>,
+    capabilities: &[String],
+    json: bool,
+) -> Result<(), String> {
+    if !capabilities.is_empty() && target != crate::redb_storage::CAPABILITY_STORAGE_FORMAT_VERSION
+    {
+        return Err("E_CONFIG: capability installation requires --target 14".into());
+    }
     let mut engine = Engine::open_redb(path).map_err(|error| error.to_string())?;
-    let result = engine
-        .upgrade_storage(target)
-        .map_err(|error| error.to_string())?;
+    let result = if !capabilities.is_empty() {
+        engine.install_storage_capabilities(capabilities, archive)
+    } else {
+        match archive {
+            Some(archive) => engine.upgrade_storage_with_archive(target, archive),
+            None => engine.upgrade_storage(target),
+        }
+    }
+    .map_err(|error| error.to_string())?;
     if json {
         println!(
             "{}",
             serde_json::to_string(&result).map_err(|error| error.to_string())?
         );
+    } else if result.changed && result.previous_format == result.format {
+        println!("storage capabilities installed at format {}", result.format);
     } else if result.changed {
         println!(
             "storage upgraded from format {} to format {}",
@@ -1864,6 +1895,16 @@ fn print_introspection(
             );
             println!("schema revision {}", introspection.schema.revision);
             println!("schema hash {}", introspection.schema.hash);
+            if let Some(capabilities) = &introspection.required_storage_capabilities {
+                println!(
+                    "required capabilities {}",
+                    if capabilities.is_empty() {
+                        "none".into()
+                    } else {
+                        capabilities.join(", ")
+                    }
+                );
+            }
             if let Some(versions) = introspection.storage_versions {
                 println!("storage format {}", versions.format);
                 println!("catalog codec {}", versions.catalog_codec);

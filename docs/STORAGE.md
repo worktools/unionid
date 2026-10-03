@@ -2,6 +2,10 @@
 
 unionid 的正式持久入口使用 redb 4.1。内存模式适合语言试验和临时数据；需要跨进程保存应用状态时，为本地命令、REPL 或服务指定同一个 `.redb` 文件。
 
+开发候选的能力 header 将物理布局、已安装能力和 journal codec 分开；新库默认仍为 format 10。显式进入 format 14 后，启停 journal 或安装能力保持同一个物理格式。每个原生 journal commit 认证执行时的 header，能力安装额外记录 before/after transition；`check` 同时核对 catalog、历史 receipt 与保留 journal，删除 schema 对象不移除已安装能力。完整模型、尚待验收的边界与版本状态见 [RFC 0028](rfc/0028-capability-storage-header.md)。
+
+The development candidate separates physical layout, installed capabilities and the journal codec; new databases still default to format 10. After an explicit upgrade to format 14, journal lifecycle and capability installation retain the same physical format. Native journal commits authenticate their execution header, with before/after transitions for capability installation. Integrity checks compare catalog, historical receipts and retained journal requirements; schema removal never uninstalls capabilities. See [RFC 0028](rfc/0028-capability-storage-header.md) for the model and pending acceptance boundaries.
+
 ## 使用入口
 
 执行脚本并保存结果：
@@ -125,12 +129,12 @@ M7 的早期 profile 定位到 full-resident open 与 full-rebuild migration 的
 
 [#439](https://github.com/worktools/unionid/issues/439) 跟踪物理布局、required capability 与 journal 的解耦。该设计完成前，除已实现的引用格式 12/13 外，暂停新增功能专属的普通/journal 成对格式号。新增持久能力必须先说明旧二进制拒绝边界、显式升级、codec 和逻辑/增量恢复；不能只添加可被旧 serde reader 忽略的字段。
 
-现有格式 1–13 的 codec 与能力定义集中在 `src/redb_storage/layout.rs`。scalar/map/partial/reference、cursor、bounded read、generation 和 journal 不再在运行路径中重复枚举格式号；legacy adapter 仍按已有格式映射 journal 配对。这里的 capability 只是内部解释，尚未写入新的磁盘元数据，当前格式、新库默认值和升级路线保持原契约。实现集中定义不等于 #439 完成，也不表示 #404 的生成值已支持持久化。
+现有格式 1–13 的 codec 与能力定义集中在 `src/redb_storage/layout.rs`。scalar/map/partial/reference、cursor、bounded read、generation 和 journal 不再在运行路径中重复枚举格式号；legacy adapter 仍按已有格式映射 journal 配对。legacy adapter 的 capability 是对旧格式的解释；format 14 开发候选则在持久 header 中显式声明已安装能力与组件 codec。旧格式保留原契约，新库默认仍为 format 10，进入原生 header 必须显式升级。#439 的发布验收仍待完成，#404 的 generated defaults 尚未实现。
 
 [#439](https://github.com/worktools/unionid/issues/439) tracks separating physical layout, required capabilities and journaling. Until that design is completed, freeze additional feature/journal format pairs beyond the already implemented reference formats 12/13. New durable capabilities first specify old-binary rejection, explicit upgrades, codecs and logical/incremental recovery; silently ignored optional serde fields are insufficient.
 
-`src/redb_storage/layout.rs` centralizes existing format 1–13 codec/capability definitions. Runtime gates use scalar/map/partial/reference, cursor, bounded-read, generation and journal capabilities instead of repeatedly listing format numbers; the legacy adapter still translates existing journal pairs. Capabilities here are internal interpretations, not new persisted metadata. Existing formats, new-database defaults and upgrade routes retain their contracts. This preparatory step neither completes #439 nor provides durable generated defaults for #404.
+`src/redb_storage/layout.rs` centralizes existing format 1–13 codec/capability definitions. Runtime gates use scalar/map/partial/reference, cursor, bounded-read, generation and journal capabilities instead of repeatedly listing format numbers; the legacy adapter still translates existing journal pairs. Legacy-adapter capabilities interpret existing formats; the format 14 development candidate explicitly persists installed capabilities and component codecs in its header. Legacy contracts remain intact, new databases still default to format 10, and the native header requires an explicit upgrade. Release acceptance for #439 remains pending; generated defaults for #404 are not implemented.
 
-持久 header、显式能力安装与跨升级增量链的具体提案见 [RFC 0028](rfc/0028-capability-storage-header.md)。完整持久模型仍是设计提案，尚未增加数据库格式或命令。内部 header 解码已严格校验 framing、规范 JSON、能力依赖与 codec；现有格式若出现保留的 `storage_header` 会在业务数据读取前明确拒绝，不能借未知 meta key 静默安装能力。
+持久 header、显式能力安装与跨升级增量链的设计及实现候选见 [RFC 0028](rfc/0028-capability-storage-header.md)。开发候选提供显式 `upgrade --target 14`；升级后可用 `--require <capability>` 安装能力，活跃 journal 的升级或安装同时要求 `--repo <path>` 验证已导出至当前 head 的 archive。header 解码严格校验 framing、规范 JSON、能力依赖与 codec；旧格式若出现保留的 `storage_header` 会在业务读取前明确拒绝。候选尚未发布，软件版本、新库默认值与发布 contract 保持不变。
 
-See [RFC 0028](rfc/0028-capability-storage-header.md) for the proposed persistent header, explicit capability installation and incremental chains across upgrades. The complete persistent model remains proposed, with no new supported database format or command. Internal header decoding validates framing, canonical JSON, capability dependencies and codecs. Existing formats reject the reserved `storage_header` before business reads; unknown metadata cannot silently install required capabilities.
+See [RFC 0028](rfc/0028-capability-storage-header.md) for the persistent-header design and implementation candidate, explicit capability installation and incremental chains across upgrades. The candidate provides explicit `upgrade --target 14`; after upgrading, `--require <capability>` installs capabilities. Upgrading or installing with an active journal also requires `--repo <path>` to verify an archive exported through the current head. Header decoding validates framing, canonical JSON, capability dependencies and codecs; legacy formats reject the reserved `storage_header` before business reads. This candidate is not released, and software versions, new-database defaults and release contracts remain unchanged.

@@ -53,6 +53,103 @@ insert items {id = 1, label = "one"}
 }
 
 #[test]
+fn cli_header_upgrade_verifies_archive_and_preserves_logical_backup_layout() {
+    let temp = TempTree::new("header-upgrade-cli");
+    let db = temp.path().join("app.redb");
+    let repo = temp.path().join("archive");
+    create_database(&db);
+    backup::incremental::init(&db, &repo, Default::default()).unwrap();
+    let invoke = |with_archive: bool| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"));
+        command
+            .args(["upgrade", "--db"])
+            .arg(&db)
+            .args(["--target", "14", "--format", "json"]);
+        if with_archive {
+            command.arg("--repo").arg(&repo);
+        }
+        command.output().unwrap()
+    };
+    let rejected = invoke(false);
+    assert!(!rejected.status.success());
+    let failure: serde_json::Value =
+        serde_json::from_slice(&rejected.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{error}: stdout={} stderr={}",
+                String::from_utf8_lossy(&rejected.stdout),
+                String::from_utf8_lossy(&rejected.stderr)
+            )
+        });
+    assert_eq!(failure["error"]["code"], "E_BACKUP_CHAIN_ACTIVE");
+    let result = invoke(true);
+    assert!(
+        result.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["previous_format"], 11);
+    assert_eq!(report["format"], 14);
+    assert_eq!(report["changed"], true);
+    backup::incremental::export(&db, &repo, Default::default()).unwrap();
+    backup::incremental::verify(&repo, Default::default()).unwrap();
+    let installed = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["upgrade", "--db"])
+        .arg(&db)
+        .args(["--target", "14", "--require", "typed_references", "--repo"])
+        .arg(&repo)
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        installed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&installed.stdout),
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let installed: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(installed["previous_format"], 14);
+    assert_eq!(installed["format"], 14);
+    assert_eq!(installed["changed"], true);
+    backup::incremental::export(&db, &repo, Default::default()).unwrap();
+    backup::incremental::verify(&repo, Default::default()).unwrap();
+    let logical = temp.path().join("backup.json");
+    let restored = temp.path().join("restored.redb");
+    assert_eq!(backup::create(&db, &logical).unwrap().format_version, 8);
+    backup::restore(&logical, &restored).unwrap();
+    let mut engine = Engine::open_redb(&restored).unwrap();
+    engine.check_integrity().unwrap();
+    assert_eq!(engine.backup_journal_status().unwrap().storage_format, 14);
+    assert_eq!(engine.execute("from items").rows.len(), 1);
+    assert_eq!(
+        engine.introspection().required_storage_capabilities,
+        Some(vec![
+            "partial_unique_index".into(),
+            "typed_map".into(),
+            "typed_references".into()
+        ])
+    );
+    drop(engine);
+    let doctor = std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["doctor", "--db"])
+        .arg(&restored)
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        doctor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let doctor: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(
+        doctor["database"]["required_storage_capabilities"],
+        serde_json::json!(["partial_unique_index", "typed_map", "typed_references"])
+    );
+}
+
+#[test]
 fn init_export_list_verify_and_retry_form_a_contiguous_chain() {
     let temp = TempTree::new("incremental-workflow");
     let db = temp.path().join("app.redb");
