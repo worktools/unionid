@@ -903,7 +903,7 @@ fn generated_reference_keys_roll_back_and_replay_across_migration_and_restore() 
         )
         .unwrap();
     let setup = engine.execute(
-        "sequence parent_ids {start 1}\nsequence item_ids {start 1}\nstruct Parent {id: int}\nstruct Item {id: int, parent: int, public_id: uuid, created_at: timestamp}\ntable parents: Parent {key id\ndefault id = next(parent_ids)}\ntable items: Item {key id\ndefault id = next(item_ids)\ndefault public_id = uuid_v7()\ndefault created_at = now()}\ncreate reference items (parent) references parents (id)",
+        "sequence parent_ids {start 1}\nsequence item_ids {start 1}\nstruct Parent {id: int}\nstruct Item {id: int, parent: int, public_id: uuid, created_at: timestamp}\ntable parents: Parent {key id\ndefault id = next(parent_ids)}\ntable items: Item {key id\ndefault id = next(item_ids)\ndefault public_id = uuid_v7()\ndefault created_at = now()}\ncreate index items (parent)\ncreate reference items (parent) references parents (id)",
     );
     assert!(setup.ok, "{COMBINATION}: {:?}", setup.error);
     drop(engine);
@@ -935,6 +935,13 @@ fn generated_reference_keys_roll_back_and_replay_across_migration_and_restore() 
     let mut engine = Engine::open_redb(&path).unwrap();
     let original = execute_protocol_request(&mut engine, request(SCRIPT));
     assert!(original.ok, "{COMBINATION}: {:?}", original.error);
+    let durable = engine.last_mutation_profile().unwrap().durable.unwrap();
+    assert_eq!(
+        durable.mode,
+        unionid::profile::DurableCommitMode::Incremental
+    );
+    assert_eq!(durable.row_changes, 2);
+    assert_eq!(durable.receipt_changes, 1);
     let rows = original.typed_rows::<Value>().unwrap();
     assert_eq!(rows[0]["id"], 1);
     assert_eq!(rows[0]["parent"], 1);
