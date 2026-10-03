@@ -53,15 +53,19 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "max",
     "migration",
     "min",
+    "next",
     "not",
+    "now",
     "option",
     "or",
     "parent",
     "rename",
     "returning",
     "select",
+    "sequence",
     "set",
     "sort",
+    "start",
     "sum",
     "table",
     "take",
@@ -73,6 +77,7 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "update",
     "upsert",
     "using",
+    "uuid_v7",
     "variant",
 ];
 
@@ -298,6 +303,14 @@ impl CompletionHelper {
             candidates.extend(introspection.tables.iter().cloned());
             candidates.extend(introspection.types.iter().cloned());
             candidates.extend(introspection.fields.iter().cloned());
+            if let Ok(statements) = crate::syntax::parse(&introspection.schema_source) {
+                candidates.extend(statements.into_iter().filter_map(|located| {
+                    match located.statement {
+                        crate::query::Statement::CreateSequence { name, .. } => Some(name),
+                        _ => None,
+                    }
+                }));
+            }
         }
         self.candidates = candidates.into_iter().collect();
     }
@@ -467,6 +480,49 @@ mod tests {
                 .map(|candidate| candidate.replacement)
                 .collect::<Vec<_>>(),
             ["table", "take", "tasks"]
+        );
+    }
+
+    #[test]
+    fn generated_defaults_completion_tracks_sequence_names_after_migration() {
+        let mut engine = crate::Engine::memory();
+        assert!(engine.execute("sequence account_ids {start 1}").ok);
+        let mut helper = CompletionHelper::new(Some(&engine.introspection()));
+        let history = rustyline::history::DefaultHistory::new();
+        let context = Context::new(&history);
+        for (source, expected) in [
+            ("seq", "sequence"),
+            ("sta", "start"),
+            ("default id = ne", "next"),
+            ("default id = uu", "uuid_v7"),
+            ("default created_at = no", "now"),
+            ("default id = next(acc", "account_ids"),
+        ] {
+            let (_, matches) = helper.complete(source, source.len(), &context).unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|candidate| candidate.replacement == expected),
+                "{source}: {expected}"
+            );
+        }
+        assert!(
+            engine
+                .execute("migration rename {rename sequence account_ids to user_ids}")
+                .ok
+        );
+        helper.set_catalog(Some(&engine.introspection()));
+        assert!(
+            helper
+                .candidates
+                .iter()
+                .any(|candidate| candidate == "user_ids")
+        );
+        assert!(
+            !helper
+                .candidates
+                .iter()
+                .any(|candidate| candidate == "account_ids")
         );
     }
 }

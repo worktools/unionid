@@ -129,7 +129,7 @@ M7 的早期 profile 定位到 full-resident open 与 full-rebuild migration 的
 
 [#439](https://github.com/worktools/unionid/issues/439) 跟踪物理布局、required capability 与 journal 的解耦。该设计完成前，除已实现的引用格式 12/13 外，暂停新增功能专属的普通/journal 成对格式号。新增持久能力必须先说明旧二进制拒绝边界、显式升级、codec 和逻辑/增量恢复；不能只添加可被旧 serde reader 忽略的字段。
 
-现有格式 1–13 的 codec 与能力定义集中在 `src/redb_storage/layout.rs`。scalar/map/partial/reference、cursor、bounded read、generation 和 journal 不再在运行路径中重复枚举格式号；legacy adapter 仍按已有格式映射 journal 配对。legacy adapter 的 capability 是对旧格式的解释；format 14 开发候选则在持久 header 中显式声明已安装能力与组件 codec。旧格式保留原契约，新库默认仍为 format 10，进入原生 header 必须显式升级。#439 的发布验收仍待完成，#404 的 generated defaults 尚未实现。
+现有格式 1–13 的 codec 与能力定义集中在 `src/redb_storage/layout.rs`。scalar/map/partial/reference、cursor、bounded read、generation 和 journal 不再在运行路径中重复枚举格式号；legacy adapter 仍按已有格式映射 journal 配对。legacy adapter 的 capability 是对旧格式的解释；format 14 开发候选则在持久 header 中显式声明已安装能力与组件 codec。旧格式保留原契约，新库默认仍为 format 10，进入原生 header 必须显式升级。#439 的发布验收仍待完成；#404 的 generated defaults 已在开发分支实现，持久使用需显式安装 `generated_defaults` capability，并使用 catalog codec 8；完整发布验收仍待完成。用法见[生成字段默认值](GENERATED_DEFAULTS.md)。
 
 [#439](https://github.com/worktools/unionid/issues/439) tracks separating physical layout, required capabilities and journaling. Until that design is completed, freeze additional feature/journal format pairs beyond the already implemented reference formats 12/13. New durable capabilities first specify old-binary rejection, explicit upgrades, codecs and logical/incremental recovery; silently ignored optional serde fields are insufficient.
 

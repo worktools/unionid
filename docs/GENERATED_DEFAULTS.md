@@ -11,6 +11,8 @@ unionid upgrade --db app.redb --target 14 --require generated_defaults
 
 如果数据库有活跃增量备份 journal，先导出 archive 至当前 head，并在升级／安装命令提供 `--repo <archive>`；不要跳过该校验。旧软件无法打开带新能力声明的文件，升级前保留备份。
 
+REPL 的 Tab 补全提供 `sequence`、`start`、`next`、`uuid_v7`、`now` 和当前 sequence 名；rename 后会刷新候选。
+
 保存下例为 `accounts.unid`，执行 `unionid run --db app.redb --file accounts.unid`：
 
 ```unionid
@@ -42,6 +44,8 @@ TCP/HTTP 返回 uuid/timestamp 时使用 protocol v2。Rust `queries!` 生成的
 ## English Description
 
 The development branch implements controlled table defaults; this is not released yet. Read this page with `unionid docs show generated-defaults`. Memory execution needs no installation. For an existing redb database, explicitly upgrade to physical format 14 and then install `generated_defaults` using the two commands above. New databases still default to format 10; DDL never upgrades implicitly. For an active incremental journal, export the archive through the current head and provide `--repo <archive>` during upgrade/installation. Keep a backup: older software rejects the new requirement.
+
+REPL Tab completion includes generator keywords and current sequence names, refreshed after rename.
 
 Save the example as `accounts.unid`, then run `unionid run --db app.redb --file accounts.unid`. Generated defaults apply only to omitted top-level fields. Explicit values override them; table policies override struct constant defaults. `next(sequence)` produces int or an int-backed nominal type in script, batch-row and declared-field order; allocation beyond i64 maximum fails with `E_ARITH`. `uuid_v7()` uses independent random bits per allocation. `now()` shares one UTC wall-clock sample per atomic request without promising monotonic or commit order. Clock/entropy failures report `E_GENERATION`.
 

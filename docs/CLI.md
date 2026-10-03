@@ -267,7 +267,7 @@ unionid cli --addr 127.0.0.1:7878 --query .types
 
 ## 补全
 
-Tab 补全当前语言关键字、meta command，以及最近一次 introspection 得到的表、类型和字段名称。schema 成功变化后，REPL 会刷新 catalog 候选。补全只替换光标前的当前标识符，不提交或改写脚本；空 catalog 仍提供关键字和 meta command。
+Tab 补全当前语言关键字、meta command，以及最近一次 introspection 得到的表、类型、字段和 sequence 名称。schema 成功变化后，REPL 会刷新 catalog 候选。补全只替换光标前的当前标识符，不提交或改写脚本；空 catalog 仍提供关键字和 meta command。
 
 ## 持久历史
 

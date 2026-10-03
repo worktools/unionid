@@ -435,6 +435,92 @@ fn sequence_and_policy_migrations_preserve_history_and_counter_identity() {
 }
 
 #[test]
+fn shadow_migration_requires_generation_capability_before_maintenance() {
+    use unionid::migration::MigrationFile;
+    for native in [false, true] {
+        for bounded in [false, true] {
+            let temp = common::TempDir::new();
+            let path = temp.0.join("capability.redb");
+            let file = MigrationFile::parse("migration generated {\nadd sequence ids {start 20}\nchange default items.id to next(ids)\n}").unwrap();
+            let mut engine = Engine::open_redb(&path).unwrap();
+            if native {
+                engine.upgrade_storage(14).unwrap();
+            }
+            ok(
+                &mut engine,
+                "struct Item {id: int, owner: text}\ntable items: Item {key id}\ninsert items {id: 1, owner: \"historical\"}",
+            );
+            let schema = engine.schema_info();
+            let source = engine.schema();
+            let rows = serde_json::to_value(ok(&mut engine, "from items").rows).unwrap();
+            let sequence = engine.backup_journal_status().unwrap().head_sequence;
+            let error = if bounded {
+                engine
+                    .advance_migrations(std::slice::from_ref(&file), 1)
+                    .unwrap_err()
+            } else {
+                engine
+                    .apply_migrations(std::slice::from_ref(&file))
+                    .unwrap_err()
+            };
+            assert_eq!(
+                error.code, "E_STORAGE_UPGRADE_REQUIRED",
+                "native={native}, bounded={bounded}: {error:?}"
+            );
+            assert_eq!(engine.schema_info(), schema);
+            assert_eq!(engine.schema(), source);
+            assert_eq!(
+                engine.backup_journal_status().unwrap().head_sequence,
+                sequence
+            );
+            assert!(engine.migration_history().is_empty());
+            assert!(
+                engine
+                    .migration_status(std::slice::from_ref(&file))
+                    .unwrap()
+                    .maintenance
+                    .is_none()
+            );
+            drop(engine);
+            let mut engine = Engine::open_redb(&path).unwrap();
+            engine.check_integrity().unwrap();
+            assert_eq!(engine.schema_info(), schema);
+            assert_eq!(
+                serde_json::to_value(ok(&mut engine, "from items").rows).unwrap(),
+                rows
+            );
+            assert!(engine.migration_history().is_empty());
+            assert!(
+                engine
+                    .migration_status(std::slice::from_ref(&file))
+                    .unwrap()
+                    .maintenance
+                    .is_none()
+            );
+            if !native {
+                engine.upgrade_storage(14).unwrap();
+            }
+            engine
+                .install_storage_capabilities(&["generated_defaults".into()], None)
+                .unwrap();
+            engine.apply_migrations(&[file]).unwrap();
+            assert_eq!(
+                id(
+                    &ok(
+                        &mut engine,
+                        "insert items {owner: \"fresh\"} | returning id"
+                    ),
+                    0
+                ),
+                20
+            );
+            drop(engine);
+            Engine::open_redb(&path).unwrap().check_integrity().unwrap();
+        }
+    }
+}
+
+#[test]
 fn shadow_abort_and_reopen_resume_preserve_source_and_target_sequences() {
     use unionid::migration::MigrationFile;
     let temp = common::TempDir::new();

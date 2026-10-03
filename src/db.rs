@@ -1880,7 +1880,7 @@ impl Database {
                 if self.objects.contains_key(&name) || self.sequences.contains_key(&name) {
                     return Err(Error::new(
                         "E_SCHEMA",
-                        format!("name '{name}' is already used by a table"),
+                        format!("name '{name}' is already in use"),
                     ));
                 }
                 self.catalog.define(name.clone(), ty)?;
@@ -2098,7 +2098,7 @@ impl Database {
         if self.catalog.types.contains_key(&name) || self.sequences.contains_key(&name) {
             return Err(Error::new(
                 "E_SCHEMA",
-                format!("name '{name}' is already used by a type"),
+                format!("name '{name}' is already in use"),
             ));
         }
         if let Some(key) = &key {

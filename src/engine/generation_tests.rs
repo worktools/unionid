@@ -296,3 +296,34 @@ fn reference_failure_after_generation_rolls_back_native_counter_and_receipt() {
     drop(engine);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn prepared_generation_survives_counter_changes_but_rejects_policy_drift_without_sampling() {
+    let mut engine = Engine::memory();
+    assert!(engine.execute(SETUP).ok);
+    let prepared = engine.prepare("insert items $row | returning id").unwrap();
+    let parameters = BTreeMap::from([("row".into(), crate::Value::Record(BTreeMap::new()))]);
+    let schema = engine.schema_info();
+    for expected in [1, 2] {
+        let inserted = engine.execute_prepared(&prepared, parameters.clone());
+        assert!(inserted.ok, "{:?}", inserted.error);
+        assert!(inserted.rows[0]["id"].cmp_eq(&crate::Value::Int(expected)));
+        assert_eq!(engine.schema_info(), schema);
+    }
+    assert!(
+        engine
+            .execute("migration remove {drop default items.id}")
+            .ok
+    );
+    assert_ne!(engine.schema_info().hash, schema.hash);
+    let sources = TestGenerationSources::new(UNIX_EPOCH, Some(1));
+    inject(&mut engine, sources.clone());
+    let stale = engine.execute_prepared(&prepared, parameters.clone());
+    assert_eq!(stale.error.unwrap().code, "E_SCHEMA_CHANGED");
+    let current = engine.prepare("insert items $row | returning id").unwrap();
+    let missing = engine.execute_prepared(&current, parameters);
+    assert_eq!(missing.error.unwrap().code, "E_FIELD");
+    assert_eq!(sources.clock_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(sources.entropy_reads.load(Ordering::SeqCst), 0);
+    assert_eq!(engine.execute("from items").rows.len(), 2);
+}

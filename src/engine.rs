@@ -2771,6 +2771,18 @@ impl Engine {
         let mut target = source_database
             .migration_target(&file.id, &file.steps)
             .map_err(|error| migration_file_error(file, error))?;
+        if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
+            && target.has_generated_defaults()
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
+            ));
+        }
         if target.requires_map_storage()
             && self
                 .durable
