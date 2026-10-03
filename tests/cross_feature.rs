@@ -393,14 +393,21 @@ fn atomic_expect_receipt_survives_commit_exit_and_both_restore_paths() {
     }
     assert_eq!(state(&path, COMBINATION), before);
     let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "atomic_receipt_commit_exit_child"])
+        .args([
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "atomic_receipt_commit_exit_child",
+        ])
         .env("UNIONID_MATRIX_COMMIT_DB", &path)
         .output()
         .unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let stderr = String::from_utf8_lossy(&child.stderr);
     assert!(
-        child.status.success(),
-        "{COMBINATION}: {}",
-        String::from_utf8_lossy(&child.stderr)
+        child.status.success() && stdout.contains("running 1 test"),
+        "{COMBINATION}: status={:?}, stdout={stdout}, stderr={stderr}",
+        child.status
     );
     let after = state(&path, COMBINATION);
     assert_eq!(after.sequence, before.sequence + 1);
