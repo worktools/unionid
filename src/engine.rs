@@ -53,6 +53,7 @@ pub struct Engine {
     durable: Option<Box<dyn DurableBackend>>,
     storage_mode: StorageMode,
     snapshot_storage_versions: Option<StorageVersions>,
+    snapshot_storage_capabilities: Option<Vec<String>>,
     last_mutation_profile: Option<MutationProfile>,
     last_migration_profile: Option<MigrationProfile>,
     open_profile: Option<StorageOpenProfile>,
@@ -311,6 +312,18 @@ trait DurableBackend: Send {
             "durable backend does not support compaction proofs",
         ))
     }
+    fn stored_header(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    fn required_storage_capabilities(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn configure_restore_layout(&mut self, _encoded: &str) -> Result<()> {
+        Err(Error::new(
+            "E_CONFIG",
+            "backend does not support restoring storage headers",
+        ))
+    }
     fn supports_production_scalars(&self) -> bool;
     fn supports_maps(&self) -> bool {
         false
@@ -325,6 +338,9 @@ trait DurableBackend: Send {
         false
     }
     fn versions(&self) -> StorageVersions;
+    fn supports_recoverable_migrations(&self) -> bool {
+        self.versions().maintenance_codec != 0
+    }
     fn backup_journal_status(&self) -> crate::backup::incremental::BackupJournalStatus {
         crate::backup::incremental::BackupJournalStatus {
             version: crate::backup::incremental::BACKUP_JOURNAL_STATUS_VERSION,
@@ -404,6 +420,17 @@ trait DurableBackend: Send {
         receipts: &ReceiptMap,
         target: u32,
     ) -> std::result::Result<StorageUpgrade, CommitFailure>;
+    fn install_capabilities(
+        &mut self,
+        _database: &Database,
+        _receipts: &ReceiptMap,
+        _capabilities: &[String],
+    ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+        Err(CommitFailure::Definite(Error::new(
+            "E_CONFIG",
+            "backend does not support storage capability installation",
+        )))
+    }
     fn maintenance_info(&self) -> Result<Option<MaintenanceInfo>> {
         Ok(None)
     }
@@ -500,6 +527,15 @@ impl DurableBackend for RedbStore {
         RedbStore::publish_compaction_proof(self, database)
     }
 
+    fn stored_header(&self) -> Result<Option<String>> {
+        RedbStore::stored_header(self)
+    }
+    fn required_storage_capabilities(&self) -> Option<Vec<String>> {
+        RedbStore::required_storage_capabilities(self)
+    }
+    fn configure_restore_layout(&mut self, encoded: &str) -> Result<()> {
+        RedbStore::configure_restore_layout(self, encoded)
+    }
     fn supports_production_scalars(&self) -> bool {
         RedbStore::supports_production_scalars(self)
     }
@@ -588,6 +624,20 @@ impl DurableBackend for RedbStore {
         RedbStore::maintenance_info(self)
     }
 
+    fn install_capabilities(
+        &mut self,
+        database: &Database,
+        receipts: &ReceiptMap,
+        capabilities: &[String],
+    ) -> std::result::Result<StorageUpgrade, CommitFailure> {
+        let result = RedbStore::install_capabilities(self, database, receipts, capabilities)?;
+        Ok(StorageUpgrade {
+            previous_format: result.previous_format,
+            format: result.format,
+            changed: result.changed,
+        })
+    }
+
     fn start_maintenance(
         &mut self,
         source: &Database,
@@ -640,6 +690,19 @@ impl DurableBackend for RedbStore {
 struct PendingIdempotency<'a> {
     key: &'a str,
     digest: &'a str,
+}
+
+fn required_storage_capability(
+    format: Option<u32>,
+    capability: &str,
+    legacy_message: &str,
+) -> Error {
+    if format == Some(crate::redb_storage::CAPABILITY_STORAGE_FORMAT_VERSION) {
+        Error::new("E_STORAGE_UPGRADE_REQUIRED", format!("required storage capability '{capability}' is not installed"))
+            .with_hint(format!("Run unionid upgrade --db <path> --target 14 --require {capability}; for an active journal, export first and supply --repo <archive>."))
+    } else {
+        Error::new("E_STORAGE_UPGRADE_REQUIRED", legacy_message)
+    }
 }
 
 impl Engine {
@@ -770,6 +833,7 @@ impl Engine {
             durable: None,
             storage_mode,
             snapshot_storage_versions: None,
+            snapshot_storage_capabilities: None,
             last_mutation_profile: None,
             last_migration_profile: None,
             open_profile: None,
@@ -1400,8 +1464,11 @@ impl Engine {
                 .iter()
                 .any(|located| located.statement.declares_references())
         {
-            return Err(Error::new(
-                "E_STORAGE_UPGRADE_REQUIRED",
+            return Err(required_storage_capability(
+                self.durable
+                    .as_ref()
+                    .map(|durable| durable.versions().format),
+                "typed_references",
                 "typed references require redb storage format 12 or 13; explicitly upgrade the database first",
             ));
         }
@@ -2328,7 +2395,7 @@ impl Engine {
             || self
                 .durable
                 .as_ref()
-                .is_some_and(|durable| matches!(durable.versions().format, 6..=13))
+                .is_some_and(|durable| durable.supports_recoverable_migrations())
         {
             self.committed.db.metadata_only()?
         } else {
@@ -2389,7 +2456,7 @@ impl Engine {
         self.apply_migrations_controlled(files, None)
     }
 
-    /// Advance format-6/7 migration maintenance by at most the requested number
+    /// Advance recoverable migration maintenance by at most the requested number
     /// of durable commits and return a structured checkpoint that can be resumed.
     pub fn advance_migrations(
         &mut self,
@@ -2405,11 +2472,11 @@ impl Engine {
         if self
             .durable
             .as_ref()
-            .is_none_or(|durable| !matches!(durable.versions().format, 6..=13))
+            .is_none_or(|durable| !durable.supports_recoverable_migrations())
         {
             return Err(Error::new(
                 "E_CONFIG",
-                "bounded migration progress requires a format-6 through format-13 redb database",
+                "bounded migration progress requires redb recoverable migration storage",
             ));
         }
         let mut budget = MaintenanceStepBudget::bounded(max_steps);
@@ -2573,8 +2640,11 @@ impl Engine {
                 )
             })
         {
-            return Err(Error::new(
-                "E_STORAGE_UPGRADE_REQUIRED",
+            return Err(required_storage_capability(
+                self.durable
+                    .as_ref()
+                    .map(|durable| durable.versions().format),
+                "typed_references",
                 "typed references require redb storage format 12 or 13; explicitly upgrade the database first",
             ));
         }
@@ -2588,7 +2658,7 @@ impl Engine {
         if self
             .durable
             .as_ref()
-            .is_some_and(|durable| matches!(durable.versions().format, 6..=13))
+            .is_some_and(|durable| durable.supports_recoverable_migrations())
         {
             return self.apply_migration_file_shadow(file, control, budget);
         }
@@ -2648,8 +2718,11 @@ impl Engine {
                 .as_ref()
                 .is_none_or(|durable| !durable.supports_maps())
         {
-            return Err(Error::new(
-                "E_STORAGE_UPGRADE_REQUIRED",
+            return Err(required_storage_capability(
+                self.durable
+                    .as_ref()
+                    .map(|durable| durable.versions().format),
+                "typed_map",
                 "typed maps are available in memory, but durable redb map storage requires format 8",
             ));
         }
@@ -2659,8 +2732,11 @@ impl Engine {
                 .as_ref()
                 .is_none_or(|durable| !durable.supports_partial_indexes())
         {
-            return Err(Error::new(
-                "E_STORAGE_UPGRADE_REQUIRED",
+            return Err(required_storage_capability(
+                self.durable
+                    .as_ref()
+                    .map(|durable| durable.versions().format),
+                "partial_unique_index",
                 "partial unique indexes require storage format 10; run storage upgrade --to 10",
             ));
         }
@@ -3013,8 +3089,11 @@ impl Engine {
                 .as_ref()
                 .is_none_or(|durable| !durable.supports_references())
         {
-            return Err(Error::new(
-                "E_STORAGE_UPGRADE_REQUIRED",
+            return Err(required_storage_capability(
+                self.durable
+                    .as_ref()
+                    .map(|durable| durable.versions().format),
+                "typed_references",
                 "typed references require redb storage format 12 or 13; explicitly upgrade the database first",
             ));
         }
@@ -3024,14 +3103,16 @@ impl Engine {
         let mut durable_view = None;
         if let Some(durable) = &mut self.durable {
             if candidate.requires_map_storage() && !durable.supports_maps() {
-                return Err(Error::new(
-                    "E_STORAGE_UPGRADE_REQUIRED",
+                return Err(required_storage_capability(
+                    Some(durable.versions().format),
+                    "typed_map",
                     "typed maps are available in memory, but durable redb map storage requires format 8",
                 ));
             }
             if candidate.requires_partial_index_storage() && !durable.supports_partial_indexes() {
-                return Err(Error::new(
-                    "E_STORAGE_UPGRADE_REQUIRED",
+                return Err(required_storage_capability(
+                    Some(durable.versions().format),
+                    "partial_unique_index",
                     "partial unique indexes require storage format 10; run storage upgrade --to 10",
                 ));
             }
@@ -3586,6 +3667,85 @@ impl Engine {
     }
 
     pub fn upgrade_storage(&mut self, target: u32) -> Result<StorageUpgrade> {
+        self.upgrade_storage_impl(target, false, None)
+    }
+
+    /// Upgrade capability metadata only after authenticating the active archive.
+    pub fn upgrade_storage_with_archive(
+        &mut self,
+        target: u32,
+        archive: impl AsRef<std::path::Path>,
+    ) -> Result<StorageUpgrade> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "storage upgrade requires reopening after an uncertain commit",
+            ));
+        }
+        if self.read_only {
+            return Err(Error::new("E_READ_ONLY", "storage upgrade is a mutation"));
+        }
+        if target != crate::redb_storage::CAPABILITY_STORAGE_FORMAT_VERSION {
+            return Err(Error::new(
+                "E_CONFIG",
+                "archive-verified upgrade requires capability storage target 14",
+            ));
+        }
+        crate::backup::incremental::verify_header_upgrade(self, archive.as_ref())?;
+        self.upgrade_storage_impl(target, true, None)
+    }
+
+    /// Explicitly install named storage capabilities and their codec dependencies.
+    /// Active journals require a fully exported, verified archive. Schema drops
+    /// never uninstall capabilities needed by historical durable state.
+    pub fn install_storage_capabilities(
+        &mut self,
+        capabilities: &[String],
+        archive: Option<&std::path::Path>,
+    ) -> Result<StorageUpgrade> {
+        if self.write_failed {
+            return Err(Error::new(
+                "E_STORAGE",
+                "capability installation requires reopening after an uncertain commit",
+            ));
+        }
+        if self.read_only {
+            return Err(Error::new(
+                "E_READ_ONLY",
+                "capability installation is a mutation",
+            ));
+        }
+        let encoded = self.stored_header()?.ok_or_else(|| {
+            Error::new(
+                "E_STORAGE_UPGRADE",
+                "upgrade to capability storage format 14 before installing capabilities",
+            )
+        })?;
+        let current = crate::redb_storage::StorageHeader::decode_transport(&encoded)?;
+        let next = current.install_capabilities(capabilities)?;
+        if next == current {
+            return self.upgrade_storage(current.format);
+        }
+        if self.backup_journal_status()?.state
+            == crate::backup::incremental::BackupJournalState::Active
+        {
+            let archive = archive.ok_or_else(|| {
+                Error::new(
+                    "E_BACKUP_CHAIN_ACTIVE",
+                    "capability installation requires an exported and verified archive",
+                )
+            })?;
+            crate::backup::incremental::verify_header_upgrade(self, archive)?;
+        }
+        self.upgrade_storage_impl(current.format, true, Some(capabilities))
+    }
+
+    fn upgrade_storage_impl(
+        &mut self,
+        target: u32,
+        verified_archive: bool,
+        capabilities: Option<&[String]>,
+    ) -> Result<StorageUpgrade> {
         if self.write_failed {
             return Err(Error::new(
                 "E_STORAGE",
@@ -3600,6 +3760,8 @@ impl Engine {
             durable.backup_journal_status().state
                 == crate::backup::incremental::BackupJournalState::Active
                 && format != target
+                && !(target == crate::redb_storage::CAPABILITY_STORAGE_FORMAT_VERSION
+                    && verified_archive)
                 && !(format == 7
                     && target == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION)
                 && !(format == crate::redb_storage::MAP_JOURNAL_STORAGE_FORMAT_VERSION
@@ -3639,7 +3801,12 @@ impl Engine {
         } else {
             self.mutable_candidate(None)?
         };
-        if journal_codec_upgrade {
+        let header_upgrade = target == crate::redb_storage::CAPABILITY_STORAGE_FORMAT_VERSION
+            && self
+                .durable
+                .as_ref()
+                .is_some_and(|store| store.versions().format != target);
+        if journal_codec_upgrade || header_upgrade || capabilities.is_some() {
             database.sequence = database
                 .sequence
                 .checked_add(1)
@@ -3651,7 +3818,13 @@ impl Engine {
                 "storage upgrade requires a database opened with Engine::open_redb",
             )
         })?;
-        match durable.upgrade(&database, &self.committed.receipts, target) {
+        let result = match capabilities {
+            Some(capabilities) => {
+                durable.install_capabilities(&database, &self.committed.receipts, capabilities)
+            }
+            None => durable.upgrade(&database, &self.committed.receipts, target),
+        };
+        match result {
             Ok(result) => {
                 let view = durable
                     .committed_view(&database)
@@ -3712,6 +3885,11 @@ impl Engine {
                 .as_ref()
                 .map(|durable| durable.versions())
                 .or(self.snapshot_storage_versions),
+            required_storage_capabilities: self
+                .durable
+                .as_ref()
+                .and_then(|durable| durable.required_storage_capabilities())
+                .or_else(|| self.snapshot_storage_capabilities.clone()),
             read_only: self.read_only,
             migration_count: self.committed.db.migration_history().len(),
             migration_head: self
@@ -3784,6 +3962,11 @@ impl Engine {
                 .as_ref()
                 .map(|durable| durable.versions())
                 .or(self.snapshot_storage_versions),
+            snapshot_storage_capabilities: self
+                .durable
+                .as_ref()
+                .and_then(|durable| durable.required_storage_capabilities())
+                .or_else(|| self.snapshot_storage_capabilities.clone()),
             ..Self::default()
         }
     }
@@ -3803,7 +3986,20 @@ impl Engine {
             || self.committed.db.requires_map_storage()
     }
 
+    pub(crate) fn stored_header(&self) -> Result<Option<String>> {
+        self.durable
+            .as_ref()
+            .map(|store| store.stored_header())
+            .transpose()
+            .map(Option::flatten)
+    }
+
     pub(crate) fn logical_backup_format(&self) -> u32 {
+        if self.durable.as_ref().is_some_and(|durable| {
+            durable.versions().format == crate::redb_storage::CAPABILITY_STORAGE_FORMAT_VERSION
+        }) {
+            return crate::backup::CAPABILITY_BACKUP_FORMAT_VERSION;
+        }
         if self.committed.db.has_references()
             || self
                 .durable
@@ -3831,6 +4027,18 @@ impl Engine {
         database: Database,
         receipts: ReceiptMap,
     ) -> Result<Self> {
+        Self::restore_redb_with_header(path, database, receipts, None)
+    }
+
+    pub(crate) fn restore_redb_with_header(
+        path: PathBuf,
+        database: Database,
+        receipts: ReceiptMap,
+        storage_header: Option<String>,
+    ) -> Result<Self> {
+        if let Some(header) = &storage_header {
+            crate::redb_storage::StorageHeader::decode_transport(header)?;
+        }
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .map_err(|error| Error::new("E_IO", error.to_string()))?;
@@ -3853,7 +4061,13 @@ impl Engine {
         drop(reservation);
         let result = (|| {
             let mut engine = Self::open_redb(path.clone())?;
-            if database.has_references() {
+            if let Some(header) = &storage_header {
+                engine
+                    .durable
+                    .as_mut()
+                    .expect("fresh redb engine has storage")
+                    .configure_restore_layout(header)?;
+            } else if database.has_references() {
                 engine.upgrade_storage(crate::redb_storage::REFERENCE_STORAGE_FORMAT_VERSION)?;
             }
             let mut response = QueryResponse::ok_message("backup restored");

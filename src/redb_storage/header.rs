@@ -2,6 +2,7 @@
 //! journal transition and backup contracts can preserve this header atomically.
 use serde::{Deserialize, Serialize};
 
+use super::{CAPABILITY_STORAGE_FORMAT_VERSION, StorageLayout};
 use super::{
     JOURNAL_CODEC_VERSION, MAINTENANCE_CODEC_VERSION, MAP_CATALOG_CODEC_VERSION,
     MAP_INDEX_KEY_VERSION, MAP_RECEIPT_CODEC_VERSION, MAP_VALUE_CODEC_VERSION,
@@ -10,6 +11,7 @@ use super::{
     REFERENCE_CATALOG_CODEC_VERSION,
 };
 use crate::error::{Error, Result};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 const MAGIC: &[u8; 4] = b"UISH";
 const VERSION: u16 = 1;
@@ -26,7 +28,7 @@ pub(super) const MAX_HEADER_BYTES: usize = PREFIX_BYTES + MAX_JSON.len();
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(super) struct StorageHeader {
+pub(crate) struct StorageHeader {
     physical_format: u32,
     required_capabilities: Vec<String>,
     codecs: Codecs,
@@ -49,7 +51,78 @@ fn invalid(message: impl Into<String>) -> Error {
 }
 
 impl StorageHeader {
+    pub(crate) fn encode_layout(layout: StorageLayout) -> Result<Vec<u8>> {
+        let header = Self {
+            physical_format: layout.format,
+            required_capabilities: layout.required_capabilities(),
+            codecs: Codecs {
+                catalog: layout.catalog,
+                value: layout.value,
+                index_key: layout.index,
+                migration: layout.migration,
+                receipt: layout.receipt,
+                maintenance: layout.maintenance,
+                journal: layout.journal,
+            },
+        };
+        header.validate_profile()?;
+        let json =
+            serde_json::to_vec(&header).map_err(|_| invalid("cannot encode canonical fields"))?;
+        Ok([MAGIC.as_slice(), &VERSION.to_be_bytes(), &json].concat())
+    }
+
+    pub(crate) fn encode_transport(layout: StorageLayout) -> Result<String> {
+        Ok(URL_SAFE_NO_PAD.encode(Self::encode_layout(layout)?))
+    }
+
+    pub(crate) fn decode_transport(encoded: &str) -> Result<StorageLayout> {
+        if encoded.len() > MAX_HEADER_BYTES.div_ceil(3) * 4 {
+            return Err(invalid("exceeds the supported header shape"));
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| invalid("invalid base64 framing"))?;
+        if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+            return Err(invalid("noncanonical base64 framing"));
+        }
+        Self::decode_any(&bytes)?.layout()
+    }
+
+    pub(crate) fn decode_any(bytes: &[u8]) -> Result<Self> {
+        Self::decode_impl(bytes, None)
+    }
+
+    pub(crate) fn layout(&self) -> Result<StorageLayout> {
+        self.validate_profile()?;
+        let has = |name: &str| self.required_capabilities.iter().any(|value| value == name);
+        let native = StorageLayout::from_header_profile(
+            has("typed_map"),
+            has("partial_unique_index"),
+            has("typed_references"),
+            self.codecs.journal != 0,
+        );
+        if self.physical_format == CAPABILITY_STORAGE_FORMAT_VERSION {
+            Ok(native)
+        } else {
+            let legacy = StorageLayout::for_format(self.physical_format)
+                .ok_or_else(|| invalid("unsupported physical format"))?;
+            if Self::encode_layout(legacy)?
+                != Self::encode_layout(StorageLayout {
+                    format: self.physical_format,
+                    ..native
+                })?
+            {
+                return Err(invalid("legacy profile contradicts physical format"));
+            }
+            Ok(legacy)
+        }
+    }
+
     pub(super) fn decode(bytes: &[u8], physical_format: u32) -> Result<Self> {
+        Self::decode_impl(bytes, Some(physical_format))
+    }
+
+    fn decode_impl(bytes: &[u8], physical_format: Option<u32>) -> Result<Self> {
         if bytes.len() > MAX_HEADER_BYTES {
             return Err(invalid("exceeds the supported header shape"));
         }
@@ -61,7 +134,7 @@ impl StorageHeader {
         }
         let header: Self = serde_json::from_slice(&bytes[PREFIX_BYTES..])
             .map_err(|_| invalid("invalid fields or JSON"))?;
-        if header.physical_format != physical_format {
+        if physical_format.is_some_and(|expected| header.physical_format != expected) {
             return Err(invalid("physical format contradicts discriminator"));
         }
         let canonical =
@@ -180,6 +253,26 @@ mod tests {
                 assert!(StorageHeader::decode(&bytes, u32::MAX).is_ok(), "{json}");
             }
         }
+    }
+
+    #[test]
+    fn transport_preserves_legacy_and_native_profiles_and_rejects_ambiguity() {
+        for format in 10..=13 {
+            let legacy = StorageLayout::for_format(format).unwrap();
+            let native = legacy.to_header_layout().unwrap();
+            for layout in [legacy, native] {
+                let encoded = StorageHeader::encode_transport(layout).unwrap();
+                assert_eq!(StorageHeader::decode_transport(&encoded).unwrap(), layout);
+                assert!(StorageHeader::decode_transport(&format!("{encoded}=")).is_err());
+                let decoded =
+                    StorageHeader::decode_any(&StorageHeader::encode_layout(layout).unwrap())
+                        .unwrap();
+                assert_eq!(decoded.layout().unwrap(), layout);
+            }
+        }
+        let bytes = frame(&BASE.replace("4294967295", "15"));
+        assert!(StorageHeader::decode_any(&bytes).unwrap().layout().is_err());
+        assert!(StorageHeader::decode_transport(&"A".repeat(MAX_HEADER_BYTES * 2)).is_err());
     }
 
     #[test]

@@ -17,6 +17,7 @@ struct State {
     ledger: Vec<MigrationEntry>,
     sequence: u64,
     receipts: usize,
+    required_storage_capabilities: Option<Vec<String>>,
     rows: Value,
 }
 
@@ -45,6 +46,7 @@ fn inspect(engine: &mut Engine, combination: &str) -> State {
         ledger: engine.migration_history().to_vec(),
         sequence,
         receipts: engine.idempotency_status().unwrap().count,
+        required_storage_capabilities: engine.introspection().required_storage_capabilities,
         rows: serde_json::to_value(response.rows).unwrap(),
     }
 }
@@ -73,11 +75,12 @@ fn reject_duplicate(path: &Path, combination: &str) {
     assert_eq!(state(path, combination), before);
 }
 
-fn migration_journey(partial_index: bool) {
-    let combination = if partial_index {
-        "journal+phased-migration+partial-unique"
-    } else {
-        "journal+phased-migration"
+fn migration_journey(partial_index: bool, native_header: bool) {
+    let combination = match (partial_index, native_header) {
+        (false, false) => "journal+phased-migration",
+        (true, false) => "journal+phased-migration+partial-unique",
+        (false, true) => "native-header+journal+phased-migration",
+        (true, true) => "native-header+journal+phased-migration+partial-unique",
     };
     eprintln!("combination={combination}");
     let temp = TempDir::new();
@@ -98,6 +101,9 @@ insert items {id: 2, label: "shared", score: 0, active: false, state: Done}
         if partial_index {
             let response = engine.execute("create unique index items (label) if active == true");
             assert!(response.ok, "{combination}: {:?}", response.error);
+        }
+        if native_header {
+            engine.upgrade_storage(14).unwrap();
         }
     }
     backup::incremental::init(&path, &archive, Default::default()).unwrap();
@@ -143,7 +149,7 @@ insert items {id: 2, label: "shared", score: 0, active: false, state: Done}
         assert_eq!(response.rows.len(), 2, "{combination}, query={query}");
         drop(engine);
         checkpoints.push(snapshot);
-        if !partial_index && files.len() == 1 {
+        if !partial_index && !native_header && files.len() == 1 {
             // Keep the existing baseline and first segment immutable while the
             // manifest starts declaring each artifact's record codec. Later
             // migrations append through the same normal exporter.
@@ -187,6 +193,17 @@ insert items {id: 2, label: "shared", score: 0, active: false, state: Done}
     let restored = temp.0.join("logical.redb");
     backup::restore(&logical, &restored).unwrap();
     assert_eq!(state(&restored, combination), *checkpoints.last().unwrap());
+    if native_header {
+        assert_eq!(
+            Engine::open_redb(&restored)
+                .unwrap()
+                .introspection()
+                .storage_versions
+                .unwrap()
+                .format,
+            14
+        );
+    }
     if partial_index {
         reject_duplicate(&restored, combination);
     }
@@ -212,6 +229,17 @@ insert items {id: 2, label: "shared", score: 0, active: false, state: Done}
             "combination={combination}, restore sequence={}",
             expected.sequence
         );
+        if native_header {
+            assert_eq!(
+                Engine::open_redb(&target)
+                    .unwrap()
+                    .introspection()
+                    .storage_versions
+                    .unwrap()
+                    .format,
+                14
+            );
+        }
         if partial_index {
             reject_duplicate(&target, combination);
         }
@@ -220,12 +248,22 @@ insert items {id: 2, label: "shared", score: 0, active: false, state: Done}
 
 #[test]
 fn journal_phased_migrations_restore_each_schema_boundary() {
-    migration_journey(false);
+    migration_journey(false, false);
 }
 
 #[test]
 fn partial_unique_index_survives_phased_migrations_and_both_restore_paths() {
-    migration_journey(true);
+    migration_journey(true, false);
+}
+
+#[test]
+fn native_header_journal_restores_each_phased_migration_boundary() {
+    migration_journey(false, true);
+}
+
+#[test]
+fn native_header_partial_unique_survives_phased_migrations_and_restore() {
+    migration_journey(true, true);
 }
 
 fn receipt_request(key: &str) -> Request {
@@ -271,9 +309,12 @@ fn receipt_restore(path: &Path, expected: &State, replies: &[(&str, &Response)],
     }
 }
 
-#[test]
-fn journal_receipt_pruning_preserves_replay_and_reuse_at_each_restore_boundary() {
-    const COMBINATION: &str = "journal+receipts+prune+replay";
+fn receipt_prune_journey(native_header: bool) {
+    let combination = if native_header {
+        "native-header+journal+receipts+prune+replay"
+    } else {
+        "journal+receipts+prune+replay"
+    };
     let temp = TempDir::new();
     let path = temp.0.join("source.redb");
     let archive = temp.0.join("archive");
@@ -282,19 +323,22 @@ fn journal_receipt_pruning_preserves_replay_and_reuse_at_each_restore_boundary()
         let response = engine.execute(
             "struct Item {id: int, score: int}\ntable items: Item {key id}\ninsert items {id: 1, score: 0}",
         );
-        assert!(response.ok, "{COMBINATION}: {:?}", response.error);
+        assert!(response.ok, "{combination}: {:?}", response.error);
+        if native_header {
+            engine.upgrade_storage(14).unwrap();
+        }
     }
     backup::incremental::init(&path, &archive, Default::default()).unwrap();
-    let mut checkpoints = vec![state(&path, COMBINATION)];
+    let mut checkpoints = vec![state(&path, combination)];
     let mut replies = Vec::new();
     for key in ["first", "retained"] {
         let mut engine = Engine::open_redb(&path).unwrap();
         let response = execute_protocol_request(&mut engine, receipt_request(key));
-        assert!(response.ok, "{COMBINATION}: {:?}", response.error);
+        assert!(response.ok, "{combination}: {:?}", response.error);
         assert!(!response.idempotency.as_ref().unwrap().replayed);
         replies.push(response);
         drop(engine);
-        checkpoints.push(state(&path, COMBINATION));
+        checkpoints.push(state(&path, combination));
     }
     {
         let mut engine = Engine::open_redb(&path).unwrap();
@@ -316,7 +360,7 @@ fn journal_receipt_pruning_preserves_replay_and_reuse_at_each_restore_boundary()
         assert_eq!(applied.selected_count, 1);
         assert_eq!(applied.remaining_count, 1);
     }
-    checkpoints.push(state(&path, COMBINATION));
+    checkpoints.push(state(&path, combination));
     for pair in checkpoints.windows(2) {
         assert_eq!(pair[1].sequence, pair[0].sequence + 1);
     }
@@ -336,7 +380,7 @@ fn journal_receipt_pruning_preserves_replay_and_reuse_at_each_restore_boundary()
     backup::incremental::verify(&archive, ArchiveLimits::default()).unwrap();
     for (index, expected) in checkpoints.into_iter().enumerate() {
         eprintln!(
-            "combination={COMBINATION}, restoring sequence={}",
+            "combination={combination}, restoring sequence={}",
             expected.sequence
         );
         let target = temp.0.join(format!("receipt-{}.redb", expected.sequence));
@@ -355,6 +399,16 @@ fn journal_receipt_pruning_preserves_replay_and_reuse_at_each_restore_boundary()
         };
         receipt_restore(&target, &expected, &present, index == 3);
     }
+}
+
+#[test]
+fn journal_receipt_pruning_preserves_replay_and_reuse_at_each_restore_boundary() {
+    receipt_prune_journey(false);
+}
+
+#[test]
+fn native_header_receipt_pruning_preserves_replay_and_reuse_at_each_restore_boundary() {
+    receipt_prune_journey(true);
 }
 
 const ATOMIC_SCRIPT: &str = "update items | filter id == 1 && score == 0 | set score = score + 1\nexpect affected == 1\nupdate items | filter id == 1 | set score = score + 1 | returning {id, score}\nexpect affected == 1";
@@ -517,17 +571,28 @@ fn reference_rejections(path: &Path, text_key: bool) {
     assert_eq!(reference_state(path), before);
 }
 
-#[test]
-fn existing_references_and_target_key_conversion_survive_both_restore_paths() {
-    const COMBINATION: &str = "journal+existing-references+key-migration";
+fn reference_journey(native_header: bool) {
+    let combination = if native_header {
+        "native-header+journal+map+partial-unique+references+key-migration"
+    } else {
+        "journal+existing-references+key-migration"
+    };
     let temp = TempDir::new();
     let path = temp.0.join("source.redb");
     let archive = temp.0.join("archive");
     {
         let mut engine = Engine::open_redb(&path).unwrap();
         engine.upgrade_storage(12).unwrap();
-        let response = engine.execute("struct Parent {id: int}\nstruct Item {id: int, parent: int}\ntable parents: Parent {key id}\ntable items: Item {key id}\ninsert parents {id: 7}\ninsert items {id: 1, parent: 99}");
-        assert!(response.ok, "{COMBINATION}: {:?}", response.error);
+        let source = if native_header {
+            "struct Parent {id: int}\nstruct Item {id: int, parent: int, tags: Map<text, int> = map {\"k\": 1}, active: bool = true}\ntable parents: Parent {key id}\ntable items: Item {key id}\ncreate unique index items (parent) if active == true\ninsert parents {id: 7}\ninsert items {id: 1, parent: 99}"
+        } else {
+            "struct Parent {id: int}\nstruct Item {id: int, parent: int}\ntable parents: Parent {key id}\ntable items: Item {key id}\ninsert parents {id: 7}\ninsert items {id: 1, parent: 99}"
+        };
+        let response = engine.execute(source);
+        assert!(response.ok, "{combination}: {:?}", response.error);
+        if native_header {
+            engine.upgrade_storage(14).unwrap();
+        }
     }
     backup::incremental::init(&path, &archive, Default::default()).unwrap();
     let mut checkpoints = vec![reference_state(&path)];
@@ -607,7 +672,7 @@ fn existing_references_and_target_key_conversion_survive_both_restore_paths() {
     backup::incremental::verify(&archive, ArchiveLimits::default()).unwrap();
     for (index, expected) in checkpoints.into_iter().enumerate() {
         eprintln!(
-            "combination={COMBINATION}, restoring sequence={}",
+            "combination={combination}, restoring sequence={}",
             expected.items.sequence
         );
         let target = temp
@@ -625,6 +690,16 @@ fn existing_references_and_target_key_conversion_survive_both_restore_paths() {
             reference_rejections(&target, index == 3);
         }
     }
+}
+
+#[test]
+fn existing_references_and_target_key_conversion_survive_both_restore_paths() {
+    reference_journey(false);
+}
+
+#[test]
+fn native_header_map_partial_unique_and_references_survive_key_conversion_and_restore() {
+    reference_journey(true);
 }
 
 fn wire_rows(
@@ -663,13 +738,16 @@ fn read_only_service(path: &Path, expected: &State) {
     assert_eq!(state(path, "read-only+phased-migration"), *expected);
 }
 
-#[test]
-fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_services() {
+fn concurrent_snapshot_journey(native_header: bool) {
     use std::time::{Duration, Instant};
     use unionid::server::ConcurrentEngine;
     use unionid::stream::{self, Frame};
 
-    const COMBINATION: &str = "journal+phased-migration+concurrent-snapshots+read-only";
+    let combination = if native_header {
+        "native-header+journal+phased-migration+concurrent-snapshots+read-only"
+    } else {
+        "journal+phased-migration+concurrent-snapshots+read-only"
+    };
     let temp = TempDir::new();
     let path = temp.0.join("source.redb");
     let archive = temp.0.join("archive");
@@ -688,9 +766,12 @@ fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_servic
             .join(",\n");
         let response = engine.execute(&format!("insert many items [{rows}]"));
         assert!(response.ok, "{:?}", response.error);
+        if native_header {
+            engine.upgrade_storage(14).unwrap();
+        }
     }
     backup::incremental::init(&path, &archive, Default::default()).unwrap();
-    let before = state(&path, COMBINATION);
+    let before = state(&path, combination);
     let shared = ConcurrentEngine::new(Engine::open_redb(&path).unwrap());
     let mut receivers = Vec::new();
     for id in 0..2 {
@@ -712,7 +793,7 @@ fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_servic
         )
         .unwrap();
         let Frame::Schema { schema, .. } = frame else {
-            panic!("{COMBINATION}: {frame:?}")
+            panic!("{combination}: {frame:?}")
         };
         assert_eq!(schema, before.schema);
         receivers.push(receiver);
@@ -733,11 +814,11 @@ fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_servic
                 break;
             }
         }
-        assert!(complete, "{COMBINATION}: {source}");
+        assert!(complete, "{combination}: {source}");
         assert_eq!(shared.stats().active_reads, 2);
         // Physical check is intentionally deferred until retained snapshots
         // are released; redb rejects it while a read transaction is alive.
-        let snapshot = shared.with_exclusive(|engine| inspect(engine, COMBINATION));
+        let snapshot = shared.with_exclusive(|engine| inspect(engine, combination));
         assert_eq!(snapshot.sequence, checkpoints.last().unwrap().sequence + 1);
         assert_eq!(snapshot.ledger.len(), files.len());
         checkpoints.push(snapshot);
@@ -758,7 +839,7 @@ fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_servic
                     assert_eq!(row_count, "32");
                     break;
                 }
-                other => panic!("{COMBINATION}: {other:?}"),
+                other => panic!("{combination}: {other:?}"),
             }
         }
         assert_eq!(rows, wire_rows(&checkpoints[0]));
@@ -769,18 +850,18 @@ fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_servic
         engine.check_integrity().unwrap();
     });
     drop(shared);
-    assert_eq!(state(&path, COMBINATION), *checkpoints.last().unwrap());
+    assert_eq!(state(&path, combination), *checkpoints.last().unwrap());
     let logical = temp.0.join("logical.json");
     backup::create(&path, &logical).unwrap();
     let restored = temp.0.join("logical.redb");
     backup::restore(&logical, &restored).unwrap();
-    assert_eq!(state(&restored, COMBINATION), *checkpoints.last().unwrap());
+    assert_eq!(state(&restored, combination), *checkpoints.last().unwrap());
     read_only_service(&restored, checkpoints.last().unwrap());
     backup::incremental::export(&path, &archive, Default::default()).unwrap();
     backup::incremental::verify(&archive, ArchiveLimits::default()).unwrap();
     for expected in checkpoints {
         eprintln!(
-            "combination={COMBINATION}, restoring sequence={}",
+            "combination={combination}, restoring sequence={}",
             expected.sequence
         );
         let target = temp.0.join(format!("snapshot-{}.redb", expected.sequence));
@@ -791,7 +872,17 @@ fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_servic
             ArchiveLimits::default(),
         )
         .unwrap();
-        assert_eq!(state(&target, COMBINATION), expected);
+        assert_eq!(state(&target, combination), expected);
         read_only_service(&target, &expected);
     }
+}
+
+#[test]
+fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_services() {
+    concurrent_snapshot_journey(false);
+}
+
+#[test]
+fn native_header_snapshots_cross_migration_then_restore_to_read_only_services() {
+    concurrent_snapshot_journey(true);
 }

@@ -2,6 +2,10 @@
 
 unionid 的正式持久入口使用 redb 4.1。内存模式适合语言试验和临时数据；需要跨进程保存应用状态时，为本地命令、REPL 或服务指定同一个 `.redb` 文件。
 
+开发候选的能力 header 将物理布局、已安装能力和 journal codec 分开；新库默认仍为 format 10。显式进入 format 14 后，启停 journal 或安装能力保持同一个物理格式。每个原生 journal commit 认证执行时的 header，能力安装额外记录 before/after transition；`check` 同时核对 catalog、历史 receipt 与保留 journal，删除 schema 对象不移除已安装能力。完整模型、尚待验收的边界与版本状态见 [RFC 0028](rfc/0028-capability-storage-header.md)。
+
+The development candidate separates physical layout, installed capabilities and the journal codec; new databases still default to format 10. After an explicit upgrade to format 14, journal lifecycle and capability installation retain the same physical format. Native journal commits authenticate their execution header, with before/after transitions for capability installation. Integrity checks compare catalog, historical receipts and retained journal requirements; schema removal never uninstalls capabilities. See [RFC 0028](rfc/0028-capability-storage-header.md) for the model and pending acceptance boundaries.
+
 ## 使用入口
 
 执行脚本并保存结果：

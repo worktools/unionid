@@ -23,6 +23,7 @@ pub const PRODUCTION_BACKUP_FORMAT_VERSION: u32 = 4;
 pub const MAP_BACKUP_FORMAT_VERSION: u32 = 5;
 pub const PARTIAL_BACKUP_FORMAT_VERSION: u32 = 6;
 pub const REFERENCE_BACKUP_FORMAT_VERSION: u32 = 7;
+pub const CAPABILITY_BACKUP_FORMAT_VERSION: u32 = 8;
 const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,6 +43,8 @@ struct BackupEnvelope {
     database: Database,
     #[serde(default, skip_serializing_if = "ReceiptMap::is_empty")]
     receipts: ReceiptMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_header: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +54,8 @@ struct RawBackupEnvelope {
     database: Box<serde_json::value::RawValue>,
     #[serde(default)]
     receipts: Option<Box<serde_json::value::RawValue>>,
+    #[serde(default)]
+    storage_header: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -64,12 +69,25 @@ pub fn create(db: impl Into<PathBuf>, output: impl AsRef<Path>) -> Result<Backup
     engine.check_integrity()?;
     let (database, source, receipts) = engine.logical_backup_view();
     let format = engine.logical_backup_format();
-    write_database_view(database, source, receipts, output.as_ref(), format)
+    let header = engine.stored_header()?;
+    write_database_view_with_header(
+        database,
+        source,
+        receipts,
+        output.as_ref(),
+        format,
+        header.as_deref(),
+    )
 }
 
 pub fn restore(backup: impl AsRef<Path>, db: impl Into<PathBuf>) -> Result<BackupInfo> {
-    let (database, receipts, info) = read_database(backup.as_ref())?;
-    drop(Engine::restore_redb(db.into(), database, receipts)?);
+    let (database, receipts, info, header) = read_database_with_header(backup.as_ref())?;
+    drop(Engine::restore_redb_with_header(
+        db.into(),
+        database,
+        receipts,
+        header,
+    )?);
     Ok(info)
 }
 
@@ -96,6 +114,8 @@ pub fn import_legacy(
 struct StreamingBackupPayload<'a> {
     database: StreamingDatabase<'a>,
     receipts: &'a ReceiptMap,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage_header: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -105,6 +125,8 @@ struct StreamingBackupEnvelope<'a> {
     schema: &'a SchemaInfo,
     database: StreamingDatabase<'a>,
     receipts: &'a ReceiptMap,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage_header: Option<&'a str>,
 }
 
 struct StreamingDatabase<'a> {
@@ -316,6 +338,7 @@ impl<W: Write> Write for LimitedWriter<W> {
     }
 }
 
+#[cfg(test)]
 fn write_database_view(
     database: &Database,
     source: &dyn TypedRowSource,
@@ -323,6 +346,23 @@ fn write_database_view(
     output: &Path,
     format_version: u32,
 ) -> Result<BackupInfo> {
+    write_database_view_with_header(database, source, receipts, output, format_version, None)
+}
+
+fn write_database_view_with_header(
+    database: &Database,
+    source: &dyn TypedRowSource,
+    receipts: &ReceiptMap,
+    output: &Path,
+    format_version: u32,
+    storage_header: Option<&str>,
+) -> Result<BackupInfo> {
+    validate_backup_header(format_version, storage_header)?;
+    if let Some(header) = storage_header {
+        crate::redb_storage::StorageHeader::decode_transport(header)?
+            .validate_required_state(database, receipts)
+            .map_err(|error| Error::new("E_BACKUP", error.message))?;
+    }
     if database.has_references() && format_version < REFERENCE_BACKUP_FORMAT_VERSION {
         return Err(Error::new(
             "E_BACKUP",
@@ -342,6 +382,7 @@ fn write_database_view(
         &StreamingBackupPayload {
             database: StreamingDatabase::new(database, source),
             receipts,
+            storage_header,
         },
     )
     .map_err(|error| Error::new("E_BACKUP", format!("encode backup payload: {error}")))?;
@@ -373,6 +414,7 @@ fn write_database_view(
             schema: &info.schema,
             database: StreamingDatabase::new(database, source),
             receipts,
+            storage_header,
         },
     )
     .map_err(|error| Error::new("E_BACKUP", format!("encode backup: {error}")))
@@ -390,7 +432,40 @@ fn write_database_view(
     Ok(info)
 }
 
+#[cfg(test)]
 fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
+    read_database_with_header(path).map(|(database, receipts, info, _)| (database, receipts, info))
+}
+
+fn validate_backup_header(format: u32, encoded: Option<&str>) -> Result<()> {
+    if !(1..=CAPABILITY_BACKUP_FORMAT_VERSION).contains(&format) {
+        return Err(Error::new(
+            "E_BACKUP",
+            format!("unsupported backup format version {format}"),
+        ));
+    }
+    if (format == CAPABILITY_BACKUP_FORMAT_VERSION) != encoded.is_some() {
+        return Err(Error::new(
+            "E_BACKUP",
+            "capability backup requires a storage header; legacy backups must omit it",
+        ));
+    }
+    if let Some(encoded) = encoded {
+        let layout = crate::redb_storage::StorageHeader::decode_transport(encoded)
+            .map_err(|error| Error::new("E_BACKUP", error.message))?;
+        if !layout.has_header() {
+            return Err(Error::new(
+                "E_BACKUP",
+                "capability backup requires the native physical layout",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_database_with_header(
+    path: &Path,
+) -> Result<(Database, ReceiptMap, BackupInfo, Option<String>)> {
     let file =
         File::open(path).map_err(|error| Error::new("E_IO", format!("open backup: {error}")))?;
     if file
@@ -410,6 +485,7 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
     }
     let raw: RawBackupEnvelope = serde_json::from_slice(&encoded)
         .map_err(|error| Error::new("E_BACKUP", format!("decode backup: {error}")))?;
+    validate_backup_header(raw.format_version, raw.storage_header.as_deref())?;
     let envelope: BackupEnvelope = serde_json::from_slice(&encoded)
         .map_err(|error| Error::new("E_BACKUP", format!("decode backup: {error}")))?;
     if !matches!(
@@ -421,6 +497,7 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             | MAP_BACKUP_FORMAT_VERSION
             | PARTIAL_BACKUP_FORMAT_VERSION
             | REFERENCE_BACKUP_FORMAT_VERSION
+            | CAPABILITY_BACKUP_FORMAT_VERSION
     ) {
         return Err(Error::new(
             "E_BACKUP",
@@ -430,7 +507,10 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
             ),
         ));
     }
-    if raw.format_version != envelope.format_version || raw.checksum != envelope.checksum {
+    if raw.format_version != envelope.format_version
+        || raw.checksum != envelope.checksum
+        || raw.storage_header != envelope.storage_header
+    {
         return Err(Error::new(
             "E_BACKUP",
             "backup envelope metadata is inconsistent",
@@ -440,11 +520,21 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
         raw.database.get().as_bytes().to_vec()
     } else {
         let receipts = raw.receipts.as_ref().map_or("{}", |value| value.get());
-        format!(
-            "{{\"database\":{},\"receipts\":{receipts}}}",
-            raw.database.get()
-        )
-        .into_bytes()
+        if let Some(header) = &raw.storage_header {
+            let header = serde_json::to_string(header)
+                .map_err(|error| Error::new("E_BACKUP", error.to_string()))?;
+            format!(
+                "{{\"database\":{},\"receipts\":{receipts},\"storage_header\":{header}}}",
+                raw.database.get()
+            )
+            .into_bytes()
+        } else {
+            format!(
+                "{{\"database\":{},\"receipts\":{receipts}}}",
+                raw.database.get()
+            )
+            .into_bytes()
+        }
     };
     let checksum = format!("sha256:{:x}", Sha256::digest(payload));
     if checksum != envelope.checksum {
@@ -484,6 +574,11 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
         ));
     }
     validate_receipts(&envelope.receipts, database.sequence)?;
+    if let Some(header) = &envelope.storage_header {
+        crate::redb_storage::StorageHeader::decode_transport(header)?
+            .validate_required_state(&database, &envelope.receipts)
+            .map_err(|error| Error::new("E_BACKUP", error.message))?;
+    }
     let schema = database.schema_info();
     if schema != envelope.schema {
         return Err(Error::new(
@@ -498,7 +593,7 @@ fn read_database(path: &Path) -> Result<(Database, ReceiptMap, BackupInfo)> {
         migration_count: database.migration_history().len(),
         receipt_count: envelope.receipts.len(),
     };
-    Ok((database, envelope.receipts, info))
+    Ok((database, envelope.receipts, info, envelope.storage_header))
 }
 
 fn info(database: &Database, receipts: &ReceiptMap, format_version: u32) -> Result<BackupInfo> {
@@ -550,6 +645,148 @@ mod reference_tests {
         let result = engine.execute("struct Parent {id: int}\nstruct Child {id: int, parent: Option<int>}\ntable parents: Parent {key id}\ntable children: Child {key id}\ninsert parents {id: 1}\ninsert many children [{id: 1, parent: Some(1)}, {id: 2, parent: None}]\ncreate reference children (parent) references parents (id)");
         assert!(result.ok, "{}", result.message);
         engine.database_snapshot().unwrap()
+    }
+
+    #[test]
+    fn capability_backup_requires_maps_retained_only_in_a_nested_receipt() {
+        let temp = Temporary::new();
+        let database = Engine::memory().database_snapshot().unwrap();
+        let mut response = crate::db::QueryResponse::ok_message("retained result");
+        response.rows.push(BTreeMap::from([(
+            "old".into(),
+            crate::Value::Option(Some(Box::new(crate::Value::Named {
+                type_id: 1,
+                value: Box::new(crate::Value::Map(BTreeMap::from([(
+                    "key".into(),
+                    crate::Value::Int(1),
+                )]))),
+            }))),
+        )]));
+        let receipts = ReceiptMap::from_iter([(
+            String::from("retained"),
+            crate::idempotency::IdempotencyReceipt {
+                digest: format!("sha256:{}", "0".repeat(64)),
+                committed_sequence: database.sequence,
+                completed_at_unix_ms: 1,
+                response,
+            },
+        )]);
+        assert!(!database.requires_map_storage());
+        let base_header = crate::redb_storage::StorageHeader::encode_transport(
+            crate::redb_storage::StorageLayout::from_header_profile(false, false, false, false),
+        )
+        .unwrap();
+        let map_header = crate::redb_storage::StorageHeader::encode_transport(
+            crate::redb_storage::StorageLayout::from_header_profile(true, false, false, false),
+        )
+        .unwrap();
+        let output = temp.0.join("backup.json");
+        let error = write_database_view_with_header(
+            &database,
+            &database,
+            &receipts,
+            &output,
+            CAPABILITY_BACKUP_FORMAT_VERSION,
+            Some(&base_header),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "E_BACKUP");
+        assert!(!output.exists());
+        write_database_view_with_header(
+            &database,
+            &database,
+            &receipts,
+            &output,
+            CAPABILITY_BACKUP_FORMAT_VERSION,
+            Some(&map_header),
+        )
+        .unwrap();
+        let mut envelope: BackupEnvelope =
+            serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        envelope.storage_header = Some(base_header);
+        let payload = StreamingBackupPayload {
+            database: StreamingDatabase::new(&envelope.database, &envelope.database),
+            receipts: &envelope.receipts,
+            storage_header: envelope.storage_header.as_deref(),
+        };
+        envelope.checksum = format!(
+            "sha256:{:x}",
+            Sha256::digest(serde_json::to_vec(&payload).unwrap())
+        );
+        std::fs::write(&output, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let target = temp.0.join("rejected.redb");
+        let error = restore(&output, &target).unwrap_err();
+        assert_eq!(error.code, "E_BACKUP");
+        assert!(error.message.contains("retained receipts"), "{error}");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn capability_backup_round_trips_header_and_rejects_unrecognized_metadata_before_data() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        for references in [false, true] {
+            let temp = Temporary::new();
+            let path = temp.0.join("source.redb");
+            let output = temp.0.join("backup.json");
+            let destination = temp.0.join("restored.redb");
+            let mut engine = Engine::open_redb(&path).unwrap();
+            assert!(engine.execute("struct Item {id: int, label: text}\ntable items: Item {key id}\ninsert items {id: 1, label: \"one\"}").ok);
+            if references {
+                engine.upgrade_storage(12).unwrap();
+            }
+            engine.upgrade_storage(14).unwrap();
+            let header = engine.stored_header().unwrap();
+            let schema = engine.schema_info();
+            let sequence = engine.backup_journal_status().unwrap().head_sequence;
+            drop(engine);
+            let info = create(&path, &output).unwrap();
+            assert_eq!(info.format_version, CAPABILITY_BACKUP_FORMAT_VERSION);
+            assert_eq!(restore(&output, &destination).unwrap(), info);
+            let mut restored = Engine::open_redb(&destination).unwrap();
+            restored.check_integrity().unwrap();
+            assert_eq!(restored.stored_header().unwrap(), header);
+            assert_eq!(restored.schema_info(), schema);
+            assert_eq!(
+                restored.backup_journal_status().unwrap().head_sequence,
+                sequence
+            );
+            assert_eq!(restored.execute("from items").rows.len(), 1);
+            drop(restored);
+
+            let original: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+            let mut unknown = original.clone();
+            let encoded = unknown["storage_header"].as_str().unwrap();
+            let bytes = URL_SAFE_NO_PAD.decode(encoded).unwrap();
+            let json = std::str::from_utf8(&bytes[6..])
+                .unwrap()
+                .replace("typed_map", "unknownxx");
+            unknown["storage_header"] = serde_json::json!(
+                URL_SAFE_NO_PAD.encode([bytes[..6].to_vec(), json.into_bytes()].concat())
+            );
+            unknown["database"] = serde_json::json!("invalid business data");
+            let corrupt = temp.0.join("corrupt.json");
+            std::fs::write(&corrupt, serde_json::to_vec(&unknown).unwrap()).unwrap();
+            let target = temp.0.join("rejected.redb");
+            let error = restore(&corrupt, &target).unwrap_err();
+            assert_eq!(error.code, "E_BACKUP");
+            assert!(error.message.contains("capability"), "{error}");
+            assert!(!target.exists());
+
+            let mut tampered = original;
+            tampered["storage_header"] = serde_json::json!(
+                crate::redb_storage::StorageHeader::encode_transport(
+                    crate::redb_storage::StorageLayout::from_header_profile(
+                        false, false, false, false
+                    )
+                )
+                .unwrap()
+            );
+            std::fs::write(&corrupt, serde_json::to_vec(&tampered).unwrap()).unwrap();
+            let error = restore(&corrupt, &target).unwrap_err();
+            assert!(error.message.contains("checksum"), "{error}");
+            assert!(!target.exists());
+        }
     }
 
     #[test]

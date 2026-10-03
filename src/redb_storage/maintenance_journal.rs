@@ -299,6 +299,15 @@ pub(super) fn append(
     for count in counts {
         begin.extend_from_slice(&count.to_be_bytes());
     }
+    let layout = {
+        let meta = read
+            .open_table(META)
+            .map_err(|error| storage_error("read cutover journal storage header", error))?;
+        read_meta(&meta)?.1
+    };
+    if layout.has_header() {
+        push_journal_bytes(&mut begin, &StorageHeader::encode_layout(layout)?)?;
+    }
     writer.record(16, begin)?;
     writer.changes(
         &source_catalog,
@@ -494,7 +503,8 @@ mod tests {
                         );
                     } else {
                         assert_eq!(records, expected.records);
-                        validate_journal_records(&journal, &expected.state).unwrap();
+                        validate_journal_records(&journal, &expected.state, store.committed.layout)
+                            .unwrap();
                     }
                     drop(journal);
                     drop(read);

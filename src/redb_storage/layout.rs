@@ -71,16 +71,16 @@ const LEGACY_LAYOUTS: [StorageLayout; 13] = [
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct StorageLayout {
-    pub(super) format: u32,
-    pub(super) catalog: u16,
-    pub(super) value: u16,
-    pub(super) index: u16,
-    pub(super) migration: u16,
-    pub(super) receipt: u16,
-    pub(super) maintenance: u16,
-    pub(super) journal: u16,
-    pub(super) capabilities: u8,
+pub(crate) struct StorageLayout {
+    pub(crate) format: u32,
+    pub(crate) catalog: u16,
+    pub(crate) value: u16,
+    pub(crate) index: u16,
+    pub(crate) migration: u16,
+    pub(crate) receipt: u16,
+    pub(crate) maintenance: u16,
+    pub(crate) journal: u16,
+    pub(crate) capabilities: u8,
 }
 
 const fn layout(format: u32, codecs: [u16; 4], capabilities: u8, journal: bool) -> StorageLayout {
@@ -102,7 +102,133 @@ const fn layout(format: u32, codecs: [u16; 4], capabilities: u8, journal: bool) 
 }
 
 impl StorageLayout {
-    pub(super) const fn for_format(format: u32) -> Option<Self> {
+    pub(crate) fn from_header_profile(
+        map: bool,
+        partial: bool,
+        references: bool,
+        journal: bool,
+    ) -> Self {
+        let (codecs, capabilities) = if references {
+            (REFERENCE_CODECS, WITH_REFERENCES)
+        } else if partial {
+            (PARTIAL_CODECS, WITH_PARTIAL)
+        } else if map {
+            (MAP_CODECS, WITH_MAPS)
+        } else {
+            (
+                [
+                    PRODUCTION_CATALOG_CODEC_VERSION,
+                    MAP_VALUE_CODEC_VERSION,
+                    PRODUCTION_INDEX_KEY_VERSION,
+                    PRODUCTION_RECEIPT_CODEC_VERSION,
+                ],
+                GENERATED,
+            )
+        };
+        layout(
+            CAPABILITY_STORAGE_FORMAT_VERSION,
+            codecs,
+            capabilities,
+            journal,
+        )
+    }
+
+    pub(crate) const fn has_header(self) -> bool {
+        self.format == CAPABILITY_STORAGE_FORMAT_VERSION
+    }
+
+    pub(crate) fn to_header_layout(self) -> Result<Self> {
+        if !matches!(self.format, 10..=14) {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE",
+                "capability storage requires format 10, 11, 12 or 13",
+            ));
+        }
+        Ok(Self {
+            format: CAPABILITY_STORAGE_FORMAT_VERSION,
+            ..self
+        })
+    }
+
+    pub(crate) fn required_capabilities(self) -> Vec<String> {
+        let mut result = Vec::new();
+        if self.supports_partial_indexes() {
+            result.push("partial_unique_index".into());
+        }
+        if self.supports_maps() {
+            result.push("typed_map".into());
+        }
+        if self.supports_references() {
+            result.push("typed_references".into());
+        }
+        result
+    }
+
+    pub(crate) fn install_capabilities(self, requested: &[String]) -> Result<Self> {
+        if !self.has_header() {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE",
+                "upgrade to capability storage format 14 before installing capabilities",
+            ));
+        }
+        let mut maps = self.supports_maps();
+        let mut partial = self.supports_partial_indexes();
+        let mut references = self.supports_references();
+        for capability in requested {
+            match capability.as_str() {
+                "typed_map" => maps = true,
+                "partial_unique_index" => {
+                    maps = true;
+                    partial = true;
+                }
+                "typed_references" => {
+                    maps = true;
+                    partial = true;
+                    references = true;
+                }
+                _ => {
+                    return Err(Error::new(
+                        "E_STORAGE_UPGRADE",
+                        format!("unsupported required storage capability '{capability}'"),
+                    ));
+                }
+            }
+        }
+        Ok(Self::from_header_profile(
+            maps,
+            partial,
+            references,
+            self.supports_journal(),
+        ))
+    }
+
+    pub(crate) fn validate_required_state(
+        self,
+        database: &Database,
+        receipts: &ReceiptMap,
+    ) -> Result<()> {
+        if !self.has_header() {
+            return Ok(());
+        }
+        let retained_maps = receipts.values().any(|receipt| {
+            receipt
+                .response
+                .rows
+                .iter()
+                .any(|row| row.values().any(value_has_map))
+        });
+        if (!self.supports_maps() && (database.requires_map_storage() || retained_maps))
+            || (!self.supports_partial_indexes() && database.requires_partial_index_storage())
+            || (!self.supports_references() && database.has_references())
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "storage header omits capabilities required by catalog or retained receipts",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) const fn for_format(format: u32) -> Option<Self> {
         if format == 0 || format > LEGACY_LAYOUTS.len() as u32 {
             None
         } else {
@@ -110,7 +236,7 @@ impl StorageLayout {
         }
     }
 
-    pub(super) const fn legacy(format: u32) -> Self {
+    pub(crate) const fn legacy(format: u32) -> Self {
         layout(
             format,
             LEGACY_CODECS,
@@ -123,45 +249,50 @@ impl StorageLayout {
         )
     }
 
-    pub(super) const fn production() -> Self {
+    pub(crate) const fn production() -> Self {
         LEGACY_LAYOUTS[(PRODUCTION_STORAGE_FORMAT_VERSION - 1) as usize]
     }
-    pub(super) const fn partial() -> Self {
+    pub(crate) const fn partial() -> Self {
         LEGACY_LAYOUTS[(PARTIAL_STORAGE_FORMAT_VERSION - 1) as usize]
     }
 
-    pub(super) const fn supports_production_scalars(self) -> bool {
+    pub(crate) const fn supports_production_scalars(self) -> bool {
         self.capabilities & SCALARS != 0
     }
-    pub(super) const fn supports_maps(self) -> bool {
+    pub(crate) const fn supports_maps(self) -> bool {
         self.capabilities & MAPS != 0
     }
-    pub(super) const fn supports_partial_indexes(self) -> bool {
+    pub(crate) const fn supports_partial_indexes(self) -> bool {
         self.capabilities & PARTIAL != 0
     }
-    pub(super) const fn supports_references(self) -> bool {
+    pub(crate) const fn supports_references(self) -> bool {
         self.capabilities & REFERENCES != 0
     }
-    pub(super) const fn supports_cursor_identity(self) -> bool {
+    pub(crate) const fn supports_cursor_identity(self) -> bool {
         self.capabilities & CURSOR != 0
     }
-    pub(super) const fn supports_bounded_reads(self) -> bool {
+    pub(crate) const fn supports_bounded_reads(self) -> bool {
         self.capabilities & BOUNDED != 0
     }
-    pub(super) const fn supports_generation_envelope(self) -> bool {
+    pub(crate) const fn supports_generation_envelope(self) -> bool {
         self.capabilities & GENERATIONS != 0
     }
-    pub(super) const fn supports_journal(self) -> bool {
+    pub(crate) const fn supports_journal(self) -> bool {
         self.journal != 0
     }
 
     /// Legacy formats encode journaling in the adjacent format number. Keep the
     /// translation here rather than selecting a format at every feature callsite.
-    pub(super) const fn with_journal(self) -> Option<Self> {
+    pub(crate) const fn with_journal(self) -> Option<Self> {
         if !self.supports_generation_envelope() {
             None
         } else if self.supports_journal() {
             Some(self)
+        } else if self.has_header() {
+            Some(Self {
+                journal: JOURNAL_CODEC_VERSION,
+                ..self
+            })
         } else {
             Self::for_format(self.format + 1)
         }
@@ -169,25 +300,17 @@ impl StorageLayout {
 
     /// Released format <=11 archives retain their exact header bytes. Reference
     /// formats are unreleased and can declare their already-required capabilities.
-    pub(super) fn archive_required_capabilities(self) -> Vec<String> {
+    pub(crate) fn archive_required_capabilities(self) -> Vec<String> {
         if self.format <= PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION {
             return Vec::new();
         }
-        let mut capabilities = Vec::new();
-        if self.supports_partial_indexes() {
-            capabilities.push("partial_unique_index".into());
-        }
-        if self.supports_maps() {
-            capabilities.push("typed_map".into());
-        }
-        if self.supports_references() {
-            capabilities.push("typed_references".into());
-        }
-        capabilities
+        self.required_capabilities()
     }
 
-    pub(super) const fn backup_format(self) -> u32 {
-        if self.supports_references() {
+    pub(crate) const fn backup_format(self) -> u32 {
+        if self.has_header() {
+            crate::backup::CAPABILITY_BACKUP_FORMAT_VERSION
+        } else if self.supports_references() {
             crate::backup::REFERENCE_BACKUP_FORMAT_VERSION
         } else if self.supports_partial_indexes() {
             crate::backup::PARTIAL_BACKUP_FORMAT_VERSION
@@ -196,6 +319,18 @@ impl StorageLayout {
         } else {
             crate::backup::PRODUCTION_BACKUP_FORMAT_VERSION
         }
+    }
+}
+
+fn value_has_map(value: &crate::model::Value) -> bool {
+    use crate::model::Value;
+    match value {
+        Value::Map(_) => true,
+        Value::Named { value, .. } | Value::Option(Some(value)) => value_has_map(value),
+        Value::Record(fields) => fields.values().any(value_has_map),
+        Value::Enum(sum) => sum.args.iter().any(value_has_map),
+        Value::Tuple(items) | Value::List(items) => items.iter().any(value_has_map),
+        _ => false,
     }
 }
 

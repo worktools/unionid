@@ -41,8 +41,9 @@ use crate::row_source::{
 use crate::{ExecutionObservation, RowId};
 
 mod layout;
-use layout::StorageLayout;
+pub(crate) use layout::StorageLayout;
 mod header;
+pub(crate) use header::StorageHeader;
 
 mod posting;
 use posting::PostingDefinition;
@@ -59,6 +60,7 @@ pub(crate) const PARTIAL_STORAGE_FORMAT_VERSION: u32 = 10;
 pub(crate) const PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 11;
 pub(crate) const REFERENCE_STORAGE_FORMAT_VERSION: u32 = 12;
 pub(crate) const REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION: u32 = 13;
+pub(crate) const CAPABILITY_STORAGE_FORMAT_VERSION: u32 = 14;
 const CATALOG_CODEC_VERSION: u16 = 2;
 const SCALAR_CATALOG_CODEC_VERSION: u16 = 3;
 const PRODUCTION_CATALOG_CODEC_VERSION: u16 = 4;
@@ -123,6 +125,15 @@ const BACKUP_JOURNAL: TableDefinition<&[u8], &[u8]> = TableDefinition::new("back
 
 const FORMAT_KEY: &str = "storage_format_version";
 const STORAGE_HEADER_KEY: &str = "storage_header";
+const LEGACY_COMPONENT_KEYS: [&str; 7] = [
+    CATALOG_CODEC_KEY,
+    VALUE_CODEC_KEY,
+    INDEX_KEY_CODEC_KEY,
+    MIGRATION_CODEC_KEY,
+    RECEIPT_CODEC_KEY,
+    MAINTENANCE_CODEC_KEY,
+    JOURNAL_CODEC_KEY,
+];
 const CATALOG_CODEC_KEY: &str = "catalog_codec_version";
 const VALUE_CODEC_KEY: &str = "value_codec_version";
 const INDEX_KEY_CODEC_KEY: &str = "index_key_version";
@@ -156,6 +167,9 @@ pub(crate) struct RedbStore {
     path: PathBuf,
     committed: DurableHead,
     compaction_token: Option<[u8; 32]>,
+    restore_layout: Option<StorageLayout>,
+    #[cfg(test)]
+    header_commit_exit: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1259,6 +1273,9 @@ impl RedbStore {
             path,
             committed: DurableHead::from_prepared(&initial),
             compaction_token: None,
+            restore_layout: None,
+            #[cfg(test)]
+            header_commit_exit: None,
         };
         let bootstrap_started = Instant::now();
         if fresh {
@@ -1315,7 +1332,13 @@ impl RedbStore {
     }
 
     pub(crate) fn supports_production_scalars(&self) -> bool {
-        self.committed.layout.supports_production_scalars()
+        self.write_layout().supports_production_scalars()
+    }
+
+    // A fresh restore validates its candidate against the requested header,
+    // while the bootstrap layout remains committed until the atomic import.
+    fn write_layout(&self) -> StorageLayout {
+        self.restore_layout.unwrap_or(self.committed.layout)
     }
 
     pub(crate) fn supports_bounded_row_mutation(&self) -> bool {
@@ -1550,6 +1573,35 @@ impl RedbStore {
         Ok((metadata, source))
     }
 
+    pub(crate) fn stored_header(&self) -> Result<Option<String>> {
+        self.committed
+            .layout
+            .has_header()
+            .then(|| StorageHeader::encode_transport(self.committed.layout))
+            .transpose()
+    }
+
+    pub(crate) fn required_storage_capabilities(&self) -> Option<Vec<String>> {
+        self.committed
+            .layout
+            .has_header()
+            .then(|| self.committed.layout.required_capabilities())
+    }
+
+    pub(crate) fn configure_restore_layout(&mut self, encoded: &str) -> Result<()> {
+        if self.committed.meta.sequence != 0
+            || self.committed.meta.schema_revision != 0
+            || self.committed.journal.is_some()
+        {
+            return Err(Error::new(
+                "E_STORAGE",
+                "restore layout requires a fresh empty database",
+            ));
+        }
+        self.restore_layout = Some(StorageHeader::decode_transport(encoded)?);
+        Ok(())
+    }
+
     pub(crate) fn versions(&self) -> StorageVersions {
         let layout = self.committed.layout;
         StorageVersions {
@@ -1566,15 +1618,15 @@ impl RedbStore {
     }
 
     pub(crate) fn supports_maps(&self) -> bool {
-        self.committed.layout.supports_maps()
+        self.write_layout().supports_maps()
     }
 
     pub(crate) fn supports_references(&self) -> bool {
-        self.committed.layout.supports_references()
+        self.write_layout().supports_references()
     }
 
     pub(crate) fn supports_partial_indexes(&self) -> bool {
-        self.committed.layout.supports_partial_indexes()
+        self.write_layout().supports_partial_indexes()
     }
 
     pub(crate) fn backup_journal_status(&self) -> crate::backup::incremental::BackupJournalStatus {
@@ -1695,6 +1747,11 @@ impl RedbStore {
         identity.update(b"unionid-incremental-database-v1\0");
         identity.update(self.committed.meta.cursor_instance_id);
         Ok(BaselineSource {
+            record_codec: if self.committed.layout.has_header() {
+                2
+            } else {
+                1
+            },
             previous_storage_format: self.committed.layout.format,
             header: ArchiveHeader {
                 chain_id: chain_id.to_owned(),
@@ -1705,6 +1762,18 @@ impl RedbStore {
                 value_codec: u32::from(self.committed.layout.value),
                 receipt_codec: u32::from(self.committed.layout.receipt),
                 required_capabilities: self.committed.layout.archive_required_capabilities(),
+                storage_header: if self.committed.layout.has_header() {
+                    Some(StorageHeader::encode_transport(
+                        self.committed.layout.with_journal().ok_or_else(|| {
+                            Error::new(
+                                "E_BACKUP_CHAIN",
+                                "storage layout cannot install journal codec",
+                            )
+                        })?,
+                    )?)
+                } else {
+                    None
+                },
             },
             frames,
         })
@@ -1739,6 +1808,7 @@ impl RedbStore {
         let mut frames = Vec::new();
         let mut commits = 0u64;
         let mut last_checksum = None;
+        let mut layout_at_cutoff = None;
         for entry in table
             .iter()
             .map_err(|error| storage_error("scan backup journal for export", error))?
@@ -1746,10 +1816,13 @@ impl RedbStore {
             let (key, value) =
                 entry.map_err(|error| storage_error("read backup journal for export", error))?;
             let (sequence, _) = decode_journal_key(key.value())?;
-            if sequence > last {
-                break;
-            }
             let (kind, payload) = decode_journal_record(value.value())?;
+            if sequence > last {
+                if kind == 26 && layout_at_cutoff.is_none() {
+                    layout_at_cutoff = Some(decode_header_transition(payload)?.0);
+                }
+                continue;
+            }
             if kind == 25 {
                 commits = commits.saturating_add(1);
                 last_checksum = Some(
@@ -1766,16 +1839,22 @@ impl RedbStore {
                 "export range ends inside a journal commit",
             ));
         }
+        let layout = layout_at_cutoff.unwrap_or(self.committed.layout);
         Ok(Some(JournalSource {
+            record_codec: if layout.has_header() { 2 } else { 1 },
             header: ArchiveHeader {
                 chain_id: state.chain_id.clone(),
                 database_digest: String::new(),
                 first_sequence: first,
                 last_sequence: last,
-                catalog_codec: u32::from(self.committed.layout.catalog),
-                value_codec: u32::from(self.committed.layout.value),
-                receipt_codec: u32::from(self.committed.layout.receipt),
-                required_capabilities: self.committed.layout.archive_required_capabilities(),
+                catalog_codec: u32::from(layout.catalog),
+                value_codec: u32::from(layout.value),
+                receipt_codec: u32::from(layout.receipt),
+                required_capabilities: layout.archive_required_capabilities(),
+                storage_header: layout
+                    .has_header()
+                    .then(|| StorageHeader::encode_transport(layout))
+                    .transpose()?,
             },
             frames,
             last_commit_checksum: last_checksum.expect("complete journal commit has checksum"),
@@ -3102,6 +3181,7 @@ impl RedbStore {
                 | PARTIAL_JOURNAL_STORAGE_FORMAT_VERSION
                 | REFERENCE_STORAGE_FORMAT_VERSION
                 | REFERENCE_JOURNAL_STORAGE_FORMAT_VERSION
+                | CAPABILITY_STORAGE_FORMAT_VERSION
         ) {
             return Err(CommitFailure::Definite(Error::new(
                 "E_STORAGE_UPGRADE",
@@ -3217,12 +3297,26 @@ impl RedbStore {
                 changed: true,
             });
         }
-        self.committed.layout = StorageLayout::for_format(target).ok_or_else(|| {
-            CommitFailure::Definite(Error::new(
-                "E_STORAGE_UPGRADE",
-                format!("unsupported storage upgrade target {target}"),
-            ))
-        })?;
+        self.committed.layout = if target == CAPABILITY_STORAGE_FORMAT_VERSION {
+            if self.committed.journal.as_ref().is_some_and(|state| {
+                state.commit_count != 0 || state.exported_sequence != self.committed.meta.sequence
+            }) {
+                return Err(CommitFailure::Definite(Error::new(
+                    "E_BACKUP_CHAIN",
+                    "capability upgrade requires export through the committed head",
+                )));
+            }
+            previous
+                .to_header_layout()
+                .map_err(CommitFailure::Definite)?
+        } else {
+            StorageLayout::for_format(target).ok_or_else(|| {
+                CommitFailure::Definite(Error::new(
+                    "E_STORAGE_UPGRADE",
+                    format!("unsupported storage upgrade target {target}"),
+                ))
+            })?
+        };
         if let Err(error) = self.commit(database, database, receipts) {
             self.committed.layout = previous;
             return Err(error);
@@ -3230,6 +3324,43 @@ impl RedbStore {
         Ok(UpgradeResult {
             previous_format: previous.format,
             format: target,
+            changed: true,
+        })
+    }
+
+    pub(crate) fn install_capabilities(
+        &mut self,
+        database: &Database,
+        receipts: &ReceiptMap,
+        capabilities: &[String],
+    ) -> std::result::Result<UpgradeResult, CommitFailure> {
+        let previous = self.committed.layout;
+        let next = previous
+            .install_capabilities(capabilities)
+            .map_err(CommitFailure::Definite)?;
+        if next == previous {
+            return Ok(UpgradeResult {
+                previous_format: previous.format,
+                format: previous.format,
+                changed: false,
+            });
+        }
+        if self.committed.journal.as_ref().is_some_and(|state| {
+            state.commit_count != 0 || state.exported_sequence != self.committed.meta.sequence
+        }) {
+            return Err(CommitFailure::Definite(Error::new(
+                "E_BACKUP_CHAIN",
+                "capability installation requires export through the committed head",
+            )));
+        }
+        self.committed.layout = next;
+        if let Err(error) = self.commit(database, database, receipts) {
+            self.committed.layout = previous;
+            return Err(error);
+        }
+        Ok(UpgradeResult {
+            previous_format: previous.format,
+            format: next.format,
             changed: true,
         })
     }
@@ -3243,7 +3374,7 @@ impl RedbStore {
         let total_started = Instant::now();
         let prepare_started = Instant::now();
         validate_receipts(receipts, database.sequence).map_err(CommitFailure::Definite)?;
-        let layout = self.committed.layout;
+        let layout = self.restore_layout.unwrap_or(self.committed.layout);
         let reload_started = Instant::now();
         let (_, _, previous, _) = self.load().map_err(CommitFailure::Definite)?;
         let reload_previous_micros = elapsed_micros(reload_started);
@@ -3260,6 +3391,7 @@ impl RedbStore {
         let transaction = self.commit_prepared(&prepared)?;
         next.journal = transaction.journal.clone();
         self.committed = DurableHead::from_prepared(&next);
+        self.restore_layout = None;
         Ok(DurableCommitProfile {
             mode: DurableCommitMode::FullRebuild,
             total_micros: elapsed_micros(total_started),
@@ -3462,9 +3594,17 @@ impl RedbStore {
         }
         let apply_micros = elapsed_micros(apply_started);
         let sync_started = Instant::now();
+        #[cfg(test)]
+        if self.header_commit_exit == Some(false) {
+            std::process::exit(73);
+        }
         transaction
             .commit()
             .map_err(|error| CommitFailure::uncertain("commit redb transaction", error))?;
+        #[cfg(test)]
+        if self.header_commit_exit == Some(true) {
+            std::process::exit(74);
+        }
         Ok(TransactionProfile {
             apply_micros,
             sync_micros: elapsed_micros(sync_started),
@@ -3981,6 +4121,7 @@ impl RedbStore {
         profile.database_construct_micros = elapsed_micros(construct_started);
         let validation_started = Instant::now();
         validate_receipts(&receipts, metadata.sequence)?;
+        layout.validate_required_state(&metadata, &receipts)?;
         profile.validation_micros = elapsed_micros(validation_started);
         profile.total_micros = elapsed_micros(total_started);
         let committed = DurableHead {
@@ -4164,6 +4305,7 @@ impl RedbStore {
             ensure_legacy_receipts(&receipts)?;
         }
         validate_receipts(&receipts, database.sequence)?;
+        layout.validate_required_state(&database, &receipts)?;
         if layout.format == LEGACY_STORAGE_FORMAT_VERSION && !receipts.is_empty() {
             return Err(Error::new(
                 "E_STORAGE",
@@ -4294,6 +4436,7 @@ impl PreparedState {
 
 #[derive(Debug, PartialEq, Eq)]
 struct PreparedDelta {
+    previous_layout: StorageLayout,
     layout: StorageLayout,
     generation: GenerationState,
     expected_meta: Option<(DurableMeta, StorageLayout, GenerationState)>,
@@ -4474,6 +4617,7 @@ impl PreparedDelta {
         }
 
         Ok(Self {
+            previous_layout: layout,
             layout,
             generation: committed.generation,
             expected_meta: Some((
@@ -4495,9 +4639,13 @@ impl PreparedDelta {
 
     fn between(previous: &PreparedState, next: &PreparedState) -> Self {
         Self {
+            previous_layout: previous.layout,
             layout: next.layout,
             generation: next.generation,
-            expected_meta: None,
+            expected_meta: next
+                .layout
+                .has_header()
+                .then(|| (previous.meta.clone(), previous.layout, previous.generation)),
             meta: next.meta.clone(),
             catalog: BytesDelta::between(&previous.catalog, &next.catalog),
             rows: BytesDelta::between(&previous.rows, &next.rows),
@@ -4559,7 +4707,17 @@ impl PreparedDelta {
         ] {
             begin.extend_from_slice(&usize_u64(count).to_be_bytes());
         }
+        if self.layout.has_header() {
+            push_journal_bytes(
+                &mut begin,
+                &StorageHeader::encode_layout(self.previous_layout)?,
+            )?;
+        }
         push_journal_record(&mut records, sequence, &mut ordinal, 16, begin)?;
+        if self.layout.has_header() && self.previous_layout != self.layout {
+            let payload = encode_header_transition(self.previous_layout, self.layout)?;
+            push_journal_record(&mut records, sequence, &mut ordinal, 26, payload)?;
+        }
 
         append_bytes_journal_records(&mut records, sequence, &mut ordinal, 17, 18, &self.catalog)?;
         append_bytes_journal_records(&mut records, sequence, &mut ordinal, 19, 20, &self.rows)?;
@@ -5043,7 +5201,7 @@ fn write_meta(
 ) -> Result<()> {
     if let Some((expected_meta, expected_layout, expected_generation)) = expected {
         for (key, expected_value) in
-            meta_entries(expected_meta, *expected_layout, *expected_generation)
+            meta_entries(expected_meta, *expected_layout, *expected_generation)?
         {
             let actual = table
                 .get(key)
@@ -5056,7 +5214,14 @@ fn write_meta(
             }
         }
     }
-    for (key, value) in meta_entries(meta, layout, generation) {
+    if layout.has_header() {
+        for key in LEGACY_COMPONENT_KEYS {
+            table
+                .remove(key)
+                .map_err(|error| storage_error("remove legacy component metadata", error))?;
+        }
+    }
+    for (key, value) in meta_entries(meta, layout, generation)? {
         table
             .insert(key, value.as_slice())
             .map_err(|error| storage_error("write meta entry", error))?;
@@ -5068,7 +5233,7 @@ fn meta_entries(
     meta: &DurableMeta,
     layout: StorageLayout,
     generation: GenerationState,
-) -> Vec<(&'static str, Vec<u8>)> {
+) -> Result<Vec<(&'static str, Vec<u8>)>> {
     let mut entries = vec![
         (FORMAT_KEY, layout.format.to_be_bytes().to_vec()),
         (CATALOG_CODEC_KEY, layout.catalog.to_be_bytes().to_vec()),
@@ -5111,13 +5276,91 @@ fn meta_entries(
     if layout.supports_journal() {
         entries.push((JOURNAL_CODEC_KEY, layout.journal.to_be_bytes().to_vec()));
     }
-    entries
+    if layout.has_header() {
+        entries.retain(|(key, _)| !LEGACY_COMPONENT_KEYS.contains(key));
+        entries.push((
+            STORAGE_HEADER_KEY,
+            header::StorageHeader::encode_layout(layout)?,
+        ));
+    }
+    Ok(entries)
 }
 
 fn read_meta(
     table: &impl ReadableTable<&'static str, &'static [u8]>,
 ) -> Result<(DurableMeta, StorageLayout, GenerationState)> {
     let format_version = u32::from_be_bytes(read_fixed::<4>(table, FORMAT_KEY)?);
+    let layout = read_storage_layout(table, format_version)?;
+    let sequence = u64::from_be_bytes(read_fixed::<8>(table, SEQUENCE_KEY)?);
+    let schema_revision = u64::from_be_bytes(read_fixed::<8>(table, SCHEMA_REVISION_KEY)?);
+    let next_catalog_id = u64::from_be_bytes(read_fixed::<8>(table, NEXT_CATALOG_ID_KEY)?);
+    let hash = read_bytes(table, SCHEMA_HASH_KEY)?;
+    let schema_hash = String::from_utf8(hash)
+        .map_err(|error| Error::new("E_STORAGE", format!("schema hash is not UTF-8: {error}")))?;
+    let identity = if layout.supports_cursor_identity() {
+        crate::pagination::CursorIdentity::from_bytes(
+            read_fixed::<16>(table, CURSOR_INSTANCE_ID_KEY)?,
+            read_fixed::<32>(table, CURSOR_SECRET_KEY)?,
+        )
+    } else {
+        crate::pagination::CursorIdentity::generate()?
+    };
+    let generation = if layout.supports_generation_envelope() {
+        let active = GenerationRef::from_encoded(u64::from_be_bytes(read_fixed::<8>(
+            table,
+            ACTIVE_GENERATION_KEY,
+        )?));
+        let next_id = u64::from_be_bytes(read_fixed::<8>(table, NEXT_GENERATION_ID_KEY)?);
+        if next_id == 0 || matches!(active, GenerationRef::Generated(id) if id >= next_id) {
+            return Err(Error::new(
+                "E_STORAGE",
+                "active/next generation metadata is contradictory",
+            ));
+        }
+        GenerationState { active, next_id }
+    } else {
+        GenerationState::legacy()
+    };
+    Ok((
+        DurableMeta {
+            sequence,
+            schema_revision,
+            next_catalog_id,
+            schema_hash,
+            cursor_instance_id: *identity.instance_id(),
+            cursor_secret: *identity.secret(),
+        },
+        layout,
+        generation,
+    ))
+}
+
+fn read_storage_layout(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    format_version: u32,
+) -> Result<StorageLayout> {
+    if format_version == CAPABILITY_STORAGE_FORMAT_VERSION {
+        let bytes = table
+            .get(STORAGE_HEADER_KEY)
+            .map_err(|error| storage_error("read storage header", error))?
+            .ok_or_else(|| {
+                Error::new("E_STORAGE", "missing storage_header for capability storage")
+            })?;
+        let layout = header::StorageHeader::decode(bytes.value(), format_version)?.layout()?;
+        for key in LEGACY_COMPONENT_KEYS {
+            if table
+                .get(key)
+                .map_err(|error| storage_error("inspect legacy component metadata", error))?
+                .is_some()
+            {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "storage_header has contradictory legacy component metadata",
+                ));
+            }
+        }
+        return Ok(layout);
+    }
     // A header cannot be a silently ignored extension of a legacy format:
     // earlier readers would ignore its mandatory semantics. Validate directly
     // from the redb guard, before allocating or reading any business tables.
@@ -5212,48 +5455,7 @@ fn read_meta(
         journal,
         ..expected
     };
-    let sequence = u64::from_be_bytes(read_fixed::<8>(table, SEQUENCE_KEY)?);
-    let schema_revision = u64::from_be_bytes(read_fixed::<8>(table, SCHEMA_REVISION_KEY)?);
-    let next_catalog_id = u64::from_be_bytes(read_fixed::<8>(table, NEXT_CATALOG_ID_KEY)?);
-    let hash = read_bytes(table, SCHEMA_HASH_KEY)?;
-    let schema_hash = String::from_utf8(hash)
-        .map_err(|error| Error::new("E_STORAGE", format!("schema hash is not UTF-8: {error}")))?;
-    let identity = if expected.supports_cursor_identity() {
-        crate::pagination::CursorIdentity::from_bytes(
-            read_fixed::<16>(table, CURSOR_INSTANCE_ID_KEY)?,
-            read_fixed::<32>(table, CURSOR_SECRET_KEY)?,
-        )
-    } else {
-        crate::pagination::CursorIdentity::generate()?
-    };
-    let generation = if expected.supports_generation_envelope() {
-        let active = GenerationRef::from_encoded(u64::from_be_bytes(read_fixed::<8>(
-            table,
-            ACTIVE_GENERATION_KEY,
-        )?));
-        let next_id = u64::from_be_bytes(read_fixed::<8>(table, NEXT_GENERATION_ID_KEY)?);
-        if next_id == 0 || matches!(active, GenerationRef::Generated(id) if id >= next_id) {
-            return Err(Error::new(
-                "E_STORAGE",
-                "active/next generation metadata is contradictory",
-            ));
-        }
-        GenerationState { active, next_id }
-    } else {
-        GenerationState::legacy()
-    };
-    Ok((
-        DurableMeta {
-            sequence,
-            schema_revision,
-            next_catalog_id,
-            schema_hash,
-            cursor_instance_id: *identity.instance_id(),
-            cursor_secret: *identity.secret(),
-        },
-        layout,
-        generation,
-    ))
+    Ok(layout)
 }
 
 fn read_optional_version(
@@ -5471,14 +5673,16 @@ fn read_journal_state_and_validate(
         return Ok(None);
     };
     validate_journal_state(&state, Some(meta))?;
-    validate_journal_records(&journal, &state)?;
+    validate_journal_records(&journal, &state, layout)?;
     Ok(Some(state))
 }
 
 fn validate_journal_records(
     table: &impl ReadableTable<&'static [u8], &'static [u8]>,
     state: &JournalState,
+    layout: StorageLayout,
 ) -> Result<()> {
+    let mut storage_head = None;
     let mut expected_sequence = state.first_retained_sequence;
     let mut expected_ordinal = 0u64;
     let mut expected_parent = state.exported_checksum.clone();
@@ -5515,7 +5719,22 @@ fn validate_journal_records(
                     "backup journal commit has no begin record",
                 ));
             }
-            let (stored_sequence, parent, counts) = decode_journal_begin(payload)?;
+            let (stored_sequence, parent, counts, commit_layout) = decode_journal_begin(payload)?;
+            if layout.has_header() != commit_layout.is_some() {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "journal commit storage header does not match its record codec",
+                ));
+            }
+            if let Some(commit_layout) = commit_layout {
+                if storage_head.is_some_and(|previous| previous != commit_layout) {
+                    return Err(Error::new(
+                        "E_STORAGE",
+                        "journal commit storage header is not contiguous",
+                    ));
+                }
+                storage_head = Some(commit_layout);
+            }
             if stored_sequence != sequence || parent != expected_parent {
                 return Err(Error::new(
                     "E_STORAGE",
@@ -5532,6 +5751,26 @@ fn validate_journal_records(
             previous_change_key.clear();
             expected_counts = counts;
             actual_counts = [0; 4];
+        } else if kind == 26 {
+            if !layout.has_header() || digest.is_none() || ordinal != 1 {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "storage header transition is misplaced",
+                ));
+            }
+            let (before, after) = decode_header_transition(payload)?;
+            if storage_head.is_some_and(|previous| previous != before) {
+                return Err(Error::new(
+                    "E_STORAGE",
+                    "storage header transition does not extend its previous header",
+                ));
+            }
+            storage_head = Some(after);
+            let hash = digest
+                .as_mut()
+                .expect("transition checked the active digest");
+            hash.update(journal_key);
+            hash.update(value);
         } else if kind == 25 {
             if !is_canonical_sha256(std::str::from_utf8(payload).unwrap_or("")) {
                 return Err(Error::new(
@@ -5598,6 +5837,12 @@ fn validate_journal_records(
             .checked_add(1)
             .ok_or_else(|| Error::new("E_STORAGE", "backup journal ordinal overflow"))?;
     }
+    if storage_head.is_some_and(|head| head != layout) {
+        return Err(Error::new(
+            "E_STORAGE",
+            "retained journal header contradicts durable storage_header",
+        ));
+    }
     if digest.is_some()
         || commits != state.commit_count
         || bytes != state.expanded_bytes
@@ -5611,7 +5856,7 @@ fn validate_journal_records(
     Ok(())
 }
 
-fn decode_journal_begin(payload: &[u8]) -> Result<(u64, String, [u64; 4])> {
+fn decode_journal_begin(payload: &[u8]) -> Result<(u64, String, [u64; 4], Option<StorageLayout>)> {
     if payload.len() < 8 {
         return Err(Error::new(
             "E_STORAGE",
@@ -5631,7 +5876,7 @@ fn decode_journal_begin(payload: &[u8]) -> Result<(u64, String, [u64; 4])> {
     }
     remaining = &remaining[16..];
     let (schema_hash, tail) = take_journal_bytes(remaining)?;
-    if tail.len() != 32 {
+    if tail.len() < 32 {
         return Err(Error::new(
             "E_STORAGE",
             "backup journal begin counts are invalid",
@@ -5650,7 +5895,30 @@ fn decode_journal_begin(payload: &[u8]) -> Result<(u64, String, [u64; 4])> {
         let start = index * 8;
         *count = u64::from_be_bytes(tail[start..start + 8].try_into().expect("fixed slice"));
     }
-    Ok((sequence, parent, counts))
+    let storage_layout = if tail.len() == 32 {
+        None
+    } else {
+        let (header, trailing) = take_journal_bytes(&tail[32..])?;
+        if !trailing.is_empty() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "journal commit storage header has trailing bytes",
+            ));
+        }
+        let layout = StorageHeader::decode_any(header)?.layout()?;
+        if layout.journal != JOURNAL_CODEC_VERSION {
+            return Err(Error::new(
+                "E_STORAGE",
+                "journal commit requires an installed journal codec",
+            ));
+        }
+        Some(layout)
+    };
+    Ok((sequence, parent, counts, storage_layout))
+}
+
+pub(crate) fn journal_begin_storage_layout(payload: &[u8]) -> Result<Option<StorageLayout>> {
+    decode_journal_begin(payload).map(|(_, _, _, layout)| layout)
 }
 
 fn validate_journal_change_payload(kind: u8, payload: &[u8]) -> Result<&[u8]> {
@@ -5668,6 +5936,41 @@ fn validate_journal_change_payload(kind: u8, payload: &[u8]) -> Result<&[u8]> {
         ));
     }
     Ok(key)
+}
+
+pub(crate) fn encode_header_transition(
+    before: StorageLayout,
+    after: StorageLayout,
+) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    push_journal_bytes(&mut payload, &StorageHeader::encode_layout(before)?)?;
+    push_journal_bytes(&mut payload, &StorageHeader::encode_layout(after)?)?;
+    decode_header_transition(&payload)?;
+    Ok(payload)
+}
+
+pub(crate) fn decode_header_transition(payload: &[u8]) -> Result<(StorageLayout, StorageLayout)> {
+    let (before, tail) = take_journal_bytes(payload)?;
+    let (after, tail) = take_journal_bytes(tail)?;
+    if !tail.is_empty() {
+        return Err(Error::new(
+            "E_STORAGE",
+            "storage header transition has trailing bytes",
+        ));
+    }
+    let before = StorageHeader::decode_any(before)?.layout()?;
+    let after = StorageHeader::decode_any(after)?.layout()?;
+    if !after.has_header()
+        || before == after
+        || before.capabilities & !after.capabilities != 0
+        || before.journal > after.journal
+    {
+        return Err(Error::new(
+            "E_STORAGE",
+            "storage header transition removes required semantics",
+        ));
+    }
+    Ok((before, after))
 }
 
 fn take_journal_bytes(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
@@ -6909,6 +7212,311 @@ fn sync_parent_directory(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_header_rejects_unknown_metadata_before_business_decoding() {
+        let root = std::env::temp_dir().join(format!(
+            "unionid-header-rejection-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for case in ["capability", "codec", "version", "missing"] {
+            let path = root.join(format!("{case}.redb"));
+            let mut engine = crate::Engine::open_redb(&path).unwrap();
+            assert!(
+                engine
+                    .execute(
+                        "struct Item {id: int}\ntable items: Item {key id}\ninsert items {id: 1}"
+                    )
+                    .ok
+            );
+            engine.upgrade_storage(14).unwrap();
+            drop(engine);
+            let raw = RedbDatabase::create(&path).unwrap();
+            let transaction = raw.begin_write().unwrap();
+            let invalid_header;
+            {
+                let mut meta = transaction.open_table(META).unwrap();
+                let original = meta
+                    .get(STORAGE_HEADER_KEY)
+                    .unwrap()
+                    .unwrap()
+                    .value()
+                    .to_vec();
+                invalid_header = match case {
+                    "capability" => Some(
+                        [
+                            &original[..6],
+                            String::from_utf8(original[6..].to_vec())
+                                .unwrap()
+                                .replace("partial_unique_index", "future_feature")
+                                .as_bytes(),
+                        ]
+                        .concat(),
+                    ),
+                    "codec" => Some(
+                        [
+                            &original[..6],
+                            String::from_utf8(original[6..].to_vec())
+                                .unwrap()
+                                .replace("\"catalog\":6", "\"catalog\":99")
+                                .as_bytes(),
+                        ]
+                        .concat(),
+                    ),
+                    "version" => {
+                        let mut bytes = original;
+                        bytes[5] = 99;
+                        Some(bytes)
+                    }
+                    "missing" => None,
+                    _ => unreachable!(),
+                };
+                if let Some(bytes) = &invalid_header {
+                    meta.insert(STORAGE_HEADER_KEY, bytes.as_slice()).unwrap();
+                } else {
+                    meta.remove(STORAGE_HEADER_KEY).unwrap();
+                }
+            }
+            let catalog_key;
+            {
+                let mut catalog = transaction.open_table(GENERATION_CATALOG).unwrap();
+                catalog_key = catalog
+                    .iter()
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .0
+                    .value()
+                    .to_vec();
+                catalog
+                    .insert(
+                        catalog_key.as_slice(),
+                        b"invalid business catalog".as_slice(),
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+            drop(raw);
+            for read_only in [true, false] {
+                let opened = if read_only {
+                    crate::Engine::open_redb_read_only(&path)
+                } else {
+                    crate::Engine::open_redb(&path)
+                };
+                let error = match opened {
+                    Ok(_) => {
+                        panic!("case={case}, read_only={read_only}: unknown metadata accepted")
+                    }
+                    Err(error) => error,
+                };
+                assert_eq!(error.code, "E_STORAGE");
+                let expected = match case {
+                    "capability" => "unsupported required capability",
+                    "codec" => "unsupported capability/codec profile",
+                    "version" => "unsupported header codec",
+                    "missing" => "missing storage_header",
+                    _ => unreachable!(),
+                };
+                assert!(
+                    error.message.contains(expected),
+                    "case={case}, read_only={read_only}: {error}"
+                );
+            }
+            let raw = RedbDatabase::create(&path).unwrap();
+            let transaction = raw.begin_read().unwrap();
+            let meta = transaction.open_table(META).unwrap();
+            assert_eq!(
+                meta.get(STORAGE_HEADER_KEY)
+                    .unwrap()
+                    .map(|value| value.value().to_vec()),
+                invalid_header
+            );
+            assert_eq!(
+                transaction
+                    .open_table(GENERATION_CATALOG)
+                    .unwrap()
+                    .get(catalog_key.as_slice())
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                b"invalid business catalog"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "invoked by native_header_commit_exit_preserves_complete_states"]
+    fn native_header_commit_exit_child() {
+        let path = std::env::var_os("UNIONID_HEADER_EXIT_DB").unwrap();
+        let install = std::env::var("UNIONID_HEADER_EXIT_INSTALL").unwrap() == "true";
+        let after = std::env::var("UNIONID_HEADER_EXIT_AFTER").unwrap() == "true";
+        let engine = crate::Engine::open_redb(&path).unwrap();
+        let mut candidate = engine.database_snapshot().unwrap();
+        candidate.sequence += 1;
+        drop(engine);
+        let (mut store, _, receipts, source, _) = RedbStore::open(&path).unwrap();
+        drop(source);
+        store.header_commit_exit = Some(after);
+        if install {
+            store
+                .install_capabilities(&candidate, &receipts, &["typed_references".into()])
+                .unwrap();
+        } else {
+            store.upgrade(&candidate, &receipts, 14).unwrap();
+        }
+        panic!("commit boundary exit hook did not execute");
+    }
+
+    #[test]
+    fn native_header_commit_exit_preserves_complete_states() {
+        let root = std::env::temp_dir().join(format!(
+            "unionid-header-commit-exit-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        // Four legacy adapters and one native capability installation share
+        // the same commit-boundary proof, without a feature Cartesian product.
+        for format in [10, 11, 12, 13, 14] {
+            for after in [false, true] {
+                let path = root.join(format!("{format}-{after}.redb"));
+                let archive = root.join(format!("archive-{format}-{after}"));
+                let mut engine = crate::Engine::open_redb(&path).unwrap();
+                let reply = engine.execute("struct Item {id: int, label: text}\ntable items: Item {key id}\ncreate unique index items (label)\ninsert many items [{id: 1, label: \"one\"}, {id: 2, label: \"two\"}]\ndelete items | filter id == 1\ninsert items {id: 3, label: \"three\"}\nmigration add_note {add field Item.note text = \"kept\"}");
+                assert!(reply.ok, "{:?}", reply.error);
+                let request = crate::protocol::Request::query(
+                    "header-upgrade-attempt",
+                    "update items | filter id == 2 | set note = \"receipt\" | returning {id, note}",
+                )
+                .with_version(crate::protocol::PRODUCTION_VERSION)
+                .unwrap()
+                .with_idempotency_key("header-upgrade-effect")
+                .unwrap();
+                let response = crate::server::execute_protocol_request(&mut engine, request);
+                assert!(response.ok, "{:?}", response.error);
+                if matches!(format, 12 | 13) {
+                    engine.upgrade_storage(12).unwrap();
+                } else if format == 14 {
+                    engine.upgrade_storage(14).unwrap();
+                }
+                drop(engine);
+                if matches!(format, 11 | 13 | 14) {
+                    crate::backup::incremental::init(&path, &archive, Default::default()).unwrap();
+                }
+                let engine = crate::Engine::open_redb(&path).unwrap();
+                let before = engine.database_snapshot().unwrap();
+                drop(engine);
+                let (store, _, receipts, source, _) = RedbStore::open(&path).unwrap();
+                let before_meta = store.committed.meta.clone();
+                let before_layout = store.committed.layout;
+                let before_generation = store.committed.generation;
+                assert_eq!(receipts.len(), 1);
+                drop(source);
+                drop(store);
+                let child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "--nocapture",
+                        "redb_storage::tests::native_header_commit_exit_child",
+                    ])
+                    .env("UNIONID_HEADER_EXIT_DB", &path)
+                    .env("UNIONID_HEADER_EXIT_INSTALL", (format == 14).to_string())
+                    .env("UNIONID_HEADER_EXIT_AFTER", after.to_string())
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&child.stdout);
+                let stderr = String::from_utf8_lossy(&child.stderr);
+                assert!(
+                    child.status.code() == Some(if after { 74 } else { 73 })
+                        && stdout.contains("running 1 test"),
+                    "format={format}, after={after}, status={:?}, stdout={stdout}, stderr={stderr}",
+                    child.status
+                );
+                let mut engine = crate::Engine::open_redb(&path).unwrap();
+                engine.check_integrity().unwrap();
+                let actual = engine.database_snapshot().unwrap();
+                let mut expected = before.clone();
+                if after {
+                    expected.sequence += 1;
+                }
+                assert_eq!(
+                    serde_json::to_value(&actual).unwrap(),
+                    serde_json::to_value(&expected).unwrap()
+                );
+                drop(engine);
+                let (store, _, restored_receipts, source, _) = RedbStore::open(&path).unwrap();
+                let mut expected_meta = before_meta;
+                if after {
+                    expected_meta.sequence += 1;
+                }
+                assert_eq!(store.committed.meta, expected_meta);
+                assert_eq!(store.committed.generation, before_generation);
+                assert_eq!(
+                    serde_json::to_value(&restored_receipts).unwrap(),
+                    serde_json::to_value(&receipts).unwrap()
+                );
+                let expected_layout = if !after {
+                    before_layout
+                } else if format == 14 {
+                    before_layout
+                        .install_capabilities(&["typed_references".into()])
+                        .unwrap()
+                } else {
+                    before_layout.to_header_layout().unwrap()
+                };
+                assert_eq!(store.committed.layout, expected_layout);
+                drop(source);
+                drop(store);
+                if matches!(format, 11 | 13 | 14) {
+                    crate::backup::incremental::export(&path, &archive, Default::default())
+                        .unwrap();
+                    crate::backup::incremental::verify(&archive, Default::default()).unwrap();
+                    let target = root.join(format!("restored-{format}-{after}.redb"));
+                    crate::backup::incremental::restore(
+                        &archive,
+                        &target,
+                        expected.sequence,
+                        Default::default(),
+                    )
+                    .unwrap();
+                    let mut recovered = crate::Engine::open_redb(&target).unwrap();
+                    recovered.check_integrity().unwrap();
+                    assert_eq!(
+                        serde_json::to_value(recovered.database_snapshot().unwrap()).unwrap(),
+                        serde_json::to_value(expected).unwrap()
+                    );
+                    if after {
+                        let target = root.join(format!("before-{format}.redb"));
+                        crate::backup::incremental::restore(
+                            &archive,
+                            &target,
+                            before.sequence,
+                            Default::default(),
+                        )
+                        .unwrap();
+                        let mut recovered = crate::Engine::open_redb(&target).unwrap();
+                        recovered.check_integrity().unwrap();
+                        assert_eq!(
+                            serde_json::to_value(recovered.database_snapshot().unwrap()).unwrap(),
+                            serde_json::to_value(before).unwrap()
+                        );
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn cached_test_row(id: RowId) -> Arc<crate::model::Row> {
         Arc::new(crate::model::Row {
             id,
@@ -7227,6 +7835,61 @@ mod tests {
         full.expected_meta = incremental.expected_meta.clone();
 
         assert_eq!(incremental, full);
+    }
+
+    #[test]
+    fn retained_native_journal_keeps_capability_requirements_after_schema_removal() {
+        let root = std::env::temp_dir().join(format!(
+            "unionid-native-journal-capabilities-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("source.redb");
+        let mut memory = crate::Engine::memory();
+        assert!(memory.execute("struct Item {id: int, tags: Map<text, int>}\ntable items: Item {key id}\ninsert items {id: 1, tags: map {\"k\": 1}}").ok);
+        let header = StorageHeader::encode_transport(StorageLayout::from_header_profile(
+            true, false, false, false,
+        ))
+        .unwrap();
+        drop(
+            crate::Engine::restore_redb_with_header(
+                path.clone(),
+                memory.database_snapshot().unwrap(),
+                ReceiptMap::new(),
+                Some(header),
+            )
+            .unwrap(),
+        );
+        crate::backup::incremental::init(&path, root.join("archive"), Default::default()).unwrap();
+        let mut engine = crate::Engine::open_redb(&path).unwrap();
+        assert!(
+            engine
+                .execute("update items | set tags = map {\"k\": 2}")
+                .ok
+        );
+        let response = engine.execute("migration remove_tags {drop field Item.tags}");
+        assert!(response.ok, "{:?}", response.error);
+        assert!(!engine.database_snapshot().unwrap().requires_map_storage());
+        engine.check_integrity().unwrap();
+        drop(engine);
+        let (store, metadata, _, _, _) = RedbStore::open(&path).unwrap();
+        assert!(!metadata.requires_map_storage());
+        let transaction = store.database.begin_read().unwrap();
+        let journal = transaction.open_table(BACKUP_JOURNAL).unwrap();
+        let state = store.committed.journal.as_ref().unwrap();
+        validate_journal_records(&journal, state, store.committed.layout).unwrap();
+        let cleared = StorageLayout::from_header_profile(false, false, false, true);
+        let error = validate_journal_records(&journal, state, cleared).unwrap_err();
+        assert_eq!(error.code, "E_STORAGE");
+        assert!(error.message.contains("retained journal header"), "{error}");
+        drop(journal);
+        drop(transaction);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -47,6 +47,9 @@ pub struct Introspection {
     pub storage: StorageMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_versions: Option<StorageVersions>,
+    /// Persisted requirements of native capability storage; legacy modes omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_storage_capabilities: Option<Vec<String>>,
     #[serde(default)]
     pub read_only: bool,
     pub migration_count: usize,
