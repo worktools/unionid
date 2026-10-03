@@ -30,6 +30,8 @@ use crate::error::{Error, Result};
 
 pub const ARCHIVE_CODEC_VERSION: u16 = 1;
 pub const MANIFEST_FORMAT_VERSION: u16 = 1;
+/// Explicit per-artifact record codecs; ordinary new chains still use version 1.
+pub const ARTIFACT_MANIFEST_FORMAT_VERSION: u16 = 2;
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
 const BASELINE_MAGIC: [u8; 4] = *b"UIB1";
@@ -80,6 +82,9 @@ pub enum ManifestState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestArtifact {
+    /// Absent in manifest v1; mandatory and nonzero in v2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_codec: Option<u16>,
     pub path: String,
     pub first_sequence: u64,
     pub last_sequence: u64,
@@ -96,6 +101,7 @@ pub struct ManifestArtifact {
 pub struct ArchiveManifest {
     pub format_version: u16,
     pub archive_codec: u16,
+    /// Chain-wide codec in v1; zero in v2, where every artifact declares it.
     pub record_codec: u16,
     pub chain_id: String,
     pub database_digest: String,
@@ -115,6 +121,21 @@ pub struct ArchiveManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkpoint_retired_artifacts: Vec<ManifestArtifact>,
     pub checksum: String,
+}
+
+impl ArchiveManifest {
+    /// Resolve the record codec without guessing from another artifact.
+    pub fn record_codec_for(&self, artifact: &ManifestArtifact) -> Result<u16> {
+        match (
+            self.format_version,
+            self.record_codec,
+            artifact.record_codec,
+        ) {
+            (MANIFEST_FORMAT_VERSION, codec, None) if codec != 0 => Ok(codec),
+            (ARTIFACT_MANIFEST_FORMAT_VERSION, 0, Some(codec)) if codec != 0 => Ok(codec),
+            _ => Err(archive_error("invalid manifest record codec declaration")),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -650,13 +671,20 @@ fn manifest_payload_bytes(manifest: &ArchiveManifest) -> Result<Vec<u8>> {
 }
 
 fn validate_manifest(manifest: &ArchiveManifest, require_checksum: bool) -> Result<()> {
-    if manifest.format_version != MANIFEST_FORMAT_VERSION
-        || manifest.archive_codec != ARCHIVE_CODEC_VERSION
-        || manifest.record_codec == 0
+    if !matches!(
+        manifest.format_version,
+        MANIFEST_FORMAT_VERSION | ARTIFACT_MANIFEST_FORMAT_VERSION
+    ) || manifest.archive_codec != ARCHIVE_CODEC_VERSION
     {
         return Err(archive_error(
             "unsupported archive manifest version or codec",
         ));
+    }
+    for artifact in std::iter::once(&manifest.baseline)
+        .chain(&manifest.segments)
+        .chain(&manifest.checkpoint_retired_artifacts)
+    {
+        manifest.record_codec_for(artifact)?;
     }
     if manifest.chain_id.is_empty() || manifest.database_digest.is_empty() {
         return Err(archive_error(
@@ -1074,6 +1102,7 @@ mod tests {
             database_digest: digest('d'),
             state: ManifestState::Active,
             baseline: ManifestArtifact {
+                record_codec: None,
                 path: format!("baselines/b-7-{}.uib", digest('a')),
                 first_sequence: 7,
                 last_sequence: 7,
@@ -1085,6 +1114,7 @@ mod tests {
                 expanded_bytes: 200,
             },
             segments: vec![ManifestArtifact {
+                record_codec: None,
                 path: format!("segments/s-8-9-{}.uis", digest('c')),
                 first_sequence: 8,
                 last_sequence: 9,
@@ -1346,6 +1376,60 @@ mod tests {
                 .frames,
             frames
         );
+    }
+
+    #[test]
+    fn artifact_manifest_codecs_are_explicit_and_authenticated() {
+        let legacy = manifest();
+        let mut explicit = legacy.clone();
+        explicit.format_version = ARTIFACT_MANIFEST_FORMAT_VERSION;
+        explicit.record_codec = 0;
+        explicit.baseline.record_codec = Some(1);
+        explicit.segments[0].record_codec = Some(2);
+        let encoded = encode_manifest(explicit.clone()).unwrap();
+        let decoded = decode_manifest(&encoded).unwrap();
+        assert_eq!(decoded.record_codec_for(&decoded.baseline).unwrap(), 1);
+        assert_eq!(decoded.record_codec_for(&decoded.segments[0]).unwrap(), 2);
+        assert_eq!(decoded.baseline.path, legacy.baseline.path);
+        assert_eq!(
+            decoded.segments[0].stored_checksum,
+            legacy.segments[0].stored_checksum
+        );
+        assert_eq!(
+            decoded.recoverable_first_sequence,
+            legacy.recoverable_first_sequence
+        );
+        assert_eq!(
+            decoded.recoverable_last_sequence,
+            legacy.recoverable_last_sequence
+        );
+        assert_eq!(encode_manifest(decoded).unwrap(), encoded);
+
+        // Codec declarations belong to the checksum-covered payload.
+        let mut unauthenticated: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        unauthenticated["segments"][0]["record_codec"] = 1.into();
+        let mutated: ArchiveManifest = serde_json::from_value(unauthenticated).unwrap();
+        assert!(decode_manifest(&serde_json::to_vec(&mutated).unwrap()).is_err());
+        for (global, baseline, segment) in [
+            (1, Some(1), Some(1)),
+            (0, None, Some(1)),
+            (0, Some(1), None),
+            (0, Some(0), Some(1)),
+        ] {
+            let mut invalid = explicit.clone();
+            invalid.record_codec = global;
+            invalid.baseline.record_codec = baseline;
+            invalid.segments[0].record_codec = segment;
+            assert!(encode_manifest(invalid).is_err());
+        }
+        let mut mixed = legacy.clone();
+        mixed.baseline.record_codec = Some(1);
+        assert!(encode_manifest(mixed).is_err());
+        let mut missing_retired = explicit;
+        missing_retired
+            .checkpoint_retired_artifacts
+            .push(legacy.baseline);
+        assert!(encode_manifest(missing_retired).is_err());
     }
 
     #[test]
