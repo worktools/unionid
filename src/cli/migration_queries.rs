@@ -209,6 +209,11 @@ fn run_loaded(
 
 impl Output {
     pub fn print(&self, json: bool) -> Result<(), String> {
+        self.print_with_details(json, false)
+    }
+
+    /// Verbosity only changes text presentation; JSON retains the complete report.
+    pub fn print_with_details(&self, json: bool, verbose: bool) -> Result<(), String> {
         if json {
             println!(
                 "{}",
@@ -233,12 +238,16 @@ impl Output {
                 &report.query_validation
             }
         };
-        print_validation(validation);
+        print_validation_with_details(validation, verbose);
         Ok(())
     }
 }
 
 pub fn print_validation(report: &QueryValidation) {
+    print_validation_with_details(report, false);
+}
+
+pub fn print_validation_with_details(report: &QueryValidation, verbose: bool) {
     println!(
         "queries: {} checked, target valid: {}",
         report.checked_files, report.valid
@@ -252,12 +261,21 @@ pub fn print_validation(report: &QueryValidation) {
             "valid"
         };
         println!("{}: {review}", file.path);
-        for failure in &file.failures {
+        for (index, failure) in file.failures.iter().enumerate() {
+            if !verbose && index > 0 && index + 1 < file.failures.len() {
+                continue;
+            }
             println!(
                 "  {} (schema {}): {}",
                 failure.migration_id.as_deref().unwrap_or("current"),
                 failure.schema.revision,
                 failure.error
+            );
+        }
+        if !verbose && file.failures.len() > 2 {
+            println!(
+                "  {} intermediate checkpoint failures omitted; use --verbose or --format json for the complete trace",
+                file.failures.len() - 2
             );
         }
     }

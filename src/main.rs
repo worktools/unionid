@@ -470,6 +470,9 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
+        /// Show every saved-query checkpoint failure in text output.
+        #[arg(long)]
+        verbose: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -485,6 +488,9 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
+        /// Show every saved-query checkpoint failure in text output.
+        #[arg(long)]
+        verbose: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -533,6 +539,9 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
+        /// Show every saved-query checkpoint failure in text output.
+        #[arg(long)]
+        verbose: bool,
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
@@ -1441,27 +1450,46 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
     let Command::Migration { command } = &args.command else {
         return None;
     };
-    let (action, db, dir, queries, no_queries, format) = match command {
+    let (action, db, dir, queries, no_queries, verbose, format) = match command {
         MigrationCommand::Plan {
             db,
             dir,
             queries,
             no_queries,
+            verbose,
             format,
-        } => (Action::Plan, db, dir, queries, *no_queries, format),
+        } => (
+            Action::Plan,
+            db,
+            dir,
+            queries,
+            *no_queries,
+            *verbose,
+            format,
+        ),
         MigrationCommand::Apply {
             db,
             dir,
             queries,
             no_queries,
+            verbose,
             format,
-        } => (Action::Apply, db, dir, queries, *no_queries, format),
+        } => (
+            Action::Apply,
+            db,
+            dir,
+            queries,
+            *no_queries,
+            *verbose,
+            format,
+        ),
         MigrationCommand::Rehearse {
             db,
             dir,
             copy,
             queries,
             no_queries,
+            verbose,
             format,
         } => (
             Action::Rehearse { copy: copy.clone() },
@@ -1469,6 +1497,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
             dir,
             queries,
             *no_queries,
+            *verbose,
             format,
         ),
         _ => return None,
@@ -1476,7 +1505,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
     let json = matches!(format, Format::Json);
     match migration_queries::run_with_discovery(action, db, dir, queries.as_deref(), no_queries) {
         Ok(None) => None,
-        Ok(Some(report)) => match report.print(json) {
+        Ok(Some(report)) => match report.print_with_details(json, verbose) {
             Ok(()) => Some(0),
             Err(message) => exit_error(format!("E_IO: {message}"), args.error_output(), None),
         },
@@ -1514,7 +1543,7 @@ fn run_migration_query_command(args: &Args) -> Option<i32> {
             } else {
                 eprintln!("{}", failure.error);
                 if let Some(report) = failure.query_validation {
-                    migration_queries::print_validation(&report);
+                    migration_queries::print_validation_with_details(&report, verbose);
                 }
                 if let Some(copy) = failure.retained_copy {
                     eprintln!("retained copy: {} (inspect before reusing)", copy.display());

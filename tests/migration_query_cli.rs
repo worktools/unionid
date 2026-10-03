@@ -214,6 +214,71 @@ fn legacy_sources_warn_on_stderr_and_table_output_identifies_checkpoint() {
 }
 
 #[test]
+fn checkpoint_details_are_opt_in_without_changing_json_or_rejection() {
+    let dir = fixture();
+    fs::write(
+        dir.0.join("migrations/003.unid"),
+        "migration note\n  parent expand\n  add field Job.note: text = \"\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.0.join("migrations/004.unid"),
+        "migration final_note\n  parent note\n  add field Job.extra: text = \"\"\n",
+    )
+    .unwrap();
+    let before = dir.0.join("details-before.json");
+    let after = dir.0.join("details-after.json");
+    backup::create(dir.0.join("db.redb"), &before).unwrap();
+    for action in ["plan", "apply", "rehearse"] {
+        let bytes = fs::read(dir.0.join("db.redb")).unwrap();
+        let plain_json = run(command(&dir.0, action), 3);
+        let mut verbose_json = command(&dir.0, action);
+        verbose_json.arg("--verbose");
+        assert_eq!(run(verbose_json, 3), plain_json);
+        assert_eq!(
+            plain_json["query_validation"]["files"][0]["failures"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        for verbose in [false, true] {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_unionid"));
+            cmd.args(["migration", action, "--db"])
+                .arg(dir.0.join("db.redb"))
+                .arg("--dir")
+                .arg(dir.0.join("migrations"));
+            if verbose {
+                cmd.arg("--verbose");
+            }
+            let output = cmd.output().unwrap();
+            assert_eq!(output.status.code(), Some(3));
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(text.contains("nested/jobs.unid: invalid"), "{text}");
+            assert!(text.contains("expand (schema 2): E_MATCH"), "{text}");
+            assert!(text.contains("final_note (schema 4): E_MATCH"), "{text}");
+            assert_eq!(text.contains("note (schema 3): E_MATCH"), verbose);
+            assert_eq!(
+                text.contains("1 intermediate checkpoint failures omitted"),
+                !verbose
+            );
+        }
+        if action != "apply" {
+            assert!(fs::read(dir.0.join("db.redb")).unwrap() == bytes);
+        }
+    }
+    backup::create(dir.0.join("db.redb"), &after).unwrap();
+    let before: Value = serde_json::from_slice(&fs::read(before).unwrap()).unwrap();
+    let after: Value = serde_json::from_slice(&fs::read(after).unwrap()).unwrap();
+    assert_eq!(before["database"], after["database"]);
+    assert_eq!(before["receipts"], after["receipts"]);
+    Engine::open_redb(dir.0.join("db.redb"))
+        .unwrap()
+        .check_integrity()
+        .unwrap();
+}
+
+#[test]
 fn new_parameterized_and_guarded_queries_are_bound_without_execution() {
     let dir = fixture();
     fs::write(
