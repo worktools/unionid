@@ -143,6 +143,14 @@ const TOPICS: &[BundledDocsTopic] = &[
         content: include_str!("../docs/APPLICATION_DATA.md"),
     },
     BundledDocsTopic {
+        name: "generated-defaults",
+        category: DocsCategory::Application,
+        title: "Generated defaults / 生成默认值",
+        summary: "Omit generated IDs, UUIDs and timestamps; understand atomic allocation and retries.",
+        source: "docs/GENERATED_DEFAULTS.md",
+        content: include_str!("../docs/GENERATED_DEFAULTS.md"),
+    },
+    BundledDocsTopic {
         name: "parquet",
         category: DocsCategory::Application,
         title: "Local Parquet inspection and queries / 本地 Parquet 查看与查询",
@@ -393,7 +401,7 @@ mod tests {
     fn bundled_docs_are_categorized_and_versioned() {
         let catalog = docs_catalog(None);
         assert_eq!(catalog.schema_version, 1);
-        assert_eq!(catalog.topics.len(), 21);
+        assert_eq!(catalog.topics.len(), 22);
         assert_eq!(catalog.topics[0].name, "getting-started");
         assert!(catalog.topics.iter().any(|topic| topic.name == "query"));
         assert!(catalog.topics.iter().any(|topic| topic.name == "parquet"));

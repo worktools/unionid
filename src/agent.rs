@@ -271,7 +271,7 @@ const COMMANDS: &[AgentCommand] = &[
     },
     AgentCommand {
         name: "docs",
-        summary: "Read version-matched bundled documentation.",
+        summary: "Read version-matched bundled documentation; generated-defaults explains omitted IDs/UUIDs/time, capability installation and retry semantics.",
         usage: "unionid docs list --format json   # or docs show <topic>, docs query",
         json: true,
     },

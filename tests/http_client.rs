@@ -1,3 +1,4 @@
+mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -336,4 +337,71 @@ async fn typed_http_preserves_adt_reference_diagnostics_and_atomic_effects() {
         expected.check(&request, response);
     }
     server.abort();
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+struct GeneratedItem {
+    id: i64,
+    token: unionid::scalars::Uuid,
+    created_at: unionid::scalars::Timestamp,
+}
+
+#[tokio::test]
+async fn generated_http_retry_preserves_native_values_and_durable_counter() {
+    let dir = common::TempDir::new();
+    let path = dir.0.join("generated-http.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    engine
+        .install_storage_capabilities(&["generated_defaults".into()], None)
+        .unwrap();
+    let setup = engine.execute("sequence ids {start 1}\nstruct Generated {id: int, token: uuid, created_at: timestamp}\ntable generated: Generated {key id, default id = next(ids), default token = uuid_v7(), default created_at = now()}");
+    assert!(setup.ok, "{:?}", setup.error);
+    let state = FlakyState {
+        engine: ConcurrentEngine::new(engine),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let app = Router::new()
+        .route(http::QUERY_PATH, post(lose_first_response))
+        .with_state(state.clone());
+    let (base_url, server) = serve(app).await;
+    let client = HttpClient::connect(base_url).unwrap();
+    let request = ProtocolRequest::query(
+        "generated-lost",
+        "insert many generated [{}, {}] | returning",
+    )
+    .with_version(2)
+    .unwrap()
+    .with_idempotency_key("generated-http")
+    .unwrap();
+    let replay = client.request_retrying(&request, 2).await.unwrap();
+    assert!(replay.ok, "{:?}", replay.error);
+    assert!(replay.idempotency.as_ref().unwrap().replayed);
+    assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+    let expected = replay.typed_rows::<GeneratedItem>().unwrap();
+    assert_eq!((expected[0].id, expected[1].id), (1, 2));
+    assert_eq!(expected[0].created_at, expected[1].created_at);
+    assert_ne!(expected[0].token, expected[1].token);
+    let rows = client
+        .request(
+            &ProtocolRequest::query("read", "from generated | sort id")
+                .with_version(2)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.typed_rows::<GeneratedItem>().unwrap(), expected);
+    server.abort();
+    let _ = server.await;
+    drop(client);
+    drop(state);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.check_integrity().unwrap();
+    assert_eq!(engine.idempotency_status().unwrap().count, 1);
+    let rows = engine.execute("from generated | sort id");
+    assert_eq!(rows.typed_rows::<GeneratedItem>().unwrap(), expected);
+    let next = engine.execute("insert generated {} | returning");
+    assert!(next.ok, "{:?}", next.error);
+    assert_eq!(next.typed_rows::<GeneratedItem>().unwrap()[0].id, 3);
+    engine.check_integrity().unwrap();
 }
