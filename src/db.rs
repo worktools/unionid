@@ -1860,7 +1860,16 @@ impl Database {
         }
     }
 
+    /// Executes one statement, publishing mutations only after success.
+    /// Use [`crate::Engine`] for atomic scripts, parameters and durable storage.
     pub fn execute(&mut self, stmt: Statement) -> Result<QueryResponse> {
+        if stmt.is_mutating() {
+            let mut candidate = self.clone();
+            candidate.begin_generation_request();
+            let response = candidate.execute_with_deadline(stmt, None)?;
+            *self = candidate;
+            return Ok(response);
+        }
         self.begin_generation_request();
         self.execute_with_deadline(stmt, None)
     }
@@ -9263,6 +9272,51 @@ mod tests {
     fn table<'a>(database: &'a Database, name: &str) -> &'a Table {
         let DbObject::Table(table) = database.objects.get(name).unwrap();
         table
+    }
+
+    #[test]
+    fn public_execute_rejects_generated_writes_without_consuming_shared_sequence() {
+        for start in [1, i64::MAX] {
+            let mut database = Database::default();
+            execute(
+                &mut database,
+                &format!(
+                    "sequence ids {{start {start}}}\nstruct Item {{id: int, owner: text}}\ntable items: Item {{key id, default id = next(ids)}}\ntable other: Item {{key id, default id = next(ids)}}\ncreate unique index items (owner)\ninsert items {{id: 0, owner: \"taken\"}}"
+                ),
+            );
+            let before = serde_json::to_value(&database).unwrap();
+            let indexes = database.indexes.clone();
+            let _ = database.take_write_set();
+            for (source, code) in [
+                ("insert items {owner: \"taken\"}", "E_CONSTRAINT"),
+                (
+                    "insert many items [{owner: \"new\"}, {owner: \"taken\"}]",
+                    if start == i64::MAX {
+                        "E_ARITH"
+                    } else {
+                        "E_CONSTRAINT"
+                    },
+                ),
+            ] {
+                let statement = crate::syntax::parse(source).unwrap().remove(0).statement;
+                assert_eq!(database.execute(statement).unwrap_err().code, code);
+                assert_eq!(serde_json::to_value(&database).unwrap(), before);
+                assert_eq!(database.indexes, indexes);
+                let writes = database.take_write_set();
+                assert!(writes.rows.is_empty());
+                assert!(writes.sequence_counters.is_empty());
+                assert!(writes.index_entries.is_empty());
+                assert!(writes.table_watermarks.is_empty());
+            }
+            let statement = crate::syntax::parse("insert other {owner: \"valid\"} | returning id")
+                .unwrap()
+                .remove(0)
+                .statement;
+            let response = database.execute(statement).unwrap();
+            assert!(response.rows[0]["id"].cmp_eq(&Value::Int(start)));
+            assert_eq!(database.sequences["ids"].next, start.checked_add(1));
+            assert_eq!(table(&database, "items").rows.len(), 1);
+        }
     }
 
     #[test]
