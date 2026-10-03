@@ -207,6 +207,12 @@ impl StorageLayout {
         database: &Database,
         receipts: &ReceiptMap,
     ) -> Result<()> {
+        if database.has_generated_defaults() {
+            return Err(Error::new(
+                "E_STORAGE",
+                "generated-default codecs are not enabled in this development candidate",
+            ));
+        }
         if !self.has_header() {
             return Ok(());
         }

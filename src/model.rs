@@ -269,6 +269,14 @@ pub struct Row {
     pub fields: BTreeMap<String, Value>,
 }
 
+/// A table-level generator bound to stable catalog identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoundGeneratedDefault {
+    Next(u64),
+    UuidV7,
+    Now,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     /// Stable catalog identity. Names may change in a later schema revision.
@@ -285,6 +293,8 @@ pub struct Table {
     pub row_type: Option<u64>,
     #[serde(default)]
     pub primary_key: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub generated_defaults: BTreeMap<u64, BoundGeneratedDefault>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

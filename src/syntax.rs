@@ -8,11 +8,11 @@ use crate::error::{Error, Result, Span};
 use crate::model::{Column, EnumType, EnumValue, EnumVariantDef, MAX_DEPTH, ScalarType, Value};
 use crate::query::{
     Aggregate, AggregateAssignment, AggregateFunction, ArithmeticOp, BoolExpression, CmpOp,
-    DeriveExpression, DeriveMatch, LocalBinding, LocalParameter, LocatedStatement, Lookup,
-    MatchArm, MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue, MatchValueArm,
-    MatchValueField, MatchValuePayload, MigrationTransform, PageDirection, PageSpec, Pipeline,
-    Returning, ScalarExpression, SchemaMigration, SetAssignment, SetValue, SortKey, Stage,
-    Statement, Window, WindowAssignment, WindowFunction,
+    DeriveExpression, DeriveMatch, GeneratedDefault, LocalBinding, LocalParameter,
+    LocatedStatement, Lookup, MatchArm, MatchField, MatchPattern, MatchPayload, MatchPredicate,
+    MatchValue, MatchValueArm, MatchValueField, MatchValuePayload, MigrationTransform,
+    PageDirection, PageSpec, Pipeline, Returning, ScalarExpression, SchemaMigration, SetAssignment,
+    SetValue, SortKey, Stage, Statement, TableDefault, Window, WindowAssignment, WindowFunction,
 };
 use crate::scalars::DecimalRounding;
 
@@ -580,6 +580,8 @@ impl Parser {
                 self.define_enum()?
             } else if self.word("type") {
                 self.define_type()?
+            } else if self.word("sequence") {
+                self.sequence()?
             } else if self.word("table") {
                 self.table()?
             } else if self.word("create") {
@@ -605,7 +607,7 @@ impl Parser {
                 self.pipeline()?
             } else {
                 return Err(self.error(
-                    "expected struct / enum / type / table / insert / upsert / update / delete / expect / migration / explain / from (or legacy create table/index)",
+                    "expected struct / enum / type / sequence / table / insert / upsert / update / delete / expect / migration / explain / from (or legacy create table/index)",
                 ));
             };
             out.push(LocatedStatement { statement, span });
@@ -1040,17 +1042,27 @@ impl Parser {
         Ok(ScalarType::Enum(EnumType { variants }))
     }
 
-    fn table(&mut self) -> Result<Statement> {
-        self.expect_word("table")?;
-        let table = self.identifier()?;
-        self.eat(Kind::Colon);
-        let row_type = self.identifier()?;
-        let mut key = None;
+    fn sequence_start(&mut self) -> Result<i64> {
+        let negative = self.eat(Kind::Minus);
+        let token = self.bump();
+        let Kind::Number(raw) = token.kind else {
+            return Err(syntax("sequence start must be an i64 literal", token.span));
+        };
+        let raw = raw.replace('_', "");
+        let raw = if negative { format!("-{raw}") } else { raw };
+        raw.parse()
+            .map_err(|_| syntax("sequence start must be an i64 literal", token.span))
+    }
+
+    fn sequence(&mut self) -> Result<Statement> {
+        self.expect_word("sequence")?;
+        let name = self.identifier()?;
+        let mut start = 1;
         if self.eat(Kind::Open('{')) {
             self.newlines();
-            if self.word("key") {
+            if self.word("start") {
                 self.bump();
-                key = Some(self.path()?);
+                start = self.sequence_start()?;
                 self.eat(Kind::Comma);
                 self.newlines();
             }
@@ -1058,16 +1070,86 @@ impl Parser {
         } else if *self.kind() == Kind::Newline {
             self.newlines();
             if self.eat(Kind::Indent) {
-                self.expect_word("key")?;
-                key = Some(self.identifier()?);
+                self.expect_word("start")?;
+                start = self.sequence_start()?;
                 self.newlines();
                 self.expect(Kind::Dedent)?;
             }
+        }
+        Ok(Statement::CreateSequence { name, start })
+    }
+
+    fn table(&mut self) -> Result<Statement> {
+        self.expect_word("table")?;
+        let table = self.identifier()?;
+        self.eat(Kind::Colon);
+        let row_type = self.identifier()?;
+        let mut key = None;
+        let mut defaults = Vec::new();
+        let end = if self.eat(Kind::Open('{')) {
+            self.newlines();
+            Some(Kind::Close('}'))
+        } else if *self.kind() == Kind::Newline {
+            self.newlines();
+            self.eat(Kind::Indent).then_some(Kind::Dedent)
+        } else {
+            None
+        };
+        if let Some(end) = end {
+            while *self.kind() != end {
+                if self.word("key") {
+                    if key.is_some() {
+                        return Err(self.error("a table may declare only one key"));
+                    }
+                    self.bump();
+                    key = Some(self.path()?);
+                } else if self.word("default") {
+                    self.bump();
+                    let field = self.identifier()?;
+                    if defaults
+                        .iter()
+                        .any(|value: &TableDefault| value.field == field)
+                    {
+                        return Err(
+                            self.error(format!("duplicate generated default for '{field}'"))
+                        );
+                    }
+                    self.expect(Kind::Op("=".into()))?;
+                    let generator = self.identifier()?;
+                    self.expect(Kind::Open('('))?;
+                    self.newlines();
+                    let generator = match generator.as_str() {
+                        "next" => GeneratedDefault::Next(self.identifier()?),
+                        "uuid_v7" => GeneratedDefault::UuidV7,
+                        "now" => GeneratedDefault::Now,
+                        _ => {
+                            return Err(self.error(
+                                "table defaults support next(sequence), uuid_v7(), or now()",
+                            ));
+                        }
+                    };
+                    self.newlines();
+                    self.expect(Kind::Close(')'))?;
+                    defaults.push(TableDefault { field, generator });
+                } else {
+                    return Err(self.error("expected key or generated default in table body"));
+                }
+                let newline = self.separated_newlines();
+                if *self.kind() == end {
+                    break;
+                }
+                if !self.eat(Kind::Comma) && !newline {
+                    return Err(self.error("separate table declarations with a newline or comma"));
+                }
+                self.newlines();
+            }
+            self.expect(end)?;
         }
         Ok(Statement::TypedTable {
             table,
             row_type,
             key,
+            defaults,
         })
     }
 

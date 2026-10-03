@@ -127,7 +127,7 @@ impl Database {
                 values,
                 returning,
             } => {
-                let ty = if matches!(
+                if matches!(
                     operation,
                     QueryOperation::Upsert | QueryOperation::UpsertMany
                 ) {
@@ -157,7 +157,18 @@ impl Database {
                 }
                 for (position, row) in rows.iter().enumerate() {
                     check_deadline_periodically(control, position)?;
-                    self.catalog.coerce(row, &ty, table)?;
+                    self.coerce_row(
+                        table,
+                        row,
+                        if matches!(
+                            operation,
+                            QueryOperation::Upsert | QueryOperation::UpsertMany
+                        ) {
+                            "upsert"
+                        } else {
+                            "insert"
+                        },
+                    )?;
                 }
                 input_rows = Some(rows.len());
                 (table.clone(), returning.as_ref())

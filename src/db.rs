@@ -26,6 +26,7 @@ use crate::row_source::{
     TableStats, TypedRowSource,
 };
 
+mod generated;
 mod index_predicate;
 mod migration;
 mod mutation_plan;
@@ -1604,6 +1605,10 @@ pub struct Database {
     reference_definitions: BTreeMap<u64, ReferenceDefinition>,
     #[serde(skip, default)]
     reference_states: BTreeMap<u64, reference::ReferenceState>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    sequences: BTreeMap<String, generated::Sequence>,
+    #[serde(skip, default)]
+    generation_context: generated::GenerationContext,
     objects: BTreeMap<String, DbObject>,
     #[serde(skip, default)]
     indexes: Indexes,
@@ -1849,6 +1854,7 @@ impl Database {
     }
 
     pub fn execute(&mut self, stmt: Statement) -> Result<QueryResponse> {
+        self.begin_generation_request();
         self.execute_with_deadline(stmt, None)
     }
 
@@ -1862,8 +1868,9 @@ impl Database {
                 "E_EXPECTATION_CONTEXT",
                 "expect requires a script mutation context",
             )),
+            Statement::CreateSequence { name, start } => self.create_sequence(name, start),
             Statement::DefineType { name, ty } => {
-                if self.objects.contains_key(&name) {
+                if self.objects.contains_key(&name) || self.sequences.contains_key(&name) {
                     return Err(Error::new(
                         "E_SCHEMA",
                         format!("name '{name}' is already used by a table"),
@@ -1884,6 +1891,7 @@ impl Database {
                 table,
                 row_type,
                 key,
+                defaults,
             } => {
                 let def = self.catalog.types.get(&row_type).ok_or_else(|| {
                     Error::new("E_SCHEMA", format!("unknown row type '{row_type}'"))
@@ -1891,7 +1899,15 @@ impl Database {
                 let ScalarType::Record(columns) = self.catalog.underlying(&def.ty)? else {
                     return Err(Error::new("E_TYPE", "a table's row type must be a record"));
                 };
-                self.create_table(table, columns.clone(), Some(def.id), key)
+                let columns = columns.clone();
+                let type_id = def.id;
+                let generators = self.bind_generated_defaults(&columns, &defaults)?;
+                let response = self.create_table(table.clone(), columns, Some(type_id), key)?;
+                let Some(DbObject::Table(created)) = self.objects.get_mut(&table) else {
+                    unreachable!()
+                };
+                created.generated_defaults = generators;
+                Ok(response)
             }
             Statement::CreateReference(spec) => self.create_reference(&spec),
             Statement::DropReference(spec) => self.drop_reference(&spec),
@@ -2072,7 +2088,7 @@ impl Database {
                 format!("table '{name}' already exists"),
             ));
         }
-        if self.catalog.types.contains_key(&name) {
+        if self.catalog.types.contains_key(&name) || self.sequences.contains_key(&name) {
             return Err(Error::new(
                 "E_SCHEMA",
                 format!("name '{name}' is already used by a type"),
@@ -2101,6 +2117,7 @@ impl Database {
                 next_row_id: 0,
                 row_type,
                 primary_key: key.clone(),
+                generated_defaults: BTreeMap::new(),
             }),
         );
         if let Some(key) = key {
@@ -2306,7 +2323,7 @@ impl Database {
         returning: Option<&Returning>,
     ) -> Result<QueryResponse> {
         let returning = self.bind_returning(name, returning)?;
-        let fields = self.coerce_row(name, &values, "insert")?;
+        let fields = self.materialize_generated_row(name, &values, "insert")?;
         let returned = self.returning_rows(returning.as_ref(), &[&fields])?;
         self.insert_fields(name, fields)?;
         let mut response = QueryResponse::ok_message(format!("inserted into '{name}'"));
@@ -2343,7 +2360,7 @@ impl Database {
         let mut fields = Vec::with_capacity(values.len());
         for (position, value) in values.iter().enumerate() {
             check_deadline_periodically(control, position)?;
-            fields.push(self.coerce_row(name, value, "insert many")?);
+            fields.push(self.materialize_generated_row(name, value, "insert many")?);
         }
         let returned_fields = fields.iter().collect::<Vec<_>>();
         let returned = self.returning_rows(returning.as_ref(), &returned_fields)?;
@@ -2450,7 +2467,7 @@ impl Database {
                 &mut changes,
                 RowChange::inserted(Arc::new(Row {
                     id: first_row_id + offset,
-                    fields: self.coerce_row(
+                    fields: self.materialize_generated_row(
                         name,
                         value,
                         if bulk { "insert many" } else { "insert" },
@@ -2495,15 +2512,14 @@ impl Database {
         returning: Option<&Returning>,
     ) -> Result<QueryResponse> {
         let returning = self.bind_returning(name, returning)?;
-        let table = self.table(name)?;
-        let key = table.primary_key.clone().ok_or_else(|| {
+        let key = self.table(name)?.primary_key.clone().ok_or_else(|| {
             Error::new(
                 "E_CONSTRAINT",
                 format!("upsert requires a primary key on table '{name}'"),
             )
             .constraint(ConstraintKind::PrimaryKeyMissing)
         })?;
-        let fields = self.coerce_row(name, &values, "upsert")?;
+        let fields = self.materialize_generated_row(name, &values, "upsert")?;
         let returned = self.returning_rows(returning.as_ref(), &[&fields])?;
         let key_value = row_field(&fields, &key)
             .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
@@ -2516,7 +2532,7 @@ impl Database {
             .and_then(|ids| ids.front())
             .copied();
         let action = if let Some(id) = existing_id {
-            let mut rows = table.rows.clone();
+            let mut rows = self.table(name)?.rows.clone();
             let position = rows.binary_search_by_key(&id, |row| row.id).map_err(|_| {
                 Error::new(
                     "E_INDEX",
@@ -2580,7 +2596,7 @@ impl Database {
         let mut batch_keys = BTreeSet::new();
         for (position, value) in values.iter().enumerate() {
             check_deadline_periodically(control, position)?;
-            let row = self.coerce_row(name, value, "upsert many")?;
+            let row = self.materialize_generated_row(name, value, "upsert many")?;
             let key_value = row_field(&row, &key)
                 .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{key}'")))?;
             if !batch_keys.insert(key_value.index_key()) {
@@ -2742,8 +2758,11 @@ impl Database {
         let mut batch_key_bytes = 0_usize;
         for (position, value) in values.iter().enumerate() {
             check_deadline_periodically(control, position)?;
-            let fields =
-                self.coerce_row(name, value, if bulk { "upsert many" } else { "upsert" })?;
+            let fields = self.materialize_generated_row(
+                name,
+                value,
+                if bulk { "upsert many" } else { "upsert" },
+            )?;
             let key_value = row_field(&fields, &primary_key)
                 .ok_or_else(|| Error::new("E_FIELD", format!("missing key '{primary_key}'")))?;
             let boundary = self.single_index_key(name, &primary_key, key_value)?;
@@ -2880,15 +2899,78 @@ impl Database {
         values: &Value,
         operation: &str,
     ) -> Result<BTreeMap<String, Value>> {
+        let table = self.table(name)?;
+        if !table.generated_defaults.is_empty()
+            && operation.starts_with("upsert")
+            && let Some(key) = &table.primary_key
+            && values.field(key).is_none()
+        {
+            return Err(Error::new(
+                "E_FIELD",
+                format!("upsert requires explicit primary key '{name}.{key}'"),
+            ));
+        }
+        if table.generated_defaults.is_empty() {
+            let ty = self.table_row_type(name)?;
+            let value = self.catalog.coerce(values, &ty, name)?;
+            let Value::Record(fields) = value.unwrapped() else {
+                return Err(Error::new(
+                    "E_TYPE",
+                    format!("{operation} requires a complete record"),
+                ));
+            };
+            return Ok(fields.clone());
+        }
+        let mut candidate = values.clone();
+        let mut missing = Vec::new();
+        fn record_mut(
+            value: &mut Value,
+            depth: usize,
+        ) -> Result<Option<&mut BTreeMap<String, Value>>> {
+            if depth >= crate::model::MAX_DEPTH {
+                return Err(Error::new("E_LIMIT", "type/value nesting is too deep"));
+            }
+            match value {
+                Value::Record(fields) => Ok(Some(fields)),
+                Value::Named { value, .. } => record_mut(value, depth + 1),
+                Value::Enum(value) if value.args.len() == 1 => {
+                    record_mut(&mut value.args[0], depth + 1)
+                }
+                _ => Ok(None),
+            }
+        }
+        if let Some(fields) = record_mut(&mut candidate, 0)? {
+            for column in &table.schema {
+                if !fields.contains_key(&column.name)
+                    && let Some(generator) = table.generated_defaults.get(&column.id)
+                {
+                    let placeholder = match generator {
+                        crate::model::BoundGeneratedDefault::Next(_) => Value::Int(0),
+                        crate::model::BoundGeneratedDefault::UuidV7 => {
+                            Value::Uuid(crate::scalars::Uuid::from_bytes([0; 16]))
+                        }
+                        crate::model::BoundGeneratedDefault::Now => {
+                            Value::Timestamp(crate::scalars::Timestamp::from_epoch_microseconds(0)?)
+                        }
+                    };
+                    fields.insert(column.name.clone(), placeholder);
+                    missing.push(column.name.clone());
+                }
+            }
+        }
         let ty = self.table_row_type(name)?;
-        let value = self.catalog.coerce(values, &ty, name)?;
+        let value = self.catalog.coerce(&candidate, &ty, name)?;
         let Value::Record(fields) = value.unwrapped() else {
             return Err(Error::new(
                 "E_TYPE",
                 format!("{operation} requires a complete record"),
             ));
         };
-        Ok(fields.clone())
+        let mut fields = fields.clone();
+        for field in missing {
+            fields.remove(&field);
+        }
+        Ok(fields)
     }
 
     fn table_row_type(&self, name: &str) -> Result<ScalarType> {
@@ -4333,7 +4415,8 @@ impl Database {
                 self.bind_delete_operation(target)?;
                 columns
             }
-            Statement::DefineType { .. }
+            Statement::CreateSequence { .. }
+            | Statement::DefineType { .. }
             | Statement::CreateTable { .. }
             | Statement::TypedTable { .. }
             | Statement::CreateIndex { .. }
@@ -6847,6 +6930,8 @@ impl Database {
             schema: &'a [Column],
             row_type: Option<u64>,
             primary_key: &'a Option<String>,
+            #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+            generated_defaults: &'a BTreeMap<u64, crate::model::BoundGeneratedDefault>,
         }
 
         #[derive(Serialize)]
@@ -6857,6 +6942,15 @@ impl Database {
             indexes: Vec<SchemaIndex>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             references: Vec<&'a ReferenceDefinition>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            sequences: Vec<SchemaSequence<'a>>,
+        }
+
+        #[derive(Serialize)]
+        struct SchemaSequence<'a> {
+            id: u64,
+            name: &'a str,
+            start: i64,
         }
 
         #[derive(Serialize)]
@@ -6901,6 +6995,7 @@ impl Database {
                 schema: &table.schema,
                 row_type: table.row_type,
                 primary_key: &table.primary_key,
+                generated_defaults: &table.generated_defaults,
             })
             .collect();
         let mut index_definitions = self
@@ -6948,6 +7043,19 @@ impl Database {
             tables,
             indexes,
             references: self.reference_definitions.values().collect(),
+            sequences: {
+                let mut sequences = self
+                    .sequences
+                    .values()
+                    .map(|sequence| SchemaSequence {
+                        id: sequence.id,
+                        name: &sequence.name,
+                        start: sequence.start,
+                    })
+                    .collect::<Vec<_>>();
+                sequences.sort_by_key(|sequence| sequence.id);
+                sequences
+            },
         };
         let encoded = serde_json::to_vec(&manifest)
             .expect("serializing the schema manifest to memory cannot fail");
@@ -7582,6 +7690,12 @@ impl Database {
     }
 
     pub(crate) fn validate_logical_backup(mut self) -> Result<Self> {
+        if self.has_generated_defaults() {
+            return Err(Error::new(
+                "E_BACKUP",
+                "generated-default backup codecs are not enabled in this development candidate",
+            ));
+        }
         self.rebuild_indexes()?;
         let codec = if self.requires_map_storage() {
             crate::codec::MAP_VALUE_CODEC_VERSION
@@ -7649,6 +7763,7 @@ impl Database {
                             next_row_id: table.next_row_id,
                             row_type: table.row_type,
                             primary_key: table.primary_key,
+                            generated_defaults: BTreeMap::new(),
                         }),
                     );
                 }
@@ -7765,6 +7880,8 @@ impl Database {
             }
         }
         let mut database = Self {
+            sequences: BTreeMap::new(),
+            generation_context: generated::GenerationContext::default(),
             reference_definitions,
             reference_states: BTreeMap::new(),
             objects,
@@ -7822,7 +7939,17 @@ impl Database {
         // Definitions were registered in dependency order; names need not sort that way.
         let mut definitions = self.catalog.types.values().collect::<Vec<_>>();
         definitions.sort_by_key(|d| d.id);
+        let mut sequence_values = self.sequences.values().collect::<Vec<_>>();
+        sequence_values.sort_by_key(|sequence| sequence.id);
+        let mut sequences = sequence_values.into_iter().peekable();
         for d in definitions {
+            while sequences.peek().is_some_and(|sequence| sequence.id < d.id) {
+                let sequence = sequences.next().unwrap();
+                lines.push(format!(
+                    "sequence {} {{start {}}}",
+                    sequence.name, sequence.start
+                ));
+            }
             match &d.ty {
                 ScalarType::Record(fields) => {
                     lines.push(format!("struct {} {{", d.name));
@@ -7845,6 +7972,12 @@ impl Database {
                 )),
             }
         }
+        for sequence in sequences {
+            lines.push(format!(
+                "sequence {} {{start {}}}",
+                sequence.name, sequence.start
+            ));
+        }
         let mut tables = self.schema_tables();
         tables.sort_by_key(|table| table.id);
         for t in tables {
@@ -7857,6 +7990,24 @@ impl Database {
                 lines.push(format!("table {name}: {row} {{"));
                 if let Some(key) = &t.primary_key {
                     lines.push(format!("  key {key}"));
+                }
+                for column in &t.schema {
+                    if let Some(generator) = t.generated_defaults.get(&column.id) {
+                        let source = match generator {
+                            crate::model::BoundGeneratedDefault::Next(id) => {
+                                let name = self
+                                    .sequences
+                                    .values()
+                                    .find(|sequence| sequence.id == *id)
+                                    .map(|sequence| sequence.name.as_str())
+                                    .unwrap_or("unknown_sequence");
+                                format!("next({name})")
+                            }
+                            crate::model::BoundGeneratedDefault::UuidV7 => "uuid_v7()".into(),
+                            crate::model::BoundGeneratedDefault::Now => "now()".into(),
+                        };
+                        lines.push(format!("  default {} = {source}", column.name));
+                    }
                 }
                 lines.push("}".into());
             } else {

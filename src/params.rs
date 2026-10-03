@@ -157,6 +157,7 @@ fn visit_statement(statement: &Statement, visitor: &mut impl FnMut(&ScalarExpres
             });
         }
         Statement::Expect { .. }
+        | Statement::CreateSequence { .. }
         | Statement::DefineType { .. }
         | Statement::CreateTable { .. }
         | Statement::TypedTable { .. }
@@ -260,6 +261,7 @@ fn visit_statement_mut(statement: &mut Statement, visitor: &mut impl FnMut(&mut 
             };
         }
         Statement::Expect { .. }
+        | Statement::CreateSequence { .. }
         | Statement::DefineType { .. }
         | Statement::CreateTable { .. }
         | Statement::TypedTable { .. }

@@ -63,7 +63,8 @@ pub(crate) fn parse(source: &str) -> Result<Database> {
     for located in statements {
         if !matches!(
             located.statement,
-            Statement::DefineType { .. }
+            Statement::CreateSequence { .. }
+                | Statement::DefineType { .. }
                 | Statement::CreateTable { .. }
                 | Statement::TypedTable { .. }
                 | Statement::CreateIndex { .. }
@@ -71,12 +72,12 @@ pub(crate) fn parse(source: &str) -> Result<Database> {
         ) {
             return Err(Error::new(
                 "E_SCHEMA",
-                "schema files may contain only type, table, index, and reference declarations",
+                "schema files may contain only type, sequence, table, index, and reference declarations",
             )
             .at(located.span));
         }
         let statement_phase = match &located.statement {
-            Statement::DefineType { .. } => 0,
+            Statement::DefineType { .. } | Statement::CreateSequence { .. } => 0,
             Statement::CreateTable { .. } | Statement::TypedTable { .. } => 1,
             Statement::CreateIndex { .. } => 2,
             Statement::CreateReference(_) => 3,

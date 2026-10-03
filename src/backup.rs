@@ -357,6 +357,12 @@ fn write_database_view_with_header(
     format_version: u32,
     storage_header: Option<&str>,
 ) -> Result<BackupInfo> {
+    if database.has_generated_defaults() {
+        return Err(Error::new(
+            "E_BACKUP",
+            "generated-default backup codecs are not enabled in this development candidate",
+        ));
+    }
     validate_backup_header(format_version, storage_header)?;
     if let Some(header) = storage_header {
         crate::redb_storage::StorageHeader::decode_transport(header)?

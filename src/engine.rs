@@ -1454,6 +1454,16 @@ impl Engine {
 
     pub fn prepare(&self, source: &str) -> Result<PreparedQuery> {
         let mut statements = syntax::parse(source)?;
+        if self.storage_mode != StorageMode::Memory
+            && statements
+                .iter()
+                .any(|located| located.statement.declares_generated_defaults())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated-default persistence is not enabled in this development candidate",
+            ));
+        }
         crate::script::preflight(&statements)?;
         if self.storage_mode != StorageMode::Memory
             && self
@@ -1655,6 +1665,16 @@ impl Engine {
         page: Option<PageSpec>,
     ) -> Result<()> {
         let mut statements = syntax::parse(source)?;
+        if self.storage_mode != StorageMode::Memory
+            && statements
+                .iter()
+                .any(|located| located.statement.declares_generated_defaults())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated-default persistence is not enabled in this development candidate",
+            ));
+        }
         if let Some(page) = page {
             attach_structured_page(&mut statements, page)?;
         }
@@ -1679,9 +1699,16 @@ impl Engine {
                 if matches!(located.statement, Statement::Expect { .. }) {
                     continue;
                 }
-                preview
-                    .execute(located.statement.clone())
-                    .map_err(|error| error.at(located.span))?;
+                if crate::script::is_dml(&located.statement) {
+                    let mut mutation = located.statement.clone();
+                    preview
+                        .bind_mutation_explain(&mut mutation, None)
+                        .map_err(|error| error.at(located.span))?;
+                } else {
+                    preview
+                        .execute(located.statement.clone())
+                        .map_err(|error| error.at(located.span))?;
+                }
             }
         }
         let types = preview
@@ -1956,6 +1983,16 @@ impl Engine {
             ));
         }
         let mut statements = syntax::parse(source)?;
+        if self.storage_mode != StorageMode::Memory
+            && statements
+                .iter()
+                .any(|located| located.statement.declares_generated_defaults())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated-default persistence is not enabled in this development candidate",
+            ));
+        }
         if let Some(page) = page {
             attach_structured_page(&mut statements, page)?;
         }
@@ -2102,6 +2139,9 @@ impl Engine {
         } else {
             None
         };
+        if let Some(candidate) = &mut candidate {
+            candidate.begin_generation_request();
+        }
         let mut response = QueryResponse::ok_message("ok");
         let include_summaries = statements.len() > 1;
         let mut summaries = if include_summaries {
@@ -3079,6 +3119,13 @@ impl Engine {
         receipt_state: Option<ReceiptMap>,
         write_set: Option<LogicalWriteSet>,
     ) -> Result<(u64, Option<DurableCommitProfile>)> {
+        if self.storage_mode != StorageMode::Memory && candidate.has_generated_defaults() {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated-default persistence is not enabled in this development candidate",
+            ));
+        }
+
         // A committed root never carries changes forward into the next
         // candidate. Row-only callers already extracted the supplied set;
         // full-rebuild callers intentionally discard any internal details.
@@ -5418,6 +5465,7 @@ mod tests {
                 table: "native_rows".into(),
                 row_type: "NativeRow".into(),
                 key: None,
+                defaults: Vec::new(),
             })
             .unwrap();
         Arc::make_mut(&mut Arc::make_mut(&mut engine.committed).db)
