@@ -4,7 +4,11 @@ Status: proposed; #439. No runtime support, format identifier, default or releas
 
 Implementation progress: strict header framing/profile validation is available internally. Existing formats reject any `storage_header` before business decoding; header installation and new-format reads/writes remain unavailable. No physical identifier is allocated. Inspection found no general metadata byte limit to reuse, so the decoder bounds bytes by the canonical shape containing all currently known capabilities and maximum-width integer fields, before allocating JSON. This is a structural bound, not a new configurable resource budget.
 
+Manifest format 2 now declares a nonzero `record_codec` on every baseline, segment and checkpoint-retired artifact, with the chain-wide field set to zero. Format 1 retains its original chain-wide codec and exact canonical bytes/checksums. Readers resolve codecs per artifact; export/checkpoint retain version 2 when continuing such a chain and preserve existing artifact bytes. Ordinary init still writes version 1. Business workflows reject unknown record codecs before artifact decoding; record codec 2 and header transitions are not implemented yet. This is manifest evolution, not native storage upgrade support.
+
 实现进展：内部已实现严格 framing/profile 校验。现有格式在业务解码前拒绝任何 `storage_header`；尚不支持安装 header 或读写新格式，未分配物理编号。代码检查未发现可复用的通用 metadata 字节限制，因此解码前使用「全部已知能力＋最大宽度整数」的规范结构长度作为上界，不增加可配置资源预算。
+
+manifest format 2 已支持 baseline、segment 和 checkpoint-retired artifact 各自声明非零 `record_codec`，链级字段为零。format 1 保留原链级 codec、规范字节与 checksum。reader 逐 artifact 解析 codec，export/checkpoint 续写 v2 链时保持版本和既有 artifact 字节；普通 init 仍生成 v1。业务入口在 artifact 解码前拒绝未知 record codec；尚未实现 record codec 2 和 header transition。这是 manifest 演进，不是原生存储升级支持。
 
 ## 中文说明
 

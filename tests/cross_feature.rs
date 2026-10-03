@@ -143,6 +143,40 @@ insert items {id: 2, label: "shared", score: 0, active: false, state: Done}
         assert_eq!(response.rows.len(), 2, "{combination}, query={query}");
         drop(engine);
         checkpoints.push(snapshot);
+        if !partial_index && files.len() == 1 {
+            // Keep the existing baseline and first segment immutable while the
+            // manifest starts declaring each artifact's record codec. Later
+            // migrations append through the same normal exporter.
+            backup::incremental::export(&path, &archive, Default::default()).unwrap();
+            let manifest_path = archive.join("manifest.json");
+            let mut manifest =
+                backup::incremental::decode_manifest(&std::fs::read(&manifest_path).unwrap())
+                    .unwrap();
+            assert_eq!(manifest.format_version, 1);
+            let artifacts: Vec<_> = std::iter::once(&manifest.baseline)
+                .chain(&manifest.segments)
+                .map(|artifact| {
+                    (
+                        artifact.path.clone(),
+                        std::fs::read(archive.join(&artifact.path)).unwrap(),
+                    )
+                })
+                .collect();
+            manifest.format_version = backup::incremental::ARTIFACT_MANIFEST_FORMAT_VERSION;
+            manifest.record_codec = 0;
+            for artifact in std::iter::once(&mut manifest.baseline).chain(&mut manifest.segments) {
+                artifact.record_codec = Some(1);
+            }
+            std::fs::write(
+                &manifest_path,
+                backup::incremental::encode_manifest(manifest).unwrap(),
+            )
+            .unwrap();
+            backup::incremental::verify(&archive, ArchiveLimits::default()).unwrap();
+            for (relative, bytes) in artifacts {
+                assert_eq!(std::fs::read(archive.join(relative)).unwrap(), bytes);
+            }
+        }
     }
 
     if partial_index {

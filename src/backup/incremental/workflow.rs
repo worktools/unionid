@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    ARCHIVE_CODEC_VERSION, ArchiveKind, ArchiveLimits, ArchiveManifest, BackupJournalConfig,
-    BackupJournalState, Compression, MANIFEST_FORMAT_VERSION, ManifestArtifact, ManifestState,
-    decode_archive, decode_manifest, encode_archive, encode_manifest, validate_archive_entry,
-    write_new_archive_entry,
+    ARCHIVE_CODEC_VERSION, ARTIFACT_MANIFEST_FORMAT_VERSION, ArchiveKind, ArchiveLimits,
+    ArchiveManifest, BackupJournalConfig, BackupJournalState, Compression, MANIFEST_FORMAT_VERSION,
+    ManifestArtifact, ManifestState, decode_archive, decode_manifest, encode_archive,
+    encode_manifest, validate_archive_entry, write_new_archive_entry,
 };
 use crate::Engine;
 use crate::db::{Database, DurableMeta};
@@ -277,6 +277,7 @@ pub fn init(
     );
     write_new_archive_entry(&repo, Path::new(&relative), &encoded.bytes)?;
     let artifact = ManifestArtifact {
+        record_codec: None,
         path: relative,
         first_sequence: source.header.first_sequence,
         last_sequence: source.header.last_sequence,
@@ -382,7 +383,7 @@ pub fn export(
                 .clone_from(&manifest.database_digest);
             let encoded = encode_archive(
                 ArchiveKind::Segment,
-                manifest.record_codec,
+                RECORD_CODEC_VERSION,
                 options.compression,
                 &source.header,
                 &source.frames,
@@ -412,6 +413,8 @@ pub fn export(
             })
             .clone();
         manifest.segments.push(ManifestArtifact {
+            record_codec: (manifest.format_version == ARTIFACT_MANIFEST_FORMAT_VERSION)
+                .then_some(RECORD_CODEC_VERSION),
             path: relative,
             first_sequence: first,
             last_sequence: through,
@@ -554,7 +557,7 @@ pub fn checkpoint(
     let source = engine.incremental_baseline_source(&old.chain_id)?;
     let encoded = encode_archive(
         ArchiveKind::Baseline,
-        old.record_codec,
+        RECORD_CODEC_VERSION,
         options.compression,
         &source.header,
         &source.frames,
@@ -567,6 +570,8 @@ pub fn checkpoint(
     );
     write_or_reuse_archive(&repo, Path::new(&relative), &encoded.bytes)?;
     let baseline = ManifestArtifact {
+        record_codec: (old.format_version == ARTIFACT_MANIFEST_FORMAT_VERSION)
+            .then_some(RECORD_CODEC_VERSION),
         path: relative,
         first_sequence: source.header.first_sequence,
         last_sequence: source.header.last_sequence,
@@ -821,7 +826,12 @@ fn replay_to_sequence(
     at_sequence: u64,
     limits: &ArchiveLimits,
 ) -> Result<ReplayState> {
-    let baseline = read_artifact(repo, &manifest.baseline, limits)?;
+    let baseline = read_artifact(
+        repo,
+        &manifest.baseline,
+        manifest.record_codec_for(&manifest.baseline)?,
+        limits,
+    )?;
     validate_decoded(
         &baseline,
         ArchiveKind::Baseline,
@@ -855,7 +865,7 @@ fn replay_to_sequence(
         if artifact.first_sequence > at_sequence {
             break;
         }
-        let segment = read_artifact(repo, artifact, limits)?;
+        let segment = read_artifact(repo, artifact, manifest.record_codec_for(artifact)?, limits)?;
         validate_decoded(
             &segment,
             ArchiveKind::Segment,
@@ -1223,7 +1233,12 @@ fn verify_manifest_artifacts(
     manifest: &ArchiveManifest,
     limits: &ArchiveLimits,
 ) -> Result<()> {
-    let baseline = read_artifact(repo, &manifest.baseline, limits)?;
+    let baseline = read_artifact(
+        repo,
+        &manifest.baseline,
+        manifest.record_codec_for(&manifest.baseline)?,
+        limits,
+    )?;
     validate_decoded(
         &baseline,
         ArchiveKind::Baseline,
@@ -1245,7 +1260,7 @@ fn verify_manifest_artifacts(
     };
     let mut commit_parent = manifest.baseline.payload_checksum.clone();
     for artifact in &manifest.segments {
-        let decoded = read_artifact(repo, artifact, limits)?;
+        let decoded = read_artifact(repo, artifact, manifest.record_codec_for(artifact)?, limits)?;
         validate_decoded(
             &decoded,
             ArchiveKind::Segment,
@@ -1272,7 +1287,12 @@ fn verify_export_head(
     status: &super::BackupJournalStatus,
     limits: &ArchiveLimits,
 ) -> Result<()> {
-    let baseline = read_artifact(repo, &manifest.baseline, limits)?;
+    let baseline = read_artifact(
+        repo,
+        &manifest.baseline,
+        manifest.record_codec_for(&manifest.baseline)?,
+        limits,
+    )?;
     validate_decoded(
         &baseline,
         ArchiveKind::Baseline,
@@ -1308,7 +1328,7 @@ fn verify_export_head(
     if exported != tail.last_sequence {
         return Err(chain_error("archive and database export heads differ"));
     }
-    let decoded = read_artifact(repo, tail, limits)?;
+    let decoded = read_artifact(repo, tail, manifest.record_codec_for(tail)?, limits)?;
     validate_decoded(
         &decoded,
         ArchiveKind::Segment,
@@ -1339,6 +1359,7 @@ fn segment_initial_parent(frames: &[super::ArchiveFrame]) -> Result<String> {
 fn read_artifact(
     repo: &Path,
     artifact: &ManifestArtifact,
+    record_codec: u16,
     limits: &ArchiveLimits,
 ) -> Result<super::DecodedArchive> {
     validate_archive_entry(repo, Path::new(&artifact.path))?;
@@ -1353,6 +1374,11 @@ fn read_artifact(
     }
     let bytes =
         fs::read(path).map_err(|error| archive_error(format!("read archive artifact: {error}")))?;
+    if bytes.len() >= 8 && bytes[6..8] != record_codec.to_be_bytes() {
+        return Err(chain_error(
+            "archive record codec does not match its artifact declaration",
+        ));
+    }
     let decoded = decode_archive(&bytes, limits)?;
     if decoded.payload_checksum != artifact.payload_checksum
         || decoded.stored_checksum != artifact.stored_checksum
@@ -1375,7 +1401,7 @@ fn validate_decoded(
     content_codecs: Option<&super::ArchiveHeader>,
 ) -> Result<()> {
     if decoded.kind != kind
-        || decoded.record_codec != manifest.record_codec
+        || decoded.record_codec != manifest.record_codec_for(artifact)?
         || decoded.header.chain_id != manifest.chain_id
         || decoded.header.database_digest != manifest.database_digest
         || decoded.header.first_sequence != artifact.first_sequence
@@ -1500,7 +1526,12 @@ fn reconcile_exported_prefix(
         .exported_checksum
         .as_deref()
         .ok_or_else(|| chain_error("database has no active export checksum"))?;
-    let baseline = read_artifact(repo, &manifest.baseline, limits)?;
+    let baseline = read_artifact(
+        repo,
+        &manifest.baseline,
+        manifest.record_codec_for(&manifest.baseline)?,
+        limits,
+    )?;
     validate_decoded(
         &baseline,
         ArchiveKind::Baseline,
@@ -1508,7 +1539,7 @@ fn reconcile_exported_prefix(
         &manifest.baseline,
         None,
     )?;
-    let decoded = read_artifact(repo, segment, limits)?;
+    let decoded = read_artifact(repo, segment, manifest.record_codec_for(segment)?, limits)?;
     validate_decoded(
         &decoded,
         ArchiveKind::Segment,
@@ -1633,10 +1664,21 @@ fn read_manifest(repo: &Path) -> Result<ArchiveManifest> {
             "archive manifest must be a bounded regular file",
         ));
     }
-    decode_manifest(
+    let manifest = decode_manifest(
         &fs::read(path)
             .map_err(|error| archive_error(format!("read archive manifest: {error}")))?,
-    )
+    )?;
+    // Container primitives can describe opaque nonzero record codecs. Business
+    // workflows must not interpret an unknown codec as today's frame semantics.
+    for artifact in std::iter::once(&manifest.baseline)
+        .chain(&manifest.segments)
+        .chain(&manifest.checkpoint_retired_artifacts)
+    {
+        if manifest.record_codec_for(artifact)? != RECORD_CODEC_VERSION {
+            return Err(chain_error("unsupported artifact record codec"));
+        }
+    }
+    Ok(manifest)
 }
 
 fn list_report(manifest: ArchiveManifest) -> IncrementalListReport {
@@ -1852,6 +1894,7 @@ mod tests {
         );
         write_new_archive_entry(&repo, Path::new(&relative), &encoded.bytes).unwrap();
         let artifact = ManifestArtifact {
+            record_codec: None,
             path: relative,
             first_sequence: source.header.first_sequence,
             last_sequence: source.header.last_sequence,
@@ -1954,6 +1997,8 @@ mod tests {
         write_new_archive_entry(&repo, Path::new(&relative), &encoded.bytes).unwrap();
         let previous = encode_manifest(manifest.clone()).unwrap();
         manifest.segments.push(ManifestArtifact {
+            record_codec: (manifest.format_version == ARTIFACT_MANIFEST_FORMAT_VERSION)
+                .then_some(RECORD_CODEC_VERSION),
             path: relative,
             first_sequence: source.header.first_sequence,
             last_sequence: source.header.last_sequence,
@@ -1982,6 +2027,15 @@ mod tests {
 
     #[test]
     fn checkpoint_resumes_after_prepared_manifest_publication() {
+        checkpoint_resume(false);
+    }
+
+    #[test]
+    fn artifact_codec_checkpoint_resumes_after_prepared_manifest_publication() {
+        checkpoint_resume(true);
+    }
+
+    fn checkpoint_resume(explicit_codecs: bool) {
         let temp = Temp::new();
         let db = temp.0.join("checkpoint.redb");
         let repo = temp.0.join("archive");
@@ -1992,13 +2046,24 @@ mod tests {
         drop(engine);
         export(&db, &repo, Default::default()).unwrap();
 
+        if explicit_codecs {
+            let old = read_manifest(&repo).unwrap();
+            let mut explicit = old.clone();
+            explicit.format_version = ARTIFACT_MANIFEST_FORMAT_VERSION;
+            explicit.record_codec = 0;
+            for artifact in std::iter::once(&mut explicit.baseline).chain(&mut explicit.segments) {
+                artifact.record_codec = Some(RECORD_CODEC_VERSION);
+            }
+            publish_manifest(&repo, Some(&encode_manifest(old).unwrap()), explicit).unwrap();
+        }
+
         let engine = Engine::open_redb(db.clone()).unwrap();
         let status = engine.backup_journal_status().unwrap();
         let old = read_manifest(&repo).unwrap();
         let source = engine.incremental_baseline_source(&old.chain_id).unwrap();
         let encoded = encode_archive(
             ArchiveKind::Baseline,
-            old.record_codec,
+            RECORD_CODEC_VERSION,
             Compression::Zstd,
             &source.header,
             &source.frames,
@@ -2014,6 +2079,7 @@ mod tests {
         let mut prepared = old.clone();
         prepared.state = ManifestState::Prepared;
         prepared.baseline = ManifestArtifact {
+            record_codec: explicit_codecs.then_some(RECORD_CODEC_VERSION),
             path: relative,
             first_sequence: source.header.first_sequence,
             last_sequence: source.header.last_sequence,

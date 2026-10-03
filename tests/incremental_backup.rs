@@ -621,3 +621,173 @@ fn checkpoint_prune_and_confirmed_disable_bound_retained_history() {
         )
     );
 }
+
+#[test]
+fn artifact_codec_manifests_preserve_archives_and_continue_export_checkpoint_restore() {
+    let temp = TempTree::new("artifact-codecs");
+    let db = temp.path().join("app.redb");
+    let repo = temp.path().join("archive");
+    create_database(&db);
+    backup::incremental::init(&db, &repo, Default::default()).unwrap();
+    let mut engine = Engine::open_redb(&db).unwrap();
+    assert!(engine.execute("update items | set label = \"two\"").ok);
+    drop(engine);
+    backup::incremental::export(&db, &repo, Default::default()).unwrap();
+    let manifest_path = repo.join("manifest.json");
+    let mut manifest =
+        backup::incremental::decode_manifest(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let originals: Vec<_> = std::iter::once(&manifest.baseline)
+        .chain(&manifest.segments)
+        .map(|artifact| {
+            (
+                artifact.clone(),
+                std::fs::read(repo.join(&artifact.path)).unwrap(),
+            )
+        })
+        .collect();
+    manifest.format_version = backup::incremental::ARTIFACT_MANIFEST_FORMAT_VERSION;
+    manifest.record_codec = 0;
+    for artifact in std::iter::once(&mut manifest.baseline).chain(&mut manifest.segments) {
+        artifact.record_codec = Some(1);
+    }
+    std::fs::write(
+        &manifest_path,
+        backup::incremental::encode_manifest(manifest.clone()).unwrap(),
+    )
+    .unwrap();
+    backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap();
+    let mut engine = Engine::open_redb(&db).unwrap();
+    assert!(engine.execute("update items | set label = \"three\"").ok);
+    drop(engine);
+    backup::incremental::export(&db, &repo, Default::default()).unwrap();
+    let updated =
+        backup::incremental::decode_manifest(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(updated.format_version, 2);
+    assert_eq!(updated.record_codec, 0);
+    for (old, bytes) in &originals {
+        let current = std::iter::once(&updated.baseline)
+            .chain(&updated.segments)
+            .find(|artifact| artifact.path == old.path)
+            .unwrap();
+        let mut expected = old.clone();
+        expected.record_codec = Some(1);
+        assert_eq!(current, &expected);
+        assert_eq!(&std::fs::read(repo.join(&old.path)).unwrap(), bytes);
+    }
+    assert!(
+        updated
+            .segments
+            .iter()
+            .all(|artifact| artifact.record_codec == Some(1))
+    );
+    for (sequence, label) in [
+        (updated.recoverable_first_sequence, "one"),
+        (updated.recoverable_first_sequence + 1, "two"),
+        (updated.recoverable_last_sequence, "three"),
+    ] {
+        let target = temp.path().join(format!("restore-{sequence}.redb"));
+        backup::incremental::restore(&repo, &target, sequence, ArchiveLimits::default()).unwrap();
+        let mut restored = Engine::open_redb(&target).unwrap();
+        assert!(restored.check_integrity().unwrap().backend_clean);
+        let rows = restored.execute("from items");
+        assert!(rows.ok, "{:?}", rows.error);
+        assert!(rows.rows[0]["label"].cmp_eq(&unionid::Value::Text(label.into())));
+    }
+    let checkpoint = backup::incremental::checkpoint(&db, &repo, Default::default()).unwrap();
+    assert_eq!(checkpoint.retired_artifacts, 3);
+    let listed = backup::incremental::list(&repo).unwrap();
+    assert_eq!(listed.baseline.record_codec, Some(1));
+    backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap();
+    let prune = backup::incremental::prune(
+        &repo,
+        checkpoint.recoverable_first_sequence,
+        true,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(prune.selected_files.len(), 3);
+    let target = temp.path().join("checkpoint.redb");
+    backup::incremental::restore(
+        &repo,
+        &target,
+        checkpoint.recoverable_first_sequence,
+        ArchiveLimits::default(),
+    )
+    .unwrap();
+    let mut restored = Engine::open_redb(&target).unwrap();
+    assert!(restored.check_integrity().unwrap().backend_clean);
+    assert!(
+        restored.execute("from items").rows[0]["label"]
+            .cmp_eq(&unionid::Value::Text("three".into()))
+    );
+    backup::incremental::disable(&db, &repo, false, true).unwrap();
+    backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap();
+}
+
+#[test]
+fn business_workflows_reject_unknown_and_mismatched_record_codecs_before_frames() {
+    let temp = TempTree::new("record-codec-rejection");
+    let db = temp.path().join("app.redb");
+    let repo = temp.path().join("archive");
+    create_database(&db);
+    backup::incremental::init(&db, &repo, Default::default()).unwrap();
+    let manifest_path = repo.join("manifest.json");
+    let original =
+        backup::incremental::decode_manifest(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    // Unreadable artifact content must not obscure an unsupported declaration.
+    let artifact_path = repo.join(&original.baseline.path);
+    let original_bytes = std::fs::read(&artifact_path).unwrap();
+    std::fs::write(&artifact_path, b"invalid archive").unwrap();
+    for explicit in [false, true] {
+        let mut unknown = original.clone();
+        if explicit {
+            unknown.format_version = 2;
+            unknown.record_codec = 0;
+            unknown.baseline.record_codec = Some(99);
+        } else {
+            unknown.record_codec = 99;
+        }
+        std::fs::write(
+            &manifest_path,
+            backup::incremental::encode_manifest(unknown).unwrap(),
+        )
+        .unwrap();
+        let target = temp.path().join(format!("rejected-{explicit}.redb"));
+        for error in [
+            backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap_err(),
+            backup::incremental::restore(
+                &repo,
+                &target,
+                original.recoverable_first_sequence,
+                ArchiveLimits::default(),
+            )
+            .unwrap_err(),
+        ] {
+            assert_eq!(error.code, "E_BACKUP_CHAIN");
+            assert!(
+                error.message.contains("unsupported artifact record codec"),
+                "{error:?}"
+            );
+        }
+        assert!(!target.exists());
+    }
+    std::fs::write(
+        &manifest_path,
+        backup::incremental::encode_manifest(original).unwrap(),
+    )
+    .unwrap();
+    let mut mismatched = original_bytes.clone();
+    mismatched[6..8].copy_from_slice(&99_u16.to_be_bytes());
+    // Also damage compressed content: the prefix mismatch must win.
+    let last = mismatched.len() - 1;
+    mismatched[last] ^= 0xff;
+    std::fs::write(&artifact_path, mismatched).unwrap();
+    let error = backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap_err();
+    assert_eq!(error.code, "E_BACKUP_CHAIN");
+    assert!(
+        error.message.contains("record codec does not match"),
+        "{error:?}"
+    );
+    std::fs::write(&artifact_path, original_bytes).unwrap();
+    backup::incremental::verify(&repo, ArchiveLimits::default()).unwrap();
+}
