@@ -1363,3 +1363,140 @@ fn independent_tcp_writers_allocate_distinct_generated_keys() {
         3
     );
 }
+
+#[test]
+fn exhausted_sequence_and_last_receipt_survive_reopen_and_both_restore_paths() {
+    use unionid::backup::incremental::{export, init, restore, verify};
+    let dir = common::TempDir::new();
+    let path = dir.0.join("exhausted.redb");
+    let archive = dir.0.join("archive");
+    let logical = dir.0.join("logical.json");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    engine
+        .install_storage_capabilities(&["generated_defaults".into()], None)
+        .unwrap();
+    ok(
+        &mut engine,
+        &SETUP.replace("start 1", &format!("start {}", i64::MAX)),
+    );
+    let schema = engine.schema_info();
+    drop(engine);
+    init(&path, &archive, Default::default()).unwrap();
+    let source = r#"insert items {owner: "last"} | returning {id, public_id, created_at}"#;
+    let digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let last = engine
+        .execute_idempotent_with_params("last", digest, source, BTreeMap::new(), None)
+        .unwrap();
+    assert_eq!(id(&last.response, 0), i64::MAX);
+    let boundary = engine.backup_journal_status().unwrap().head_sequence;
+    drop(engine);
+    unionid::backup::create(&path, &logical).unwrap();
+    let logical_target = dir.0.join("logical.redb");
+    unionid::backup::restore(&logical, &logical_target).unwrap();
+    export(&path, &archive, Default::default()).unwrap();
+    verify(&archive, Default::default()).unwrap();
+    let journal_target = dir.0.join("journal.redb");
+    restore(&archive, &journal_target, boundary, Default::default()).unwrap();
+    for target in [&path, &logical_target, &journal_target] {
+        let mut engine = Engine::open_redb(target).unwrap();
+        engine.check_integrity().unwrap();
+        assert_eq!(engine.schema_info(), schema);
+        let replay = engine
+            .execute_idempotent_with_params("last", digest, source, BTreeMap::new(), None)
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(
+            serde_json::to_value(replay.response.rows).unwrap(),
+            serde_json::to_value(&last.response.rows).unwrap()
+        );
+        let head = engine.backup_journal_status().unwrap().head_sequence;
+        let failed = engine
+            .execute_idempotent_with_params(
+                "exhausted",
+                digest,
+                r#"insert items {owner: "exhausted"}"#,
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(failed.code, "E_ARITH");
+        assert_eq!(engine.backup_journal_status().unwrap().head_sequence, head);
+        assert_eq!(engine.idempotency_status().unwrap().count, 1);
+        assert_eq!(ok(&mut engine, "from items").rows.len(), 1);
+        // Explicit IDs bypass the exhausted generator, and the failed key is
+        // still available for a different request rather than being reserved.
+        let explicit = engine
+            .execute_idempotent_with_params(
+                "exhausted",
+                digest,
+                r#"insert items {id: 0, owner: "explicit"} | returning id"#,
+                BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        assert!(!explicit.replayed);
+        assert_eq!(id(&explicit.response, 0), 0);
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(
+            engine
+                .execute(r#"insert items {owner: "still-exhausted"}"#)
+                .error
+                .unwrap()
+                .code,
+            "E_ARITH"
+        );
+        engine.check_integrity().unwrap();
+    }
+}
+
+#[test]
+fn batch_upsert_generates_non_keys_without_consuming_the_key_sequence() {
+    let mut engine = Engine::memory();
+    ok(&mut engine, SETUP);
+    let initial = ok(
+        &mut engine,
+        r#"insert items {owner: "initial"} | returning"#,
+    );
+    assert_eq!(id(&initial, 0), 1);
+    let invalid =
+        engine.execute(r#"upsert many items [{id: 1, owner: "replaced"}, {owner: "missing-key"}]"#);
+    assert_eq!(invalid.error.unwrap().code, "E_FIELD");
+    assert_eq!(
+        serde_json::to_value(ok(&mut engine, "from items").rows).unwrap(),
+        serde_json::to_value(&initial.rows).unwrap()
+    );
+    let batch = ok(
+        &mut engine,
+        r#"upsert many items [{id: 1, owner: "replaced"}, {id: 90, owner: "new"}] | returning"#,
+    );
+    assert_eq!((id(&batch, 0), id(&batch, 1)), (1, 90));
+    assert!(batch.rows[0]["created_at"].cmp_eq(&batch.rows[1]["created_at"]));
+    assert!(!batch.rows[0]["public_id"].cmp_eq(&batch.rows[1]["public_id"]));
+    assert!(!batch.rows[0]["public_id"].cmp_eq(&initial.rows[0]["public_id"]));
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                r#"insert items {owner: "next"} | returning id"#
+            ),
+            0
+        ),
+        2
+    );
+}
+
+#[test]
+fn shared_sequence_follows_declared_field_order_rather_than_record_key_order() {
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "sequence ids {start 1}\nstruct Pair {z: int, a: int}\ntable pairs: Pair {default a = next(ids), default z = next(ids)}",
+    );
+    let rows = ok(&mut engine, "insert many pairs [{}, {}] | returning");
+    for (row, first) in rows.rows.iter().zip([1, 3]) {
+        assert!(row["z"].cmp_eq(&Value::Int(first)));
+        assert!(row["a"].cmp_eq(&Value::Int(first + 1)));
+    }
+}
