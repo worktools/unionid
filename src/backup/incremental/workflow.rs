@@ -503,7 +503,7 @@ pub(crate) fn verify_header_upgrade(engine: &Engine, repo: &Path) -> Result<()> 
         || manifest.recoverable_last_sequence != status.head_sequence
     {
         return Err(chain_error(
-            "header upgrade requires a sealed archive at the current database head",
+            "header upgrade requires an active archive manifest at the current database head",
         ));
     }
     reconcile_identity(&manifest, &status)?;
