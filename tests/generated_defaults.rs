@@ -947,3 +947,250 @@ fn cli_and_tcp_omit_generated_fields_and_preserve_receipts_across_restart() {
     );
     engine.check_integrity().unwrap();
 }
+
+#[test]
+fn installing_generators_mid_journal_preserves_each_header_and_counter_boundary() {
+    use unionid::backup::incremental::{checkpoint, export, init, restore, verify};
+    let dir = common::TempDir::new();
+    let path = dir.0.join("transition.redb");
+    let archive = dir.0.join("archive");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    drop(engine);
+    init(&path, &archive, Default::default()).unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let baseline = engine.backup_journal_status().unwrap().head_sequence;
+    let initial_capabilities = engine.introspection().required_storage_capabilities;
+    let initial_schema = engine.schema_info();
+    let required = ["generated_defaults".into()];
+    assert_eq!(
+        engine
+            .install_storage_capabilities(&required, None)
+            .unwrap_err()
+            .code,
+        "E_BACKUP_CHAIN_ACTIVE"
+    );
+    assert_eq!(
+        engine.backup_journal_status().unwrap().head_sequence,
+        baseline
+    );
+    ok(
+        &mut engine,
+        "struct Note {id: int}\ntable notes: Note {key id}\ninsert notes {id: 90}",
+    );
+    let old_head = engine.backup_journal_status().unwrap().head_sequence;
+    let old_schema = engine.schema_info();
+    assert!(
+        engine
+            .install_storage_capabilities(&required, Some(&archive))
+            .is_err()
+    );
+    assert_eq!(
+        engine.backup_journal_status().unwrap().head_sequence,
+        old_head
+    );
+    assert_eq!(
+        engine.introspection().required_storage_capabilities,
+        initial_capabilities
+    );
+    drop(engine);
+    export(&path, &archive, Default::default()).unwrap();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert!(
+        engine
+            .install_storage_capabilities(&required, Some(&archive))
+            .unwrap()
+            .changed
+    );
+    let installed = engine.backup_journal_status().unwrap().head_sequence;
+    assert_eq!(installed, old_head + 1);
+    assert_eq!(engine.schema_info(), old_schema);
+    assert!(
+        !engine
+            .install_storage_capabilities(&required, None)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        engine.backup_journal_status().unwrap().head_sequence,
+        installed
+    );
+    ok(&mut engine, SETUP);
+    let generated = ok(&mut engine, r#"insert items {owner: "first"} | returning"#);
+    let generated_head = engine.backup_journal_status().unwrap().head_sequence;
+    let generated_schema = engine.schema_info();
+    drop(engine);
+    export(&path, &archive, Default::default()).unwrap();
+    verify(&archive, Default::default()).unwrap();
+    for (sequence, schema, has_capability, has_items) in [
+        (baseline, initial_schema, false, false),
+        (old_head, old_schema.clone(), false, false),
+        (installed, old_schema, true, false),
+        (generated_head, generated_schema, true, true),
+    ] {
+        let target = dir.0.join(format!("boundary-{sequence}.redb"));
+        restore(&archive, &target, sequence, Default::default()).unwrap();
+        let mut restored = Engine::open_redb(&target).unwrap();
+        restored.check_integrity().unwrap();
+        assert_eq!(restored.schema_info(), schema);
+        assert_eq!(
+            restored.introspection().storage_versions.unwrap().format,
+            14
+        );
+        let capabilities = restored
+            .introspection()
+            .required_storage_capabilities
+            .unwrap();
+        assert_eq!(
+            capabilities.iter().any(|cap| cap == "generated_defaults"),
+            has_capability
+        );
+        if has_items {
+            let rows = ok(&mut restored, "from items");
+            assert_eq!(
+                serde_json::to_value(rows.rows).unwrap(),
+                serde_json::to_value(&generated.rows).unwrap()
+            );
+            assert_eq!(
+                id(
+                    &ok(
+                        &mut restored,
+                        r#"insert items {owner: "second"} | returning id"#
+                    ),
+                    0
+                ),
+                2
+            );
+        } else {
+            let declaration = restored.execute("sequence probe {start 1}");
+            assert_eq!(declaration.ok, has_capability);
+        }
+    }
+    let checkpoint = checkpoint(&path, &archive, Default::default()).unwrap();
+    let target = dir.0.join("checkpoint.redb");
+    restore(
+        &archive,
+        &target,
+        checkpoint.recoverable_first_sequence,
+        Default::default(),
+    )
+    .unwrap();
+    let mut engine = Engine::open_redb(&target).unwrap();
+    assert!(
+        engine
+            .introspection()
+            .required_storage_capabilities
+            .unwrap()
+            .iter()
+            .any(|cap| cap == "generated_defaults")
+    );
+    engine.check_integrity().unwrap();
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                r#"insert items {owner: "after-checkpoint"} | returning id"#
+            ),
+            0
+        ),
+        2
+    );
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert_eq!(
+        engine.backup_journal_status().unwrap().state,
+        unionid::backup::incremental::BackupJournalState::Active
+    );
+    engine.disable_backup_journal(true).unwrap();
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    assert_eq!(engine.introspection().storage_versions.unwrap().format, 14);
+    assert!(
+        engine
+            .introspection()
+            .required_storage_capabilities
+            .unwrap()
+            .iter()
+            .any(|cap| cap == "generated_defaults")
+    );
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                r#"insert items {owner: "after-disable"} | returning id"#
+            ),
+            0
+        ),
+        2
+    );
+    engine.check_integrity().unwrap();
+}
+
+#[test]
+#[ignore = "requires UNIONID_OLD_BINARY pointing to an actual pre-native release"]
+fn old_release_rejects_generated_storage_without_changing_business_state() {
+    let binary = std::env::var("UNIONID_OLD_BINARY").expect("supply a released unionid binary");
+    let dir = common::TempDir::new();
+    let path = dir.0.join("old-reader.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        ok(
+            &mut engine,
+            "struct Legacy {id: int}\ntable legacy: Legacy {key id}\ninsert legacy {id: 90}",
+        );
+    }
+    let read = || {
+        std::process::Command::new(&binary)
+            .args(["run", "--db"])
+            .arg(&path)
+            .args(["--read-only", "--query", "from legacy", "--format", "json"])
+            .output()
+            .unwrap()
+    };
+    let compatible = read();
+    assert!(
+        compatible.status.success(),
+        "old release must read the legacy baseline: {}",
+        String::from_utf8_lossy(&compatible.stdout)
+    );
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(14).unwrap();
+        engine
+            .install_storage_capabilities(&["generated_defaults".into()], None)
+            .unwrap();
+        ok(&mut engine, SETUP);
+        ok(&mut engine, r#"insert items {owner: "generated"}"#);
+    }
+    let before = dir.0.join("before.json");
+    let after = dir.0.join("after.json");
+    unionid::backup::create(&path, &before).unwrap();
+    let rejected = read();
+    let stdout = String::from_utf8_lossy(&rejected.stdout);
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        !rejected.status.success(),
+        "stdout={stdout}, stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("E_STORAGE") || stderr.contains("E_STORAGE"),
+        "stdout={stdout}, stderr={stderr}"
+    );
+    unionid::backup::create(&path, &after).unwrap();
+    assert!(
+        std::fs::read(before).unwrap() == std::fs::read(after).unwrap(),
+        "old reader changed logical durable state"
+    );
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.check_integrity().unwrap();
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                r#"insert items {owner: "next"} | returning id"#
+            ),
+            0
+        ),
+        2
+    );
+}

@@ -1190,15 +1190,20 @@ fn replay_database(
     state: ReplayState,
     _manifest: &ArchiveManifest,
 ) -> Result<(Database, ReceiptMap)> {
-    let catalog_value = state
-        .catalog
-        .values()
-        .next()
-        .ok_or_else(|| chain_error("baseline catalog is empty"))?;
-    if catalog_value.len() < 6 {
-        return Err(chain_error("stored catalog entry is truncated"));
-    }
-    let catalog_codec = u16::from_be_bytes(catalog_value[4..6].try_into().expect("fixed slice"));
+    let catalog_codec = match state.catalog.values().next() {
+        Some(value) => {
+            if value.len() < 6 {
+                return Err(chain_error("stored catalog entry is truncated"));
+            }
+            u16::from_be_bytes(value[4..6].try_into().expect("fixed slice"))
+        }
+        // Native baselines and mixed-chain transitions authenticate the codec
+        // independently of business objects, including an empty catalog.
+        None => state
+            .storage_layout
+            .map(|layout| layout.catalog)
+            .ok_or_else(|| chain_error("baseline catalog is empty"))?,
+    };
     if state
         .storage_layout
         .is_some_and(|layout| layout.catalog != catalog_codec)
