@@ -886,3 +886,120 @@ fn concurrent_snapshots_cross_migration_reclaim_then_restore_to_read_only_servic
 fn native_header_snapshots_cross_migration_then_restore_to_read_only_services() {
     concurrent_snapshot_journey(true);
 }
+
+#[test]
+fn generated_reference_keys_roll_back_and_replay_across_migration_and_restore() {
+    const COMBINATION: &str = "native+journal+generated-keys+references+receipts";
+    const SCRIPT: &str = "insert parents {}\ninsert items {parent: 1} | returning";
+    let temp = TempDir::new();
+    let path = temp.0.join("source.redb");
+    let archive = temp.0.join("archive");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    engine
+        .install_storage_capabilities(
+            &["generated_defaults".into(), "typed_references".into()],
+            None,
+        )
+        .unwrap();
+    let setup = engine.execute(
+        "sequence parent_ids {start 1}\nsequence item_ids {start 1}\nstruct Parent {id: int}\nstruct Item {id: int, parent: int, public_id: uuid, created_at: timestamp}\ntable parents: Parent {key id\ndefault id = next(parent_ids)}\ntable items: Item {key id\ndefault id = next(item_ids)\ndefault public_id = uuid_v7()\ndefault created_at = now()}\ncreate index items (parent)\ncreate reference items (parent) references parents (id)",
+    );
+    assert!(setup.ok, "{COMBINATION}: {:?}", setup.error);
+    drop(engine);
+    backup::incremental::init(&path, &archive, Default::default()).unwrap();
+    let before = state(&path, COMBINATION);
+    let request = |script: &str| {
+        Request::query("generated-reference", script)
+            .with_version(PRODUCTION_VERSION)
+            .unwrap()
+            .with_idempotency_key("generated-reference-first")
+            .unwrap()
+    };
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let rejected = execute_protocol_request(
+        &mut engine,
+        request("insert parents {}\ninsert items {parent: 999} | returning"),
+    );
+    assert!(!rejected.ok);
+    let error = rejected.error.unwrap();
+    assert_eq!(error.code, "E_CONSTRAINT");
+    assert_eq!(error.statement_index, Some(2));
+    assert_eq!(
+        error.constraint,
+        Some(unionid::error::ConstraintKind::ReferenceMissing)
+    );
+    assert!(engine.execute("from parents").rows.is_empty());
+    drop(engine);
+    assert_eq!(state(&path, COMBINATION), before);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let original = execute_protocol_request(&mut engine, request(SCRIPT));
+    assert!(original.ok, "{COMBINATION}: {:?}", original.error);
+    let durable = engine.last_mutation_profile().unwrap().durable.unwrap();
+    assert_eq!(
+        durable.mode,
+        unionid::profile::DurableCommitMode::Incremental
+    );
+    assert_eq!(durable.row_changes, 2);
+    assert_eq!(durable.receipt_changes, 1);
+    let rows = original.typed_rows::<Value>().unwrap();
+    assert_eq!(rows[0]["id"], 1);
+    assert_eq!(rows[0]["parent"], 1);
+    drop(engine);
+    let committed = state(&path, COMBINATION);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let migration =
+        MigrationFile::parse("migration note {add field Item.note text = \"migrated\"}").unwrap();
+    engine.apply_migrations(&[migration]).unwrap();
+    drop(engine);
+    let migrated = state(&path, COMBINATION);
+    let logical = temp.0.join("logical.json");
+    backup::create(&path, &logical).unwrap();
+    let logical_target = temp.0.join("logical.redb");
+    backup::restore(&logical, &logical_target).unwrap();
+    backup::incremental::export(&path, &archive, Default::default()).unwrap();
+    backup::incremental::verify(&archive, ArchiveLimits::default()).unwrap();
+    let mut targets = vec![(path, &migrated), (logical_target, &migrated)];
+    for expected in [&committed, &migrated] {
+        let target = temp.0.join(format!("sequence-{}.redb", expected.sequence));
+        backup::incremental::restore(
+            &archive,
+            &target,
+            expected.sequence,
+            ArchiveLimits::default(),
+        )
+        .unwrap();
+        targets.push((target, expected));
+    }
+    for (target, expected) in targets {
+        assert_eq!(state(&target, COMBINATION), *expected);
+        let mut engine = Engine::open_redb(&target).unwrap();
+        let parents = engine.execute("from parents | sort id");
+        assert!(parents.ok);
+        assert_eq!(
+            parents.typed_rows::<Value>().unwrap(),
+            vec![serde_json::json!({"id": 1})]
+        );
+        let replay = execute_protocol_request(&mut engine, request(SCRIPT));
+        let mut expected_reply = serde_json::to_value(&original).unwrap();
+        expected_reply["idempotency"]["replayed"] = Value::Bool(true);
+        assert_eq!(serde_json::to_value(replay).unwrap(), expected_reply);
+        let rejected = engine.execute("delete parents");
+        assert_eq!(
+            rejected.error.unwrap().constraint,
+            Some(unionid::error::ConstraintKind::ReferenceRestricted)
+        );
+        drop(engine);
+        assert_eq!(state(&target, COMBINATION), *expected);
+        let mut engine = Engine::open_redb(&target).unwrap();
+        let next = engine.execute("insert parents {}\ninsert items {parent: 2} | returning");
+        assert!(next.ok, "{COMBINATION}: {:?}", next.error);
+        let next = next.typed_rows::<Value>().unwrap();
+        assert_eq!(next[0]["id"], 2);
+        assert_eq!(next[0]["parent"], 2);
+        assert_ne!(next[0]["public_id"], rows[0]["public_id"]);
+        assert_eq!(engine.execute("from parents").rows.len(), 2);
+        assert_eq!(engine.execute("from items").rows.len(), 2);
+        engine.check_integrity().unwrap();
+    }
+}
