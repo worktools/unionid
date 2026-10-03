@@ -260,6 +260,33 @@ impl Database {
         self.generation_context = GenerationContext::default();
     }
 
+    pub(crate) fn generated_input_shape(
+        &self,
+        table: &str,
+        upsert: bool,
+    ) -> Result<Option<(crate::portable::TypeShape, Vec<String>)>> {
+        let table = self.table(table)?;
+        let fields = table
+            .schema
+            .iter()
+            .filter(|field| {
+                table.generated_defaults.contains_key(&field.id)
+                    && (!upsert || table.primary_key.as_deref() != Some(field.name.as_str()))
+            })
+            .map(|field| field.name.clone())
+            .collect::<Vec<_>>();
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((
+            crate::portable::describe_type(
+                &self.catalog,
+                &ScalarType::Record(table.schema.clone()),
+            )?,
+            fields,
+        )))
+    }
+
     pub(crate) fn schema_sequences(&self) -> Vec<&Sequence> {
         let mut sequences = self.sequences.values().collect::<Vec<_>>();
         sequences.sort_by_key(|sequence| sequence.id);

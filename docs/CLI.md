@@ -161,7 +161,7 @@ unionid schema describe --db app.redb --output schema.contract.json
 
 ### 静态查询描述 / Static query descriptions
 
-`query describe` 使用当前 parser、binder 和 type IR，离线检查一个静态查询文件，并输出 [RFC 0015](rfc/0015-static-query-contract.md) 的 version 1 JSON。一个查询文件只包含一个 prepared operation；schema 文件仍只接受声明：
+`query describe` 使用当前 parser、binder 和 type IR，离线检查一个静态查询文件，并输出 [RFC 0015](rfc/0015-static-query-contract.md) 的 version 2 JSON。一个查询文件只包含一个 prepared operation；schema 文件仍只接受声明：
 
 ```bash
 unionid query describe --schema schema.unid --file queries/find_task.unid
@@ -171,7 +171,7 @@ unionid query describe --schema schema.unid --file queries/create_task.unid --ou
 
 `--schema` 适用于声明文件作为权威来源；`--db` 从数据库的私有副本读取 live catalog，保留 migration 建立的稳定 ID 和真实 revision/hash。两者必须且只能选择一个。输出包含 schema identity、规范化源码及其 SHA-256、operation、按名称排序的参数类型、结果字段类型、`none` / `exactly_one` / `at_most_one` / `many` cardinality，以及是否返回 affected-row metadata。字段、payload、参数统一失败和非穷尽 match 会在离线绑定时失败并带源码 span。digest 忽略等价的空格/换行布局，但投影或语义变化会改变 digest；运行时仍由 `PreparedQuery` 精确核对 schema revision/hash。
 
-`query describe` uses the runtime parser, binder, and type IR to validate one static query file offline and emit the RFC 0015 version-1 JSON contract. Choose exactly one catalog source: `--schema` for an authoritative declaration file or `--db` for a private copy of a live catalog that preserves migration-established IDs and its actual revision/hash. Output includes schema identity, canonical source and SHA-256 digest, operation, name-sorted parameter shapes, result field shapes, conservative cardinality, and affected-row metadata. Field, payload, parameter-unification, and match-coverage errors fail during offline binding with a source span. Equivalent layout has the same digest; projection or semantic changes do not. `PreparedQuery` still checks the exact schema revision/hash at runtime.
+`query describe` uses the runtime parser, binder, and type IR to validate one static query file offline and emit the RFC 0015 version-2 JSON contract. Choose exactly one catalog source: `--schema` for an authoritative declaration file or `--db` for a private copy of a live catalog that preserves migration-established IDs and its actual revision/hash. Output includes schema identity, canonical source and SHA-256 digest, operation, name-sorted parameter shapes, result field shapes, conservative cardinality, and affected-row metadata. Field, payload, parameter-unification, and match-coverage errors fail during offline binding with a source span. Equivalent layout has the same digest; projection or semantic changes do not. `PreparedQuery` still checks the exact schema revision/hash at runtime.
 
 `query rust` 从同一契约生成一个可直接编译的 Rust 文件，其中包含 schema ADT、查询 `Params`、结果 row 和 Engine 调用函数。默认函数名取查询文件名，也可显式使用 `--name`。调用函数逐字段把参数转换为 typed `Value`，按 cardinality 返回 `T`、`Option<T>` 或 `Vec<T>`；mutation 同时返回 affected rows。它在 prepare 前核对生成时的 schema revision/hash，因此数据库漂移会明确返回 `E_SCHEMA_CHANGED`：
 

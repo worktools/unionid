@@ -3986,6 +3986,14 @@ impl Engine {
         self.committed.db.schema_info()
     }
 
+    pub(crate) fn generated_input_shape(
+        &self,
+        table: &str,
+        upsert: bool,
+    ) -> Result<Option<(crate::portable::TypeShape, Vec<String>)>> {
+        self.committed.db.generated_input_shape(table, upsert)
+    }
+
     /// Describe the current catalog and retain its runtime value validator.
     pub fn portable_contract(&self) -> Result<crate::portable::PortableContract> {
         crate::portable::PortableContract::from_database(self.committed.db.as_ref())

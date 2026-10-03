@@ -193,3 +193,40 @@ fn nominal_generation_does_not_override_reusable_constant_omission_metadata() {
     assert!(response.ok);
     assert!(response.rows[0]["id"].unwrapped().cmp_eq(&Value::Int(99)));
 }
+
+#[test]
+fn query_inputs_describe_omission_separately_and_keep_upsert_keys_required() {
+    let schema = "sequence ids {start 1}\nstruct Item {id: int, owner: text, created_at: timestamp}\ntable items: Item {key id, default id = next(ids), default created_at = now()}";
+    for (query, fields) in [
+        ("explain insert items $item", vec!["id", "created_at"]),
+        ("explain upsert items $item", vec!["created_at"]),
+        (
+            "insert items $item | returning id",
+            vec!["id", "created_at"],
+        ),
+        (
+            "insert many items $item | returning id",
+            vec!["id", "created_at"],
+        ),
+        ("upsert items $item | returning id", vec!["created_at"]),
+        ("upsert many items $item | returning id", vec!["created_at"]),
+    ] {
+        let description = unionid::query_contract::describe(schema, query).unwrap();
+        assert_eq!(description.version, 2);
+        assert_eq!(description.parameters[0].omittable_fields, fields);
+        let source = unionid::codegen::rust_query(schema, query, "write_item").unwrap();
+        assert!(source.contains("pub created_at: Option<unionid::scalars::Timestamp>"));
+        assert!(source.contains("serialize_present"));
+        if query.starts_with("upsert") || query.starts_with("explain upsert") {
+            assert!(source.contains("pub id: i64,"));
+        } else {
+            assert!(source.contains("pub id: Option<i64>,"));
+        }
+    }
+    let mut old = unionid::query_contract::describe(schema, "insert items $item").unwrap();
+    old.version = 1;
+    assert!(
+        unionid::codegen::rust_query_bundle_from_descriptions(schema, &[("old".into(), old)])
+            .is_err()
+    );
+}

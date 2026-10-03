@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::portable::{PortableSchemaIdentity, TypeShape};
 use crate::query::{Pipeline, SetOperator, Stage, Statement};
 
-pub const QUERY_DESCRIPTION_VERSION: u32 = 1;
+pub const QUERY_DESCRIPTION_VERSION: u32 = 2;
 
 /// A single-operation query file after schema-aware offline binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,6 +72,9 @@ pub struct QueryParameterDescription {
     pub name: String,
     /// Lossless portable value shape.
     pub shape: TypeShape,
+    /// Table input fields that may be absent, separate from ADT Option values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omittable_fields: Vec<String>,
 }
 
 /// The row and mutation metadata produced by a successful operation.
@@ -152,9 +155,43 @@ fn describe_prepared(engine: &Engine, prepared: &PreparedQuery) -> Result<QueryD
                     format!("bound parameter '${name}' has no inferred type"),
                 )
             })?;
+            let mut shape = crate::portable::describe_type(catalog, ty)?;
+            let mut omittable_fields = Vec::new();
+            let input_statement = match &located.statement {
+                Statement::ExplainMutation(statement) => statement.as_ref(),
+                statement => statement,
+            };
+            let input = match input_statement {
+                Statement::InsertParameter {
+                    table, parameter, ..
+                }
+                | Statement::InsertManyParameter {
+                    table, parameter, ..
+                } if parameter == name => Some((table.as_str(), false)),
+                Statement::UpsertParameter {
+                    table, parameter, ..
+                }
+                | Statement::UpsertManyParameter {
+                    table, parameter, ..
+                } if parameter == name => Some((table.as_str(), true)),
+                _ => None,
+            };
+            if let Some((table, upsert)) = input
+                && let Some((row, fields)) = engine.generated_input_shape(table, upsert)?
+            {
+                shape = match shape {
+                    TypeShape::List { max_items, .. } => TypeShape::List {
+                        item: Box::new(row),
+                        max_items,
+                    },
+                    _ => row,
+                };
+                omittable_fields = fields;
+            }
             Ok(QueryParameterDescription {
                 name: name.clone(),
-                shape: crate::portable::describe_type(catalog, ty)?,
+                shape,
+                omittable_fields,
             })
         })
         .collect::<Result<Vec<_>>>()?;
