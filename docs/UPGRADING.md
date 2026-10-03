@@ -285,3 +285,10 @@ New public fields require updating Rust struct literals: Error.statement_index d
 Guards require memory or redb. Legacy WAL and WAL + snapshot modes reject guarded scripts with E_CONFIG before candidate construction or logging, with a hint to use --db. This prevents committing an unreplayable log; existing unguarded WAL files remain recoverable.
 
 旧 WAL 记录的恢复不套用新请求的 4,096 语句上限，仍保留既有 source/record 字节限制；历史大记录可以恢复，新提交依然受限。Historical WAL replay retains its existing byte budgets instead of applying the new request statement limit; old large records remain recoverable while new submissions are bounded.
+
+
+## 开发版：显式选择精简预检报告 / Development: explicit compact preflight reports
+
+plan/apply/rehearse 新增 `--query-report compact`，使用 `query_validation.version = 2` 的共享 checkpoint 和错误区间。默认及显式 `--query-report full` 仍为 v1；已有 Rust 方法、旧 JSON 形态和完整轨迹预算保持原契约。新增的 Rust v2 方法和 JSON 消费方应根据报告 version 分派，区间两端为 inclusive 的零基 checkpoint 索引。`--verbose` 只改变文本展开，不切换报告版本。这个入口不升级存储，也不改变 migration 按文件提交的边界；默认切换及正式版本验收仍待后续。详见 [MIGRATIONS](MIGRATIONS.md)。
+
+Development plan/apply/rehearse add --query-report compact for query_validation.version 2 with shared checkpoints and inclusive zero-based failure intervals. Default/explicit full remains v1, preserving existing Rust methods, JSON shapes and full-trace budgets. Consumers using the explicit v2 APIs/report should dispatch on version. --verbose changes text detail only. No storage upgrade or migration commit-boundary change occurs; a default switch and formal release acceptance remain pending. See [MIGRATIONS](MIGRATIONS.md).
