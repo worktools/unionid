@@ -156,11 +156,15 @@ unionid migration apply --db app.redb --dir migrations --queries queries --forma
 
 成功 JSON 为原有报告增加 `query_validation`。失败只输出一个 `ok: false` 对象：最终查询无效时顶层 `error.code` 为 `E_MIGRATION`、退出码 3；具体错误、文件路径和 checkpoint 在 `query_validation.files[].failures`。I/O 错误退出码 5，资源限制退出码 3。预检成功不保证数据转换成功，后续 migration 文件失败仍可能留下先前已提交的 migration；根据 `query_validation.valid` 区分查询预检失败与后续执行失败。
 
+文本默认逐文件显示最终状态，以及首次和最后一次失败的 migration/schema；超过两次失败时显示省略数量。`plan`、`apply` 和 `rehearse` 的 `--verbose` 展开所有 checkpoint 错误，例如 `unionid migration plan --db app.redb --dir migrations --verbose`。这只是展示选项：不减少绑定或检查，JSON 与 Rust version 1 报告始终保留完整轨迹，错误码和拒绝提交的规则不变。
+
 `plan` 使用锁定源文件后创建的临时副本，避免 redb 打开时的恢复元数据写入源库。`rehearse` 同样保留源库字节；自动副本在成功或失败后清理。`--copy path` 只接受不存在的目标，失败或成功报告中的 `retained_copy` 表示本次创建并保留的副本，需检查其 schema/ledger 后再使用；已有文件及源库别名绝不覆盖。源库被占用时返回 `E_BUSY`（退出码 4）。`apply` 在同一个实际 Engine 中预检并提交；新库查询预检失败不会创建数据库文件。
 
 These commands are available in development toward v0.13. Each file contains one statically describable query or mutation, optionally followed by `expect`; preflight does not execute queries or require runtime parameter values. The nonempty directory is recursively loaded once in relative-path order. `.uid` remains accepted with stderr warnings. Reject symlinks, non-source entries, and invalid UTF-8; cap directory depth at 32 and total entries, including empty directories, at 4,096. Check queries even when no migrations are pending.
 
 Success adds `query_validation` to the existing report. Failure emits exactly one `ok: false` JSON envelope. Invalid final queries return `E_MIGRATION` and exit 3, with original file/checkpoint errors in `query_validation.files[].failures`; I/O returns exit 5 and resource limits exit 3. A valid preflight does not guarantee successful data conversion: later migration failures may retain earlier per-file commits. Use `query_validation.valid` to distinguish preflight rejection from later execution failure.
+
+Default text shows each file's final status and its first/last failing migration and schema, with an omitted count when more than two checkpoints fail. Add `--verbose` to plan, apply or rehearse for every checkpoint error, for example `unionid migration plan --db app.redb --dir migrations --verbose`. This changes presentation only: all binding and checks still run, JSON/Rust version-1 reports retain the complete trace, and error codes and precommit rejection are unchanged.
 
 Plan uses a locked temporary copy to avoid touching the source's redb recovery metadata. Rehearsal also preserves source bytes and removes automatic copies after success or failure. Explicit `--copy` destinations must not exist; `retained_copy` identifies a copy created and retained by this attempt, whose schema/ledger should be inspected before reuse. Existing files and source aliases are never overwritten. An active source owner returns `E_BUSY` with exit 4. Apply preflights and commits within the same actual Engine; rejected new-database queries create no database file.
 

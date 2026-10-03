@@ -4,6 +4,12 @@
 
 Development migration CLI discovers sibling saved queries by default and may reject existing projects before apply; --no-queries explicitly disables with a stderr notice, while --queries overrides the directory. Init adds scripts/check.sh; project check prioritizes binding errors. Database formats/APIs are unchanged; see [MIGRATIONS](MIGRATIONS.md).
 
+## 开发版：迁移诊断展示 / Development: migration diagnostics
+
+迁移预检的文本输出默认只展开每个查询的首次和最后一次 checkpoint 失败，并明确显示中间省略的数量；需要原有完整文本轨迹时，在 plan/apply/rehearse 加 `--verbose`。JSON、Rust version 1 报告、公开字段、预算和提交前拒绝规则保持不变；不需要数据库升级。详见 [MIGRATIONS](MIGRATIONS.md)。
+
+Saved-query preflight text now expands each query's first and last checkpoint failures and explicitly counts omitted intermediate entries. Add `--verbose` to plan/apply/rehearse for the complete text trace. JSON, Rust version-1 reports, public fields, budgets and precommit rejection remain unchanged; no database upgrade is required. See [MIGRATIONS](MIGRATIONS.md).
+
 ## 开发版：单语句摘要精简 / Development: single-statement summaries
 
 #441：新执行的单语句响应省略 `statements`（Rust 中为空 Vec），多语句和守卫脚本保持摘要；rows、returning、affected_rows 和错误 statement_index 不变。使用者不要依赖单语句的 statements[0]，改读顶层 affected_rows。既有回执按保存的完整结果重放，可能仍有单项摘要；重开、backup/restore 不改写它。公开字段、协议与存储 codec 不变，不需要升级数据库。其他预算/轨迹评估仍未完成。
