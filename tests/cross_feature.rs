@@ -65,6 +65,10 @@ fn reject_duplicate(path: &Path, combination: &str) {
         before.sequence,
         response.error
     );
+    assert_eq!(
+        response.error.as_ref().unwrap().constraint,
+        Some(unionid::error::ConstraintKind::PartialUnique)
+    );
     drop(engine);
     assert_eq!(state(path, combination), before);
 }
