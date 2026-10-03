@@ -1962,6 +1962,64 @@ fn redb_update_delete_preserve_row_ids_constraints_and_indexes() {
 }
 
 #[test]
+fn storage_headers_are_not_ignored_by_legacy_readers() {
+    let canonical = concat!(
+        "{\"physical_format\":10,\"required_capabilities\":[],",
+        "\"codecs\":{\"catalog\":4,\"value\":3,\"index_key\":3,",
+        "\"migration\":1,\"receipt\":2,\"maintenance\":1,\"journal\":0}}"
+    );
+    for (json, message) in [
+        (canonical.to_string(), "explicitly upgraded physical format"),
+        (
+            canonical.replace("[]", "[\"generated_defaults\"]"),
+            "unsupported required capability",
+        ),
+        (
+            canonical.replace("\"value\":3", "\"value\":99"),
+            "unsupported capability/codec profile",
+        ),
+    ] {
+        let dir = TempDir::new();
+        let path = dir.0.join("header.redb");
+        drop(Engine::open_redb(&path).unwrap());
+        let database = RedbDatabase::open(&path).unwrap();
+        let transaction = database.begin_write().unwrap();
+        let bytes = [b"UISH\0\x01".as_slice(), json.as_bytes()].concat();
+        transaction
+            .open_table(REDB_META)
+            .unwrap()
+            .insert("storage_header", bytes.as_slice())
+            .unwrap();
+        // Corrupt business data too: the metadata error must win, proving that
+        // the header is rejected before decoding catalog entries.
+        transaction
+            .open_table(REDB_GENERATION_CATALOG)
+            .unwrap()
+            .insert(b"broken".as_slice(), b"broken".as_slice())
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(database);
+        for error in [
+            Engine::open_redb(&path).err().unwrap(),
+            Engine::open_redb_read_only(&path).err().unwrap(),
+        ] {
+            assert_eq!(error.code, "E_STORAGE");
+            assert!(error.message.contains(message), "{error:?}");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args(["check", "--db"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
 fn redb_fixed_tables_are_versioned_and_unknown_formats_fail_closed() {
     let dir = TempDir::new();
     let path = dir.0.join("state.redb");

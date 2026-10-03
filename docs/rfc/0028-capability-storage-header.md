@@ -2,6 +2,10 @@
 
 Status: proposed; #439. No runtime support, format identifier, default or release change is introduced by this document. RFC 0027 in #460 reserves generated defaults; this contract does not implement them.
 
+Implementation progress: strict header framing/profile validation is available internally. Existing formats reject any `storage_header` before business decoding; header installation and new-format reads/writes remain unavailable. No physical identifier is allocated. Inspection found no general metadata byte limit to reuse, so the decoder bounds bytes by the canonical shape containing all currently known capabilities and maximum-width integer fields, before allocating JSON. This is a structural bound, not a new configurable resource budget.
+
+实现进展：内部已实现严格 framing/profile 校验。现有格式在业务解码前拒绝任何 `storage_header`；尚不支持安装 header 或读写新格式，未分配物理编号。代码检查未发现可复用的通用 metadata 字节限制，因此解码前使用「全部已知能力＋最大宽度整数」的规范结构长度作为上界，不增加可配置资源预算。
+
 ## 中文说明
 
 ### 问题与边界
@@ -12,7 +16,7 @@ Status: proposed; #439. No runtime support, format identifier, default or releas
 
 ### 持久 header
 
-在 `meta` 保存单个 `storage_header`：四字节 magic `UISH`、big-endian u16 header codec（首版 1），后接固定字段顺序的 UTF-8 JSON。严格字段、禁止重复 key、无空白、bounded 解码；具体字节预算沿用现有 metadata 限制并在实现中测量，不另加任意资源预算。
+在 `meta` 保存单个 `storage_header`：四字节 magic `UISH`、big-endian u16 header codec（首版 1），后接固定字段顺序的 UTF-8 JSON。严格字段、禁止重复 key、无空白、bounded 解码；字节上界由已知规范结构推导，不另加任意资源预算。新能力加入时需重新验证该结构上界。
 
 | 字段 | 契约 |
 |---|---|
@@ -55,7 +59,7 @@ Status: proposed; #439. No runtime support, format identifier, default or releas
 
 This proposal completes the design boundary missing from #461 legacy-profile centralization and #462 archive capability checks. It retains redb, stable IDs, generations and the existing atomic writer; it adds no distributed/multiple-writer mode, automatic upgrades/downgrades or removal of legacy conversion support.
 
-Persist one `storage_header` in meta: `UISH` magic, big-endian u16 header codec 1, then strict canonical UTF-8 JSON with `physical_format`, sorted unique `required_capabilities`, and independent catalog/value/index-key/migration/receipt/maintenance/journal codecs. Reject duplicate/unknown fields, unknown capabilities and codecs before catalog/row/receipt/journal reads in writable and read-only modes. Use existing measured metadata bounds. Allocate the physical discriminator during implementation: old binaries reject it; later binaries reject unknown requirements instead of per-feature format numbers.
+Persist one `storage_header` in meta: `UISH` magic, big-endian u16 header codec 1, then strict canonical UTF-8 JSON with `physical_format`, sorted unique `required_capabilities`, and independent catalog/value/index-key/migration/receipt/maintenance/journal codecs. Reject duplicate/unknown fields, unknown capabilities and codecs before catalog/row/receipt/journal reads in writable and read-only modes. Bound bytes by the known canonical shape before JSON allocation; revalidate the structural bound when adding a capability. Allocate the physical discriminator during implementation: old binaries reject it; later binaries reject unknown requirements instead of per-feature format numbers.
 
 The base retains production generation/cursor/scalar requirements. Optional names match archives: `typed_map`, `partial_unique_index`, `typed_references`; reserve but reject `generated_defaults` until implemented. Generation envelopes are unrelated to generated defaults. Capabilities remain installed after schema drops because retained receipts/journals can require them. Remove redundant component meta keys for the new model; preserve sequence/schema/ID/cursor/generation identities and reject missing new headers rather than falling back to legacy.
 
