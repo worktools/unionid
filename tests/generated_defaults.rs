@@ -361,3 +361,154 @@ fn legacy_recovery_rejects_generators_without_publishing_or_replaying_them() {
     );
     assert_eq!(serde_json::to_value(&db).unwrap(), before);
 }
+
+#[test]
+fn sequence_and_policy_migrations_preserve_history_and_counter_identity() {
+    let temp = common::TempDir::new();
+    let path = temp.0.join("migrations.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    engine
+        .install_storage_capabilities(&["generated_defaults".into()], None)
+        .unwrap();
+    ok(
+        &mut engine,
+        "migration initial {\nadd sequence ids {start 7}\nadd struct Item {id: int, owner: text}\nadd table items: Item {key id, default id = next(ids)}\n}",
+    );
+    let first = ok(
+        &mut engine,
+        "insert items {owner: \"first\"} | returning id",
+    );
+    assert_eq!(id(&first, 0), 7);
+    let before = engine.schema_info();
+    ok(
+        &mut engine,
+        "migration rename {\nrename sequence ids to item_ids\nrename field Item.id to key\n}",
+    );
+    assert_ne!(engine.schema_info().hash, before.hash);
+    assert!(engine.schema().contains("next(item_ids)"));
+    let next = ok(
+        &mut engine,
+        "insert items {owner: \"second\"} | returning key",
+    );
+    assert!(next.rows[0]["key"].cmp_eq(&Value::Int(8)));
+    let rows = ok(&mut engine, "from items | sort key").rows;
+    let schema = engine.schema_info();
+    for source in [
+        "migration bad {drop sequence item_ids}",
+        "migration bad {change default items.key to now()}",
+        "migration bad {add sequence items {start 1}}",
+        "migration bad {rename table items to item_ids}",
+        "migration bad {\ndrop key items\nchange field Item.key to text using old -> \"x\"\n}",
+    ] {
+        assert!(!engine.execute(source).ok, "{source}");
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(
+            serde_json::to_value(ok(&mut engine, "from items | sort key").rows).unwrap(),
+            serde_json::to_value(&rows).unwrap()
+        );
+    }
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let third = ok(
+        &mut engine,
+        "insert items {owner: \"third\"} | returning key",
+    );
+    assert!(third.rows[0]["key"].cmp_eq(&Value::Int(9)));
+    ok(
+        &mut engine,
+        "migration switch {\nadd sequence replacement {start 100}\nchange default items.key to next(replacement)\ndrop sequence item_ids\n}",
+    );
+    let replacement = ok(
+        &mut engine,
+        "insert items {owner: \"replacement\"} | returning key",
+    );
+    assert!(replacement.rows[0]["key"].cmp_eq(&Value::Int(100)));
+    ok(
+        &mut engine,
+        "migration remove {\ndrop default items.key\ndrop sequence replacement\n}",
+    );
+    assert!(!engine.execute("insert items {owner: \"missing\"}").ok);
+    ok(&mut engine, "insert items {key: 101, owner: \"explicit\"}");
+    drop(engine);
+    Engine::open_redb(&path).unwrap().check_integrity().unwrap();
+}
+
+#[test]
+fn shadow_abort_and_reopen_resume_preserve_source_and_target_sequences() {
+    use unionid::migration::MigrationFile;
+    let temp = common::TempDir::new();
+    let path = temp.0.join("shadow.redb");
+    let initial = MigrationFile::parse("migration initial {\nadd sequence ids {start 1}\nadd struct Item {id: int, owner: text}\nadd table items: Item {key id, default id = next(ids)}\n}").unwrap();
+    let expanded = MigrationFile::parse("migration expanded {\nparent initial\nrename sequence ids to item_ids\nadd sequence public_ids {start 50}\nadd field Item.public_id: int = 0\nadd field Item.created_at: timestamp = @2020-01-01T00:00:00Z\nchange default items.public_id to next(public_ids)\nchange default items.created_at to now()\n}").unwrap();
+    let files = [initial.clone(), expanded];
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    engine
+        .install_storage_capabilities(&["generated_defaults".into()], None)
+        .unwrap();
+    engine.apply_migrations(&[initial]).unwrap();
+    ok(
+        &mut engine,
+        "insert many items [{owner: \"a\"}, {owner: \"b\"}, {owner: \"c\"}]",
+    );
+    let schema = engine.schema_info();
+    let rows = serde_json::to_value(ok(&mut engine, "from items | sort id").rows).unwrap();
+    engine.advance_migrations(&files, 1).unwrap();
+    assert!(
+        engine
+            .migration_status(&files)
+            .unwrap()
+            .maintenance
+            .is_some()
+    );
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.abort_migration().unwrap();
+    assert_eq!(engine.schema_info(), schema);
+    assert_eq!(
+        serde_json::to_value(ok(&mut engine, "from items | sort id").rows).unwrap(),
+        rows
+    );
+    assert!(!engine.schema().contains("public_ids"));
+    let mut completed = false;
+    for _ in 0..32 {
+        engine.advance_migrations(&files, 1).unwrap();
+        drop(engine);
+        engine = Engine::open_redb(&path).unwrap();
+        engine.check_integrity().unwrap();
+        let status = engine.migration_status(&files).unwrap();
+        if status.maintenance.is_none() && engine.migration_history().len() == 2 {
+            completed = true;
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "migration did not finish within 32 bounded steps"
+    );
+    let historical = ok(&mut engine, "from items | sort id");
+    assert_eq!(historical.rows.len(), 3);
+    for row in &historical.rows {
+        assert!(row["public_id"].cmp_eq(&Value::Int(0)));
+        let Value::Timestamp(time) = row["created_at"].unwrapped() else {
+            panic!("expected timestamp")
+        };
+        assert_eq!(time.epoch_microseconds(), 1_577_836_800_000_000);
+    }
+    let fresh = ok(
+        &mut engine,
+        "insert items {owner: \"fresh\"} | returning {id, public_id, created_at}",
+    );
+    assert_eq!(id(&fresh, 0), 4);
+    assert!(fresh.rows[0]["public_id"].cmp_eq(&Value::Int(50)));
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    let next = ok(
+        &mut engine,
+        "insert items {owner: \"next\"} | returning {id, public_id}",
+    );
+    assert_eq!(id(&next, 0), 5);
+    assert!(next.rows[0]["public_id"].cmp_eq(&Value::Int(51)));
+    engine.check_integrity().unwrap();
+}

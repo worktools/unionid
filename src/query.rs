@@ -134,6 +134,22 @@ pub enum Statement {
 
 #[derive(Debug, Clone)]
 pub enum SchemaMigration {
+    AddSequence {
+        name: String,
+        start: i64,
+    },
+    RenameSequence {
+        from: String,
+        to: String,
+    },
+    DropSequence {
+        name: String,
+    },
+    ChangeGeneratedDefault {
+        table: String,
+        field: String,
+        generator: GeneratedDefault,
+    },
     AddReference(ReferenceSpec),
     DropReference(ReferenceSpec),
     AddType {
@@ -147,6 +163,7 @@ pub enum SchemaMigration {
         table: String,
         row_type: String,
         key: Option<String>,
+        defaults: Vec<TableDefault>,
     },
     DropTable {
         table: String,
@@ -280,6 +297,7 @@ impl Statement {
     pub(crate) fn declares_generated_defaults(&self) -> bool {
         matches!(self, Self::CreateSequence { .. })
             || matches!(self, Self::TypedTable {defaults, ..} if !defaults.is_empty())
+            || matches!(self, Self::Migration {steps, ..} if steps.iter().any(|step| matches!(step, SchemaMigration::AddSequence {..} | SchemaMigration::ChangeGeneratedDefault {..}) || matches!(step, SchemaMigration::AddTable {defaults, ..} if !defaults.is_empty())))
     }
 
     pub fn changes_schema(&self) -> bool {

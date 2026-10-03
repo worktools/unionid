@@ -1068,15 +1068,37 @@ impl Parser {
             }
             self.expect(Kind::Close('}'))?;
         } else if *self.kind() == Kind::Newline {
+            let layout_start = self.pos;
             self.newlines();
             if self.eat(Kind::Indent) {
                 self.expect_word("start")?;
                 start = self.sequence_start()?;
                 self.newlines();
                 self.expect(Kind::Dedent)?;
+            } else {
+                self.pos = layout_start;
             }
         }
         Ok(Statement::CreateSequence { name, start })
+    }
+
+    fn generated_default(&mut self) -> Result<GeneratedDefault> {
+        let name = self.identifier()?;
+        self.expect(Kind::Open('('))?;
+        self.newlines();
+        let generator = match name.as_str() {
+            "next" => GeneratedDefault::Next(self.identifier()?),
+            "uuid_v7" => GeneratedDefault::UuidV7,
+            "now" => GeneratedDefault::Now,
+            _ => {
+                return Err(
+                    self.error("generated defaults support next(sequence), uuid_v7(), or now()")
+                );
+            }
+        };
+        self.newlines();
+        self.expect(Kind::Close(')'))?;
+        Ok(generator)
     }
 
     fn table(&mut self) -> Result<Statement> {
@@ -1090,11 +1112,18 @@ impl Parser {
             self.newlines();
             Some(Kind::Close('}'))
         } else if *self.kind() == Kind::Newline {
+            let layout_start = self.pos;
             self.newlines();
-            self.eat(Kind::Indent).then_some(Kind::Dedent)
+            if self.eat(Kind::Indent) {
+                Some(Kind::Dedent)
+            } else {
+                self.pos = layout_start;
+                None
+            }
         } else {
             None
         };
+        let has_body = end.is_some();
         if let Some(end) = end {
             while *self.kind() != end {
                 if self.word("key") {
@@ -1115,21 +1144,7 @@ impl Parser {
                         );
                     }
                     self.expect(Kind::Op("=".into()))?;
-                    let generator = self.identifier()?;
-                    self.expect(Kind::Open('('))?;
-                    self.newlines();
-                    let generator = match generator.as_str() {
-                        "next" => GeneratedDefault::Next(self.identifier()?),
-                        "uuid_v7" => GeneratedDefault::UuidV7,
-                        "now" => GeneratedDefault::Now,
-                        _ => {
-                            return Err(self.error(
-                                "table defaults support next(sequence), uuid_v7(), or now()",
-                            ));
-                        }
-                    };
-                    self.newlines();
-                    self.expect(Kind::Close(')'))?;
+                    let generator = self.generated_default()?;
                     defaults.push(TableDefault { field, generator });
                 } else {
                     return Err(self.error("expected key or generated default in table body"));
@@ -1144,6 +1159,10 @@ impl Parser {
                 self.newlines();
             }
             self.expect(end)?;
+        }
+        if !has_body && self.word("key") {
+            self.bump();
+            key = Some(self.path()?);
         }
         Ok(Statement::TypedTable {
             table,
@@ -1241,7 +1260,12 @@ impl Parser {
     fn migration_step(&mut self) -> Result<SchemaMigration> {
         if self.word("add") {
             self.bump();
-            if self.word("reference") {
+            if self.word("sequence") {
+                let Statement::CreateSequence { name, start } = self.sequence()? else {
+                    unreachable!()
+                };
+                Ok(SchemaMigration::AddSequence { name, start })
+            } else if self.word("reference") {
                 Ok(SchemaMigration::AddReference(self.reference_spec()?))
             } else if self.word("struct") {
                 let Statement::DefineType { name, ty } = self.define_struct()? else {
@@ -1259,32 +1283,20 @@ impl Parser {
                 };
                 Ok(SchemaMigration::AddType { name, ty })
             } else if self.word("table") {
-                self.bump();
-                let table = self.identifier()?;
-                self.eat(Kind::Colon);
-                let row_type = self.identifier()?;
-                let key = if self.eat(Kind::Open('{')) {
-                    self.newlines();
-                    let key = if self.word("key") {
-                        self.bump();
-                        Some(self.path()?)
-                    } else {
-                        None
-                    };
-                    self.eat(Kind::Comma);
-                    self.newlines();
-                    self.expect(Kind::Close('}'))?;
-                    key
-                } else if self.word("key") {
-                    self.bump();
-                    Some(self.path()?)
-                } else {
-                    None
+                let Statement::TypedTable {
+                    table,
+                    row_type,
+                    key,
+                    defaults,
+                } = self.table()?
+                else {
+                    unreachable!()
                 };
                 Ok(SchemaMigration::AddTable {
                     table,
                     row_type,
                     key,
+                    defaults,
                 })
             } else if self.word("field") {
                 self.bump();
@@ -1335,7 +1347,12 @@ impl Parser {
             }
         } else if self.word("drop") {
             self.bump();
-            if self.word("reference") {
+            if self.word("sequence") {
+                self.bump();
+                Ok(SchemaMigration::DropSequence {
+                    name: self.identifier()?,
+                })
+            } else if self.word("reference") {
                 Ok(SchemaMigration::DropReference(self.reference_spec()?))
             } else if self.word("type") {
                 self.bump();
@@ -1386,7 +1403,15 @@ impl Parser {
             }
         } else if self.word("rename") {
             self.bump();
-            if self.word("type") {
+            if self.word("sequence") {
+                self.bump();
+                let from = self.identifier()?;
+                self.expect_word("to")?;
+                Ok(SchemaMigration::RenameSequence {
+                    from,
+                    to: self.identifier()?,
+                })
+            } else if self.word("type") {
                 self.bump();
                 let from = self.identifier()?;
                 self.expect_word("to")?;
@@ -1427,11 +1452,24 @@ impl Parser {
                 self.bump();
                 let (owner, field) = self.migration_member("default")?;
                 self.expect_word("to")?;
-                Ok(SchemaMigration::ChangeDefault {
-                    owner,
-                    field,
-                    value: self.value(0)?,
-                })
+                if (self.word("next") || self.word("uuid_v7") || self.word("now"))
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|token| token.kind == Kind::Open('('))
+                {
+                    Ok(SchemaMigration::ChangeGeneratedDefault {
+                        table: owner,
+                        field,
+                        generator: self.generated_default()?,
+                    })
+                } else {
+                    Ok(SchemaMigration::ChangeDefault {
+                        owner,
+                        field,
+                        value: self.value(0)?,
+                    })
+                }
             } else if self.word("field") {
                 self.bump();
                 let (owner, field) = self.migration_member("field")?;

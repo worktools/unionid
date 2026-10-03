@@ -51,6 +51,9 @@ impl Database {
         // This batch may contain children before any parent batch is built.
         // Validate identities/types now; Ready validates complete row/posting
         // existence across the entire unpublished target generation.
+        batch
+            .validate_generated_state()
+            .map_err(|error| Error::new("E_MIGRATION", error.message))?;
         batch.rebind_migration_batch_references()?;
         batch.advance_schema_revision()?;
         batch.sequence = self
@@ -69,6 +72,9 @@ impl Database {
         for step in steps {
             candidate.apply_schema_migration(step)?;
         }
+        candidate
+            .validate_generated_state()
+            .map_err(|error| Error::new("E_MIGRATION", error.message))?;
         candidate.rebuild_references()?;
         *self = candidate;
         Ok(QueryResponse::ok_message(format!(
@@ -78,10 +84,32 @@ impl Database {
 
     fn apply_schema_migration(&mut self, step: SchemaMigration) -> Result<()> {
         match step {
+            SchemaMigration::AddSequence { name, start } => {
+                self.create_sequence(name, start).map(|_| ())
+            }
+            SchemaMigration::RenameSequence { from, to } => self.rename_sequence(&from, to),
+            SchemaMigration::DropSequence { name } => self.drop_sequence(&name),
+            SchemaMigration::ChangeGeneratedDefault {
+                table,
+                field,
+                generator,
+            } => {
+                let columns = self.table(&table)?.schema.clone();
+                let policy = self.bind_generated_defaults(
+                    &columns,
+                    &[crate::query::TableDefault { field, generator }],
+                )?;
+                let Some(DbObject::Table(target)) = self.objects.get_mut(&table) else {
+                    unreachable!()
+                };
+                target.generated_defaults.extend(policy);
+                Ok(())
+            }
+
             SchemaMigration::AddReference(spec) => self.add_migration_reference(&spec),
             SchemaMigration::DropReference(spec) => self.drop_reference(&spec).map(|_| ()),
             SchemaMigration::AddType { name, ty } => {
-                if self.objects.contains_key(&name) {
+                if self.objects.contains_key(&name) || self.sequences.contains_key(&name) {
                     return Err(Error::new(
                         "E_SCHEMA",
                         format!("name '{name}' is already used by a table"),
@@ -94,6 +122,7 @@ impl Database {
                 table,
                 row_type,
                 key,
+                defaults,
             } => {
                 let definition = self.catalog.types.get(&row_type).ok_or_else(|| {
                     Error::new("E_SCHEMA", format!("unknown row type '{row_type}'"))
@@ -101,8 +130,15 @@ impl Database {
                 let ScalarType::Record(columns) = self.catalog.underlying(&definition.ty)? else {
                     return Err(Error::new("E_TYPE", "a table's row type must be a record"));
                 };
-                self.create_table(table, columns.clone(), Some(definition.id), key)
-                    .map(|_| ())
+                let columns = columns.clone();
+                let row_type = definition.id;
+                let policies = self.bind_generated_defaults(&columns, &defaults)?;
+                self.create_table(table.clone(), columns, Some(row_type), key)?;
+                let Some(DbObject::Table(target)) = self.objects.get_mut(&table) else {
+                    unreachable!()
+                };
+                target.generated_defaults = policies;
+                Ok(())
             }
             SchemaMigration::DropTable { table } => self.drop_table(&table),
             SchemaMigration::RenameTable { from, to } => self.rename_table(&from, to),
@@ -159,6 +195,39 @@ impl Database {
         }
     }
 
+    fn rename_sequence(&mut self, from: &str, to: String) -> Result<()> {
+        if self.objects.contains_key(&to)
+            || self.catalog.types.contains_key(&to)
+            || self.sequences.contains_key(&to)
+        {
+            return Err(Error::new(
+                "E_SCHEMA",
+                format!("schema name '{to}' already exists"),
+            ));
+        }
+        let mut sequence = self
+            .sequences
+            .remove(from)
+            .ok_or_else(|| Error::new("E_SCHEMA", format!("unknown sequence '{from}'")))?;
+        sequence.name = to.clone();
+        self.sequences.insert(to, sequence);
+        Ok(())
+    }
+
+    fn drop_sequence(&mut self, name: &str) -> Result<()> {
+        let sequence = self
+            .sequences
+            .get(name)
+            .ok_or_else(|| Error::new("E_SCHEMA", format!("unknown sequence '{name}'")))?;
+        for table in self.schema_tables() {
+            if table.generated_defaults.values().any(|generator| matches!(generator, crate::model::BoundGeneratedDefault::Next(id) if *id == sequence.id)) {
+                return Err(Error::new("E_MIGRATION", format!("cannot drop sequence '{name}'; it is referenced by table '{}'", table.name)));
+            }
+        }
+        self.sequences.remove(name);
+        Ok(())
+    }
+
     fn drop_type(&mut self, name: &str) -> Result<()> {
         let id = self
             .catalog
@@ -197,7 +266,10 @@ impl Database {
     }
 
     fn rename_table(&mut self, from: &str, to: String) -> Result<()> {
-        if self.objects.contains_key(&to) || self.catalog.types.contains_key(&to) {
+        if self.objects.contains_key(&to)
+            || self.catalog.types.contains_key(&to)
+            || self.sequences.contains_key(&to)
+        {
             return Err(Error::new(
                 "E_SCHEMA",
                 format!("schema name '{to}' already exists"),
@@ -219,7 +291,10 @@ impl Database {
 
     fn rename_type(&mut self, from: &str, to: String) -> Result<()> {
         require_uppercase_name(&to, "type")?;
-        if self.catalog.types.contains_key(&to) || self.objects.contains_key(&to) {
+        if self.catalog.types.contains_key(&to)
+            || self.objects.contains_key(&to)
+            || self.sequences.contains_key(&to)
+        {
             return Err(Error::new(
                 "E_SCHEMA",
                 format!("schema name '{to}' already exists"),
@@ -348,6 +423,25 @@ impl Database {
     }
 
     fn drop_default(&mut self, owner: &str, field: &str) -> Result<()> {
+        if self.objects.contains_key(owner) {
+            let field_id = self
+                .table(owner)?
+                .schema
+                .iter()
+                .find(|column| column.name == field)
+                .ok_or_else(|| Error::new("E_FIELD", format!("unknown field '{owner}.{field}'")))?
+                .id;
+            let Some(DbObject::Table(table)) = self.objects.get_mut(owner) else {
+                unreachable!()
+            };
+            if table.generated_defaults.remove(&field_id).is_none() {
+                return Err(Error::new(
+                    "E_MIGRATION",
+                    format!("field '{owner}.{field}' has no generated default"),
+                ));
+            }
+            return Ok(());
+        }
         let old_catalog = self.catalog.clone();
         let owner_id = self.named_type_id(owner)?;
         let field_id = direct_record_field(&old_catalog, owner, field)?.id;

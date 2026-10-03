@@ -112,3 +112,22 @@ fn generator_syntax_rejects_ambiguous_or_unsupported_forms() {
         InputStatus::Complete
     ));
 }
+
+#[test]
+fn generated_migrations_format_and_reparse_with_existing_constant_defaults() {
+    for source in [
+        "migration generated {\nadd sequence ids {start - 4}\nadd struct Item {id: int, created_at: timestamp}\nadd table items: Item {key id, default id = next(ids), default created_at = now()}\nrename sequence ids to item_ids\nchange default items.id to next(item_ids)\ndrop default items.created_at\ndrop default items.id\ndrop sequence item_ids\n}",
+        "migration plain {\nadd sequence ids\nadd struct Item {id: int}\nadd table items Item key id\nchange default Item.id to 1\nchange default items.id to next(ids)\n}",
+    ] {
+        let formatted = format_source(source).unwrap();
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+        assert!(!formatted.contains(';'));
+    }
+    for source in [
+        "migration bad {change default items.id to next(ids, extra)}",
+        "migration bad {change default items.created_at to now(1)}",
+        "migration bad {add sequence ids {start 1.5}}",
+    ] {
+        assert!(parse(source).is_err(), "{source}");
+    }
+}
