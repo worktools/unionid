@@ -121,3 +121,99 @@ fn preparation_explain_explicit_values_and_read_only_do_not_call_sources() {
     assert_eq!(sources.clock_reads.load(Ordering::SeqCst), 0);
     assert_eq!(sources.entropy_reads.load(Ordering::SeqCst), 0);
 }
+
+fn interruption_journey(engine: &mut Engine) {
+    use crate::db::generated::TestGenerationInterrupt;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Instant;
+    assert!(engine.execute(SETUP).ok);
+    let schema = engine.schema_info();
+    let mut expected_id = 1;
+    for timed in [false, true] {
+        let sequence = engine.committed.db.sequence;
+        let receipt_count = engine.idempotency_status().unwrap().count;
+        let signal = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let interrupt = if timed {
+            TestGenerationInterrupt::Deadline(deadline)
+        } else {
+            TestGenerationInterrupt::Cancel(signal.clone())
+        };
+        let sources = TestGenerationSources::interrupt_after_entropy(UNIX_EPOCH, 1, interrupt);
+        inject(engine, sources.clone());
+        let control = ExecutionControl::cancellable(deadline, signal, None);
+        let key = if timed { "timeout" } else { "cancel" };
+        let failure = engine
+            .execute_idempotent_with_deadline(
+                key,
+                DIGEST,
+                BATCH,
+                BTreeMap::new(),
+                None,
+                Some(&control),
+            )
+            .unwrap_err();
+        assert_eq!(
+            failure.code,
+            if timed { "E_TIMEOUT" } else { "E_CANCELLED" }
+        );
+        // Entropy is sampled only after allocating the sequence ID and time:
+        // the failure therefore occurs inside allocation, not at admission.
+        assert!(sources.entropy_reads.load(Ordering::SeqCst) >= 1);
+        assert_eq!(sources.clock_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.committed.db.sequence, sequence);
+        assert_eq!(engine.schema_info(), schema);
+        assert_eq!(engine.idempotency_status().unwrap().count, receipt_count);
+        let rows = engine.execute("from items");
+        assert!(rows.ok);
+        assert_eq!(rows.rows.len(), (expected_id - 1) as usize);
+        let good = TestGenerationSources::new(UNIX_EPOCH, None);
+        inject(engine, good.clone());
+        let retry = engine
+            .execute_idempotent_with_params(key, DIGEST, BATCH, BTreeMap::new(), None)
+            .unwrap();
+        assert!(!retry.replayed);
+        assert!(retry.response.rows[0]["id"].cmp_eq(&crate::Value::Int(expected_id)));
+        assert!(retry.response.rows[1]["id"].cmp_eq(&crate::Value::Int(expected_id + 1)));
+        expected_id += 2;
+        let replay = engine
+            .execute_idempotent_with_params(key, DIGEST, BATCH, BTreeMap::new(), None)
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(good.entropy_reads.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[test]
+fn cancellation_and_deadline_after_generation_roll_back_memory_candidates() {
+    interruption_journey(&mut Engine::memory());
+}
+
+#[test]
+fn cancellation_and_deadline_after_generation_do_not_publish_native_counters_or_receipts() {
+    let directory = std::env::temp_dir().join(format!(
+        "unionid-generated-interruption-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("data.redb");
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.upgrade_storage(14).unwrap();
+    engine
+        .install_storage_capabilities(&["generated_defaults".into()], None)
+        .unwrap();
+    interruption_journey(&mut engine);
+    drop(engine);
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.check_integrity().unwrap();
+    assert_eq!(engine.idempotency_status().unwrap().count, 2);
+    let next = engine.execute("insert items {} | returning id");
+    assert!(next.ok);
+    assert!(next.rows[0]["id"].cmp_eq(&crate::Value::Int(5)));
+    drop(engine);
+    std::fs::remove_dir_all(directory).unwrap();
+}

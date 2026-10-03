@@ -1,6 +1,6 @@
 # RFC 0027：受控生成默认值 / Controlled generated defaults
 
-- 状态 / Status: proposed; not implemented or available in published binaries
+- 状态 / Status: implementation candidate in [#475](https://github.com/worktools/unionid/pull/475); not available in published binaries
 - Milestone: v0.15.0
 - Tracking: [#404](https://github.com/worktools/unionid/issues/404)
 - Storage design dependency: [#439](https://github.com/worktools/unionid/issues/439)
@@ -11,7 +11,7 @@
 
 让应用省略服务端生成的 ID、UUID 和创建时间。首版只支持表的顶层字段默认值，不引入查询中的可变函数、触发器或任意默认表达式。已有 struct 的常量默认值保持不变；生成策略属于 table，不改变可复用 ADT 本身。
 
-下面是待实现的规范源码，不是当前可执行示例。调用括号区分受控生成器与常量字段默认值，兼容 Rust macro token；不添加分号。
+下面的规范源码已在开发候选实现中执行验证，正式发布尚未完成。调用括号区分受控生成器与常量字段默认值，兼容 Rust macro token；不添加分号。
 
 ```text
 sequence account_ids {start 1}
@@ -77,7 +77,7 @@ insert / insert many 支持省略生成字段。upsert / upsert many 必须显�
 
 Provide server-generated IDs, UUIDs and creation timestamps through top-level table-field defaults. Do not add volatile query functions, triggers or arbitrary default expressions. Existing struct constant defaults remain unchanged; generation belongs to the table rather than the reusable ADT.
 
-The source example above is proposed syntax, not executable today. Parentheses distinguish controlled generator calls from constant defaults and work with Rust macro tokens; no semicolons are added. A named sequence is a separate stable-ID schema object, with an i64 literal start (default 1) and increment 1. No cycle, caching or reset. `next(seq)` accepts only a declared sequence identifier. The three generators produce int, uuid and timestamp, including contextual initialization of nominal fields with the same underlying type. Reject implicit text/Option conversion, duplicate defaults and invalid fields at schema binding.
+The source example above executes in the development implementation candidate; formal release acceptance is still pending. Parentheses distinguish controlled generator calls from constant defaults and work with Rust macro tokens; no semicolons are added. A named sequence is a separate stable-ID schema object, with an i64 literal start (default 1) and increment 1. No cycle, caching or reset. `next(seq)` accepts only a declared sequence identifier. The three generators produce int, uuid and timestamp, including contextual initialization of nominal fields with the same underlying type. Reject implicit text/Option conversion, duplicate defaults and invalid fields at schema binding.
 
 Generate only missing fields. Explicit values, including valid None, win; table defaults precede struct constants. Keep existing nested constant completion, but disallow generated defaults inside paths, enum payloads, lists and maps in this first delivery. Explicit IDs never advance a sequence or invoke max+1; choose start deliberately for existing data and retain ordinary uniqueness checks.
 

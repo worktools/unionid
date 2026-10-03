@@ -70,6 +70,22 @@ impl GenerationContext {
                 return Err(Error::new("E_GENERATION", "UUID entropy source failed"));
             }
             random.fill(call as u8);
+            if let Some((at, interrupt)) = &sources.entropy_interrupt
+                && *at == call
+            {
+                match interrupt {
+                    TestGenerationInterrupt::Cancel(signal) => {
+                        signal.store(true, std::sync::atomic::Ordering::Release)
+                    }
+                    TestGenerationInterrupt::Deadline(deadline) => {
+                        if let Some(remaining) =
+                            deadline.checked_duration_since(std::time::Instant::now())
+                        {
+                            std::thread::sleep(remaining);
+                        }
+                    }
+                }
+            }
         } else {
             getrandom::fill(&mut random)
                 .map_err(|_| Error::new("E_GENERATION", "UUID entropy source failed"))?;
@@ -89,6 +105,14 @@ pub(crate) struct TestGenerationSources {
     pub clock_reads: std::sync::atomic::AtomicUsize,
     pub entropy_reads: std::sync::atomic::AtomicUsize,
     pub fail_entropy_at: Option<usize>,
+    entropy_interrupt: Option<(usize, TestGenerationInterrupt)>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) enum TestGenerationInterrupt {
+    Cancel(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    Deadline(std::time::Instant),
 }
 
 #[cfg(test)]
@@ -97,9 +121,22 @@ impl TestGenerationSources {
         std::sync::Arc::new(Self {
             clock,
             fail_entropy_at,
+            entropy_interrupt: None,
             clock_reads: std::sync::atomic::AtomicUsize::new(0),
             entropy_reads: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    pub fn interrupt_after_entropy(
+        clock: SystemTime,
+        at: usize,
+        interrupt: TestGenerationInterrupt,
+    ) -> std::sync::Arc<Self> {
+        let mut sources = Self::new(clock, None);
+        std::sync::Arc::get_mut(&mut sources)
+            .unwrap()
+            .entropy_interrupt = Some((at, interrupt));
+        sources
     }
 }
 

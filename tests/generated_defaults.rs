@@ -1194,3 +1194,172 @@ fn old_release_rejects_generated_storage_without_changing_business_state() {
         2
     );
 }
+
+#[test]
+#[ignore = "requires UNIONID_FORMAT14_READER built before generated_defaults support"]
+fn format14_reader_rejects_unknown_generated_capability_before_catalog_decoding() {
+    let binary = std::env::var("UNIONID_FORMAT14_READER").unwrap();
+    let version = std::process::Command::new(&binary)
+        .args(["version", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(version.status.success());
+    let version: serde_json::Value = serde_json::from_slice(&version.stdout).unwrap();
+    assert!(
+        version["readable_storage_formats"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(14))
+    );
+    assert!(
+        !version["supported_storage_capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("generated_defaults"))
+    );
+    let dir = common::TempDir::new();
+    let path = dir.0.join("native-old-reader.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(14).unwrap();
+        ok(
+            &mut engine,
+            "struct Legacy {id: int}\ntable legacy: Legacy {key id}\ninsert legacy {id: 90}",
+        );
+    }
+    let read = || {
+        std::process::Command::new(&binary)
+            .args(["run", "--db"])
+            .arg(&path)
+            .args(["--read-only", "--query", "from legacy", "--format", "json"])
+            .output()
+            .unwrap()
+    };
+    let accepted = read();
+    assert!(
+        accepted.status.success(),
+        "stdout={}, stderr={}",
+        String::from_utf8_lossy(&accepted.stdout),
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let result: QueryResponse = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert!(result.ok);
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&Value::Int(90)));
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine
+            .install_storage_capabilities(&["generated_defaults".into()], None)
+            .unwrap();
+        ok(&mut engine, SETUP);
+        ok(&mut engine, r#"insert items {owner: "first"}"#);
+    }
+    let before = dir.0.join("before.json");
+    let after = dir.0.join("after.json");
+    unionid::backup::create(&path, &before).unwrap();
+    let rejected = read();
+    let stdout = String::from_utf8_lossy(&rejected.stdout);
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        !rejected.status.success(),
+        "stdout={stdout}, stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("unsupported required capability")
+            || stderr.contains("unsupported required capability"),
+        "stdout={stdout}, stderr={stderr}"
+    );
+    unionid::backup::create(&path, &after).unwrap();
+    assert!(
+        std::fs::read(before).unwrap() == std::fs::read(after).unwrap(),
+        "old reader changed durable logical state"
+    );
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.check_integrity().unwrap();
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                r#"insert items {owner: "next"} | returning id"#
+            ),
+            0
+        ),
+        2
+    );
+}
+
+#[test]
+fn independent_tcp_writers_allocate_distinct_generated_keys() {
+    #[derive(Debug, serde::Deserialize)]
+    struct Generated {
+        id: i64,
+        public_id: unionid::scalars::Uuid,
+        created_at: unionid::scalars::Timestamp,
+    }
+    let dir = common::TempDir::new();
+    let path = dir.0.join("writers.redb");
+    {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.upgrade_storage(14).unwrap();
+        engine
+            .install_storage_capabilities(&["generated_defaults".into()], None)
+            .unwrap();
+        ok(&mut engine, SETUP);
+    }
+    let mut server = common::Server::start(&["--db", path.to_str().unwrap()]);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for owner in ["first", "second"] {
+        let mut client = unionid::TcpClient::connect(&server.addr).unwrap();
+        let barrier = barrier.clone();
+        tasks.push(std::thread::spawn(move || {
+            let request = unionid::ProtocolRequest::query(
+                owner,
+                format!(
+                    "insert items {{owner: \"{owner}\"}} | returning {{id, public_id, created_at}}"
+                ),
+            )
+            .with_version(2)
+            .unwrap()
+            .with_idempotency_key(owner)
+            .unwrap();
+            barrier.wait();
+            let response = client.request(&request).unwrap();
+            assert!(response.ok, "{:?}", response.error);
+            assert!(!response.idempotency.as_ref().unwrap().replayed);
+            response.typed_rows::<Generated>().unwrap().remove(0)
+        }));
+    }
+    let first = tasks.remove(0).join().unwrap();
+    let second = tasks.remove(0).join().unwrap();
+    let mut ids = [first.id, second.id];
+    ids.sort();
+    assert_eq!(ids, [1, 2]);
+    assert_ne!(first.public_id, second.public_id);
+    server.shutdown();
+    let mut engine = Engine::open_redb(&path).unwrap();
+    engine.check_integrity().unwrap();
+    assert_eq!(engine.idempotency_status().unwrap().count, 2);
+    for generated in [first, second] {
+        let row = ok(
+            &mut engine,
+            &format!(
+                "from items | filter id == {} | select {{id, public_id, created_at}}",
+                generated.id
+            ),
+        );
+        let durable = row.typed_rows::<Generated>().unwrap().remove(0);
+        assert_eq!(durable.public_id, generated.public_id);
+        assert_eq!(durable.created_at, generated.created_at);
+    }
+    assert_eq!(
+        id(
+            &ok(
+                &mut engine,
+                r#"insert items {owner: "third"} | returning id"#
+            ),
+            0
+        ),
+        3
+    );
+}
