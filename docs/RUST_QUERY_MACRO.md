@@ -109,3 +109,27 @@ query add_session {
 宏在编译期检查类型，目标行是否存在则由运行时数据库在原子写入中检查：不存在的目标返回 `E_CONSTRAINT`，被引用的目标不能删除或修改 key。直接 Optional 引用中的 `None` 不要求目标行；删除引用属于 schema drift，旧绑定返回 `E_SCHEMA_CHANGED`，需要重新生成。ADT 目标可使用全表 unique index；主键仍只接受当前支持的 int/text/uuid 类型。完整内存与 redb 重启示例见 `query-macro/tests/references.rs` 和配套 schema；本能力尚在 v0.14 开发中。
 
 Reference declarations participate in the macro's schema identity. Generated fields remain ordinary Rust structs, enums and `Option<T>`; pass an entire typed row with `$session` as above. Compile-time checks validate types, while atomic runtime writes enforce target existence and restrict deletion/key changes. Direct Optional references skip `None`. Removing the relationship invalidates existing bindings with `E_SCHEMA_CHANGED`. Use an unconditional unique index for ADT targets; primary keys retain their existing int/text/uuid restriction. The reference macro tests cover memory, redb reopen, missing targets and restricted deletion. This capability is still in development for v0.14.
+
+## 生成字段输入 / Generated field inputs (development)
+
+声明 `default id = next(ids)` 等表级生成策略后，`insert items $item` 的生成输入会独立于完整 `Item` ADT。例如查询名 `add_item`、参数名 `item` 对应 `add_item::AddItemParamsItem`：生成字段采用 `Option<T>`，`None` 省略字段，`Some(value)` 显式覆盖；普通字段、enum 和嵌套 Option 保持原 ADT 类型。
+
+```rust
+let output = add_item::add_item(
+    &mut engine,
+    add_item::AddItemParams {
+        item: add_item::AddItemParamsItem {
+            id: None,
+            owner: "Ada".into(),
+            state: State::Pending,
+            detail: Detail {note: None},
+            public_id: None,
+            created_at: None,
+        },
+    },
+)?;
+```
+
+这里的完整 schema 与运行示例见 `query-macro/tests/generated.unid` 和 `generated.rs`。专用 serializer 直接序列化 `Some(value)` 中的值，而不是产生数据库 `Some(...)` constructor；嵌套 `Detail.note: None` 仍是业务 ADT 的 None。批量写入使用 `Vec<add_batch::AddBatchParamsItems>` 的同一规则。upsert 输入的主键仍是必填原类型，其余生成字段可省略并按完整替换规则重新生成。输出 `Row` 的 ID、UUID、timestamp 仍是完整原类型，不变成 Option。query description version 2 的 `omittable_fields` 描述这些表输入规则；没有此元数据的 version 1 描述仍可生成原绑定。此能力仍未发布，持久库需显式安装 `generated_defaults` native capability。
+
+With table generation policies, generated insert inputs are separate from complete stored ADTs. `None` omits a generated field and `Some(value)` supplies an explicit value. A dedicated serializer emits the supplied value directly, avoiding an accidental database Option constructor. Ordinary fields and nested Option values retain their ADT representation. Batch inputs use `Vec<add_batch::AddBatchParamsItems>` with the same rules per element. Upsert keys remain required in their original type; other missing generated fields follow full-replacement defaults. Output IDs, UUIDs and timestamps remain complete types. Query-description version 2 carries table input `omittable_fields`; version 1 without omission metadata retains its original binding behavior. This is unpublished development and durable use requires explicitly installing the native `generated_defaults` capability.

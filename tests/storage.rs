@@ -1971,7 +1971,7 @@ fn storage_headers_are_not_ignored_by_legacy_readers() {
     for (json, message) in [
         (canonical.to_string(), "explicitly upgraded physical format"),
         (
-            canonical.replace("[]", "[\"generated_defaults\"]"),
+            canonical.replace("[]", "[\"future_feature\"]"),
             "unsupported required capability",
         ),
         (

@@ -334,6 +334,9 @@ trait DurableBackend: Send {
     fn supports_references(&self) -> bool {
         false
     }
+    fn supports_generated_defaults(&self) -> bool {
+        false
+    }
     fn supports_bounded_row_mutation(&self) -> bool {
         false
     }
@@ -549,6 +552,10 @@ impl DurableBackend for RedbStore {
     }
     fn supports_references(&self) -> bool {
         RedbStore::supports_references(self)
+    }
+
+    fn supports_generated_defaults(&self) -> bool {
+        RedbStore::supports_generated_defaults(self)
     }
 
     fn supports_bounded_row_mutation(&self) -> bool {
@@ -1454,6 +1461,20 @@ impl Engine {
 
     pub fn prepare(&self, source: &str) -> Result<PreparedQuery> {
         let mut statements = syntax::parse(source)?;
+        if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
+            && statements
+                .iter()
+                .any(|located| located.statement.declares_generated_defaults())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
+            ));
+        }
         crate::script::preflight(&statements)?;
         if self.storage_mode != StorageMode::Memory
             && self
@@ -1655,6 +1676,20 @@ impl Engine {
         page: Option<PageSpec>,
     ) -> Result<()> {
         let mut statements = syntax::parse(source)?;
+        if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
+            && statements
+                .iter()
+                .any(|located| located.statement.declares_generated_defaults())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
+            ));
+        }
         if let Some(page) = page {
             attach_structured_page(&mut statements, page)?;
         }
@@ -1679,9 +1714,16 @@ impl Engine {
                 if matches!(located.statement, Statement::Expect { .. }) {
                     continue;
                 }
-                preview
-                    .execute(located.statement.clone())
-                    .map_err(|error| error.at(located.span))?;
+                if crate::script::is_dml(&located.statement) {
+                    let mut mutation = located.statement.clone();
+                    preview
+                        .bind_mutation_explain(&mut mutation, None)
+                        .map_err(|error| error.at(located.span))?;
+                } else {
+                    preview
+                        .execute(located.statement.clone())
+                        .map_err(|error| error.at(located.span))?;
+                }
             }
         }
         let types = preview
@@ -1956,6 +1998,20 @@ impl Engine {
             ));
         }
         let mut statements = syntax::parse(source)?;
+        if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
+            && statements
+                .iter()
+                .any(|located| located.statement.declares_generated_defaults())
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
+            ));
+        }
         if let Some(page) = page {
             attach_structured_page(&mut statements, page)?;
         }
@@ -2102,6 +2158,9 @@ impl Engine {
         } else {
             None
         };
+        if let Some(candidate) = &mut candidate {
+            candidate.begin_generation_request();
+        }
         let mut response = QueryResponse::ok_message("ok");
         let include_summaries = statements.len() > 1;
         let mut summaries = if include_summaries {
@@ -2712,6 +2771,18 @@ impl Engine {
         let mut target = source_database
             .migration_target(&file.id, &file.steps)
             .map_err(|error| migration_file_error(file, error))?;
+        if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
+            && target.has_generated_defaults()
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
+            ));
+        }
         if target.requires_map_storage()
             && self
                 .durable
@@ -3079,6 +3150,19 @@ impl Engine {
         receipt_state: Option<ReceiptMap>,
         write_set: Option<LogicalWriteSet>,
     ) -> Result<(u64, Option<DurableCommitProfile>)> {
+        if self.storage_mode != StorageMode::Memory
+            && self
+                .durable
+                .as_ref()
+                .is_none_or(|durable| !durable.supports_generated_defaults())
+            && candidate.has_generated_defaults()
+        {
+            return Err(Error::new(
+                "E_STORAGE_UPGRADE_REQUIRED",
+                "generated defaults require native storage capability generated_defaults; explicitly upgrade to format 14 and install the capability",
+            ));
+        }
+
         // A committed root never carries changes forward into the next
         // candidate. Row-only callers already extracted the supplied set;
         // full-rebuild callers intentionally discard any internal details.
@@ -3912,6 +3996,14 @@ impl Engine {
 
     pub fn schema_info(&self) -> crate::db::SchemaInfo {
         self.committed.db.schema_info()
+    }
+
+    pub(crate) fn generated_input_shape(
+        &self,
+        table: &str,
+        upsert: bool,
+    ) -> Result<Option<(crate::portable::TypeShape, Vec<String>)>> {
+        self.committed.db.generated_input_shape(table, upsert)
     }
 
     /// Describe the current catalog and retain its runtime value validator.
@@ -5418,6 +5510,7 @@ mod tests {
                 table: "native_rows".into(),
                 row_type: "NativeRow".into(),
                 key: None,
+                defaults: Vec::new(),
             })
             .unwrap();
         Arc::make_mut(&mut Arc::make_mut(&mut engine.committed).db)
@@ -5513,3 +5606,6 @@ mod tests {
         assert!(replay.replayed);
     }
 }
+
+#[cfg(test)]
+mod generation_tests;

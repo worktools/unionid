@@ -185,6 +185,18 @@ fn render_rust_query_body(
     description: &QueryDescription,
     name: &str,
 ) -> Result<()> {
+    if !matches!(description.version, 1 | 2)
+        || (description.version == 1
+            && description
+                .parameters
+                .iter()
+                .any(|parameter| !parameter.omittable_fields.is_empty()))
+    {
+        return Err(Error::new(
+            "E_QUERY_CONTRACT",
+            "unsupported query description or omission metadata version",
+        ));
+    }
     let function_name = rust_value_name(name)?;
     let type_prefix = rust_type_name(name)?;
     writeln!(
@@ -241,11 +253,73 @@ fn emit_query_params(
     for parameter in &description.parameters {
         let field = unique_query_field(&mut seen, &parameter.name, "query parameter")?;
         let nested = format!("{name}{}", type_component(&parameter.name)?);
-        let ty = format_shape(&parameter.shape, &nested, helpers)?;
+        let ty = if parameter.omittable_fields.is_empty() {
+            format_shape(&parameter.shape, &nested, helpers)?
+        } else {
+            format_input_shape(
+                &parameter.shape,
+                &nested,
+                &parameter.omittable_fields,
+                helpers,
+            )?
+        };
         writeln!(output, "    pub {field}: {ty},").unwrap();
     }
     writeln!(output, "}}\n").unwrap();
     Ok(())
+}
+
+fn format_input_shape(
+    shape: &TypeShape,
+    name: &str,
+    omitted: &[String],
+    helpers: &mut String,
+) -> Result<String> {
+    if let TypeShape::List { item, .. } = shape {
+        return Ok(format!(
+            "Vec<{}>",
+            format_input_shape(item, name, omitted, helpers)?
+        ));
+    }
+    let TypeShape::Record { fields } = shape else {
+        return Err(Error::new(
+            "E_QUERY_CONTRACT",
+            "omission metadata requires a record input",
+        ));
+    };
+    let field_count = omitted.len();
+    let omitted = omitted.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if omitted.len() != field_count
+        || omitted.is_empty()
+        || omitted
+            .iter()
+            .any(|name| !fields.iter().any(|field| field.name == *name))
+    {
+        return Err(Error::new(
+            "E_QUERY_CONTRACT",
+            "unknown omittable input field",
+        ));
+    }
+    let mut body = format!(
+        "#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]\npub struct {name} {{\n"
+    );
+    let mut seen = BTreeSet::new();
+    for field in fields {
+        let rust_field = unique_name(&mut seen, &field.name, "generated input field")?;
+        let nested = format!("{name}{}", type_component(&field.name)?);
+        let ty = format_shape(&field.shape, &nested, helpers)?;
+        if escaped(&field.name) {
+            writeln!(body, "    #[serde(rename = {:?})]", field.name).unwrap();
+        }
+        if omitted.contains(field.name.as_str()) {
+            writeln!(body, "    #[serde(default, skip_serializing_if = \"Option::is_none\", serialize_with = \"{name}::serialize_present\")]\n    pub {rust_field}: Option<{ty}>,").unwrap();
+        } else {
+            writeln!(body, "    pub {rust_field}: {ty},").unwrap();
+        }
+    }
+    writeln!(body, "}}\nimpl {name} {{\n    fn serialize_present<T: serde::Serialize, S: serde::Serializer>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error> {{\n        serde::Serialize::serialize(value.as_ref().ok_or_else(|| <S::Error as serde::ser::Error>::custom(\"omitted input field reached serializer\"))?, serializer)\n    }}\n}}\n").unwrap();
+    helpers.push_str(&body);
+    Ok(name.into())
 }
 
 fn emit_query_row(

@@ -18,6 +18,18 @@ canonical source and is convenient for a human or an LLM context. Use `.tables`,
 For the stable command surface, error-code vocabulary, and constraint/hint contract in one
 machine-readable object, run `unionid agent --format json` before generating code.
 
+## Generated inputs (development candidate)
+
+When the current catalog declares table defaults `next(sequence)`, `uuid_v7()` or
+`now()`, inserts may omit those top-level fields. Never invent a generator as a
+query expression or assume a nested field has a generated policy. Upsert still
+requires its primary key explicitly. Generator policies appear in schema source
+and portable metadata; inspect the actual catalog first. Durable use requires
+explicit format-14 upgrade and installation of `generated_defaults`; DDL does not
+install it. Use protocol v2 for UUID/timestamp output. Reuse the same idempotency
+key and request after a lost response to retain original generated values.
+Read `unionid docs show generated-defaults` for setup, limits, rollback and migration.
+
 ## Source rules
 
 - Source is UTF-8 and semicolon-free. Newlines separate statements and multiline items.

@@ -59,6 +59,25 @@
 //! }
 //! ```
 
+//! Generated defaults may be omitted on insert, but an upsert key is required:
+//!
+//! ```compile_fail,E0308
+//! unionid_query::queries! {
+//!     schema "tests/generated.unid"
+//!     query replace_item {upsert items $item}
+//! }
+//! let _ = replace_item::ReplaceItemParams {
+//!     item: replace_item::ReplaceItemParamsItem {
+//!         id: None,
+//!         owner: "missing key".into(),
+//!         state: State::Pending,
+//!         detail: Detail {note: None},
+//!         public_id: None,
+//!         created_at: None,
+//!     },
+//! };
+//! ```
+
 use std::path::{Path, PathBuf};
 
 use proc_macro::TokenStream;

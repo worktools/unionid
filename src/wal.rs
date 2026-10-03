@@ -82,6 +82,7 @@ impl Wal {
 }
 
 pub fn replay_from_path(path: &Path, db: &mut Database) -> Result<usize, String> {
+    db.ensure_legacy_generation().map_err(|e| e.to_string())?;
     if !path.exists() {
         return Ok(0);
     }
@@ -148,6 +149,14 @@ pub fn replay_from_path(path: &Path, db: &mut Database) -> Result<usize, String>
         };
         let statements = syntax::parse_legacy_wal(&source)
             .map_err(|e| format!("WAL line {line_number}: {e}"))?;
+        if statements
+            .iter()
+            .any(|statement| statement.statement.declares_generated_defaults())
+        {
+            return Err(format!(
+                "WAL line {line_number}: generated defaults require native redb storage; source replay cannot preserve generated values"
+            ));
+        }
         if !statements.iter().any(|s| s.statement.is_mutating()) {
             return Err(format!("WAL line {line_number}: no mutation"));
         }

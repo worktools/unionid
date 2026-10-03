@@ -14,6 +14,7 @@ pub const MAX_STATEMENT_SUMMARY_BYTES: usize = 512 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatementKind {
+    CreateSequence,
     DefineType,
     CreateTable,
     Table,
@@ -43,6 +44,7 @@ pub struct StatementSummary {
 
 pub(crate) fn kind(statement: &Statement) -> StatementKind {
     match statement {
+        Statement::CreateSequence { .. } => StatementKind::CreateSequence,
         Statement::DefineType { .. } => StatementKind::DefineType,
         Statement::CreateTable { .. } => StatementKind::CreateTable,
         Statement::TypedTable { .. } => StatementKind::Table,
@@ -154,6 +156,7 @@ mod tests {
     fn valid_summary_shapes_imply_the_public_byte_bound() {
         use StatementKind::*;
         for kind in [
+            CreateSequence,
             DefineType,
             CreateTable,
             Table,
@@ -184,10 +187,9 @@ mod tests {
                         Insert | InsertMany | Upsert | UpsertMany | Update | Delete => {
                             Some(usize::MAX)
                         }
-                        DefineType | CreateTable | Table | CreateIndex | CreateReference
-                        | DropReference | Migration | Explain | ExplainAnalyze | Query | Expect => {
-                            None
-                        }
+                        CreateSequence | DefineType | CreateTable | Table | CreateIndex
+                        | CreateReference | DropReference | Migration | Explain
+                        | ExplainAnalyze | Query | Expect => None,
                     };
                     StatementSummary {
                         index,

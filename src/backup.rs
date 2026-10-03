@@ -135,15 +135,20 @@ struct StreamingDatabase<'a> {
     tables: BTreeMap<String, DurableTable>,
     indexes: BTreeMap<String, BTreeMap<String, IndexDefinition>>,
     references: BTreeMap<u64, crate::db::ReferenceDefinition>,
+    sequences: BTreeMap<String, crate::db::generated::Sequence>,
 }
 
 impl<'a> StreamingDatabase<'a> {
     fn new(database: &'a Database, source: &'a dyn TypedRowSource) -> Self {
         let mut tables = BTreeMap::new();
         let mut references = BTreeMap::new();
+        let mut sequences = BTreeMap::new();
         let mut indexes = BTreeMap::<String, BTreeMap<String, IndexDefinition>>::new();
         for entry in database.durable_catalog_entries() {
             match entry {
+                DurableCatalogEntry::Sequence(sequence) => {
+                    sequences.insert(sequence.name.clone(), sequence);
+                }
                 DurableCatalogEntry::Reference(definition) => {
                     references.insert(definition.id, definition);
                 }
@@ -165,6 +170,7 @@ impl<'a> StreamingDatabase<'a> {
             tables,
             indexes,
             references,
+            sequences,
         }
     }
 }
@@ -174,10 +180,15 @@ impl Serialize for StreamingDatabase<'_> {
     where
         S: Serializer,
     {
-        let mut state = serializer
-            .serialize_struct("Database", if self.references.is_empty() { 6 } else { 7 })?;
+        let mut state = serializer.serialize_struct(
+            "Database",
+            6 + usize::from(!self.references.is_empty()) + usize::from(!self.sequences.is_empty()),
+        )?;
         if !self.references.is_empty() {
             state.serialize_field("reference_definitions", &self.references)?;
+        }
+        if !self.sequences.is_empty() {
+            state.serialize_field("sequences", &self.sequences)?;
         }
         state.serialize_field(
             "objects",
@@ -229,7 +240,10 @@ impl Serialize for StreamingTable<'_> {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("Table", 8)?;
+        let mut state = serializer.serialize_struct(
+            "Table",
+            8 + usize::from(!self.table.generated_defaults.is_empty()),
+        )?;
         state.serialize_field("object", "Table")?;
         state.serialize_field("id", &self.table.id)?;
         state.serialize_field("name", &self.table.name)?;
@@ -244,6 +258,9 @@ impl Serialize for StreamingTable<'_> {
         state.serialize_field("next_row_id", &self.table.next_row_id)?;
         state.serialize_field("row_type", &self.table.row_type)?;
         state.serialize_field("primary_key", &self.table.primary_key)?;
+        if !self.table.generated_defaults.is_empty() {
+            state.serialize_field("generated_defaults", &self.table.generated_defaults)?;
+        }
         state.end()
     }
 }
@@ -357,6 +374,12 @@ fn write_database_view_with_header(
     format_version: u32,
     storage_header: Option<&str>,
 ) -> Result<BackupInfo> {
+    if database.has_generated_defaults() && storage_header.is_none() {
+        return Err(Error::new(
+            "E_BACKUP",
+            "generated defaults require a native storage header in logical backup",
+        ));
+    }
     validate_backup_header(format_version, storage_header)?;
     if let Some(header) = storage_header {
         crate::redb_storage::StorageHeader::decode_transport(header)?
@@ -505,6 +528,12 @@ fn read_database_with_header(
                 "unsupported backup format version {}",
                 envelope.format_version
             ),
+        ));
+    }
+    if envelope.database.has_generated_defaults() && envelope.storage_header.is_none() {
+        return Err(Error::new(
+            "E_BACKUP",
+            "generated defaults require a native storage header in logical backup",
         ));
     }
     if raw.format_version != envelope.format_version

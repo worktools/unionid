@@ -98,3 +98,33 @@ fn cli_lists_and_reads_categorized_bundled_docs() {
             .contains("unionid docs list")
     );
 }
+
+#[test]
+fn generated_defaults_docs_are_discoverable_and_the_example_executes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+        .args(["docs", "show", "generated-defaults", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["category"], "application");
+    let content = document["content"].as_str().unwrap();
+    let example = content
+        .split("```unionid\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let mut engine = unionid::Engine::memory();
+    let result = engine.execute(example);
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.rows.len(), 1);
+    assert!(result.rows[0]["id"].cmp_eq(&unionid::Value::Int(1)));
+    assert!(content.contains("E_GENERATION"));
+    assert!(content.contains("protocol v2"));
+}

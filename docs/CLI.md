@@ -148,7 +148,7 @@ unionid schema rust --db app.redb --output src/schema.rs
 
 `schema check --file <schema.unid>` validates a declarative schema and prints its normalized form, and `schema print --db <db.redb>` prints the schema stored in a database. `schema rust` generates Rust `struct`/`enum` bindings from a schema file or an existing database; type mapping and recursion boxing follow RFC 0012. The output depends only on `serde` and `unionid::scalars`, Rust keyword field names get a `_` suffix, and schema files still accept only type/table/index declarations (a full script returns `E_SCHEMA`).
 
-`schema describe` 输出 [RFC 0014](rfc/0014-portable-adt-contract.md) 的 portable JSON（v0.14 开发中为 version 3，增加 typed references；version 1/2 仍可读取，但不能携带引用约束），供查询绑定生成器和未来宿主语言 adapter 使用。文件模式从声明建立独立 catalog；数据库模式描述 live catalog 的逐字节私有副本，使 redb 的恢复 bookkeeping 不会改变请求的原文件，同时保留 migration 后的稳定 ID。ID 是十进制字符串且只在一个数据库 lineage 内有意义：
+`schema describe` 输出 [RFC 0014](rfc/0014-portable-adt-contract.md) 的 portable JSON（当前生成默认值开发分支为 version 4，增加 sequences 和 table generated_defaults；versions 1–3 仍可读取，但旧版本不能携带其尚不支持的引用或生成策略），供查询绑定生成器和未来宿主语言 adapter 使用。文件模式从声明建立独立 catalog；数据库模式描述 live catalog 的逐字节私有副本，使 redb 的恢复 bookkeeping 不会改变请求的原文件，同时保留 migration 后的稳定 ID。ID 是十进制字符串且只在一个数据库 lineage 内有意义：
 
 ```bash
 unionid schema describe --file schema.unid
@@ -157,11 +157,11 @@ unionid schema describe --db app.redb --output schema.contract.json
 
 描述包含 schema identity、命名 ADT、递归 ref、精确标量约束、默认值/输入省略、表、主键和索引。它不会输出行、数据库 instance、cursor secret 或业务值。应用可通过 `PortableContract::validate_type` 使用与 prepared binding 相同的运行时校验；未知 variant 明确失败。
 
-`schema describe` emits the RFC 0014 portable JSON (version 3 in v0.14 development adds typed references; versions 1/2 remain readable but cannot carry reference constraints), used by query-binding generators and future host-language adapters. File mode creates an independent catalog from declarations, while database mode describes a private byte-for-byte copy of the live catalog so redb recovery bookkeeping cannot change the requested file; migration-stable IDs are preserved. IDs are decimal strings scoped to one database lineage. The description includes schema identity, named ADTs, recursive references, exact scalar constraints, defaults/omission, tables, keys, indexes, and typed references; it excludes rows, database instance identity, cursor secrets, and business values. `PortableContract::validate_type` reuses prepared-binding validation and fails explicitly on unknown variants.
+`schema describe` emits the RFC 0014 portable JSON (version 4 in generated-default development adds sequences and table generated defaults; versions 1–3 remain readable but cannot carry constraints or policies unsupported by that version), used by query-binding generators and future host-language adapters. File mode creates an independent catalog from declarations, while database mode describes a private byte-for-byte copy of the live catalog so redb recovery bookkeeping cannot change the requested file; migration-stable IDs are preserved. IDs are decimal strings scoped to one database lineage. The description includes schema identity, named ADTs, recursive references, exact scalar constraints, defaults/omission, tables, keys, indexes, and typed references; it excludes rows, database instance identity, cursor secrets, and business values. `PortableContract::validate_type` reuses prepared-binding validation and fails explicitly on unknown variants.
 
 ### 静态查询描述 / Static query descriptions
 
-`query describe` 使用当前 parser、binder 和 type IR，离线检查一个静态查询文件，并输出 [RFC 0015](rfc/0015-static-query-contract.md) 的 version 1 JSON。一个查询文件只包含一个 prepared operation；schema 文件仍只接受声明：
+`query describe` 使用当前 parser、binder 和 type IR，离线检查一个静态查询文件，并输出 [RFC 0015](rfc/0015-static-query-contract.md) 的 version 2 JSON。一个查询文件只包含一个 prepared operation；schema 文件仍只接受声明：
 
 ```bash
 unionid query describe --schema schema.unid --file queries/find_task.unid
@@ -171,7 +171,7 @@ unionid query describe --schema schema.unid --file queries/create_task.unid --ou
 
 `--schema` 适用于声明文件作为权威来源；`--db` 从数据库的私有副本读取 live catalog，保留 migration 建立的稳定 ID 和真实 revision/hash。两者必须且只能选择一个。输出包含 schema identity、规范化源码及其 SHA-256、operation、按名称排序的参数类型、结果字段类型、`none` / `exactly_one` / `at_most_one` / `many` cardinality，以及是否返回 affected-row metadata。字段、payload、参数统一失败和非穷尽 match 会在离线绑定时失败并带源码 span。digest 忽略等价的空格/换行布局，但投影或语义变化会改变 digest；运行时仍由 `PreparedQuery` 精确核对 schema revision/hash。
 
-`query describe` uses the runtime parser, binder, and type IR to validate one static query file offline and emit the RFC 0015 version-1 JSON contract. Choose exactly one catalog source: `--schema` for an authoritative declaration file or `--db` for a private copy of a live catalog that preserves migration-established IDs and its actual revision/hash. Output includes schema identity, canonical source and SHA-256 digest, operation, name-sorted parameter shapes, result field shapes, conservative cardinality, and affected-row metadata. Field, payload, parameter-unification, and match-coverage errors fail during offline binding with a source span. Equivalent layout has the same digest; projection or semantic changes do not. `PreparedQuery` still checks the exact schema revision/hash at runtime.
+`query describe` uses the runtime parser, binder, and type IR to validate one static query file offline and emit the RFC 0015 version-2 JSON contract. Choose exactly one catalog source: `--schema` for an authoritative declaration file or `--db` for a private copy of a live catalog that preserves migration-established IDs and its actual revision/hash. Output includes schema identity, canonical source and SHA-256 digest, operation, name-sorted parameter shapes, result field shapes, conservative cardinality, and affected-row metadata. Field, payload, parameter-unification, and match-coverage errors fail during offline binding with a source span. Equivalent layout has the same digest; projection or semantic changes do not. `PreparedQuery` still checks the exact schema revision/hash at runtime.
 
 `query rust` 从同一契约生成一个可直接编译的 Rust 文件，其中包含 schema ADT、查询 `Params`、结果 row 和 Engine 调用函数。默认函数名取查询文件名，也可显式使用 `--name`。调用函数逐字段把参数转换为 typed `Value`，按 cardinality 返回 `T`、`Option<T>` 或 `Vec<T>`；mutation 同时返回 affected rows。它在 prepare 前核对生成时的 schema revision/hash，因此数据库漂移会明确返回 `E_SCHEMA_CHANGED`：
 
@@ -267,7 +267,7 @@ unionid cli --addr 127.0.0.1:7878 --query .types
 
 ## 补全
 
-Tab 补全当前语言关键字、meta command，以及最近一次 introspection 得到的表、类型和字段名称。schema 成功变化后，REPL 会刷新 catalog 候选。补全只替换光标前的当前标识符，不提交或改写脚本；空 catalog 仍提供关键字和 meta command。
+Tab 补全当前语言关键字、meta command，以及最近一次 introspection 得到的表、类型、字段和 sequence 名称。schema 成功变化后，REPL 会刷新 catalog 候选。补全只替换光标前的当前标识符，不提交或改写脚本；空 catalog 仍提供关键字和 meta command。
 
 ## 持久历史
 

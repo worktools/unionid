@@ -3,9 +3,9 @@
 use crate::error::Result;
 use crate::model::{Column, EnumType, ScalarType, Value};
 use crate::query::{
-    Aggregate, AggregateFunction, ArithmeticOp, BoolExpression, DeriveMatch, IndexComponent,
-    LocalBinding, MatchField, MatchPattern, MatchPayload, MatchPredicate, MatchValue,
-    MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
+    Aggregate, AggregateFunction, ArithmeticOp, BoolExpression, DeriveMatch, GeneratedDefault,
+    IndexComponent, LocalBinding, MatchField, MatchPattern, MatchPayload, MatchPredicate,
+    MatchValue, MatchValueField, MatchValuePayload, MigrationTransform, Pipeline, ScalarExpression,
     SchemaMigration, SetValue, Stage, Statement, WindowFunction,
 };
 
@@ -98,6 +98,9 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             };
             line(output, depth, &format!("expect affected {op} {affected}"));
         }
+        Statement::CreateSequence { name, start } => {
+            line(output, depth, &format!("sequence {name} {{start {start}}}"));
+        }
         Statement::DefineType { name, ty } => type_definition(output, "type", name, ty, depth),
         Statement::CreateTable { table, columns } => line(
             output,
@@ -108,10 +111,23 @@ fn statement(output: &mut String, value: &Statement, depth: usize) {
             table,
             row_type,
             key,
+            defaults,
         } => {
             line(output, depth, &format!("table {table}: {row_type} {{"));
             if let Some(key) = key {
                 line(output, depth + 1, &format!("key {key}"));
+            }
+            for default in defaults {
+                let generator = match &default.generator {
+                    GeneratedDefault::Next(sequence) => format!("next({sequence})"),
+                    GeneratedDefault::UuidV7 => "uuid_v7()".into(),
+                    GeneratedDefault::Now => "now()".into(),
+                };
+                line(
+                    output,
+                    depth + 1,
+                    &format!("default {} = {generator}", default.field),
+                );
             }
             line(output, depth, "}");
         }
@@ -845,8 +861,40 @@ fn aggregate_text(output: &mut String, aggregate: &Aggregate, depth: usize) {
     }
 }
 
+fn generated_default(generator: &GeneratedDefault) -> String {
+    match generator {
+        GeneratedDefault::Next(name) => format!("next({name})"),
+        GeneratedDefault::UuidV7 => "uuid_v7()".into(),
+        GeneratedDefault::Now => "now()".into(),
+    }
+}
+
 fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
     match step {
+        SchemaMigration::AddSequence { name, start } => line(
+            output,
+            depth,
+            &format!("add sequence {name} {{start {start}}}"),
+        ),
+        SchemaMigration::RenameSequence { from, to } => {
+            line(output, depth, &format!("rename sequence {from} to {to}"))
+        }
+        SchemaMigration::DropSequence { name } => {
+            line(output, depth, &format!("drop sequence {name}"))
+        }
+        SchemaMigration::ChangeGeneratedDefault {
+            table,
+            field,
+            generator,
+        } => line(
+            output,
+            depth,
+            &format!(
+                "change default {table}.{field} to {}",
+                generated_default(generator)
+            ),
+        ),
+
         SchemaMigration::AddReference(spec) | SchemaMigration::DropReference(spec) => {
             let action = if matches!(step, SchemaMigration::AddReference(_)) {
                 "add"
@@ -873,10 +921,22 @@ fn migration_step(output: &mut String, step: &SchemaMigration, depth: usize) {
             table,
             row_type,
             key,
+            defaults,
         } => {
             line(output, depth, &format!("add table {table}: {row_type} {{"));
             if let Some(key) = key {
                 line(output, depth + 1, &format!("key {key}"));
+            }
+            for default in defaults {
+                line(
+                    output,
+                    depth + 1,
+                    &format!(
+                        "default {} = {}",
+                        default.field,
+                        generated_default(&default.generator)
+                    ),
+                );
             }
             line(output, depth, "}");
         }

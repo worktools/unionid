@@ -22,11 +22,29 @@ pub struct ReferenceSpec {
     pub target_fields: Vec<String>,
 }
 
+/// Controlled generator syntax; binding resolves sequence names to stable IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedDefault {
+    Next(String),
+    UuidV7,
+    Now,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDefault {
+    pub field: String,
+    pub generator: GeneratedDefault,
+}
+
 #[derive(Debug, Clone)]
 pub enum Statement {
     Expect {
         op: CmpOp,
         affected: u64,
+    },
+    CreateSequence {
+        name: String,
+        start: i64,
     },
     DefineType {
         name: String,
@@ -40,6 +58,7 @@ pub enum Statement {
         table: String,
         row_type: String,
         key: Option<String>,
+        defaults: Vec<TableDefault>,
     },
     CreateReference(ReferenceSpec),
     DropReference(ReferenceSpec),
@@ -115,6 +134,22 @@ pub enum Statement {
 
 #[derive(Debug, Clone)]
 pub enum SchemaMigration {
+    AddSequence {
+        name: String,
+        start: i64,
+    },
+    RenameSequence {
+        from: String,
+        to: String,
+    },
+    DropSequence {
+        name: String,
+    },
+    ChangeGeneratedDefault {
+        table: String,
+        field: String,
+        generator: GeneratedDefault,
+    },
     AddReference(ReferenceSpec),
     DropReference(ReferenceSpec),
     AddType {
@@ -128,6 +163,7 @@ pub enum SchemaMigration {
         table: String,
         row_type: String,
         key: Option<String>,
+        defaults: Vec<TableDefault>,
     },
     DropTable {
         table: String,
@@ -258,10 +294,17 @@ impl Statement {
         }
     }
 
+    pub(crate) fn declares_generated_defaults(&self) -> bool {
+        matches!(self, Self::CreateSequence { .. })
+            || matches!(self, Self::TypedTable {defaults, ..} if !defaults.is_empty())
+            || matches!(self, Self::Migration {steps, ..} if steps.iter().any(|step| matches!(step, SchemaMigration::AddSequence {..} | SchemaMigration::ChangeGeneratedDefault {..}) || matches!(step, SchemaMigration::AddTable {defaults, ..} if !defaults.is_empty())))
+    }
+
     pub fn changes_schema(&self) -> bool {
         matches!(
             self,
-            Self::DefineType { .. }
+            Self::CreateSequence { .. }
+                | Self::DefineType { .. }
                 | Self::CreateTable { .. }
                 | Self::TypedTable { .. }
                 | Self::CreateIndex { .. }

@@ -260,12 +260,21 @@ pub fn describe_step(step: &SchemaMigration) -> (String, bool) {
                 dropping,
             )
         }
+        SchemaMigration::AddSequence { name, .. } => (format!("add sequence {name}"), false),
+        SchemaMigration::RenameSequence { from, to } => {
+            (format!("rename sequence {from} to {to}"), false)
+        }
+        SchemaMigration::DropSequence { name } => (format!("drop sequence {name}"), true),
+        SchemaMigration::ChangeGeneratedDefault { table, field, .. } => {
+            (format!("change generated default {table}.{field}"), false)
+        }
         SchemaMigration::AddType { name, .. } => (format!("add type {name}"), false),
         SchemaMigration::DropType { name } => (format!("drop type {name}"), true),
         SchemaMigration::AddTable {
             table,
             row_type,
             key,
+            ..
         } => (
             format!(
                 "add table {table} {row_type}{}",
