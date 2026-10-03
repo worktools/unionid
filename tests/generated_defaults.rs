@@ -1035,6 +1035,160 @@ fn cli_and_tcp_omit_generated_fields_and_preserve_receipts_across_restart() {
 }
 
 #[test]
+fn cli_active_archive_upgrade_export_install_and_restore_journey() {
+    let dir = common::TempDir::new();
+    let path = dir.0.join("upgrade.redb");
+    let archive = dir.0.join("archive");
+    let db = path.to_str().unwrap();
+    let repo = archive.to_str().unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .args(args)
+            .args(["--format", "json"])
+            .output()
+            .unwrap()
+    };
+    let success = |args: &[&str]| {
+        let output = run(args);
+        assert!(
+            output.status.success(),
+            "{args:?}: stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    success(&[
+        "run",
+        "--db",
+        db,
+        "--query",
+        "struct Item {id: int, owner: text}\ntable items: Item {key id}\ninsert items {id: 1, owner: \"historical\"}",
+    ]);
+    success(&["backup", "incremental", "init", "--db", db, "--repo", repo]);
+    success(&[
+        "backup",
+        "incremental",
+        "export",
+        "--db",
+        db,
+        "--repo",
+        repo,
+    ]);
+    success(&["backup", "incremental", "verify", "--repo", repo]);
+    let schema = Engine::open_redb(&path).unwrap().schema_info();
+    success(&["upgrade", "--db", db, "--target", "14", "--repo", repo]);
+    let observe = || {
+        let mut engine = Engine::open_redb(&path).unwrap();
+        engine.check_integrity().unwrap();
+        (
+            engine.backup_journal_status().unwrap().head_sequence,
+            serde_json::to_value(engine.introspection()).unwrap(),
+            serde_json::to_value(ok(&mut engine, "from items | sort id").rows).unwrap(),
+        )
+    };
+    let before = observe();
+    let rejected = run(&[
+        "upgrade",
+        "--db",
+        db,
+        "--target",
+        "14",
+        "--require",
+        "generated_defaults",
+        "--repo",
+        repo,
+    ]);
+    assert!(!rejected.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "E_BACKUP_CHAIN");
+    assert_eq!(observe(), before);
+    success(&[
+        "backup",
+        "incremental",
+        "export",
+        "--db",
+        db,
+        "--repo",
+        repo,
+    ]);
+    success(&["backup", "incremental", "verify", "--repo", repo]);
+    success(&[
+        "upgrade",
+        "--db",
+        db,
+        "--target",
+        "14",
+        "--require",
+        "generated_defaults",
+        "--repo",
+        repo,
+    ]);
+    let installed = observe().0;
+    assert_eq!(installed, before.0 + 1);
+    assert_eq!(Engine::open_redb(&path).unwrap().schema_info(), schema);
+    let response = success(&[
+        "run",
+        "--db",
+        db,
+        "--query",
+        "migration generated {add sequence ids {start 2}\nchange default items.id to next(ids)}\ninsert items {owner: \"fresh\"} | returning id",
+    ]);
+    let response: QueryResponse = serde_json::from_value(response).unwrap();
+    assert_eq!(id(&response, 0), 2);
+    let head = observe().0;
+    success(&[
+        "backup",
+        "incremental",
+        "export",
+        "--db",
+        db,
+        "--repo",
+        repo,
+    ]);
+    success(&["backup", "incremental", "verify", "--repo", repo]);
+    for (sequence, generated, rows) in [(before.0, false, 1), (installed, true, 1), (head, true, 2)]
+    {
+        let restored = dir.0.join(format!("restored-{sequence}.redb"));
+        success(&[
+            "restore",
+            "incremental",
+            "--repo",
+            repo,
+            "--db",
+            restored.to_str().unwrap(),
+            "--at-sequence",
+            &sequence.to_string(),
+        ]);
+        let mut engine = Engine::open_redb(&restored).unwrap();
+        engine.check_integrity().unwrap();
+        assert_eq!(
+            engine.backup_journal_status().unwrap().head_sequence,
+            sequence
+        );
+        assert_eq!(
+            engine
+                .introspection()
+                .required_storage_capabilities
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "generated_defaults"),
+            generated
+        );
+        assert_eq!(ok(&mut engine, "from items").rows.len(), rows);
+        if sequence == head {
+            assert_eq!(
+                id(
+                    &ok(&mut engine, "insert items {owner: \"next\"} | returning id"),
+                    0
+                ),
+                3
+            );
+        }
+    }
+}
+
+#[test]
 fn installing_generators_mid_journal_preserves_each_header_and_counter_boundary() {
     use unionid::backup::incremental::{checkpoint, export, init, restore, verify};
     let dir = common::TempDir::new();

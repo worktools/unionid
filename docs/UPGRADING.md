@@ -4,11 +4,11 @@
 
 #439 的候选实现提供旧 format 10/11/12/13 到原生 header format 14 的显式单向升级；默认格式、软件版本及发布 contract 尚未切换。无活跃链时使用 `upgrade --db <path> --target 14`；活跃链先 export/verify，再给 upgrade 指定 `--repo <archive>`。升级和能力安装各自仅推进一次 sequence，保留业务 schema identity、RowId、cursor 身份、ledger 与 receipt；未完成 maintenance 必须先完成或 abort。
 
-已经进入 format 14 后，可用 `upgrade --db <path> --target 14 --require typed_references` 显式原子安装能力及依赖；活跃链同样需要已导出且验证的 `--repo`。支持 `typed_map`、`partial_unique_index` 和 `typed_references`，未知能力被拒绝，重复安装不推进 sequence，journal 不再要求另一物理格式。新的 logical backup 8 与 archive record codec 2 由旧发布二进制明确拒绝；升级前保留已验证的旧 logical backup，回滚仍需恢复到新路径。该候选不是正式发布契约，完整设计与验收状态见 [RFC 0028](rfc/0028-capability-storage-header.md)。
+已经进入 format 14 后，可用 `upgrade --db <path> --target 14 --require typed_references` 显式原子安装能力及依赖；活跃链同样需要已导出且验证的 `--repo`。支持 `typed_map`、`partial_unique_index`、`typed_references` 和 `generated_defaults`，未知能力被拒绝，重复安装不推进 sequence，journal 不再要求另一物理格式。新的 logical backup 8 与 archive record codec 2 由旧发布二进制明确拒绝；升级前保留已验证的旧 logical backup，回滚仍需恢复到新路径。该候选不是正式发布契约，完整设计与验收状态见 [RFC 0028](rfc/0028-capability-storage-header.md)。
 
 The #439 candidate provides an explicit one-way upgrade from legacy formats 10/11/12/13 to native header format 14; defaults, software versions and release contracts have not switched. Use `upgrade --db <path> --target 14` without an active chain. For an active chain, export and verify first, then supply `--repo <archive>`. Upgrade and capability installation each consume one sequence while preserving business schema identity, RowIds, cursor identity, ledger and receipts. Finish or abort unfinished maintenance first.
 
-Once on format 14, `upgrade --db <path> --target 14 --require typed_references` atomically installs capabilities and dependencies; active chains also require an exported, verified `--repo`. Supported names are `typed_map`, `partial_unique_index` and `typed_references`. Unknown requirements are rejected; repeated installation is a no-op. Journal lifecycle no longer needs another physical format. Prior released binaries reject logical backup 8 and archive record codec 2. Keep a verified legacy logical backup before upgrading; rollback still restores to a new path. This candidate is not the release contract. See [RFC 0028](rfc/0028-capability-storage-header.md) for design and acceptance status.
+Once on format 14, `upgrade --db <path> --target 14 --require typed_references` atomically installs capabilities and dependencies; active chains also require an exported, verified `--repo`. Supported names are `typed_map`, `partial_unique_index`, `typed_references` and `generated_defaults`. Unknown requirements are rejected; repeated installation is a no-op. Journal lifecycle no longer needs another physical format. Prior released binaries reject logical backup 8 and archive record codec 2. Keep a verified legacy logical backup before upgrading; rollback still restores to a new path. This candidate is not the release contract. See [RFC 0028](rfc/0028-capability-storage-header.md) for design and acceptance status.
 
 Rust 手写 `Introspection` struct literal 需补充 `required_storage_capabilities: None`；新 reader 可反序列化缺少该字段的旧 JSON。原生库响应为已安装能力数组，legacy／memory 响应省略该字段。
 
@@ -17,6 +17,25 @@ Handwritten Rust `Introspection` struct literals must initialize `required_stora
 开发版迁移 CLI 默认发现 migrations 同级 queries 并预检，既有项目可能提前收到查询契约错误；显式 --no-queries 可关闭并在 stderr 提示，--queries 仍可覆盖目录。init 新增 scripts/check.sh，project check 优先报告绑定错误。数据库格式/API 不变，详细行为见 [MIGRATIONS](MIGRATIONS.md#默认项目查询预检--automatic-project-preflight-development)。
 
 Development migration CLI discovers sibling saved queries by default and may reject existing projects before apply; --no-queries explicitly disables with a stderr notice, while --queries overrides the directory. Init adds scripts/check.sh; project check prioritizes binding errors. Database formats/APIs are unchanged; see [MIGRATIONS](MIGRATIONS.md).
+
+### 活跃增量链的两步操作 / Two steps with an active archive
+
+先进入 native format 14，再安装能力；`--require` 不会替 legacy 数据库执行基础升级。每步提交都会推进 head，因此两步之间必须再次 export/verify。下面假设 backups 已由 `backup incremental init` 建立；操作期间停止其他 writer：
+
+```sh
+unionid backup incremental export --db app.redb --repo backups/
+unionid backup incremental verify --repo backups/
+unionid upgrade --db app.redb --target 14 --repo backups/
+unionid backup incremental export --db app.redb --repo backups/
+unionid backup incremental verify --repo backups/
+unionid upgrade --db app.redb --target 14 --require generated_defaults --repo backups/
+unionid backup incremental export --db app.redb --repo backups/
+unionid backup incremental verify --repo backups/
+```
+
+若跳过中间 export，安装会以 `E_BACKUP_CHAIN` 拒绝，数据库保持在已成功升级但尚未安装新能力的状态；补做 export/verify 后重试安装。最后一次 export 封存安装提交，之后再声明生成策略。使用 `unionid docs show generated-defaults` 查看写入规则。
+
+Enter native format 14 before installing requirements; --require does not perform the legacy base upgrade. Each commit advances the head, so export/verify again between the two operations. The commands assume an archive already initialized with backup incremental init and no concurrent writer. Skipping the middle export rejects installation with E_BACKUP_CHAIN, leaving the successful base upgrade intact and the capability uninstalled. Export/verify and retry installation. The final export seals its commit before declaring generated policies. Read the write rules with unionid docs show generated-defaults.
 
 ## 开发版：迁移诊断展示 / Development: migration diagnostics
 
