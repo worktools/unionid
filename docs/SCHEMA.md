@@ -2,13 +2,13 @@
 
 状态：v0.2 契约，2026-09-10。本文定义 catalog 中对象的身份、应用 schema 版本，以及 migration 必须遵守的兼容规则。当前已经实现稳定 ID、原子 schema revision、schema hash、共享名称空间、响应元数据、[版本化 ADT value codec](CODEC.md)、[显式 schema migration 与版本化 runner](MIGRATIONS.md)，以及[声明式 schema diff](SCHEMA-DIFF.md)。
 
-面向生成客户端的 machine description、无损运行时校验和四方向演进报告见 [RFC 0014](rfc/0014-portable-adt-contract.md)；v0.14 开发中的 description version 3 增加引用的稳定 ID、源/目标路径、目标 key、Exact/Optional 匹配与 restrict 行为；versions 1/2 仍可读取，但不允许携带引用约束。索引继续保留 canonical partial predicate。`schema describe` 中的 ID 使用字符串并明确限定为单个数据库 catalog lineage；它们不能作为跨数据库全局身份。
+面向生成客户端的 machine description、无损运行时校验和四方向演进报告见 [RFC 0014](rfc/0014-portable-adt-contract.md)；description version 3 增加引用的稳定 ID、源/目标路径、目标 key、Exact/Optional 匹配与 restrict 行为；当前生成默认值开发分支的 version 4 增加 sequences 与 table generated_defaults。versions 1–3 仍可读取，但 versions 1/2 不允许引用约束，versions 1–3 不允许生成策略。索引继续保留 canonical partial predicate。`schema describe` 中的 ID 使用字符串并明确限定为单个数据库 catalog lineage；它们不能作为跨数据库全局身份。
 
 存储格式版本、语言／协议版本与应用 schema revision 是三个独立概念：升级 unionid 二进制不自动修改应用 schema，读取目标 schema 文件也不会隐式迁移已有数据。
 
 ## 1. Catalog 身份
 
-每个数据库有一个单调递增、从 1 开始的 `u64` catalog ID 空间。类型、字段、sum 变体、表、索引和引用约束都从同一空间分配 ID。ID 永不复用，且不是用户数据的 RowId。
+每个数据库有一个单调递增、从 1 开始的 `u64` catalog ID 空间。类型、字段、sum 变体、表、索引、引用约束和 sequence 都从同一空间分配 ID。ID 永不复用，且不是用户数据的 RowId。
 
 RowId 属于单张表的内部行身份，使用独立、从 0 开始的单调 `u64` 空间。它不出现在用户 record 中，也不等同于业务主键；移动内存位置或未来 migration 改写值时保留 RowId。删除 RowId 后不复用，索引始终引用该稳定身份。每表的下一分配值与 catalog definition 一同持久化，但不属于应用 schema hash。
 
@@ -35,7 +35,7 @@ Ordinary unique indexes compare complete typed values, including `None`; a singl
 
 空数据库的 schema revision 是 0。一次成功的原子脚本只要包含 type、table、index 或 reference 变更，就在提交时把 revision 增加 1；同一脚本包含多个 schema 语句仍只产生一个 revision。纯 insert 或查询不改变 revision，解析、类型检查、约束或持久化失败也不发布新 revision。
 
-`schema.hash` 是 `sha256:<hex>`。hash manifest 无 partial index/reference 时使用版本 1，有 partial predicate 时使用版本 2，有引用约束时使用版本 3。内容按稳定 ID 排序，包含类型及其完整结构、表定义、索引定义（包括 unique kind 与 partial predicate 的规范化 atom）和引用定义（固定目标 key、路径与 mode），不包含行、索引 posting、提交 sequence 或 schema revision。名称和对外可见的字段顺序属于 schema，因此会影响 hash；稳定 ID保证这种变化不会改变旧值的含义。partial predicate 引用 stable field path；drop/change 被引用字段前必须先 drop 索引，改变字段类型要求显式重建 predicate index。
+`schema.hash` 是 `sha256:<hex>`。hash manifest 无 partial index/reference 时使用版本 1，有 partial predicate 时使用版本 2，有引用约束时使用版本 3，有 sequence 或生成策略时使用版本 4。内容按稳定 ID 排序，包含类型及其完整结构、表定义、索引定义（包括 unique kind 与 partial predicate 的规范化 atom）和引用定义（固定目标 key、路径与 mode），包含 sequence 的声明 start 与表字段到生成器/sequence ID 的绑定，不包含活动 counter/exhausted、行、索引 posting、提交 sequence 或 schema revision。名称和对外可见的字段顺序属于 schema，因此会影响 hash；稳定 ID保证这种变化不会改变旧值的含义。partial predicate 引用 stable field path；drop/change 被引用字段前必须先 drop 索引，改变字段类型要求显式重建 predicate index。
 
 revision 用于同一数据库内的快速失效检查；hash 用于备份、导入、migration plan 和不同进程之间的精确 schema 对照。两者都不是 migration ID。客户端不得假设两个独立创建但文本相同的数据库具有可互换的 catalog ID。
 
@@ -150,4 +150,14 @@ Use `schema print --format source` to save only canonical declarations. Default 
 
 `fmt` retains stdin and single-file stdout support and accepts repeated `-f` or positional files. Multiple files require either `--check` or `--write`, never both. Check reports noncanonical paths without writing. Write parses the complete batch first, then replaces each changed file via a same-directory temporary file while preserving ordinary permissions. It rejects symlinks, directories, and read-only files. Invalid syntax changes no file; later I/O failures do not provide cross-file rollback. Never reformat already-applied migrations: their immutable checksum remains authoritative. Restrict migration formatting to new, unapplied files.
 
-Reference constraints share the catalog stable-ID allocator and participate in schema revision/hash. The hash manifest uses version 1 without predicates/references, version 2 with partial predicates, and version 3 with references. Reference identity pins source/target tables, paired field-ID paths, target key and Exact/Optional modes; derived postings and business rows are excluded. This is separate from storage and portable-description versions.
+Reference constraints share the catalog stable-ID allocator and participate in schema revision/hash. The hash manifest uses version 1 without predicates/references, version 2 with partial predicates, version 3 with references, and version 4 with sequence declarations or generated-default policies. Reference identity pins source/target tables, paired field-ID paths, target key and Exact/Optional modes; Sequence definitions include the declared start and stable-ID generator bindings; active counters/exhaustion, derived postings and business rows are excluded. This is separate from storage and portable-description versions.
+
+## 生成策略的机器描述 / Generated policy descriptions
+
+生成默认值开发分支使用 portable description version 4。顶层 `sequences` 包含十进制字符串 `id`、`name` 和有符号十进制字符串 `start`，不暴露活动计数器。表的 `generated_defaults` 包含顶层 `field`、`field_id` 和 tagged `generator`：`next` 携带 `sequence_id`，另有 `uuid_v7` 与 `now`。缺失的旧字段按空列表读取，但不能把这些非空能力放进 version 1–3。策略属于表输入，不能把 reusable ADT 的字段变成 Option 或改变其常量 default；upsert 的显式主键规则仍单独适用。
+
+`SchemaDescription::validate` 校验唯一 ID、sequence start、字段名称/ID、结果类型及 sequence 引用；`PortableContract::validate_description` 还拒绝与当前 catalog 不一致的序列定义或被删改的策略。生成策略变更进入 client_write 演进报告；存储数据形状没有因策略变化而改变。schema diff 对可能的 sequence rename 和 start 变化产生需要业务确认的 TODO，不猜测删除/重建或 counter reset。
+
+The generated-default development branch emits portable description version 4. Top-level `sequences` carry decimal-string IDs, names and signed decimal-string starts, excluding active counters. Each table's `generated_defaults` carries a top-level field name/ID and a tagged generator: `next` includes a sequence ID, alongside `uuid_v7` and `now`. Older absent fields decode as empty lists; versions 1–3 cannot carry nonempty generation metadata. Policies describe table inputs without making reusable ADT fields optional or changing their constant defaults. Upsert still requires explicit keys.
+
+Structural validation checks IDs, canonical starts, field identity, generator result types and sequence references. Catalog-backed validation also rejects altered or stripped generation metadata. Policy changes appear on the client-write evolution axis without changing stored value shapes. Schema diff leaves possible sequence renames and start changes as explicit decision TODOs; it never infers a counter reset.

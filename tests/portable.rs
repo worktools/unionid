@@ -619,7 +619,7 @@ fn portable_references_round_trip_typed_paths_and_pinned_keys() {
     use unionid::portable::{ReferenceKeyDescription, ReferenceMatchMode};
     let contract = unionid::portable::PortableContract::from_source(REFERENCE_SCHEMA).unwrap();
     let description = contract.description();
-    assert_eq!(description.version, 3);
+    assert_eq!(description.version, DESCRIPTION_VERSION);
     contract.validate_description(description).unwrap();
     let child = description
         .tables

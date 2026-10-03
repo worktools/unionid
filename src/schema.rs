@@ -110,6 +110,7 @@ pub(crate) fn diff(
     let mut todos = Vec::new();
     let mut warnings = Vec::new();
 
+    diff_sequences(current, &target, &mut generated, &mut todos);
     diff_types(current, &target, &mut generated, &mut todos, &mut warnings);
     diff_tables(current, &target, &mut generated, &mut todos);
     diff_references(current, &target, &mut generated);
@@ -200,8 +201,88 @@ fn diff_comparison_source(database: &Database) -> String {
         .lines()
         .partition(|line| line.starts_with("create reference "));
     references.sort_unstable();
+    let (mut sequences, mut declarations): (Vec<_>, Vec<_>) = declarations
+        .drain(..)
+        .partition(|line| line.starts_with("sequence "));
+    sequences.sort_unstable();
+    declarations.extend(sequences);
     declarations.extend(references);
     declarations.join("\n")
+}
+
+fn diff_sequences(
+    current: &Database,
+    target: &Database,
+    generated: &mut Vec<SchemaDiffOperation>,
+    todos: &mut Vec<SchemaDiffOperation>,
+) {
+    let old = current
+        .schema_sequences()
+        .into_iter()
+        .map(|sequence| (sequence.name.as_str(), sequence))
+        .collect::<BTreeMap<_, _>>();
+    let new = target
+        .schema_sequences()
+        .into_iter()
+        .map(|sequence| (sequence.name.as_str(), sequence))
+        .collect::<BTreeMap<_, _>>();
+    let mut rename_from = BTreeSet::new();
+    let mut rename_to = BTreeSet::new();
+    for (name, sequence) in &old {
+        if let Some(target) = new.get(name) {
+            if sequence.start != target.start {
+                todos.push(todo(format!("todo change sequence {name} start explicitly; existing counters cannot be reset")));
+            }
+            continue;
+        }
+        let candidates = new
+            .iter()
+            .filter(|(name, candidate)| {
+                !old.contains_key(*name) && candidate.start == sequence.start
+            })
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        if !candidates.is_empty() {
+            rename_from.insert(*name);
+            rename_to.extend(candidates.iter().copied());
+            todos.push(todo(format!(
+                "todo confirm rename sequence {name} to {} or replace it explicitly",
+                candidates.join(", ")
+            )));
+        }
+    }
+    for sequence in target.schema_sequences() {
+        if !old.contains_key(sequence.name.as_str()) && !rename_to.contains(sequence.name.as_str())
+        {
+            generated.push(operation(
+                format!(
+                    "add sequence {} {{start {}}}",
+                    sequence.name, sequence.start
+                ),
+                false,
+            ));
+        }
+    }
+    for name in old.keys() {
+        if !new.contains_key(name) && !rename_from.contains(name) {
+            generated.push(operation(format!("drop sequence {name}"), true));
+        }
+    }
+}
+
+fn table_default_sources(database: &Database, table: &Table) -> BTreeMap<String, String> {
+    table
+        .schema
+        .iter()
+        .filter_map(|column| {
+            table.generated_defaults.get(&column.id).map(|generator| {
+                (
+                    column.name.clone(),
+                    database.generated_default_source(generator),
+                )
+            })
+        })
+        .collect()
 }
 
 fn diff_types(
@@ -590,6 +671,24 @@ fn diff_tables(
         if renamed_to.contains(name) {
             continue;
         }
+        let new_defaults = table_default_sources(target, table);
+        let old_defaults = current_tables
+            .get(name)
+            .map(|old| table_default_sources(current, old))
+            .unwrap_or_default();
+        for field in old_defaults.keys() {
+            if !new_defaults.contains_key(field) {
+                generated.push(operation(format!("drop default {name}.{field}"), false));
+            }
+        }
+        for (field, generator) in new_defaults {
+            if old_defaults.get(&field) != Some(&generator) {
+                generated.push(operation(
+                    format!("change default {name}.{field} to {generator}"),
+                    false,
+                ));
+            }
+        }
         match current_tables.get(name) {
             None => match table_type_name(target, table) {
                 Some(row_type) => generated.push(operation(
@@ -909,30 +1008,34 @@ fn todo(description: String) -> SchemaDiffOperation {
 
 fn operation_priority(description: &str) -> u8 {
     if description.starts_with("drop reference ") {
-        return 0;
-    }
-    if description.starts_with("add reference ") {
-        return 10;
-    }
-    1 + if description.starts_with("drop key ") {
         0
-    } else if description.starts_with("drop index ") {
+    } else if description.starts_with("drop default ") {
         1
-    } else if description.starts_with("add type ") {
+    } else if description.starts_with("drop key ") {
         2
-    } else if description.starts_with("drop table ") {
+    } else if description.starts_with("drop index ") {
+        3
+    } else if description.starts_with("add type ") || description.starts_with("add sequence ") {
         4
-    } else if description.starts_with("drop type ") {
-        5
-    } else if description.starts_with("add table ") {
+    } else if description.starts_with("drop table ") {
         6
-    } else if description.starts_with("set key ") {
+    } else if description.starts_with("drop type ") {
         7
+    } else if description.starts_with("add table ") {
+        8
+    } else if description.starts_with("change default ") {
+        9
+    } else if description.starts_with("set key ") {
+        10
     } else if description.starts_with("add index ") || description.starts_with("add unique index ")
     {
-        8
+        11
+    } else if description.starts_with("drop sequence ") {
+        12
+    } else if description.starts_with("add reference ") {
+        13
     } else {
-        3
+        5
     }
 }
 

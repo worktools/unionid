@@ -4,6 +4,7 @@
 //! to one database lineage and may exceed lossless JSON-number ranges. Runtime
 //! validation delegates to the same catalog coercion used by query binding.
 
+mod generated;
 mod references;
 pub(crate) use references::describe as describe_references;
 
@@ -16,11 +17,12 @@ use crate::error::{Error, Result};
 use crate::model::{Catalog, Column, EnumType, ScalarType};
 use crate::protocol::WireValue;
 
-pub const DESCRIPTION_VERSION: u32 = 3;
+pub const DESCRIPTION_VERSION: u32 = 4;
 
 /// Version 1 descriptions predate partial unique index predicates and remain
-/// readable; version 2 adds predicates, and version 3 adds typed references.
-const SUPPORTED_DESCRIPTION_VERSIONS: &[u32] = &[1, 2, DESCRIPTION_VERSION];
+/// readable; version 2 adds predicates, version 3 adds typed references, and
+/// version 4 adds sequence definitions and table-level generated defaults.
+const SUPPORTED_DESCRIPTION_VERSIONS: &[u32] = &[1, 2, 3, DESCRIPTION_VERSION];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaDescription {
@@ -29,6 +31,8 @@ pub struct SchemaDescription {
     pub schema: PortableSchemaIdentity,
     pub types: Vec<TypeDescription>,
     pub tables: Vec<TableDescription>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequences: Vec<SequenceDescription>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +165,33 @@ pub struct TableDescription {
     /// v1/v2 metadata without references remains readable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<ReferenceDescription>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_defaults: Vec<GeneratedDefaultDescription>,
+}
+
+/// Immutable sequence declaration; active counters are durable state, not schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceDescription {
+    pub id: String,
+    pub name: String,
+    pub start: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedDefaultDescription {
+    pub field: String,
+    pub field_id: String,
+    pub generator: GeneratorDescription,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GeneratorDescription {
+    Next { sequence_id: String },
+    UuidV7,
+    Now,
 }
 
 /// A typed, restrict-only relationship owned by the source table.
@@ -420,6 +451,7 @@ impl SchemaDescription {
             }
         }
         references::validate(self, &type_definitions, &mut ids)?;
+        generated::validate(self, &type_definitions, &mut ids)?;
         Ok(())
     }
 
@@ -465,6 +497,7 @@ impl SchemaDescription {
         }
 
         compare_tables(self, candidate, &mut report);
+        generated::compare(self, candidate, &mut report);
         Ok(report)
     }
 }
@@ -1144,6 +1177,7 @@ impl PortableContract {
     /// `SchemaDescription::validate` alone has no types to bind against.
     pub fn validate_description(&self, description: &SchemaDescription) -> Result<()> {
         description.validate()?;
+        generated::validate_live(&self.description, description)?;
         for table in self.description.tables.iter().chain(&description.tables) {
             let declared = description.tables.iter().find(|item| item.id == table.id);
             let live = self
@@ -1357,6 +1391,31 @@ fn describe_database(database: &Database) -> Result<SchemaDescription> {
                     .transpose()?,
                 indexes: indexes.remove(&table.id).unwrap_or_default(),
                 references: references.remove(&table.id).unwrap_or_default(),
+                generated_defaults: table
+                    .schema
+                    .iter()
+                    .filter_map(|field| {
+                        table.generated_defaults.get(&field.id).map(|generator| {
+                            GeneratedDefaultDescription {
+                                field: field.name.clone(),
+                                field_id: field.id.to_string(),
+                                generator: match generator {
+                                    crate::model::BoundGeneratedDefault::Next(id) => {
+                                        GeneratorDescription::Next {
+                                            sequence_id: id.to_string(),
+                                        }
+                                    }
+                                    crate::model::BoundGeneratedDefault::UuidV7 => {
+                                        GeneratorDescription::UuidV7
+                                    }
+                                    crate::model::BoundGeneratedDefault::Now => {
+                                        GeneratorDescription::Now
+                                    }
+                                },
+                            }
+                        })
+                    })
+                    .collect(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1371,6 +1430,15 @@ fn describe_database(database: &Database) -> Result<SchemaDescription> {
         schema: database.schema_info().into(),
         types,
         tables,
+        sequences: database
+            .schema_sequences()
+            .into_iter()
+            .map(|sequence| SequenceDescription {
+                id: sequence.id.to_string(),
+                name: sequence.name.clone(),
+                start: sequence.start.to_string(),
+            })
+            .collect(),
     };
     description.validate()?;
     Ok(description)

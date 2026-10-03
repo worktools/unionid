@@ -260,6 +260,28 @@ impl Database {
         self.generation_context = GenerationContext::default();
     }
 
+    pub(crate) fn schema_sequences(&self) -> Vec<&Sequence> {
+        let mut sequences = self.sequences.values().collect::<Vec<_>>();
+        sequences.sort_by_key(|sequence| sequence.id);
+        sequences
+    }
+
+    pub(crate) fn generated_default_source(&self, generator: &BoundGeneratedDefault) -> String {
+        match generator {
+            BoundGeneratedDefault::Next(id) => {
+                let name = self
+                    .sequences
+                    .values()
+                    .find(|sequence| sequence.id == *id)
+                    .map(|sequence| sequence.name.as_str())
+                    .unwrap_or("unknown_sequence");
+                format!("next({name})")
+            }
+            BoundGeneratedDefault::UuidV7 => "uuid_v7()".into(),
+            BoundGeneratedDefault::Now => "now()".into(),
+        }
+    }
+
     pub(crate) fn has_generated_defaults(&self) -> bool {
         !self.sequences.is_empty()
             || self
