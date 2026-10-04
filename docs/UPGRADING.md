@@ -88,7 +88,7 @@ unionid 把应用 schema migration 与数据库内部格式升级视为两件不
 
 v0.12 聚焦原子业务守卫与逐语句摘要，三个 crate 同步为 0.12.0。默认 storage 10（可读 1–11）、backup 6（可读 1–6）、protocol 1/2、stream 1、codec 6/3/4/3/1/0 与 v0.11 保持一致，不需要内部格式升级或应用 migration。Rust struct literal 的新增公开字段、脚本预算与旧 WAL 边界见下方 v0.12 API 说明。
 
-v0.12 adds atomic business guards and statement summaries. All three crates use 0.12.0; storage, backup, protocol, stream, and codec versions match v0.11, requiring no format upgrade or application migration. Review the added public Rust fields, script bounds, and legacy WAL restrictions below. See [release notes](RELEASE-v0.12.0.md).
+v0.12 adds atomic business guards and statement summaries. All three crates use 0.12.0; storage, backup, protocol, stream, and codec versions match v0.11, requiring no format upgrade or application migration. Review the added public Rust fields, script bounds, and legacy WAL restrictions below. See [v0.12 user guide](https://github.com/worktools/unionid/discussions/418).
 
 ## v0.11 格式与源码契约（历史 / Historical）
 
