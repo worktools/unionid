@@ -1,0 +1,37 @@
+# v0.15 development: normalize names and summarize sales by an explicit local day.
+# Integers are cents: divide explicitly by 100; decimal scale does not change units.
+struct Sale {
+  id: int
+  buyer: text
+  quantity: int
+  price_cents: int
+  occurred_at: timestamp
+}
+
+table sales: Sale {
+  key id
+}
+
+insert many sales [
+  {buyer: " Alice ", id: 1, occurred_at: @2026-10-02T18:00:00Z, price_cents: 125, quantity: 2}
+  {buyer: "ALICE", id: 2, occurred_at: @2026-10-03T01:00:00Z, price_cents: 250, quantity: 1}
+  {buyer: "Bob", id: 3, occurred_at: @2026-10-03T01:00:00Z, price_cents: 999, quantity: 1}
+]
+
+from sales
+derive buyer = lower (trim buyer)
+filter starts_with buyer "ali"
+derive {
+  unit_price = {
+    decimal_div (int_to_decimal price_cents 18 0) (int_to_decimal 100 18 0) 18 2 "exact"
+  }
+  total = decimal_mul (int_to_decimal quantity 18 0) unit_price 18 2 "exact"
+  day = date_of occurred_at "+08:00"
+}
+group day {
+  aggregate {
+    sales = count
+    total = sum total
+  }
+}
+sort day
