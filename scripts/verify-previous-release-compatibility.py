@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import shutil
 import socket
 import subprocess
 import tarfile
@@ -323,8 +324,17 @@ def require_rejected(command, code, message=None):
 
 def verify_reference_boundary(previous, current, work, source_format, reference_format):
     database = work / f"previous-format{source_format}.redb"
+    native = reference_format == 14
+    if native:
+        # Keep the legacy fixture intact for its independent 12/13 boundary.
+        native_database = work / f"native-from-format{source_format}.redb"
+        shutil.copyfile(database, native_database)
+        database = native_database
     run([current, "upgrade", "--db", database, "--target", str(reference_format),
          "--format", "json"])
+    if native:
+        run([current, "upgrade", "--db", database, "--target", "14",
+             "--require", "typed_references", "--format", "json"])
     source = """struct Assignment {id: int, task: Option<int>}
 table assignments: Assignment {key id}
 create reference assignments (task) references tasks (id)
@@ -351,8 +361,9 @@ from assignments | sort id
     run([current, "check", "--db", database, "--format", "json"])
     backup = work / f"references-format{reference_format}.backup.json"
     run([current, "backup", "--db", database, "--output", backup, "--format", "json"])
-    if json.loads(backup.read_text()).get("format_version") != 7:
-        raise RuntimeError("reference backup did not use format 7")
+    backup_format = 8 if native else 7
+    if json.loads(backup.read_text()).get("format_version") != backup_format:
+        raise RuntimeError(f"reference backup did not use format {backup_format}")
     rejected_path = work / f"old-restore-format{reference_format}.redb"
     require_rejected(
         [previous, "restore", "--backup", backup, "--db", rejected_path,
@@ -390,7 +401,7 @@ from assignments | sort id
             raise RuntimeError("current database/restore accepted a missing target")
     return {
         "storage_format": reference_format,
-        "backup_format": 7,
+        "backup_format": backup_format,
         "old_reader_rejected": True,
         "old_writer_rejected": True,
         "old_restore_rejected": True,
@@ -481,6 +492,21 @@ def main():
         for case in [f"format{storage_format}"]
     }
 
+    native_reference_cases = {}
+    native_skip_reasons = []
+    if default_format != 10:
+        native_skip_reasons.append("previous_default_is_not_format_10")
+    if 14 not in current_version["readable_storage_formats"]:
+        native_skip_reasons.append("current_does_not_read_native_format")
+    if 14 in previous_version["readable_storage_formats"]:
+        native_skip_reasons.append("previous_already_reads_native_format")
+    if 8 in previous_version["readable_backup_formats"]:
+        native_skip_reasons.append("previous_already_reads_native_backup")
+    if not native_skip_reasons:
+        native_reference_cases["format14"] = verify_reference_boundary(
+            previous, current, work, 10, 14
+        )
+
     reference_cases = {}
     skip_reasons = reference_boundary_skip_reasons(previous_version, current_version)
     if not skip_reasons:
@@ -499,6 +525,11 @@ def main():
                 "current_version": current_version["software_version"],
                 "cases": cases,
                 "reference_boundaries": reference_cases,
+                "native_reference_boundaries": native_reference_cases,
+                "native_reference_boundary_verification": {
+                    "status": "skipped" if native_skip_reasons else "passed",
+                    "skip_reasons": native_skip_reasons,
+                },
                 "reference_boundary_verification": {
                     "status": "skipped" if skip_reasons else "passed",
                     "skip_reasons": skip_reasons,
