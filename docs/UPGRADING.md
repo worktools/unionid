@@ -37,6 +37,19 @@ unionid backup incremental verify --repo backups/
 
 Enter native format 14 before installing requirements; --require does not perform the legacy base upgrade. Each commit advances the head, so export/verify again between the two operations. The commands assume an archive already initialized with backup incremental init and no concurrent writer. Skipping the middle export rejects installation with E_BACKUP_CHAIN, leaving the successful base upgrade intact and the capability uninstalled. Export/verify and retry installation. The final export seals its commit before declaring generated policies. Read the write rules with unionid docs show generated-defaults.
 
+### 恢复升级前的 checkpoint / Restore a pre-upgrade checkpoint
+
+升级前记录已经 export/verify 的 commit sequence，并保留该恢复点。若需要让旧软件重新使用旧格式库，用理解 native archive 的当前软件恢复到另一条路径；旧软件不能直接读取已经转换为新 record codec 的 archive。将 `PRE_UPGRADE_SEQUENCE` 设为仍在 archive 中保留的升级前 sequence：
+
+```sh
+unionid restore incremental --repo backups/ --db rollback.redb --at-sequence "$PRE_UPGRADE_SEQUENCE"
+unionid check --db rollback.redb
+```
+
+该恢复点保留它当时的 legacy 格式；确认格式在旧软件支持范围内后，再用旧软件打开。实际 v0.13.2 已验证能读取从同一升级链恢复出的 format 11 checkpoint。回退只恢复该 sequence 的状态，不包含后续新写入，也不对当前 native 数据库执行原地降级。不要删除当前数据库；先核对恢复结果，再决定应用使用哪条路径。
+
+Before upgrading, record an exported/verified commit sequence and retain that recovery point. To use the old format with older software again, restore to another path using current software that understands the native archive. Older software cannot directly read an archive converted to the new record codec. Set PRE_UPGRADE_SEQUENCE to a retained pre-upgrade sequence and run the commands above. That checkpoint preserves its legacy format; confirm the older reader supports it before opening. Actual v0.13.2 reads a format-11 checkpoint restored from the same upgraded chain. Rollback restores only that sequence, excludes later writes and does not downgrade the current native database in place. Keep the current database until the restored state is verified and the application path is chosen.
+
 ## 开发版：迁移诊断展示 / Development: migration diagnostics
 
 迁移预检的文本输出默认只展开每个查询的首次和最后一次 checkpoint 失败，并明确显示中间省略的数量；需要原有完整文本轨迹时，在 plan/apply/rehearse 加 `--verbose`。JSON、Rust version 1 报告、公开字段、预算和提交前拒绝规则保持不变；不需要数据库升级。详见 [MIGRATIONS](MIGRATIONS.md)。
