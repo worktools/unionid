@@ -30,7 +30,7 @@ fn cli_returns_versioned_llm_query_docs_as_markdown_and_json() {
     assert_eq!(json["software_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(json["language_version"], "0.7");
     assert_eq!(json["topic"], "query");
-    assert_eq!(json["examples"].as_array().unwrap().len(), 6);
+    assert_eq!(json["examples"].as_array().unwrap().len(), 7);
     for example in json["examples"].as_array().unwrap() {
         let source = example["source"].as_str().unwrap();
         assert_eq!(unionid::format_source(source).unwrap(), source);

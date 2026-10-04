@@ -305,6 +305,11 @@ pub struct LlmQueryDocs {
 
 const EXAMPLES: &[LlmQueryExample] = &[
     LlmQueryExample {
+        name: "scalar-workflow",
+        description: "Normalize buyer names, convert minor currency units explicitly, and aggregate sales by a fixed-offset date (v0.15 development).",
+        source: include_str!("../examples/llm/scalar-workflow.unid"),
+    },
+    LlmQueryExample {
         name: "typed-references",
         description: "Enforce order/line target existence and query indexed related rows (v0.14 development).",
         source: include_str!("../examples/orders_and_lines.unid"),
@@ -384,6 +389,15 @@ mod tests {
             let response = engine.execute(example.source);
             assert!(response.ok, "{}: {}", example.name, response.message);
             assert!(!response.rows.is_empty(), "{}", example.name);
+            if example.name == "scalar-workflow" {
+                assert_eq!(response.rows.len(), 1);
+                let row = &response.rows[0];
+                assert!(row["day"].cmp_eq(&crate::Value::Date("2026-10-03".parse().unwrap())));
+                assert!(row["sales"].cmp_eq(&crate::Value::Int(2)));
+                assert!(row["total"].cmp_eq(&crate::Value::Decimal(
+                    crate::scalars::Decimal::parse("5.00", 18, 2).unwrap()
+                )));
+            }
         }
     }
 
