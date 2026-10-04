@@ -22,6 +22,12 @@
 - Benchmark documents identify the measurement date, commit, scale and reproduction steps; historical measurements are not current performance promises. Retain baselines and comparisons that explain architectural decisions. Before removing or archiving raw samples, verify their download location, references and reproduction scripts. Select test fixtures by the compatibility boundary they protect rather than file count or size.
 - Check that documentation links and examples still match the implementation. Ordinary PRs use Ubuntu fast checks; full macOS and release evaluators run before release, as defined by the existing workflows.
 
+## PR 审查地图 / PR review map
+
+复杂 PR 在正文嵌入[粗粒度架构图](ARCHITECTURE.md)，标出实际修改的节点或契约箭头，并把关键文件、行为变化和验证对应起来。局部 PR 可用更短的使用链路；文档/流程 PR 标明运行时是否受影响。图随最终 diff 更新，不维护另一份实时计划。
+
+Embed the [coarse architecture map](ARCHITECTURE.md) in complex PRs, marking changed nodes or contract edges and connecting key files, behavior changes and verification. Local PRs can show a shorter user journey; documentation/process PRs state runtime impact. Update the diagram to match the final diff without maintaining a second live roadmap.
+
 ## 发布版本同步 / Release version synchronization
 
 根 `Cargo.toml` 的 `package.version` 是当前软件版本来源。准备已授权的版本更新时，只在此处修改版本，再运行 `python3 scripts/check-release-metadata.py --sync-version`，同步两个宏 crate、query macro 的精确依赖、Git 跟踪的本地包 lockfile 和发布合约的 `software_version`。默认不带参数只检查，不写文件；普通 Ubuntu CI 使用检查模式。
