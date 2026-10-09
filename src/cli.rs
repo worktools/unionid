@@ -36,7 +36,51 @@ pub fn run_local_with_options(
 }
 
 pub fn inspect_parquet(path: &Path, limit: usize, json: bool) -> Result<(), String> {
-    let inspection = match crate::parquet::inspect(path, limit) {
+    inspect_parquet_with_display(path, limit, json, false)
+}
+
+pub fn inspect_parquet_with_display(
+    path: &Path,
+    limit: usize,
+    json: bool,
+    full: bool,
+) -> Result<(), String> {
+    inspect_parquet_with_options(
+        path,
+        &crate::parquet::PreviewOptions {
+            limit,
+            ..Default::default()
+        },
+        json,
+        full,
+        false,
+    )
+}
+
+pub fn inspect_parquet_with_options(
+    path: &Path,
+    options: &crate::parquet::PreviewOptions,
+    json: bool,
+    full: bool,
+    expanded: bool,
+) -> Result<(), String> {
+    let mut options = options.clone();
+    // Keep the default human preview small, and push that projection into the reader.
+    let result = (|| {
+        let mut hidden = 0;
+        if !json && options.limit > 0 && options.columns.is_empty() {
+            let metadata = crate::parquet::inspect(path, 0)?;
+            hidden = metadata.columns.len().saturating_sub(6);
+            options.columns = metadata
+                .columns
+                .iter()
+                .take(6)
+                .map(|column| column.name.clone())
+                .collect();
+        }
+        crate::parquet::inspect_with_options(path, &options).map(|inspection| (inspection, hidden))
+    })();
+    let (inspection, hidden) = match result {
         Ok(inspection) => inspection,
         Err(error) => {
             let fallback_hint = match error.code.as_str() {
@@ -58,54 +102,42 @@ pub fn inspect_parquet(path: &Path, limit: usize, json: bool) -> Result<(), Stri
         );
         return Ok(());
     }
-    println!("file | {}", inspection.path);
-    println!("rows | {}", inspection.rows_total);
-    println!("row groups | {}", inspection.row_groups);
-    println!("schema");
-    if inspection.columns.is_empty() {
-        println!("(no columns)");
-    } else {
-        println!("name | type");
-        for column in &inspection.columns {
-            println!("{} | {}", column.name, column.r#type);
-        }
-    }
-    println!("preview");
-    if inspection.preview_rows.is_empty() {
-        println!("(no rows)");
-    } else {
-        println!(
-            "{}",
-            inspection
-                .columns
-                .iter()
-                .map(|column| column.name.as_str())
-                .collect::<Vec<_>>()
-                .join(" | ")
-        );
-        for row in &inspection.preview_rows {
-            println!(
-                "{}",
-                inspection
-                    .columns
-                    .iter()
-                    .map(|column| row.get(&column.name).map(display_value).unwrap_or_default())
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            );
-        }
-    }
-    println!(
-        "previewed {} of {} row(s){}",
-        inspection.preview_rows.len(),
-        inspection.rows_total,
-        if inspection.preview_truncated {
-            " (truncated)"
-        } else {
-            ""
-        }
+    let width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(40, 240);
+    print!(
+        "{}",
+        crate::parquet_display::render(&inspection, full, expanded, width)
     );
+    if hidden > 0 {
+        println!(
+            "{hidden} column(s) hidden; use --schema to list them, --columns name,... to select, or --columns '*' for all"
+        );
+    }
     Ok(())
+}
+
+pub(crate) fn parquet_cell(value: &Value, full: bool) -> String {
+    let text = display_value(value);
+    // Escape control characters so every preview row stays on one terminal line.
+    let mut chars = text.chars().flat_map(|ch| {
+        if ch.is_control() {
+            ch.escape_default().collect::<Vec<_>>()
+        } else {
+            vec![ch]
+        }
+    });
+    if full {
+        return chars.collect();
+    }
+    let prefix: String = chars.by_ref().take(119).collect();
+    match (chars.next(), chars.next()) {
+        (None, _) => prefix,
+        (Some(last), None) => format!("{prefix}{last}"),
+        _ => format!("{prefix}…"),
+    }
 }
 
 pub fn query_parquet(path: &Path, source: Option<String>, json: bool) -> Result<(), String> {
@@ -2427,6 +2459,18 @@ pub fn display_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{IntrospectionKind, ReplAction, ReplInput, introspection_command};
+
+    #[test]
+    fn parquet_preview_bounds_unicode_and_escapes_controls() {
+        let value = crate::Value::Text("界\n".repeat(100));
+        let cell = super::parquet_cell(&value, false);
+        assert_eq!(cell.chars().count(), 120);
+        assert!(cell.ends_with('…'));
+        assert!(!cell.contains('\n'));
+        assert_eq!(super::parquet_cell(&value, true), value.source_text());
+        let short = crate::Value::Int(42);
+        assert_eq!(super::parquet_cell(&short, false), "42");
+    }
 
     #[test]
     fn repl_tracks_continuation_ready_submission_and_eof() {

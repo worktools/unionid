@@ -30,6 +30,7 @@ mod ordered_key;
 mod pagination;
 mod params;
 pub mod parquet;
+mod parquet_display;
 pub mod portable;
 pub mod profile;
 pub mod project;

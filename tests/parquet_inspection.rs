@@ -169,8 +169,8 @@ fn cli_prints_human_and_machine_readable_inspection() {
         String::from_utf8_lossy(&table.stderr)
     );
     let stdout = String::from_utf8(table.stdout).unwrap();
-    assert!(stdout.contains("rows | 3"));
-    assert!(stdout.contains("name | Option<text>"));
+    assert!(stdout.contains("rows: 3"));
+    assert!(stdout.contains("Row | id"));
     assert!(stdout.contains("previewed 1 of 3 row(s) (truncated)"));
 
     let json = Command::new(env!("CARGO_BIN_EXE_unionid"))
@@ -423,4 +423,245 @@ fn query_rejects_only_an_individually_oversized_pending_row() {
     let projected = engine.execute("from data | select id");
     assert!(projected.ok, "{}", projected.message);
     assert_eq!(projected.rows.len(), 3);
+}
+
+#[test]
+fn projection_and_offset_preserve_requested_order_and_file_positions() {
+    let temp = TempDir::new();
+    let path = temp.0.join("people.parquet");
+    write_fixture(&path);
+    let options = unionid::parquet::PreviewOptions {
+        limit: 1,
+        offset: 1,
+        columns: vec!["name".into(), "id".into()],
+    };
+    let report = unionid::parquet::inspect_with_options(&path, &options).unwrap();
+    assert_eq!(report.preview_offset, 1);
+    assert_eq!(
+        report
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        ["name", "id"]
+    );
+    assert_eq!(report.preview_rows[0].len(), 2);
+    assert!(matches!(report.preview_rows[0]["id"], Value::Int(2)));
+    assert!(matches!(
+        report.preview_rows[0]["name"],
+        Value::Option(None)
+    ));
+    let mut beyond = options.clone();
+    beyond.offset = 100;
+    assert!(
+        unionid::parquet::inspect_with_options(&path, &beyond)
+            .unwrap()
+            .preview_rows
+            .is_empty()
+    );
+    for columns in [vec!["missing".into()], vec!["id".into(), "id".into()]] {
+        let bad = unionid::parquet::PreviewOptions {
+            columns,
+            ..options.clone()
+        };
+        assert_eq!(
+            unionid::parquet::inspect_with_options(&path, &bad)
+                .unwrap_err()
+                .code,
+            "E_FIELD"
+        );
+    }
+}
+
+#[test]
+fn cli_schema_and_local_preview_are_readable_and_json_stays_typed() {
+    let temp = TempDir::new();
+    let path = temp.0.join("people.parquet");
+    write_fixture(&path);
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .arg("parquet")
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let schema = run(&["--schema"]);
+    assert!(schema.contains("Nullable"));
+    assert!(schema.contains("Option<text>"));
+    assert!(!schema.contains("Preview"));
+    assert!(!schema.contains("Ada"));
+    let preview = run(&[
+        "--columns",
+        "name,id",
+        "--offset",
+        "1",
+        "--limit",
+        "1",
+        "--expanded",
+    ]);
+    assert!(preview.contains("Row 2"));
+    assert!(preview.contains("name : None"));
+    assert!(!preview.contains("active"));
+    let json: serde_json::Value = serde_json::from_str(&run(&[
+        "--columns",
+        "id",
+        "--offset",
+        "2",
+        "--limit",
+        "1",
+        "--format",
+        "json",
+    ]))
+    .unwrap();
+    assert_eq!(json["preview_offset"], 2);
+    assert_eq!(json["columns"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["preview_rows"][0]["id"],
+        serde_json::to_value(Value::Int(3)).unwrap()
+    );
+}
+
+#[test]
+fn wide_default_preview_hides_columns_and_full_json_preserves_long_text() {
+    let temp = TempDir::new();
+    let path = temp.0.join("wide.parquet");
+    let schema = Arc::new(Schema::new(
+        (0..8)
+            .map(|i| Field::new(format!("field_{i}"), DataType::Utf8, false))
+            .collect::<Vec<_>>(),
+    ));
+    let text = "界\n".repeat(300);
+    let columns = (0..8)
+        .map(|_| Arc::new(StringArray::from(vec![text.as_str()])) as ArrayRef)
+        .collect();
+    let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .arg("parquet")
+            .arg(&path)
+            .args(args)
+            .env("COLUMNS", "100")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let text_output = run(&[]);
+    assert!(text_output.contains("2 column(s) hidden"));
+    assert!(text_output.contains('…'));
+    assert!(!text_output.contains("field_6"));
+    assert!(text_output.len() < 4000);
+    let all = run(&["--columns", "*"]);
+    assert!(all.contains("field_7"));
+    let json: serde_json::Value = serde_json::from_str(&run(&["--format", "json"])).unwrap();
+    assert_eq!(json["columns"].as_array().unwrap().len(), 8);
+    assert_eq!(
+        json["preview_rows"][0]["field_7"],
+        serde_json::to_value(Value::Text(text)).unwrap()
+    );
+}
+
+#[test]
+fn projected_preview_skips_unsupported_fields_and_offsets_across_row_groups() {
+    let temp = TempDir::new();
+    let path = temp.0.join("projected.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new(
+            "local_time",
+            DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
+            false,
+        ),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
+            Arc::new(TimestampMicrosecondArray::from(vec![0, 1, 2, 3])),
+        ],
+    )
+    .unwrap();
+    let properties = parquet::file::properties::WriterProperties::builder()
+        .set_max_row_group_row_count(Some(2))
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(File::create(&path).unwrap(), schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    assert_eq!(
+        unionid::parquet::inspect(&path, 1).unwrap_err().code,
+        "E_PARQUET_TYPE"
+    );
+    let report = unionid::parquet::inspect_with_options(
+        &path,
+        &unionid::parquet::PreviewOptions {
+            limit: 2,
+            offset: 1,
+            columns: vec!["id".into()],
+        },
+    )
+    .unwrap();
+    assert_eq!(report.row_groups, 2);
+    assert_eq!(report.preview_rows.len(), 2);
+    assert!(matches!(report.preview_rows[0]["id"], Value::Int(20)));
+    assert!(matches!(report.preview_rows[1]["id"], Value::Int(30)));
+}
+
+#[test]
+fn preview_defaults_preserve_json_and_reject_mixed_query_options() {
+    let temp = TempDir::new();
+    let path = temp.0.join("defaults.parquet");
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from_iter_values(0..8))],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_unionid"))
+            .arg("parquet")
+            .arg(&path)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let text = run(&[]);
+    assert!(text.status.success());
+    assert!(
+        String::from_utf8(text.stdout)
+            .unwrap()
+            .contains("previewed 5 of 8")
+    );
+    let json = run(&["--format", "json"]);
+    assert!(json.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(json["preview_rows"].as_array().unwrap().len(), 8);
+    for args in [
+        vec!["--schema"],
+        vec!["--columns", "id"],
+        vec!["--offset", "1"],
+        vec!["--expanded"],
+        vec!["--full"],
+    ] {
+        for query in [vec!["--query", "from data"], vec!["--interactive"]] {
+            let args = [args.clone(), query].concat();
+            assert!(
+                !run(&args).status.success(),
+                "mixed modes accepted: {args:?}"
+            );
+        }
+    }
 }
