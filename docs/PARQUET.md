@@ -4,11 +4,16 @@
 
 ```bash
 unionid parquet events.parquet
-unionid parquet events.parquet --limit 50
+unionid parquet events.parquet --schema
+unionid parquet events.parquet --columns id,name --offset 10 --limit 3
+unionid parquet events.parquet --columns input --limit 1 --expanded
+unionid parquet events.parquet --columns '*' --limit 1 --full
 unionid parquet events.parquet --limit 20 --format json
 ```
 
-默认读取前 20 行；`--limit 0` 只检查 metadata 和 schema；硬上限为 1,000 行，转换后保留的 preview payload 上限为 64 MiB。读取按最多 1,024 行的 Arrow batch 进行，因此不会为了显示少量数据先把完整文件物化到内存；64 MiB 限制不表示 Arrow 解码过程的瞬时内存上限。
+默认文本预览前 5 行、前 6 列，提示其余隐藏列数量；`--columns id,name` 按指定顺序选择顶层列，`--columns '*'` 选择全部列。选择会下推到 Parquet reader，未选择的列不解码。`--offset N` 从文件顺序跳过 N 行（从 0 开始），输出 Row 编号从 1 开始；超出文件末尾返回空预览。`--schema` 或 `--limit 0` 只读取 metadata 并以对齐表格显示字段名、完整类型和可空性。
+
+数据预览采用对齐表格；宽度超过终端 `COLUMNS`（未设置时为 100，范围 40–240）时自动逐行纵向展示并换行，`--expanded` 可强制纵向展示。文本输出每格最多 120 个字符，控制字符转义为单行，截断以 `…` 标记。`--full` 显示完整单元格，JSON 始终保持无损，默认前 20 行及全部列；`--limit 0` 只检查 metadata 和 schema；硬上限为 1,000 行，转换后保留的 preview payload 上限为 64 MiB。读取按最多 1,024 行的 Arrow batch 进行，因此不会为了显示少量数据先把完整文件物化到内存；64 MiB 限制不表示 Arrow 解码过程的瞬时内存上限。
 
 发布包附带三行示例文件，可直接运行：
 
@@ -38,7 +43,7 @@ unionid parquet examples/people.parquet --query 'from data | filter active | sel
 
 第三方 Parquet schema 只携带结构信息时，UnionID 不会根据字符串或 tagged record 猜测命名 enum。无法无损映射的 Arrow 类型、非 UTC timestamp、超过 microsecond 精度的值、超出 `i64` 的 unsigned integer，以及非 text key map 都会返回 `E_PARQUET_TYPE` 或 `E_PARQUET_VALUE`，并带字段路径。
 
-JSON 输出是 version 1 inspection envelope，包含 `path`、`rows_total`、`row_groups`、`columns`、`preview_rows` 和 `preview_truncated`。预览值使用 UnionID 的 typed `Value` 表示，因此 `Option::None`、null、bytes、decimal 和 temporal 值不会退化成含糊字符串。
+JSON 默认预览前 20 行及全部列，保持无损；`--columns` 和 `--offset` 同样适用。JSON 输出是 version 1 inspection envelope，新增从 0 开始的 `preview_offset`，包含 `path`、`rows_total`、`row_groups`、`columns`、`preview_rows` 和 `preview_truncated`。预览值使用 UnionID 的 typed `Value` 表示，因此 `Option::None`、null、bytes、decimal 和 temporal 值不会退化成含糊字符串。
 
 ## 直接查询
 
@@ -59,17 +64,24 @@ unionid parquet events.parquet --interactive
 
 扫描返回的 typed batch 最多包含 1,024 行、16 MiB 序列化数据；Arrow batch 若包含多个合法大行，会拆分返回且保持行顺序，单个 projected row 超过 16 MiB 才返回 `E_LIMIT`（可缩小单元格或投影更少列）。此上限不约束瞬时 Arrow decode memory。扫描仍沿用查询执行器的结果行数、工作内存、deadline 和 cancellation 检查。当前只接受可直接写进 UnionID query 的 ASCII 字段名；不符合标识符规则的字段返回 `E_PARQUET_TYPE`，提示先重命名。多文件/glob、Hive partition、schema union、远程对象存储、并行扫描、predicate pruning、稳定 page cursor 和 Parquet 导出仍属于按真实需求推进的探索范围。
 
+预览选项 `--schema`、`--columns`、`--offset`、`--expanded`、`--full` 不与 `--query` 或 `--interactive` 混用；查询使用 pipeline 的 `select` 和 `take`。
+
 # Local Parquet inspection
 
 `unionid parquet` reads one local Parquet file and prints its row count, row-group count, inferred structural UnionID types, and a bounded row preview. It does not create a redb database, modify the source file, or expose file access through the TCP or HTTP service.
 
 ```bash
 unionid parquet events.parquet
-unionid parquet events.parquet --limit 50
+unionid parquet events.parquet --schema
+unionid parquet events.parquet --columns id,name --offset 10 --limit 3
+unionid parquet events.parquet --columns input --limit 1 --expanded
+unionid parquet events.parquet --columns '*' --limit 1 --full
 unionid parquet events.parquet --limit 20 --format json
 ```
 
-The command previews 20 rows by default. `--limit 0` reads metadata and schema only. The hard limit is 1,000 rows, and the retained serialized preview payload is capped at 64 MiB. Input is decoded in Arrow batches of at most 1,024 rows, so a small preview does not materialize the complete file first; the 64 MiB retained-payload bound is not a bound on transient Arrow decode memory.
+The default text preview shows 5 rows and the first 6 columns, with a hidden-column count. `--columns id,name` selects top-level columns in the requested display order; `--columns '*'` selects all columns. Projection is pushed into the Parquet reader so unselected columns are not decoded. `--offset N` skips N rows in file order (zero-based); displayed Row numbers start at 1. Offsets past EOF return an empty preview. `--schema` or `--limit 0` reads metadata only and displays aligned column names, full types, and nullability.
+
+Preview tables align cells and automatically switch to vertical rows when wider than terminal `COLUMNS` (default 100, clamped to 40–240). `--expanded` forces vertical rows with wrapped values. Text cells are limited to 120 characters, with escaped control characters and `…` marking truncation. Use `--full` for complete cells; JSON always remains lossless and keeps its default of 20 rows and all columns. `--limit 0` reads metadata and schema only. The hard limit is 1,000 rows, and the retained serialized preview payload is capped at 64 MiB. Input is decoded in Arrow batches of at most 1,024 rows, so a small preview does not materialize the complete file first; the 64 MiB retained-payload bound is not a bound on transient Arrow decode memory.
 
 The archive includes a three-row `examples/people.parquet` fixture. Inspect it with `unionid parquet examples/people.parquet --limit 2` or query it with `--query 'from data | filter active | select {id, name} | sort id'`. Rebuild it with `cargo run --example parquet_fixture -- examples/people.parquet`. The packaged `tutorial/validate-local-data.py` exercises inspection, querying, and the read-only boundary.
 
@@ -77,7 +89,7 @@ The current mapping is lossless: signed integers and unsigned integers that fit 
 
 UnionID does not guess nominal enums when a third-party Parquet schema only carries structural information. Unsupported Arrow types, timestamps without UTC metadata, values finer than microseconds, unsigned values outside `i64`, and maps without text keys fail with `E_PARQUET_TYPE` or `E_PARQUET_VALUE` and identify the field path.
 
-JSON output is a version 1 inspection envelope containing `path`, `rows_total`, `row_groups`, `columns`, `preview_rows`, and `preview_truncated`. Preview cells retain UnionID's typed `Value` representation, preserving `Option::None`, null, bytes, decimal, and temporal distinctions.
+JSON output retains its 20-row default and selects all columns unless projected. `--columns` and `--offset` also apply. The version 1 inspection envelope adds zero-based `preview_offset` and contains `path`, `rows_total`, `row_groups`, `columns`, `preview_rows`, and `preview_truncated`. Preview cells retain UnionID's typed `Value` representation, preserving `Option::None`, null, bytes, decimal, and temporal distinctions.
 
 ## Direct queries
 
@@ -97,3 +109,5 @@ unionid parquet events.parquet --interactive
 Queries are read-only. Insert, upsert, update, delete, DDL, and migration statements fail with `E_READ_ONLY` before a row batch is read. Top-level columns unused by filters, derives, aggregates, windows, sorting, or the final result are pushed into the Parquet reader and are not decoded by Arrow. An `explain` plan reports `external_scan: "parquet_scan"` and `projected_columns`; table output presents the same scan and projection.
 
 Returned typed source batches contain at most 1,024 rows and 16 MiB of serialized data. Arrow batches containing several valid large rows are split without changing row order; only a projected row that individually exceeds 16 MiB fails with `E_LIMIT` (reduce cell sizes or project fewer columns). This bound does not cap transient Arrow decode memory. Scanning also retains the existing result-row, working-memory, deadline, and cancellation checks. Field names must currently be ASCII identifiers that can be written directly in a UnionID query; incompatible names fail with `E_PARQUET_TYPE` and a rename hint. Multiple files and globs, Hive partitions, schema union, remote object storage, parallel scans, predicate pruning, stable page cursors, and Parquet export remain demand-driven exploration.
+
+Preview options `--schema`, `--columns`, `--offset`, `--expanded`, and `--full` cannot be combined with `--query` or `--interactive`; use pipeline `select` and `take` for queries.

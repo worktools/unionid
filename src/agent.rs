@@ -296,7 +296,7 @@ const COMMANDS: &[AgentCommand] = &[
     AgentCommand {
         name: "parquet",
         summary: "Inspect or query one local Parquet file as typed read-only data.",
-        usage: "unionid parquet <path> [--limit <rows> | --query <pipeline> | --interactive] [--format json]",
+        usage: "unionid parquet <path> [--schema] [--columns <names>] [--offset <rows>] [--limit <rows>] [--query <pipeline> | --interactive] [--format json]",
         json: true,
     },
     AgentCommand {

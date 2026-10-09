@@ -221,9 +221,24 @@ enum Command {
     /// Inspect one local Parquet file without importing it into redb.
     Parquet {
         path: PathBuf,
-        /// Maximum number of rows to decode for the preview.
-        #[arg(long, default_value_t = unionid::parquet::DEFAULT_PREVIEW_ROWS)]
-        limit: usize,
+        /// Maximum preview rows (default: 5 for text, 20 for JSON).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Show column definitions only, without decoding rows.
+        #[arg(long, conflicts_with_all = ["query", "interactive"])]
+        schema: bool,
+        /// Select top-level columns, separated by commas, in display order.
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["query", "interactive"])]
+        columns: Vec<String>,
+        /// Skip this many rows before the preview (zero-based).
+        #[arg(long, default_value_t = 0, conflicts_with_all = ["query", "interactive"])]
+        offset: usize,
+        /// Display each row vertically, one field per line.
+        #[arg(long, conflicts_with_all = ["query", "interactive"])]
+        expanded: bool,
+        /// Show complete cell values in text output (JSON always retains full values).
+        #[arg(long, conflicts_with_all = ["query", "interactive"])]
+        full: bool,
         /// Execute one read-only UnionID pipeline against the request-local table `data`.
         #[arg(long, conflicts_with = "interactive")]
         query: Option<String>,
@@ -1139,14 +1154,38 @@ fn run(args: Args) -> Result<(), String> {
         Command::Parquet {
             path,
             limit,
+            schema,
+            columns,
+            offset,
+            expanded,
+            full,
             query,
             interactive,
             format,
         } => {
+            let json = matches!(format, Format::Json);
             if query.is_some() || interactive {
-                cli::query_parquet(&path, query, matches!(format, Format::Json))
+                cli::query_parquet(&path, query, json)
             } else {
-                cli::inspect_parquet(&path, limit, matches!(format, Format::Json))
+                cli::inspect_parquet_with_options(
+                    &path,
+                    &unionid::parquet::PreviewOptions {
+                        limit: if schema {
+                            0
+                        } else {
+                            limit.unwrap_or(if json {
+                                unionid::parquet::DEFAULT_PREVIEW_ROWS
+                            } else {
+                                5
+                            })
+                        },
+                        offset,
+                        columns,
+                    },
+                    json,
+                    full,
+                    expanded,
+                )
             }
         }
         Command::Docs { command: None } => print_docs_catalog(None, false),

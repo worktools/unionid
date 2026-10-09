@@ -52,9 +52,40 @@ pub struct ParquetInspection {
     pub columns: Vec<ParquetColumn>,
     pub preview_rows: Vec<BTreeMap<String, Value>>,
     pub preview_truncated: bool,
+    pub preview_offset: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreviewOptions {
+    pub limit: usize,
+    /// Zero-based row offset in file order.
+    pub offset: usize,
+    /// Top-level columns in display order; empty selects all columns.
+    pub columns: Vec<String>,
+}
+
+impl Default for PreviewOptions {
+    fn default() -> Self {
+        Self {
+            limit: DEFAULT_PREVIEW_ROWS,
+            offset: 0,
+            columns: Vec::new(),
+        }
+    }
 }
 
 pub fn inspect(path: &Path, limit: usize) -> Result<ParquetInspection> {
+    inspect_with_options(
+        path,
+        &PreviewOptions {
+            limit,
+            ..PreviewOptions::default()
+        },
+    )
+}
+
+pub fn inspect_with_options(path: &Path, options: &PreviewOptions) -> Result<ParquetInspection> {
+    let limit = options.limit;
     if limit > MAX_PREVIEW_ROWS {
         return Err(Error::new(
             "E_LIMIT",
@@ -85,9 +116,28 @@ pub fn inspect(path: &Path, limit: usize) -> Result<ParquetInspection> {
         })?;
     let row_groups = builder.metadata().num_row_groups();
     let schema = builder.schema().clone();
-    let columns = schema
-        .fields()
+    let indices = if options.columns.is_empty() || options.columns == ["*"] {
+        (0..schema.fields().len()).collect::<Vec<_>>()
+    } else {
+        let mut indices = Vec::new();
+        for name in &options.columns {
+            let index = schema.index_of(name).map_err(|_| {
+                Error::new("E_FIELD", format!("unknown Parquet column '{name}'"))
+                    .with_hint("use --schema to list top-level column names")
+            })?;
+            if indices.contains(&index) {
+                return Err(Error::new(
+                    "E_FIELD",
+                    format!("duplicate Parquet column '{name}'"),
+                ));
+            }
+            indices.push(index);
+        }
+        indices
+    };
+    let columns = indices
         .iter()
+        .map(|&index| schema.field(index))
         .map(|field| {
             Ok(ParquetColumn {
                 name: field.name().clone(),
@@ -99,8 +149,11 @@ pub fn inspect(path: &Path, limit: usize) -> Result<ParquetInspection> {
 
     let mut preview_rows = Vec::with_capacity(limit.min(rows_total as usize));
     let mut preview_bytes = 0_usize;
-    if limit > 0 {
+    if limit > 0 && (options.offset as u64) < rows_total {
+        let projection = ProjectionMask::roots(builder.parquet_schema(), indices.iter().copied());
         let reader = builder
+            .with_projection(projection)
+            .with_offset(options.offset)
             .with_batch_size(limit.min(1_024))
             .with_limit(limit)
             .build()
@@ -109,7 +162,7 @@ pub fn inspect(path: &Path, limit: usize) -> Result<ParquetInspection> {
             let batch = batch.map_err(|error| parquet_error(path, "decode rows", error))?;
             for row_index in 0..batch.num_rows() {
                 let mut row = BTreeMap::new();
-                for (column_index, field) in schema.fields().iter().enumerate() {
+                for (column_index, field) in batch.schema().fields().iter().enumerate() {
                     row.insert(
                         field.name().clone(),
                         value_at(
@@ -150,10 +203,10 @@ pub fn inspect(path: &Path, limit: usize) -> Result<ParquetInspection> {
         row_groups,
         columns,
         preview_truncated: rows_total > preview_rows.len() as u64,
+        preview_offset: options.offset,
         preview_rows,
     })
 }
-
 /// Open one Parquet file as the request-local, read-only table `data`.
 ///
 /// The returned engine uses the normal parser, binder, planner and query
