@@ -497,11 +497,11 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
-        /// Report representation: full (v1) or compact (v2, lossless error intervals).
+        /// Report representation: compact (v2, default, lossless error intervals) or full (v1).
         #[arg(
             long,
             value_enum,
-            default_value = "full",
+            default_value = "compact",
             conflicts_with = "no_queries"
         )]
         query_report: QueryReportFormat,
@@ -523,11 +523,11 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
-        /// Report representation: full (v1) or compact (v2, lossless error intervals).
+        /// Report representation: compact (v2, default, lossless error intervals) or full (v1).
         #[arg(
             long,
             value_enum,
-            default_value = "full",
+            default_value = "compact",
             conflicts_with = "no_queries"
         )]
         query_report: QueryReportFormat,
@@ -582,11 +582,11 @@ enum MigrationCommand {
         /// Explicitly disable automatic saved-query preflight.
         #[arg(long, conflicts_with = "queries")]
         no_queries: bool,
-        /// Report representation: full (v1) or compact (v2, lossless error intervals).
+        /// Report representation: compact (v2, default, lossless error intervals) or full (v1).
         #[arg(
             long,
             value_enum,
-            default_value = "full",
+            default_value = "compact",
             conflicts_with = "no_queries"
         )]
         query_report: QueryReportFormat,

@@ -66,13 +66,12 @@ fn failed_preflight_returns_one_report_and_preserves_database() {
         assert_eq!(report["exit_code"], 3);
         assert_eq!(report["error"]["code"], "E_MIGRATION");
         let validation = &report["query_validation"];
-        assert_eq!(validation["version"], 1);
+        assert_eq!(validation["version"], 2);
         assert_eq!(validation["valid"], false);
         assert_eq!(validation["files"][0]["path"], "nested/jobs.unid");
-        assert_eq!(
-            validation["files"][0]["failures"][0]["migration_id"],
-            "expand"
-        );
+        assert_eq!(validation["checkpoints"][1]["migration_id"], "expand");
+        assert_eq!(validation["files"][0]["failures"][0]["first_checkpoint"], 1);
+        assert_eq!(validation["files"][0]["failures"][0]["last_checkpoint"], 1);
         assert_eq!(
             validation["files"][0]["failures"][0]["error"]["code"],
             "E_MATCH"
@@ -235,8 +234,28 @@ fn checkpoint_details_are_opt_in_without_changing_json_or_rejection() {
         let mut verbose_json = command(&dir.0, action);
         verbose_json.arg("--verbose");
         assert_eq!(run(verbose_json, 3), plain_json);
+        assert_eq!(plain_json["query_validation"]["version"], 2);
         assert_eq!(
             plain_json["query_validation"]["files"][0]["failures"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            plain_json["query_validation"]["files"][0]["failures"][0]["first_checkpoint"],
+            1
+        );
+        assert_eq!(
+            plain_json["query_validation"]["files"][0]["failures"][0]["last_checkpoint"],
+            3
+        );
+        let mut full_json = command(&dir.0, action);
+        full_json.args(["--query-report", "full"]);
+        let full_json = run(full_json, 3);
+        assert_eq!(full_json["query_validation"]["version"], 1);
+        assert_eq!(
+            full_json["query_validation"]["files"][0]["failures"]
                 .as_array()
                 .unwrap()
                 .len(),
@@ -653,7 +672,11 @@ fn compact_json_version_does_not_depend_on_text_verbosity() {
     assert_eq!(run(verbose, 3), normal);
     assert_eq!(normal["query_validation"]["version"], 2);
     let default = run(command(&dir.0, "plan"), 3);
-    assert_eq!(default["query_validation"]["version"], 1);
+    assert_eq!(default, normal);
+    let mut full = command(&dir.0, "plan");
+    full.args(["--query-report", "full"]);
+    let full = run(full, 3);
+    assert_eq!(full["query_validation"]["version"], 1);
     for action in ["plan", "apply", "rehearse"] {
         let output = Command::new(env!("CARGO_BIN_EXE_unionid"))
             .args(["migration", action, "--help"])
