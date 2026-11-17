@@ -53,6 +53,8 @@ jobs:
           deploy/envoy/verify.sh target/debug/unionid
       - name: Check and exercise standalone evaluation tools
         shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/unionid-eval-target
         run: |
           for manifest in \
             tools/storage-eval/Cargo.toml \
@@ -82,6 +84,8 @@ jobs:
       - name: Run optional large incremental-backup evaluation
         if: github.event_name == 'workflow_dispatch' && inputs.run_large_backup_evaluator
         shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/unionid-eval-target
         run: |
           cargo run --release --locked --manifest-path tools/incremental-backup-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-incremental-backup-10k" 10000 30 1000 > "${RUNNER_TEMP}/unionid-incremental-backup-10k.json"
           cargo run --release --locked --manifest-path tools/incremental-backup-eval/Cargo.toml -- "${RUNNER_TEMP}/unionid-incremental-backup-100k" 100000 30 3000 > "${RUNNER_TEMP}/unionid-incremental-backup-100k.json"
@@ -118,12 +122,13 @@ jobs:
           curl --fail --location --retry 3 --output "${RUNNER_TEMP}/${archive}" "${base}/${archive}"
           curl --fail --location --retry 3 --output "${RUNNER_TEMP}/${archive}.sha256" "${base}/${archive}.sha256"
           cargo build --locked --bin unionid
+          current_version="$(python3 -c 'import json; print(json.load(open("release/contract.json"))["software_version"])')"
           python3 scripts/verify-previous-release-compatibility.py \
             --archive "${RUNNER_TEMP}/${archive}" \
             --checksum "${RUNNER_TEMP}/${archive}.sha256" \
             --current-binary target/debug/unionid \
             --previous-version 0.13.0 \
-            --current-version 0.13.1 \
+            --current-version "${current_version}" \
             --work-dir "${RUNNER_TEMP}/unionid-v013-compat"
       - name: Package native artifact
         shell: bash

@@ -51,6 +51,7 @@ def reported_capabilities(report):
         "protocol": max(report["protocol_versions"]),
         "protocol_versions": report["protocol_versions"],
         "stream_protocol_versions": report["stream_protocol_versions"],
+        "supported_storage_capabilities": report["supported_storage_capabilities"],
     }
 
 

@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import pathlib
 import platform
 import subprocess
@@ -11,7 +12,10 @@ from datetime import datetime
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "tools" / "adt-interop-eval" / "Cargo.toml"
-BINARY = ROOT / "tools" / "adt-interop-eval" / "target" / "release" / "unionid-adt-interop-eval"
+TARGET_DIR = pathlib.Path(
+    os.environ.get("CARGO_TARGET_DIR", ROOT / "tools" / "adt-interop-eval" / "target")
+)
+BINARY = TARGET_DIR / "release" / "unionid-adt-interop-eval"
 
 
 def main():
