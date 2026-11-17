@@ -947,27 +947,55 @@ fn preflight_attaches_actionable_hints_for_renames_and_added_variants() {
             .hint
             .as_deref()
             .unwrap()
-            .contains("table 'jobs' was renamed to 'archived_jobs'")
+            .contains("table 'jobs' was renamed to 'archived_jobs' in migration 'evolve'")
     );
     assert!(
         by_path["field.unid"]
             .hint
             .as_deref()
             .unwrap()
-            .contains("field 'Job.score' was renamed to 'Job.points'")
+            .contains("field 'Job.score' was renamed to 'Job.points' in migration 'evolve'")
     );
     assert!(
-        by_path["variant.unid"]
-            .hint
-            .as_deref()
-            .unwrap()
-            .contains("variant 'State.Pending' was renamed to 'State.Queued'")
+        by_path["variant.unid"].hint.as_deref().unwrap().contains(
+            "variant 'State.Pending' was renamed to 'State.Queued' in migration 'evolve'"
+        )
     );
     assert!(
         by_path["match.unid"]
             .hint
             .as_deref()
             .unwrap()
-            .contains("variant 'State.Cancelled' was added by a migration")
+            .contains("variant 'State.Cancelled' in migration 'evolve' was added")
+    );
+
+    // When a subsequent migration drops the renamed table/field/variant, do not recommend the dropped target:
+    let dropped_files = [
+        initial(),
+        next(
+            "evolve",
+            "initial",
+            "rename table jobs to archived_jobs\n  rename field Job.score to points",
+        ),
+        next(
+            "drop_targets",
+            "evolve",
+            "drop table archived_jobs\n  drop field Job.points",
+        ),
+    ];
+    let dropped_report = engine
+        .plan_migrations_with_queries(
+            &dropped_files,
+            &[query("table.unid", "from jobs | select {id}")],
+        )
+        .unwrap()
+        .query_validation;
+    let final_table_error = &dropped_report.files[0].failures.last().unwrap().error;
+    assert!(
+        !final_table_error
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("archived_jobs")
     );
 }

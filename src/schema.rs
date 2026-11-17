@@ -20,7 +20,7 @@ pub struct SchemaDiffOperation {
     pub requires_input: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaDiffTodoKind {
     RenameSequence,
@@ -151,20 +151,39 @@ pub(crate) fn diff(
     diff_tables(current, &target, &mut generated, &mut todos);
     diff_references(current, &target, &mut generated);
     generated.sort_by_key(|operation| operation_priority(&operation.description));
-    // Conversion TODOs need user input but must still precede reference adds:
-    // accepting a filled-in conversion should not require fixing its order.
+    let (row_type_todos, mut other_todos): (Vec<_>, Vec<_>) = todos
+        .into_iter()
+        .partition(|item| item.kind == SchemaDiffTodoKind::ChangeTableRowType);
+    // Table row-type replacements drop/recreate the table, so they must run
+    // before dropping the old row type (priority 7).
+    let before_drop_type = generated
+        .iter()
+        .position(|operation| operation_priority(&operation.description) >= 7)
+        .unwrap_or(generated.len());
+    generated.splice(
+        before_drop_type..before_drop_type,
+        row_type_todos.iter().map(|item| SchemaDiffOperation {
+            description: item.description.clone(),
+            destructive: false,
+            requires_input: true,
+        }),
+    );
+    // Other conversion TODOs need user input but must still precede reference
+    // adds: accepting a filled-in conversion should not require fixing its order.
     let reference_adds = generated
         .iter()
         .position(|operation| operation.description.starts_with("add reference "))
         .unwrap_or(generated.len());
     generated.splice(
         reference_adds..reference_adds,
-        todos.iter().map(|item| SchemaDiffOperation {
+        other_todos.iter().map(|item| SchemaDiffOperation {
             description: item.description.clone(),
             destructive: false,
             requires_input: true,
         }),
     );
+    let mut todos = row_type_todos;
+    todos.append(&mut other_todos);
     let impacts = current
         .catalog
         .types
@@ -1203,6 +1222,7 @@ fn variant_signature(catalog: &Catalog, variant: &crate::model::EnumVariantDef) 
 fn variant_payload(catalog: &Catalog, variant: &crate::model::EnumVariantDef) -> String {
     match variant.args.as_slice() {
         [] => "()".into(),
+        [one] if matches!(one, ScalarType::Tuple(_)) => format!("({})", catalog.describe(one)),
         [one] => catalog.describe(one),
         many => format!(
             "({})",

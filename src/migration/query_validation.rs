@@ -106,7 +106,7 @@ pub(crate) struct QueryValidator<'a> {
     queries: Vec<&'a MigrationQuery>,
     baselines: Vec<Option<Signature>>,
     files: Vec<QueryFileValidation>,
-    applied_steps: Vec<crate::query::SchemaMigration>,
+    applied_steps: Vec<(String, crate::query::SchemaMigration)>,
     diagnostics: usize,
     diagnostic_bytes: usize,
     first: bool,
@@ -197,7 +197,11 @@ impl<'a> QueryValidator<'a> {
         database: &Database,
     ) -> Result<()> {
         if let Some(file) = migration {
-            self.applied_steps.extend(file.steps.iter().cloned());
+            self.applied_steps.extend(
+                file.steps
+                    .iter()
+                    .map(|step| (file.id.clone(), step.clone())),
+            );
         }
         let migration_id = migration.map(|file| file.id.as_str());
         let engine = Engine::from_database(database.clone());
@@ -451,7 +455,10 @@ fn quoted_after<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
     Some(quoted)
 }
 
-fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::SchemaMigration]) {
+fn enrich_migration_query_error(
+    error: &mut Error,
+    steps: &[(String, crate::query::SchemaMigration)],
+) {
     use crate::query::SchemaMigration;
     if steps.is_empty() {
         return;
@@ -462,18 +469,29 @@ fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::Schema
                 return;
             };
             let mut current = name;
-            let mut renamed = false;
-            for step in steps {
-                if let SchemaMigration::RenameTable { from, to } = step
-                    && from == current
-                {
-                    current = to;
-                    renamed = true;
+            let mut origin_migration: Option<&str> = None;
+            let mut dropped = false;
+            for (migration_id, step) in steps {
+                if dropped {
+                    break;
+                }
+                match step {
+                    SchemaMigration::RenameTable { from, to } if from == current => {
+                        current = to;
+                        origin_migration = Some(migration_id);
+                    }
+                    SchemaMigration::DropTable { table } if table == current => {
+                        dropped = true;
+                    }
+                    _ => {}
                 }
             }
-            if renamed && current != name {
+            if !dropped
+                && current != name
+                && let Some(migration_id) = origin_migration
+            {
                 error.hint = Some(format!(
-                    "table '{name}' was renamed to '{current}'; update the query to reference '{current}'"
+                    "table '{name}' was renamed to '{current}' in migration '{migration_id}'; update the query to reference '{current}'"
                 ));
             }
         }
@@ -485,13 +503,15 @@ fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::Schema
                 .rsplit_once('.')
                 .map(|(_, field)| field)
                 .unwrap_or(path);
-            for (index, step) in steps.iter().enumerate() {
+            for (index, (migration_id, step)) in steps.iter().enumerate() {
                 if let SchemaMigration::RenameField { owner, from, to } = step
                     && (from == leaf || format!("{owner}.{from}") == path)
                 {
                     let mut current_owner = owner.as_str();
                     let mut current_field = to.as_str();
-                    for later in &steps[index + 1..] {
+                    let mut origin_migration = migration_id.as_str();
+                    let mut dropped = false;
+                    for (later_migration, later) in &steps[index + 1..] {
                         match later {
                             SchemaMigration::RenameType { from, to } if from == current_owner => {
                                 current_owner = to;
@@ -502,13 +522,25 @@ fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::Schema
                                 to: later_to,
                             } if later_owner == current_owner && later_from == current_field => {
                                 current_field = later_to;
+                                origin_migration = later_migration;
+                            }
+                            SchemaMigration::DropField {
+                                owner: later_owner,
+                                field,
+                            } if later_owner == current_owner && field == current_field => {
+                                dropped = true;
+                                break;
+                            }
+                            SchemaMigration::DropType { name } if name == current_owner => {
+                                dropped = true;
+                                break;
                             }
                             _ => {}
                         }
                     }
-                    if current_field != from {
+                    if !dropped && current_field != from {
                         error.hint = Some(format!(
-                            "field '{owner}.{from}' was renamed to '{current_owner}.{current_field}'; update the query to reference '{current_field}'"
+                            "field '{owner}.{from}' was renamed to '{current_owner}.{current_field}' in migration '{origin_migration}'; update the query to reference '{current_field}'"
                         ));
                         return;
                     }
@@ -523,14 +555,16 @@ fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::Schema
                     .rsplit_once('.')
                     .map(|(q, v)| (Some(q), v))
                     .unwrap_or((None, raw));
-                for (index, step) in steps.iter().enumerate() {
+                for (index, (migration_id, step)) in steps.iter().enumerate() {
                     if let SchemaMigration::RenameVariant { owner, from, to } = step
                         && from == variant_name
                         && qualifier.is_none_or(|q| q == owner)
                     {
                         let mut current_owner = owner.as_str();
                         let mut current_variant = to.as_str();
-                        for later in &steps[index + 1..] {
+                        let mut origin_migration = migration_id.as_str();
+                        let mut dropped = false;
+                        for (later_migration, later) in &steps[index + 1..] {
                             match later {
                                 SchemaMigration::RenameType { from, to }
                                     if from == current_owner =>
@@ -545,13 +579,26 @@ fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::Schema
                                     && later_from == current_variant =>
                                 {
                                     current_variant = later_to;
+                                    origin_migration = later_migration;
+                                }
+                                SchemaMigration::DropVariant {
+                                    owner: later_owner,
+                                    variant,
+                                    ..
+                                } if later_owner == current_owner && variant == current_variant => {
+                                    dropped = true;
+                                    break;
+                                }
+                                SchemaMigration::DropType { name } if name == current_owner => {
+                                    dropped = true;
+                                    break;
                                 }
                                 _ => {}
                             }
                         }
-                        if current_variant != from {
+                        if !dropped && current_variant != from {
                             error.hint = Some(format!(
-                                "variant '{owner}.{from}' was renamed to '{current_owner}.{current_variant}'; update the query to reference '{current_variant}'"
+                                "variant '{owner}.{from}' was renamed to '{current_owner}.{current_variant}' in migration '{origin_migration}'; update the query to reference '{current_variant}'"
                             ));
                             return;
                         }
@@ -561,48 +608,72 @@ fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::Schema
                 .or_else(|| quoted_after(&error.message, "unknown local type '"))
             {
                 let mut current = type_name;
-                let mut renamed = false;
-                for step in steps {
-                    if let SchemaMigration::RenameType { from, to } = step
-                        && from == current
-                    {
-                        current = to;
-                        renamed = true;
+                let mut origin_migration: Option<&str> = None;
+                let mut dropped = false;
+                for (migration_id, step) in steps {
+                    if dropped {
+                        break;
+                    }
+                    match step {
+                        SchemaMigration::RenameType { from, to } if from == current => {
+                            current = to;
+                            origin_migration = Some(migration_id);
+                        }
+                        SchemaMigration::DropType { name } if name == current => {
+                            dropped = true;
+                        }
+                        _ => {}
                     }
                 }
-                if renamed && current != type_name {
+                if !dropped
+                    && current != type_name
+                    && let Some(migration_id) = origin_migration
+                {
                     error.hint = Some(format!(
-                        "type '{type_name}' was renamed to '{current}'; update the query to reference '{current}'"
+                        "type '{type_name}' was renamed to '{current}' in migration '{migration_id}'; update the query to reference '{current}'"
                     ));
                 }
             } else if error.code == "E_MATCH"
                 && let Some(rest) = error.message.strip_prefix("non-exhaustive match; missing ")
                 && let Some((missing_list, _)) = rest.split_once("; uncovered example ")
             {
-                let mut active_added: Vec<(String, String)> = Vec::new();
-                for step in steps {
+                let mut active_added: Vec<(String, String, String)> = Vec::new();
+                for (migration_id, step) in steps {
                     match step {
                         SchemaMigration::AddVariant { owner, name, .. } => {
-                            if !active_added.iter().any(|(o, v)| o == owner && v == name) {
-                                active_added.push((owner.clone(), name.clone()));
+                            if let Some(existing) = active_added
+                                .iter_mut()
+                                .find(|(o, v, _)| o == owner && v == name)
+                            {
+                                existing.2.clone_from(migration_id);
+                            } else {
+                                active_added.push((
+                                    owner.clone(),
+                                    name.clone(),
+                                    migration_id.clone(),
+                                ));
                             }
                         }
                         SchemaMigration::RenameVariant { owner, from, to } => {
-                            for (o, v) in &mut active_added {
+                            for (o, v, m) in &mut active_added {
                                 if o == owner && v == from {
                                     *v = to.clone();
+                                    m.clone_from(migration_id);
                                 }
                             }
                         }
                         SchemaMigration::RenameType { from, to } => {
-                            for (o, _) in &mut active_added {
+                            for (o, _, _) in &mut active_added {
                                 if o == from {
                                     *o = to.clone();
                                 }
                             }
                         }
                         SchemaMigration::DropVariant { owner, variant, .. } => {
-                            active_added.retain(|(o, v)| !(o == owner && v == variant));
+                            active_added.retain(|(o, v, _)| !(o == owner && v == variant));
+                        }
+                        SchemaMigration::DropType { name } => {
+                            active_added.retain(|(o, _, _)| o != name);
                         }
                         _ => {}
                     }
@@ -610,7 +681,7 @@ fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::Schema
                 let missing_items = missing_list.split(", ").collect::<Vec<_>>();
                 let matched = active_added
                     .iter()
-                    .filter(|(owner, variant)| {
+                    .filter(|(owner, variant, _)| {
                         missing_items.iter().any(|item| {
                             *item == variant.as_str()
                                 || *item == format!("{owner}.{variant}").as_str()
@@ -620,16 +691,18 @@ fn enrich_migration_query_error(error: &mut Error, steps: &[crate::query::Schema
                 if !matched.is_empty() {
                     let qualified = matched
                         .iter()
-                        .map(|(owner, variant)| format!("'{owner}.{variant}'"))
+                        .map(|(owner, variant, migration_id)| {
+                            format!("'{owner}.{variant}' in migration '{migration_id}'")
+                        })
                         .collect::<Vec<_>>()
                         .join(", ");
                     let branches = matched
                         .iter()
-                        .map(|(_, variant)| variant.as_str())
+                        .map(|(_, variant, _)| variant.as_str())
                         .collect::<Vec<_>>()
                         .join(", ");
                     error.hint = Some(format!(
-                        "variant {qualified} was added by a migration; add a match branch covering {branches}"
+                        "variant {qualified} was added; add a match branch covering {branches}"
                     ));
                 }
             }
