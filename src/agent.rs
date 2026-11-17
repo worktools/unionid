@@ -237,7 +237,7 @@ const COMMANDS: &[AgentCommand] = &[
     AgentCommand {
         name: "migration",
         summary: "Diff target schemas (with structured unresolved_todos), plan, rehearse, apply, advance, inspect, and abort migrations; preflights sibling saved queries by default.",
-        usage: "unionid migration diff --db <path> --schema <schema.unid> --name <name> --format json   # resolve diff.unresolved_todos using suggested_templates; then: migration plan|rehearse|apply --db <path> --dir <dir> [--queries <queries-dir> | --no-queries] [--query-report full|compact] [--verbose] --format json; other commands: status, advance, abort",
+        usage: "unionid migration diff --db <path> --schema <schema.unid> --name <name> --format json   # resolve diff.unresolved_todos using suggested_templates; then: migration plan|rehearse|apply --db <path> --dir <dir> [--queries <queries-dir> | --no-queries] [--query-report compact|full] [--verbose] --format json; other commands: status, advance, abort",
         json: true,
     },
     AgentCommand {
