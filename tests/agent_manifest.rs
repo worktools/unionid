@@ -55,6 +55,18 @@ fn agent_manifest_is_machine_readable_and_covers_the_error_contract() {
             .iter()
             .any(|field| field == "statement_index")
     );
+    let migration_workflow = value["migration_workflow"].as_array().unwrap();
+    assert_eq!(migration_workflow.len(), 5);
+    assert!(
+        migration_workflow
+            .iter()
+            .any(|step| step.as_str().unwrap().contains("unresolved_todos"))
+    );
+    assert!(
+        migration_workflow
+            .iter()
+            .any(|step| step.as_str().unwrap().contains("migration rehearse"))
+    );
 }
 
 #[test]
@@ -66,6 +78,8 @@ fn agent_manifest_markdown_lists_commands_and_hints() {
     assert!(markdown.starts_with("# unionid agent manifest"));
     assert!(markdown.contains("## Commands"));
     assert!(markdown.contains("## Error contract"));
+    assert!(markdown.contains("## Migration workflow"));
+    assert!(markdown.contains("unresolved_todos"));
     assert!(markdown.contains("storage_format: 10"));
     assert!(markdown.contains("partial_unique"));
     assert!(markdown.contains("E_TABLE"));

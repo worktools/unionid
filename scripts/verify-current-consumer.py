@@ -83,6 +83,7 @@ tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "net", "time"
 unionid = {{ path = {dependency}, features = ["http", "http-client"] }}
 """
         )
+        (consumer / "Cargo.lock").write_bytes((ROOT / "Cargo.lock").read_bytes())
         work = temporary / "work"
         environment = os.environ.copy()
         # Keep the consumer source isolated while reusing dependency artifacts.

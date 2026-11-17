@@ -899,3 +899,103 @@ fn compact_large_preflight_can_repair_final_queries_then_apply_normally() {
     assert!(engine.execute("from missing").ok);
     assert_eq!(engine.execute("from jobs").rows.len(), 1);
 }
+
+#[test]
+fn preflight_attaches_actionable_hints_for_renames_and_added_variants() {
+    let mut engine = Engine::memory();
+    setup(&mut engine);
+    let files = [
+        initial(),
+        next(
+            "evolve",
+            "initial",
+            "rename table jobs to archived_jobs\n  \
+             rename field Job.score to points\n  \
+             rename variant State.Pending to Queued\n  \
+             add variant State.Cancelled",
+        ),
+    ];
+    let queries = [
+        query("table.unid", "from jobs | select {id}"),
+        query("field.unid", "from archived_jobs | select {score}"),
+        query(
+            "variant.unid",
+            "from archived_jobs | filter state == Pending | select {id}",
+        ),
+        query(
+            "match.unid",
+            "from archived_jobs\nderive done = match state {\n Queued => false\n Done => true\n}\nselect {id, done}",
+        ),
+    ];
+    let full = engine
+        .plan_migrations_with_queries(&files, &queries)
+        .unwrap()
+        .query_validation;
+    let compact = engine
+        .plan_migrations_with_queries_v2(&files, &queries)
+        .unwrap()
+        .query_validation;
+    assert_eq!(expand_compact(&compact), full);
+
+    let by_path = full
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), &f.failures.last().unwrap().error))
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        by_path["table.unid"]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("table 'jobs' was renamed to 'archived_jobs' in migration 'evolve'")
+    );
+    assert!(
+        by_path["field.unid"]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("field 'Job.score' was renamed to 'Job.points' in migration 'evolve'")
+    );
+    assert!(
+        by_path["variant.unid"].hint.as_deref().unwrap().contains(
+            "variant 'State.Pending' was renamed to 'State.Queued' in migration 'evolve'"
+        )
+    );
+    assert!(
+        by_path["match.unid"]
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains("variant 'State.Cancelled' in migration 'evolve' was added")
+    );
+
+    // When a subsequent migration drops the renamed table/field/variant, do not recommend the dropped target:
+    let dropped_files = [
+        initial(),
+        next(
+            "evolve",
+            "initial",
+            "rename table jobs to archived_jobs\n  rename field Job.score to points",
+        ),
+        next(
+            "drop_targets",
+            "evolve",
+            "drop table archived_jobs\n  drop field Job.points",
+        ),
+    ];
+    let dropped_report = engine
+        .plan_migrations_with_queries(
+            &dropped_files,
+            &[query("table.unid", "from jobs | select {id}")],
+        )
+        .unwrap()
+        .query_validation;
+    let final_table_error = &dropped_report.files[0].failures.last().unwrap().error;
+    assert!(
+        !final_table_error
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("archived_jobs")
+    );
+}

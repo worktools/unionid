@@ -540,3 +540,220 @@ fn reference_diff_rebinds_a_replaced_unique_index() {
         "E_CONSTRAINT"
     );
 }
+
+#[test]
+fn structured_unresolved_todos_provide_kinds_signatures_and_templates() {
+    use unionid::SchemaDiffTodoKind;
+
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type State = Pending | Failed {message text}\n\
+         type Task =\n  id int\n  title text\n  count int\n  state State\n\
+         table tasks Task\n  key id",
+    );
+    let target = "type State = Pending | Rejected {code int, message text}\n\
+                  type Task =\n  id int\n  label text\n  count text\n  state State\n  owner int\n\
+                  table archived_tasks Task\n  key id";
+    let diff = engine
+        .diff_schema(target, "m0001_structured_todos", None)
+        .unwrap();
+    assert!(!diff.runnable);
+    assert_eq!(
+        diff.unresolved_todos.len(),
+        diff.operations
+            .iter()
+            .filter(|op| op.requires_input)
+            .count()
+    );
+    for todo in &diff.unresolved_todos {
+        assert!(
+            diff.migration_source.contains(&todo.description),
+            "missing description in source: {}",
+            todo.description
+        );
+    }
+
+    let rename_field = diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::RenameField)
+        .unwrap();
+    assert_eq!(rename_field.target, "Task.title");
+    assert_eq!(rename_field.candidates, ["label"]);
+    assert_eq!(
+        rename_field.suggested_templates[0],
+        "rename field Task.title to label"
+    );
+
+    let backfill_field = diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::BackfillField)
+        .unwrap();
+    assert_eq!(backfill_field.target, "Task.owner");
+    assert_eq!(backfill_field.target_signature.as_deref(), Some("int"));
+
+    let change_field = diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::ChangeField)
+        .unwrap();
+    assert_eq!(change_field.target, "Task.count");
+    assert_eq!(change_field.current_signature.as_deref(), Some("int"));
+    assert_eq!(change_field.target_signature.as_deref(), Some("text"));
+
+    let rename_table = diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::RenameTable)
+        .unwrap();
+    assert_eq!(rename_table.target, "tasks");
+    assert_eq!(rename_table.candidates, ["archived_tasks"]);
+    assert_eq!(
+        rename_table.suggested_templates[0],
+        "rename table tasks to archived_tasks"
+    );
+
+    // Resolving a field-rename + backfill + conversion + table-rename draft via templates:
+    let mut resolved = diff.migration_source.clone();
+    resolved = resolved.replace(
+        &rename_field.description,
+        &rename_field.suggested_templates[0],
+    );
+    resolved = resolved.replace(
+        &backfill_field.description,
+        &backfill_field.suggested_templates[0].replace("required_backfill_value", "0"),
+    );
+    resolved = resolved.replace(
+        &change_field.description,
+        &change_field.suggested_templates[0].replace("value", "\"0\""),
+    );
+    resolved = resolved.replace(
+        &rename_table.description,
+        &rename_table.suggested_templates[0],
+    );
+    let file = MigrationFile::parse(resolved).unwrap();
+    engine.apply_migrations(&[file]).unwrap();
+    assert_eq!(
+        engine.schema(),
+        Engine::check_schema(target).unwrap().normalized
+    );
+}
+
+#[test]
+fn all_fourteen_todo_kinds_single_tuple_variants_and_row_type_drops_work() {
+    use std::collections::BTreeSet;
+    use unionid::SchemaDiffTodoKind;
+
+    // 1. Exercise all 14 SchemaDiffTodoKind variants in one comprehensive diff:
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "sequence seq_rename_old {start 1}\n\
+         sequence seq_change {start 1}\n\
+         type AliasOld = int\n\
+         type ShapeChanged = {x int}\n\
+         type VariantOrder = First | Second | OldUnit | Payload(int)\n\
+         type FieldOrder = {first int, second text}\n\
+         type Item = {id int, old_field text, converted int}\n\
+         type OldRow = {id int}\n\
+         type NewRow = {id int, extra text = \"ok\"}\n\
+         table old_items Item\n\
+         table swapped OldRow\n  key id",
+    );
+    let target_all = "sequence seq_rename_new {start 1}\n\
+                      sequence seq_change {start 10}\n\
+                      type AliasNew = int\n\
+                      type ShapeChanged = Alpha | Beta\n\
+                      type VariantOrder = Second | First | NewUnit | Payload((int, text))\n\
+                      type FieldOrder = {second text, first int}\n\
+                      type Item = {id int, new_field text, converted text, required int}\n\
+                      type NewRow = {id int, extra text = \"ok\"}\n\
+                      table new_items Item\n\
+                      table swapped NewRow\n  key id\n\
+                      create table legacy_raw (id int)";
+    let diff = engine
+        .diff_schema(target_all, "m0001_all_kinds", None)
+        .unwrap();
+    assert!(!diff.runnable);
+    let kinds = diff
+        .unresolved_todos
+        .iter()
+        .map(|todo| todo.kind)
+        .collect::<Vec<_>>();
+    for expected in [
+        SchemaDiffTodoKind::RenameSequence,
+        SchemaDiffTodoKind::ChangeSequenceStart,
+        SchemaDiffTodoKind::RenameType,
+        SchemaDiffTodoKind::ReplaceType,
+        SchemaDiffTodoKind::RenameVariant,
+        SchemaDiffTodoKind::ChangeVariant,
+        SchemaDiffTodoKind::PreserveVariantOrder,
+        SchemaDiffTodoKind::RenameField,
+        SchemaDiffTodoKind::BackfillField,
+        SchemaDiffTodoKind::ChangeField,
+        SchemaDiffTodoKind::PreserveFieldOrder,
+        SchemaDiffTodoKind::RenameTable,
+        SchemaDiffTodoKind::ChangeTableRowType,
+        SchemaDiffTodoKind::LegacyStructuralTable,
+    ] {
+        assert!(
+            kinds.contains(&expected),
+            "missing todo kind {expected:?} in {kinds:?}"
+        );
+    }
+    assert_eq!(kinds.iter().copied().collect::<BTreeSet<_>>().len(), 14);
+
+    // 2. Verify single-tuple variant payload template preserves 1-tuple arity:
+    let mut variant_engine = Engine::memory();
+    ok(&mut variant_engine, "type Wrap = Pair(int) | Empty");
+    let variant_target = "type Wrap = Pair((int, text)) | Empty";
+    let variant_diff = variant_engine
+        .diff_schema(variant_target, "m0001_single_tuple_variant", None)
+        .unwrap();
+    let change_variant = variant_diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::ChangeVariant)
+        .unwrap();
+    assert_eq!(
+        change_variant.target_signature.as_deref(),
+        Some("((int, text))")
+    );
+    let resolved_variant = variant_diff.migration_source.replace(
+        &change_variant.description,
+        &change_variant.suggested_templates[0].replace("value", "(old, \"item\")"),
+    );
+    let variant_file = MigrationFile::parse(resolved_variant).unwrap();
+    variant_engine.apply_migrations(&[variant_file]).unwrap();
+    assert_eq!(
+        variant_engine.schema(),
+        Engine::check_schema(variant_target).unwrap().normalized
+    );
+
+    // 3. Verify ChangeTableRowType runs before `drop type OldRow`:
+    let mut row_engine = Engine::memory();
+    ok(
+        &mut row_engine,
+        "type OldRow = {id int}\ntable tasks OldRow\n  key id",
+    );
+    let row_target = "type NewRow = {id int, title text = \"\"}\ntable tasks NewRow\n  key id";
+    let row_diff = row_engine
+        .diff_schema(row_target, "m0001_swap_row_type", None)
+        .unwrap();
+    let swap_todo = row_diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::ChangeTableRowType)
+        .unwrap();
+    let resolved_row = row_diff
+        .migration_source
+        .replace(&swap_todo.description, &swap_todo.suggested_templates[0]);
+    let row_file = MigrationFile::parse(resolved_row).unwrap();
+    row_engine.apply_migrations(&[row_file]).unwrap();
+    assert_eq!(
+        row_engine.schema(),
+        Engine::check_schema(row_target).unwrap().normalized
+    );
+}

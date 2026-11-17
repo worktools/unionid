@@ -2439,7 +2439,7 @@ impl Engine {
             QueryValidator::new(queries, checkpoints)?
         };
         let plan =
-            self.plan_migrations_observed(files, true, |id, db| validator.inspect(id, db))?;
+            self.plan_migrations_observed(files, true, |file, db| validator.inspect(file, db))?;
         Ok((plan, validator))
     }
 
@@ -2513,7 +2513,7 @@ impl Engine {
         &self,
         files: &[MigrationFile],
         metadata_only: bool,
-        mut inspect: impl FnMut(Option<&str>, &Database) -> Result<()>,
+        mut inspect: impl FnMut(Option<&MigrationFile>, &Database) -> Result<()>,
     ) -> Result<MigrationPlan> {
         let applied_count =
             validate_files_against_history(files, self.committed.db.migration_history())?;
@@ -2569,7 +2569,7 @@ impl Engine {
                 schema_hash: after.hash,
                 applied_at_unix_ms: 0,
             })?;
-            inspect(Some(&file.id), &candidate)?;
+            inspect(Some(file), &candidate)?;
         }
         Ok(MigrationPlan {
             current_schema,

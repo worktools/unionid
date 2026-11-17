@@ -84,6 +84,7 @@ serde = {{ version = "1", features = ["derive"] }}
 unionid = {{ path = {root} }}
 '''
         )
+        (consumer / "Cargo.lock").write_bytes((ROOT / "Cargo.lock").read_bytes())
         environment = os.environ.copy()
         environment["CARGO_TARGET_DIR"] = str(ROOT / "target")
         environment["UNIONID_TYPED_APP_V1"] = str(generated_v1)

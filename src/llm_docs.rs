@@ -171,7 +171,7 @@ const TOPICS: &[BundledDocsTopic] = &[
         category: DocsCategory::Lifecycle,
         title: "Migrations / 数据迁移",
         source: "docs/MIGRATIONS.md",
-        summary: "Plan, apply, resume, inspect, and validate schema migrations.",
+        summary: "Diff target schemas (with structured unresolved_todos), rehearse, plan, apply, and validate schema migrations with the 5-step agent workflow.",
         content: include_str!("../docs/MIGRATIONS.md"),
     },
     BundledDocsTopic {
@@ -447,6 +447,10 @@ mod tests {
         let rendered = render_bundled_document_markdown(&query);
         assert!(rendered.starts_with("---\ndocument_schema_version: 1\n"));
         assert!(rendered.contains("topic: query\ncategory: language"));
+        let migrations = bundled_document("migrations").unwrap();
+        assert_eq!(migrations.category, DocsCategory::Lifecycle);
+        assert!(migrations.content.contains("unresolved_todos"));
+        assert!(migrations.content.contains("migration_workflow"));
         assert!(bundled_document("missing").is_none());
     }
 

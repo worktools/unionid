@@ -20,12 +20,48 @@ pub struct SchemaDiffOperation {
     pub requires_input: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaDiffTodoKind {
+    RenameSequence,
+    ChangeSequenceStart,
+    RenameType,
+    ReplaceType,
+    RenameVariant,
+    ChangeVariant,
+    PreserveVariantOrder,
+    RenameField,
+    BackfillField,
+    ChangeField,
+    PreserveFieldOrder,
+    RenameTable,
+    ChangeTableRowType,
+    LegacyStructuralTable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchemaDiffTodo {
+    pub kind: SchemaDiffTodoKind,
+    pub target: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_templates: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchemaDiff {
     pub current_schema: SchemaInfo,
     pub target_declaration: SchemaInfo,
     pub normalized_schema: String,
     pub operations: Vec<SchemaDiffOperation>,
+    #[serde(default)]
+    pub unresolved_todos: Vec<SchemaDiffTodo>,
     pub impacts: Vec<SchemaDiffImpact>,
     pub warnings: Vec<String>,
     pub runnable: bool,
@@ -115,13 +151,39 @@ pub(crate) fn diff(
     diff_tables(current, &target, &mut generated, &mut todos);
     diff_references(current, &target, &mut generated);
     generated.sort_by_key(|operation| operation_priority(&operation.description));
-    // Conversion TODOs need user input but must still precede reference adds:
-    // accepting a filled-in conversion should not require fixing its order.
+    let (row_type_todos, mut other_todos): (Vec<_>, Vec<_>) = todos
+        .into_iter()
+        .partition(|item| item.kind == SchemaDiffTodoKind::ChangeTableRowType);
+    // Table row-type replacements drop/recreate the table, so they must run
+    // before dropping the old row type (priority 7).
+    let before_drop_type = generated
+        .iter()
+        .position(|operation| operation_priority(&operation.description) >= 7)
+        .unwrap_or(generated.len());
+    generated.splice(
+        before_drop_type..before_drop_type,
+        row_type_todos.iter().map(|item| SchemaDiffOperation {
+            description: item.description.clone(),
+            destructive: false,
+            requires_input: true,
+        }),
+    );
+    // Other conversion TODOs need user input but must still precede reference
+    // adds: accepting a filled-in conversion should not require fixing its order.
     let reference_adds = generated
         .iter()
         .position(|operation| operation.description.starts_with("add reference "))
         .unwrap_or(generated.len());
-    generated.splice(reference_adds..reference_adds, todos);
+    generated.splice(
+        reference_adds..reference_adds,
+        other_todos.iter().map(|item| SchemaDiffOperation {
+            description: item.description.clone(),
+            destructive: false,
+            requires_input: true,
+        }),
+    );
+    let mut todos = row_type_todos;
+    todos.append(&mut other_todos);
     let impacts = current
         .catalog
         .types
@@ -187,6 +249,7 @@ pub(crate) fn diff(
         normalized_schema: target.schema_text(),
         runnable,
         operations,
+        unresolved_todos: todos,
         impacts,
         warnings,
         migration_source: source,
@@ -214,7 +277,7 @@ fn diff_sequences(
     current: &Database,
     target: &Database,
     generated: &mut Vec<SchemaDiffOperation>,
-    todos: &mut Vec<SchemaDiffOperation>,
+    todos: &mut Vec<SchemaDiffTodo>,
 ) {
     let old = current
         .schema_sequences()
@@ -231,7 +294,20 @@ fn diff_sequences(
     for (name, sequence) in &old {
         if let Some(target) = new.get(name) {
             if sequence.start != target.start {
-                todos.push(todo(format!("todo change sequence {name} start explicitly; existing counters cannot be reset")));
+                todos.push(SchemaDiffTodo {
+                    kind: SchemaDiffTodoKind::ChangeSequenceStart,
+                    target: (*name).to_string(),
+                    description: format!(
+                        "todo change sequence {name} start explicitly; existing counters cannot be reset"
+                    ),
+                    current_signature: Some(sequence.start.to_string()),
+                    target_signature: Some(target.start.to_string()),
+                    candidates: Vec::new(),
+                    suggested_templates: vec![format!(
+                        "drop sequence {name}\n  add sequence {name} {{start {}}}",
+                        target.start
+                    )],
+                });
             }
             continue;
         }
@@ -245,10 +321,25 @@ fn diff_sequences(
         if !candidates.is_empty() {
             rename_from.insert(*name);
             rename_to.extend(candidates.iter().copied());
-            todos.push(todo(format!(
-                "todo confirm rename sequence {name} to {} or replace it explicitly",
-                candidates.join(", ")
-            )));
+            let cand = candidates[0];
+            todos.push(SchemaDiffTodo {
+                kind: SchemaDiffTodoKind::RenameSequence,
+                target: (*name).to_string(),
+                description: format!(
+                    "todo confirm rename sequence {name} to {} or replace it explicitly",
+                    candidates.join(", ")
+                ),
+                current_signature: Some(sequence.start.to_string()),
+                target_signature: Some(sequence.start.to_string()),
+                candidates: candidates.iter().map(|item| (*item).to_string()).collect(),
+                suggested_templates: vec![
+                    format!("rename sequence {name} to {cand}"),
+                    format!(
+                        "drop sequence {name}\n  add sequence {cand} {{start {}}}",
+                        sequence.start
+                    ),
+                ],
+            });
         }
     }
     for sequence in target.schema_sequences() {
@@ -289,7 +380,7 @@ fn diff_types(
     current: &Database,
     target: &Database,
     generated: &mut Vec<SchemaDiffOperation>,
-    todos: &mut Vec<SchemaDiffOperation>,
+    todos: &mut Vec<SchemaDiffTodo>,
     warnings: &mut Vec<String>,
 ) {
     let current_names = current
@@ -329,14 +420,28 @@ fn diff_types(
         if !candidates.is_empty() {
             rename_from.insert(from.clone());
             rename_to.extend(candidates.iter().cloned());
-            let target = if candidates.len() == 1 {
+            let target_label = if candidates.len() == 1 {
                 candidates[0].clone()
             } else {
                 format!("one of {}", candidates.join(", "))
             };
-            todos.push(todo(format!(
-                "todo confirm rename type {from} to {target} or replace it explicitly"
-            )));
+            let cand = candidates[0].clone();
+            let current_sig = current.catalog.describe(&current.catalog.types[from].ty);
+            let target_sig = target.catalog.describe(&target.catalog.types[&cand].ty);
+            todos.push(SchemaDiffTodo {
+                kind: SchemaDiffTodoKind::RenameType,
+                target: from.clone(),
+                description: format!(
+                    "todo confirm rename type {from} to {target_label} or replace it explicitly"
+                ),
+                current_signature: Some(current_sig),
+                target_signature: Some(target_sig.clone()),
+                candidates,
+                suggested_templates: vec![
+                    format!("rename type {from} to {cand}"),
+                    format!("drop type {from}\n  add type {cand} = {target_sig}"),
+                ],
+            });
         }
     }
     removed.retain(|name| !rename_from.contains(name));
@@ -388,7 +493,7 @@ fn diff_type(
     target: &TypeDefinition,
     target_catalog: &Catalog,
     generated: &mut Vec<SchemaDiffOperation>,
-    todos: &mut Vec<SchemaDiffOperation>,
+    todos: &mut Vec<SchemaDiffTodo>,
     warnings: &mut Vec<String>,
 ) {
     if type_signature(current_catalog, &current.ty) == type_signature(target_catalog, &target.ty) {
@@ -441,14 +546,29 @@ fn diff_type(
                 if !candidates.is_empty() {
                     renamed_from.insert(*from);
                     renamed_to.extend(candidates.iter().copied());
-                    let target = if candidates.len() == 1 {
+                    let target_label = if candidates.len() == 1 {
                         candidates[0].to_string()
                     } else {
                         format!("one of {}", candidates.join(", "))
                     };
-                    todos.push(todo(format!(
-                        "todo confirm rename variant {name}.{from} to {target}"
-                    )));
+                    let cand = candidates[0];
+                    let target_desc = target_catalog.describe_variant(target_variants[cand]);
+                    todos.push(SchemaDiffTodo {
+                        kind: SchemaDiffTodoKind::RenameVariant,
+                        target: format!("{name}.{from}"),
+                        description: format!(
+                            "todo confirm rename variant {name}.{from} to {target_label}"
+                        ),
+                        current_signature: Some(current_catalog.describe_variant(old)),
+                        target_signature: Some(target_desc.clone()),
+                        candidates: candidates.iter().map(|item| (*item).to_string()).collect(),
+                        suggested_templates: vec![
+                            format!("rename variant {name}.{from} to {cand}"),
+                            format!(
+                                "drop variant {name}.{from}\n  add variant {name}.{target_desc}"
+                            ),
+                        ],
+                    });
                 }
             }
             for (variant, definition) in &target_variants {
@@ -472,10 +592,20 @@ fn diff_type(
                         if variant_signature(current_catalog, old)
                             != variant_signature(target_catalog, definition) =>
                     {
-                        todos.push(todo(format!(
-                            "todo change variant {name}.{variant} to {} using old -> value",
-                            variant_payload(target_catalog, definition)
-                        )));
+                        let target_payload = variant_payload(target_catalog, definition);
+                        todos.push(SchemaDiffTodo {
+                            kind: SchemaDiffTodoKind::ChangeVariant,
+                            target: format!("{name}.{variant}"),
+                            description: format!(
+                                "todo change variant {name}.{variant} to {target_payload} using old -> value"
+                            ),
+                            current_signature: Some(variant_payload(current_catalog, old)),
+                            target_signature: Some(target_payload.clone()),
+                            candidates: Vec::new(),
+                            suggested_templates: vec![format!(
+                                "change variant {name}.{variant} to {target_payload} using old -> value"
+                            )],
+                        });
                     }
                     _ => {}
                 }
@@ -498,14 +628,35 @@ fn diff_type(
                 .map(|variant| variant.name.as_str())
                 .collect::<Vec<_>>();
             if current_order != target_order {
-                todos.push(todo(format!(
-                    "todo preserve or explicitly migrate variant order for type {name}"
-                )));
+                todos.push(SchemaDiffTodo {
+                    kind: SchemaDiffTodoKind::PreserveVariantOrder,
+                    target: name.to_string(),
+                    description: format!(
+                        "todo preserve or explicitly migrate variant order for type {name}"
+                    ),
+                    current_signature: Some(current_order.join(", ")),
+                    target_signature: Some(target_order.join(", ")),
+                    candidates: Vec::new(),
+                    suggested_templates: Vec::new(),
+                });
             }
         }
-        _ => todos.push(todo(format!(
-            "todo replace type {name} with an explicit compatible migration"
-        ))),
+        _ => {
+            let target_sig = target_catalog.describe(&target.ty);
+            todos.push(SchemaDiffTodo {
+                kind: SchemaDiffTodoKind::ReplaceType,
+                target: name.to_string(),
+                description: format!(
+                    "todo replace type {name} with an explicit compatible migration"
+                ),
+                current_signature: Some(current_catalog.describe(&current.ty)),
+                target_signature: Some(target_sig.clone()),
+                candidates: Vec::new(),
+                suggested_templates: vec![format!(
+                    "drop type {name}\n  add type {name} = {target_sig}"
+                )],
+            });
+        }
     }
 }
 
@@ -516,7 +667,7 @@ fn diff_fields(
     target: &[Column],
     target_catalog: &Catalog,
     generated: &mut Vec<SchemaDiffOperation>,
-    todos: &mut Vec<SchemaDiffOperation>,
+    todos: &mut Vec<SchemaDiffTodo>,
 ) {
     let current_by_name = current
         .iter()
@@ -546,14 +697,36 @@ fn diff_fields(
         if !candidates.is_empty() {
             renamed_from.insert(*from);
             renamed_to.extend(candidates.iter().copied());
-            let target = if candidates.len() == 1 {
+            let target_label = if candidates.len() == 1 {
                 candidates[0].to_string()
             } else {
                 format!("one of {}", candidates.join(", "))
             };
-            todos.push(todo(format!(
-                "todo confirm rename field {owner}.{from} to {target}"
-            )));
+            let cand = candidates[0];
+            let new_field = target_by_name[cand];
+            let add_template = if new_field.default.is_some() {
+                format!(
+                    "add field {owner}.{}",
+                    target_catalog.describe_column(new_field)
+                )
+            } else {
+                format!(
+                    "add field {owner}.{cand} {} = required_backfill_value\n  drop default {owner}.{cand}",
+                    target_catalog.describe(&new_field.ty)
+                )
+            };
+            todos.push(SchemaDiffTodo {
+                kind: SchemaDiffTodoKind::RenameField,
+                target: format!("{owner}.{from}"),
+                description: format!("todo confirm rename field {owner}.{from} to {target_label}"),
+                current_signature: Some(current_catalog.describe_column(old)),
+                target_signature: Some(target_catalog.describe_column(new_field)),
+                candidates: candidates.iter().map(|item| (*item).to_string()).collect(),
+                suggested_templates: vec![
+                    format!("rename field {owner}.{from} to {cand}"),
+                    format!("drop field {owner}.{from}\n  {add_template}"),
+                ],
+            });
         }
     }
     for (name, field) in &target_by_name {
@@ -568,18 +741,43 @@ fn diff_fields(
                 ),
                 false,
             )),
-            None => todos.push(todo(format!(
-                "todo add field {owner}.{name} {} = required_backfill_value",
-                target_catalog.describe(&field.ty)
-            ))),
+            None => {
+                let target_ty = target_catalog.describe(&field.ty);
+                todos.push(SchemaDiffTodo {
+                    kind: SchemaDiffTodoKind::BackfillField,
+                    target: format!("{owner}.{name}"),
+                    description: format!(
+                        "todo add field {owner}.{name} {target_ty} = required_backfill_value"
+                    ),
+                    current_signature: None,
+                    target_signature: Some(target_ty.clone()),
+                    candidates: Vec::new(),
+                    suggested_templates: vec![
+                        format!(
+                            "add field {owner}.{name} {target_ty} = required_backfill_value\n  drop default {owner}.{name}"
+                        ),
+                        format!("add field {owner}.{name} {target_ty} = required_backfill_value"),
+                    ],
+                });
+            }
             Some(old)
                 if type_signature(current_catalog, &old.ty)
                     != type_signature(target_catalog, &field.ty) =>
             {
-                todos.push(todo(format!(
-                    "todo change field {owner}.{name} to {} using old -> value",
-                    target_catalog.describe(&field.ty)
-                )));
+                let target_ty = target_catalog.describe(&field.ty);
+                todos.push(SchemaDiffTodo {
+                    kind: SchemaDiffTodoKind::ChangeField,
+                    target: format!("{owner}.{name}"),
+                    description: format!(
+                        "todo change field {owner}.{name} to {target_ty} using old -> value"
+                    ),
+                    current_signature: Some(current_catalog.describe(&old.ty)),
+                    target_signature: Some(target_ty.clone()),
+                    candidates: Vec::new(),
+                    suggested_templates: vec![format!(
+                        "change field {owner}.{name} to {target_ty} using old -> value"
+                    )],
+                });
             }
             Some(old)
                 if value_signature(old.default.as_ref())
@@ -614,9 +812,17 @@ fn diff_fields(
         .map(|field| field.name.as_str())
         .collect::<Vec<_>>();
     if current_order != target_order {
-        todos.push(todo(format!(
-            "todo preserve or explicitly migrate field order for type {owner}"
-        )));
+        todos.push(SchemaDiffTodo {
+            kind: SchemaDiffTodoKind::PreserveFieldOrder,
+            target: owner.to_string(),
+            description: format!(
+                "todo preserve or explicitly migrate field order for type {owner}"
+            ),
+            current_signature: Some(current_order.join(", ")),
+            target_signature: Some(target_order.join(", ")),
+            candidates: Vec::new(),
+            suggested_templates: Vec::new(),
+        });
     }
 }
 
@@ -624,7 +830,7 @@ fn diff_tables(
     current: &Database,
     target: &Database,
     generated: &mut Vec<SchemaDiffOperation>,
-    todos: &mut Vec<SchemaDiffOperation>,
+    todos: &mut Vec<SchemaDiffTodo>,
 ) {
     let current_tables = current
         .schema_tables()
@@ -654,14 +860,31 @@ fn diff_tables(
         if !candidates.is_empty() {
             renamed_from.insert(*from);
             renamed_to.extend(candidates.iter().copied());
-            let target = if candidates.len() == 1 {
+            let target_label = if candidates.len() == 1 {
                 candidates[0].to_string()
             } else {
                 format!("one of {}", candidates.join(", "))
             };
-            todos.push(todo(format!(
-                "todo confirm rename table {from} to {target}"
-            )));
+            let cand = candidates[0];
+            let new_table = target_tables[cand];
+            let row_type = table_type_name(target, new_table).unwrap_or("RowType");
+            let key_suffix = new_table
+                .primary_key
+                .as_ref()
+                .map(|key| format!(" key {key}"))
+                .unwrap_or_default();
+            todos.push(SchemaDiffTodo {
+                kind: SchemaDiffTodoKind::RenameTable,
+                target: (*from).to_string(),
+                description: format!("todo confirm rename table {from} to {target_label}"),
+                current_signature: table_type_name(current, old).map(str::to_string),
+                target_signature: table_type_name(target, new_table).map(str::to_string),
+                candidates: candidates.iter().map(|item| (*item).to_string()).collect(),
+                suggested_templates: vec![
+                    format!("rename table {from} to {cand}"),
+                    format!("drop table {from}\n  add table {cand} {row_type}{key_suffix}"),
+                ],
+            });
         }
     }
 
@@ -702,15 +925,39 @@ fn diff_tables(
                     ),
                     false,
                 )),
-                None => todos.push(todo(format!(
-                    "todo add legacy structural table {name} as a named record table"
-                ))),
+                None => todos.push(SchemaDiffTodo {
+                    kind: SchemaDiffTodoKind::LegacyStructuralTable,
+                    target: (*name).to_string(),
+                    description: format!(
+                        "todo add legacy structural table {name} as a named record table"
+                    ),
+                    current_signature: None,
+                    target_signature: None,
+                    candidates: Vec::new(),
+                    suggested_templates: Vec::new(),
+                }),
             },
             Some(old) => {
                 if table_type_name(current, old) != table_type_name(target, table) {
-                    todos.push(todo(format!(
-                        "todo change row type for table {name} with an explicit migration"
-                    )));
+                    let row_type = table_type_name(target, table).unwrap_or("RowType");
+                    let key_suffix = table
+                        .primary_key
+                        .as_ref()
+                        .map(|key| format!(" key {key}"))
+                        .unwrap_or_default();
+                    todos.push(SchemaDiffTodo {
+                        kind: SchemaDiffTodoKind::ChangeTableRowType,
+                        target: (*name).to_string(),
+                        description: format!(
+                            "todo change row type for table {name} with an explicit migration"
+                        ),
+                        current_signature: table_type_name(current, old).map(str::to_string),
+                        target_signature: table_type_name(target, table).map(str::to_string),
+                        candidates: Vec::new(),
+                        suggested_templates: vec![format!(
+                            "drop table {name}\n  add table {name} {row_type}{key_suffix}"
+                        )],
+                    });
                 }
                 if old.primary_key != table.primary_key {
                     if old.primary_key.is_some() {
@@ -975,6 +1222,7 @@ fn variant_signature(catalog: &Catalog, variant: &crate::model::EnumVariantDef) 
 fn variant_payload(catalog: &Catalog, variant: &crate::model::EnumVariantDef) -> String {
     match variant.args.as_slice() {
         [] => "()".into(),
+        [one] if matches!(one, ScalarType::Tuple(_)) => format!("({})", catalog.describe(one)),
         [one] => catalog.describe(one),
         many => format!(
             "({})",
@@ -995,14 +1243,6 @@ fn operation(description: String, destructive: bool) -> SchemaDiffOperation {
         description,
         destructive,
         requires_input: false,
-    }
-}
-
-fn todo(description: String) -> SchemaDiffOperation {
-    SchemaDiffOperation {
-        description,
-        destructive: false,
-        requires_input: true,
     }
 }
 
