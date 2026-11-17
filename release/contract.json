@@ -8,7 +8,8 @@
       4,
       5,
       6,
-      7
+      7,
+      8
     ],
     "catalog_codec": 6,
     "index_key_codec": 4,
@@ -35,10 +36,17 @@
       10,
       11,
       12,
-      13
+      13,
+      14
     ],
     "stream_protocol_versions": [
       1
+    ],
+    "supported_storage_capabilities": [
+      "generated_defaults",
+      "partial_unique_index",
+      "typed_map",
+      "typed_references"
     ],
     "value_codec": 3,
     "version_report_schema": 1
