@@ -47,7 +47,18 @@ diff 读取 live schema 和 migration ledger，但不写数据库。数据库文
 - 主键增加、删除或替换
 - 从空库创建完整命名 ADT schema
 
-diff 不猜测身份或数据转换。疑似 type/table/field/variant rename、required 字段回填、字段类型或 variant payload 变化、字段／变体重排会生成 `todo ...` 行，并把草稿标记为 `runnable: false`。`todo` 故意不属于 migration 语法，因此 plan/apply 会拒绝未补全草稿。开发者需要把它改为明确的 `rename`、带 `using old -> ...` 的转换或其他显式操作。
+diff 不猜测身份或数据转换。疑似 type/table/field/variant rename、required 字段回填、字段类型或 variant payload 变化、字段／变体重排会生成 `todo ...` 行，并把草稿标记为 `runnable: false`。`todo` 故意不属于 migration 语法，因此 plan/apply 会拒绝未补全草稿。开发者或 AI Agent 需要把它改为明确的 `rename`、带 `using old -> ...` 的转换或其他显式操作。
+
+`SchemaDiff` 与 `unionid migration diff --format json` 同时输出结构化的 `unresolved_todos` 数组（`runnable: true` 时为空）。每项 `SchemaDiffTodo` 提供：
+
+- `kind`：区分 `rename_sequence`、`change_sequence_start`、`rename_type`、`replace_type`、`rename_variant`、`change_variant`、`preserve_variant_order`、`rename_field`、`backfill_field`、`change_field`、`preserve_field_order`、`rename_table`、`change_table_row_type`、`legacy_structural_table`
+- `target`：受影响对象或成员路径（如 `"Task.title"`、`"State.Failed"`、`"tasks"`）
+- `description`：与 `migration_source` 中完全一致的 `todo ...` 文本行，可直接用于精确替换
+- `current_signature` / `target_signature`：变更前后的类型、变体负载或序列起始值签名
+- `candidates`：疑似重命名时的候选目标名称列表
+- `suggested_templates`：1～2 个可直接替换该 `todo` 行的合法迁移语法模板（例如 `rename field ...` 与 `drop field ... / add field ...`）
+
+`SchemaDiff` and `unionid migration diff --format json` also include a structured `unresolved_todos` array (empty when `runnable: true`). Each `SchemaDiffTodo` provides `kind`, `target`, the exact `description` line in `migration_source`, optional `current_signature` and `target_signature`, `candidates` for suspected renames, and `suggested_templates` containing concrete migration syntax templates so AI agents and tools can resolve drafts deterministically without parsing prose.
 
 草稿补全后走正常 runner：
 

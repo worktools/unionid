@@ -540,3 +540,103 @@ fn reference_diff_rebinds_a_replaced_unique_index() {
         "E_CONSTRAINT"
     );
 }
+
+#[test]
+fn structured_unresolved_todos_provide_kinds_signatures_and_templates() {
+    use unionid::SchemaDiffTodoKind;
+
+    let mut engine = Engine::memory();
+    ok(
+        &mut engine,
+        "type State = Pending | Failed {message text}\n\
+         type Task =\n  id int\n  title text\n  count int\n  state State\n\
+         table tasks Task\n  key id",
+    );
+    let target = "type State = Pending | Rejected {code int, message text}\n\
+                  type Task =\n  id int\n  label text\n  count text\n  state State\n  owner int\n\
+                  table archived_tasks Task\n  key id";
+    let diff = engine
+        .diff_schema(target, "m0001_structured_todos", None)
+        .unwrap();
+    assert!(!diff.runnable);
+    assert_eq!(
+        diff.unresolved_todos.len(),
+        diff.operations
+            .iter()
+            .filter(|op| op.requires_input)
+            .count()
+    );
+    for todo in &diff.unresolved_todos {
+        assert!(
+            diff.migration_source.contains(&todo.description),
+            "missing description in source: {}",
+            todo.description
+        );
+    }
+
+    let rename_field = diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::RenameField)
+        .unwrap();
+    assert_eq!(rename_field.target, "Task.title");
+    assert_eq!(rename_field.candidates, ["label"]);
+    assert_eq!(
+        rename_field.suggested_templates[0],
+        "rename field Task.title to label"
+    );
+
+    let backfill_field = diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::BackfillField)
+        .unwrap();
+    assert_eq!(backfill_field.target, "Task.owner");
+    assert_eq!(backfill_field.target_signature.as_deref(), Some("int"));
+
+    let change_field = diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::ChangeField)
+        .unwrap();
+    assert_eq!(change_field.target, "Task.count");
+    assert_eq!(change_field.current_signature.as_deref(), Some("int"));
+    assert_eq!(change_field.target_signature.as_deref(), Some("text"));
+
+    let rename_table = diff
+        .unresolved_todos
+        .iter()
+        .find(|todo| todo.kind == SchemaDiffTodoKind::RenameTable)
+        .unwrap();
+    assert_eq!(rename_table.target, "tasks");
+    assert_eq!(rename_table.candidates, ["archived_tasks"]);
+    assert_eq!(
+        rename_table.suggested_templates[0],
+        "rename table tasks to archived_tasks"
+    );
+
+    // Resolving a field-rename + backfill + conversion + table-rename draft via templates:
+    let mut resolved = diff.migration_source.clone();
+    resolved = resolved.replace(
+        &rename_field.description,
+        &rename_field.suggested_templates[0],
+    );
+    resolved = resolved.replace(
+        &backfill_field.description,
+        &backfill_field.suggested_templates[0].replace("required_backfill_value", "0"),
+    );
+    resolved = resolved.replace(
+        &change_field.description,
+        &change_field.suggested_templates[0].replace("value", "\"0\""),
+    );
+    resolved = resolved.replace(
+        &rename_table.description,
+        &rename_table.suggested_templates[0],
+    );
+    let file = MigrationFile::parse(resolved).unwrap();
+    engine.apply_migrations(&[file]).unwrap();
+    assert_eq!(
+        engine.schema(),
+        Engine::check_schema(target).unwrap().normalized
+    );
+}

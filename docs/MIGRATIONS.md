@@ -202,6 +202,21 @@ Development adds explicit version-2 Rust plan/apply methods; existing methods an
 V2 limits retained error intervals to 4,096 and encoded reports to 1 MiB, while preserving existing file/source/bind limits. Repeated failures consume one interval; distinct errors or large metadata can still fail with E_LIMIT without truncation. MigrationQueryErrorV2 preserves the compact report after final-query rejection or later conversion failure. Apply rejects invalid final schemas before any maintenance/migration commit; successful preflight retains per-file conversion commits. CLI still defaults to full/v1; compact/v2 collects directly without building v1 first. --verbose affects text only, leaving the selected JSON version unchanged. Release defaults and storage formats are unchanged.
 
 
+当待执行 migration 包含 `rename table`、`rename type`、`rename field`、`rename variant` 或 `add variant` 时，若已保存查询在该检查点绑定失败（例如引用了旧表名/字段名/变体名，或因新增 sum 变体导致 `match` 不再穷尽），预检报告（v1 与 v2 compact）会在对应检查点失败的 `error.hint` 中自动给出可操作的修复提示（指明旧名称与新名称，或新增的变体与需补充的 `match` 分支）。
+
+When pending migrations include `rename table`, `rename type`, `rename field`, `rename variant`, or `add variant`, saved-query bind failures at those checkpoints automatically carry an actionable `error.hint` in both v1 and v2 compact reports (identifying the old and new names or the newly added sum variants that require a `match` branch).
+
+### AI Agent 自动演进五步闭环 / 5-step autonomous schema evolution workflow
+
+`unionid agent --format json` 的 `migration_workflow` 提供面向 AI Agent 的零人工介入迁移标准流程：
+
+1. 校验并规范化目标 schema：`unionid schema check --file schema.unid --format json`
+2. 生成迁移草稿并按 `diff.unresolved_todos` 的 `suggested_templates` 消解未决项：`unionid migration diff --db app.redb --schema schema.unid --name <name> --format json`
+3. 在隔离副本上演练迁移与同级 `queries/` 自动预检：`unionid migration rehearse --db app.redb --dir migrations --format json`
+4. 切换前创建可验证逻辑备份：`unionid backup --db app.redb --output before-migration.backup.json --format json`
+5. 正式应用迁移并验证存储完整性：`unionid migration apply --db app.redb --dir migrations --format json` 与 `unionid check --db app.redb --format json`
+
+`migration_workflow` in `unionid agent --format json` lists this 5-step closed loop (`schema check` → `migration diff` with `unresolved_todos` resolution → `migration rehearse` with saved-query preflight → `backup` → `migration apply` + `check`).
 ```sh
 unionid migration plan --db app.redb --dir migrations --query-report compact --format json
 unionid migration rehearse --db app.redb --dir migrations --query-report compact

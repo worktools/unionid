@@ -123,7 +123,7 @@ pub use query_contract::{
 };
 pub use schema::{
     SchemaBuilder, SchemaCheck, SchemaDiff, SchemaDiffImpact, SchemaDiffOperation,
-    SchemaDiffTableImpact, UnionidSchema,
+    SchemaDiffTableImpact, SchemaDiffTodo, SchemaDiffTodoKind, UnionidSchema,
 };
 pub use server::{
     CancelResult, CancelStatus, ConcurrencyStats, ConcurrentEngine, OperationOutcome,

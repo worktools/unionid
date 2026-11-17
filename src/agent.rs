@@ -152,6 +152,7 @@ pub struct AgentManifest {
     pub current_storage: StorageVersions,
     pub commands: Vec<AgentCommand>,
     pub workflow: Vec<&'static str>,
+    pub migration_workflow: Vec<&'static str>,
     pub error_contract: AgentErrorContract,
     pub docs: AgentDocs,
     pub atomic_scripts: AgentAtomicScripts,
@@ -235,8 +236,8 @@ const COMMANDS: &[AgentCommand] = &[
     },
     AgentCommand {
         name: "migration",
-        summary: "Create, plan, apply, rehearse, resume, inspect, and abort migrations; optionally preflight saved queries.",
-        usage: "unionid migration plan --db <path> --dir <dir> [--queries <queries-dir> | --no-queries] [--query-report full|compact] [--verbose] --format json   # sibling queries are checked automatically; full is v1 (default), compact is lossless v2 checkpoint intervals; --verbose expands text only; options also support apply and rehearse; other commands: status, advance, abort",
+        summary: "Diff target schemas (with structured unresolved_todos), plan, rehearse, apply, advance, inspect, and abort migrations; preflights sibling saved queries by default.",
+        usage: "unionid migration diff --db <path> --schema <schema.unid> --name <name> --format json   # resolve diff.unresolved_todos using suggested_templates; then: migration plan|rehearse|apply --db <path> --dir <dir> [--queries <queries-dir> | --no-queries] [--query-report full|compact] [--verbose] --format json; other commands: status, advance, abort",
         json: true,
     },
     AgentCommand {
@@ -322,6 +323,14 @@ const WORKFLOW: &[&str] = &[
     "On failure branch on `error.code` and `error.constraint`, then follow `error.hint`.",
 ];
 
+const MIGRATION_WORKFLOW: &[&str] = &[
+    "1. Validate target schema declarations: `unionid schema check --file schema.unid --format json`.",
+    "2. Generate a draft migration and resolve `diff.unresolved_todos` using `suggested_templates`: `unionid migration diff --db app.redb --schema schema.unid --name <name> --format json`.",
+    "3. Rehearse on an isolated database copy with automatic saved-query preflight: `unionid migration rehearse --db app.redb --dir migrations --format json`.",
+    "4. Create a verified logical backup before production cutover: `unionid backup --db app.redb --output before-migration.backup.json --format json`.",
+    "5. Apply migrations and verify storage integrity: `unionid migration apply --db app.redb --dir migrations --format json` && `unionid check --db app.redb --format json`.",
+];
+
 const HINT_CODES: &[&str] = &[
     "E_TABLE",
     "E_CONSTRAINT",
@@ -373,6 +382,7 @@ pub fn manifest() -> AgentManifest {
         current_storage: Engine::current_storage_versions(),
         commands: COMMANDS.to_vec(),
         workflow: WORKFLOW.to_vec(),
+        migration_workflow: MIGRATION_WORKFLOW.to_vec(),
         atomic_scripts: AgentAtomicScripts {
             guard: "expect affected <operator> <nonnegative u64 literal> (immediately after DML)",
             operators: ["==", "!=", "<", "<=", ">", ">="],
@@ -484,8 +494,13 @@ pub fn render_markdown() -> String {
             .join(", ")
     ));
     output.push_str(&format!(
-        "\n## Workflow\n\n{}\n\n## Docs\n\n- catalog: `{}`\n- query reference: `{}`\n- schema: `{}`\n",
+        "\n## Workflow\n\n{}\n\n## Migration workflow\n\n{}\n\n## Docs\n\n- catalog: `{}`\n- query reference: `{}`\n- schema: `{}`\n",
         WORKFLOW
+            .iter()
+            .map(|step| format!("- {step}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        MIGRATION_WORKFLOW
             .iter()
             .map(|step| format!("- {step}"))
             .collect::<Vec<_>>()
